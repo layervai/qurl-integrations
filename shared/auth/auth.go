@@ -19,6 +19,7 @@ type EnvProvider struct {
 	EnvVar string
 }
 
+// APIKey returns the API key from the configured environment variable.
 func (p EnvProvider) APIKey(_ context.Context, _ string) (string, error) {
 	key := os.Getenv(p.EnvVar)
 	if key == "" {

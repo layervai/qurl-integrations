@@ -1,3 +1,4 @@
+// Package internal contains Slack-specific handler logic.
 package internal
 
 import (
@@ -10,9 +11,12 @@ import (
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
+
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
+
+const methodPost = "POST"
 
 // Config holds the Slack handler configuration.
 type Config struct {
@@ -33,16 +37,16 @@ func NewHandler(cfg Config) *Handler {
 }
 
 // Handle routes incoming API Gateway requests to the appropriate handler.
-func (h *Handler) Handle(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	slog.Info("received request", "path", req.Path, "method", req.HTTPMethod)
 
 	switch {
-	case req.Path == "/slack/commands" && req.HTTPMethod == "POST":
+	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
 		return h.handleSlashCommand(ctx, req)
-	case req.Path == "/slack/events" && req.HTTPMethod == "POST":
-		return h.handleEvent(ctx, req)
-	case req.Path == "/slack/interactions" && req.HTTPMethod == "POST":
-		return h.handleInteraction(ctx, req)
+	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
+		return h.handleEvent(req)
+	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
+		return h.handleInteraction(req)
 	case req.Path == "/health":
 		return respond(http.StatusOK, map[string]string{"status": "ok"})
 	default:
@@ -50,7 +54,7 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayProxyRequest)
 	}
 }
 
-func (h *Handler) handleSlashCommand(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	values, err := url.ParseQuery(req.Body)
 	if err != nil {
 		return respond(http.StatusBadRequest, map[string]string{"error": "invalid form body"})
@@ -92,7 +96,7 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 	qurl, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
 	if err != nil {
 		slog.Error("failed to create QURL", "error", err, "target_url", targetURL)
-		return respondSlack(fmt.Sprintf("Failed to create QURL: %v", err))
+		return respondSlack("Failed to create QURL: " + err.Error())
 	}
 
 	return respondSlack(fmt.Sprintf("QURL created!\n*Link:* %s\n*Target:* %s", qurl.LinkURL, qurl.TargetURL))
@@ -109,15 +113,16 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 	result, err := c.List(ctx, client.ListInput{Limit: 5})
 	if err != nil {
 		slog.Error("failed to list QURLs", "error", err)
-		return respondSlack(fmt.Sprintf("Failed to list QURLs: %v", err))
+		return respondSlack("Failed to list QURLs: " + err.Error())
 	}
 
 	if len(result.QURLs) == 0 {
 		return respondSlack("No QURLs found.")
 	}
 
-	var lines []string
-	for _, q := range result.QURLs {
+	lines := make([]string, 0, len(result.QURLs))
+	for i := range result.QURLs {
+		q := &result.QURLs[i]
 		line := fmt.Sprintf("• %s → %s (%d clicks)", q.LinkURL, q.TargetURL, q.ClickCount)
 		if q.Title != "" {
 			line = fmt.Sprintf("• *%s* — %s → %s (%d clicks)", q.Title, q.LinkURL, q.TargetURL, q.ClickCount)
@@ -128,8 +133,8 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 	return respondSlack("*Recent QURLs:*\n" + strings.Join(lines, "\n"))
 }
 
-func (h *Handler) handleEvent(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// Handle Slack URL verification challenge
+func (h *Handler) handleEvent(req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Handle Slack URL verification challenge.
 	var body struct {
 		Type      string `json:"type"`
 		Challenge string `json:"challenge"`
@@ -138,13 +143,13 @@ func (h *Handler) handleEvent(ctx context.Context, req events.APIGatewayProxyReq
 		return respond(http.StatusOK, map[string]string{"challenge": body.Challenge})
 	}
 
-	// TODO: Handle link_shared events for unfurling
+	// TODO: Handle link_shared events for unfurling.
 	slog.Info("event received", "body_length", len(req.Body))
 	return respond(http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func (h *Handler) handleInteraction(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// TODO: Handle interactive components (buttons, modals)
+func (h *Handler) handleInteraction(req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// TODO: Handle interactive components (buttons, modals).
 	slog.Info("interaction received", "body_length", len(req.Body))
 	return respond(http.StatusOK, map[string]string{"ok": "true"})
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-lambda-go/events"
+
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -26,24 +27,28 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer srv.Close()
 
 	h := newTestHandler(t, srv)
-	resp, err := h.Handle(context.Background(), events.APIGatewayProxyRequest{
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
 		Path:       "/health",
 		HTTPMethod: "GET",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
 func TestSlashCommandHelp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer srv.Close()
 
 	h := newTestHandler(t, srv)
@@ -53,34 +58,38 @@ func TestSlashCommandHelp(t *testing.T) {
 		"team_id": {"T123"},
 	}.Encode()
 
-	resp, err := h.Handle(context.Background(), events.APIGatewayProxyRequest{
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
 		Path:       "/slack/commands",
-		HTTPMethod: "POST",
+		HTTPMethod: methodPost,
 		Body:       body,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 
 	var result map[string]string
-	json.Unmarshal([]byte(resp.Body), &result)
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
 	if result["text"] == "" {
 		t.Error("expected non-empty help text")
 	}
 }
 
 func TestSlashCommandCreate(t *testing.T) {
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(client.QURL{
+		if err := json.NewEncoder(w).Encode(client.QURL{
 			ID:        "qurl_123",
 			ShortCode: "abc",
 			TargetURL: "https://example.com",
 			LinkURL:   "https://qurl.link.layerv.xyz/abc",
-		})
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
 	}))
 	defer qurlSrv.Close()
 
@@ -93,35 +102,39 @@ func TestSlashCommandCreate(t *testing.T) {
 		"team_id": {"T123"},
 	}.Encode()
 
-	resp, err := h.Handle(context.Background(), events.APIGatewayProxyRequest{
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
 		Path:       "/slack/commands",
-		HTTPMethod: "POST",
+		HTTPMethod: methodPost,
 		Body:       body,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 
 	var result map[string]string
-	json.Unmarshal([]byte(resp.Body), &result)
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
 	if result["response_type"] != "ephemeral" {
 		t.Errorf("expected ephemeral response, got %q", result["response_type"])
 	}
 }
 
 func TestURLVerificationChallenge(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer srv.Close()
 
 	h := newTestHandler(t, srv)
 	body := `{"type":"url_verification","challenge":"test-challenge-123"}`
 
-	resp, err := h.Handle(context.Background(), events.APIGatewayProxyRequest{
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
 		Path:       "/slack/events",
-		HTTPMethod: "POST",
+		HTTPMethod: methodPost,
 		Body:       body,
 	})
 	if err != nil {
@@ -129,7 +142,9 @@ func TestURLVerificationChallenge(t *testing.T) {
 	}
 
 	var result map[string]string
-	json.Unmarshal([]byte(resp.Body), &result)
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
 	if result["challenge"] != "test-challenge-123" {
 		t.Errorf("expected challenge echo, got %q", result["challenge"])
 	}

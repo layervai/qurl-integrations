@@ -6,6 +6,7 @@ import "time"
 // Type identifies a QURL webhook event type.
 type Type string
 
+// Webhook event types.
 const (
 	TypeQURLCreated Type = "qurl.created"
 	TypeQURLClicked Type = "qurl.clicked"

@@ -1,17 +1,28 @@
 # CLAUDE.md — qurl-integrations
 
+## CRITICAL RULES - NEVER VIOLATE
+
+> **NEVER push directly to `main` branch.** All changes MUST go through a Pull Request, no exceptions. Create a branch, open a PR, and let CI run.
+
+> **All commits must be GPG/SSH signed.** Unsigned commits will be rejected by GitHub branch protection rules.
+
+> **All code must pass `golangci-lint` with zero issues.** The linter config is strict by design — fix the code, don't weaken the rules.
+
+## Code Change Workflow
+
+1. `git checkout main && git pull origin main`
+2. `git checkout -b <type>/<short-description>`
+3. Make changes
+4. `make check` (runs fmt, vet, lint, tests)
+5. `git push -u origin <branch>`
+6. `gh pr create --title "<type>(scope): description" --body "..."`
+7. Address code review feedback, then push fixes
+
 ## Project Overview
 
 Monorepo for QURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
 Each integration lives in `apps/{name}/` with independent release tracks.
 Shared code lives in `shared/`.
-
-## Repository Rules
-
-1. **Never push directly to main.** Always create a branch and PR.
-2. **Conventional Commits required.** Scope to the app: `feat(slack):`, `fix(teams):`, `chore(shared):`.
-3. **Path-filtered CI.** Each app has its own workflow. Changes to `shared/` trigger all app tests.
-4. **Independent releases.** Release Please monorepo mode. Each app has its own version and CHANGELOG.
 
 ## Commit Format
 
@@ -35,6 +46,45 @@ Examples:
 - **App-private code:** `apps/{name}/internal/`
 - **Shared code:** `shared/{package}/` — changes here affect ALL apps
 - **Per-app infra:** `apps/{name}/deploy/terraform/`
+
+## Linting
+
+This repo uses `golangci-lint` v2.10.1 with 28+ linters enabled (see `.golangci.yml`). Key rules:
+
+- All errors must be checked (`errcheck`)
+- Use `errors.Is`/`errors.As`, not type assertions (`errorlint`)
+- No naked returns (`nakedret`)
+- Max cognitive complexity 30 / cyclomatic complexity 20
+- No code duplication over 150 tokens (`dupl`)
+- Repeated strings (3+ occurrences) must be constants (`goconst`)
+- All exported types/functions need comments (`revive`)
+- `nolint` directives require explanation and specific linter name (`nolintlint`)
+- Security scanning via `gosec`
+- Performance-aware formatting (`perfsprint`)
+
+## Pre-commit Hooks
+
+```bash
+# Install (one-time)
+pip install pre-commit && pre-commit install
+
+# Run manually
+pre-commit run --all-files
+```
+
+Hooks: trailing whitespace, EOF fixer, YAML/JSON validation, large file check, private key detection, merge conflict check, `gofmt`, `go mod tidy`, `golangci-lint`.
+
+## Common Commands
+
+```bash
+make check          # Full CI parity: fmt + vet + lint + test
+make lint           # golangci-lint only
+make test           # go test (no race)
+make test-race      # go test -race
+make build-slack    # Build Slack Lambda binary
+make security       # govulncheck
+make fmt            # gofmt + goimports
+```
 
 ## Testing
 

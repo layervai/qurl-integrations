@@ -45,15 +45,15 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 
 // QURL represents a QURL resource.
 type QURL struct {
-	ID          string    `json:"id"`
-	ShortCode   string    `json:"short_code"`
-	TargetURL   string    `json:"target_url"`
-	Title       string    `json:"title,omitempty"`
-	Description string    `json:"description,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string     `json:"id"`
+	ShortCode   string     `json:"short_code"`
+	TargetURL   string     `json:"target_url"`
+	Title       string     `json:"title,omitempty"`
+	Description string     `json:"description,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	ClickCount  int       `json:"click_count"`
-	LinkURL     string    `json:"link_url"`
+	ClickCount  int        `json:"click_count"`
+	LinkURL     string     `json:"link_url"`
 }
 
 // CreateInput is the input for creating a QURL.
@@ -85,7 +85,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*QURL, error) {
 
 // Get retrieves a QURL by ID.
 func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+id, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+id, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -116,7 +116,7 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 		url += "&cursor=" + input.Cursor
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -130,7 +130,7 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 
 // Delete deletes a QURL by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+id, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+id, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -143,6 +143,7 @@ type APIError struct {
 	Message    string `json:"message"`
 }
 
+// Error returns the error message.
 func (e *APIError) Error() string {
 	return fmt.Sprintf("qurl api error (%d): %s", e.StatusCode, e.Message)
 }
@@ -155,7 +156,7 @@ func (c *Client) do(req *http.Request, out any) error {
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

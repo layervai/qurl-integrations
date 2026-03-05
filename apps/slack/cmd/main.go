@@ -1,3 +1,4 @@
+// Package main is the Lambda entrypoint for the Slack integration.
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -39,6 +41,6 @@ func main() {
 	})
 
 	lambda.Start(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-		return handler.Handle(ctx, req)
+		return handler.Handle(ctx, &req)
 	})
 }
