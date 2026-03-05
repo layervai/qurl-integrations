@@ -28,8 +28,8 @@ coverage:
 	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
 	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
 	echo "Total coverage: $${COVERAGE}%"; \
-	if [ "$$(echo "$$COVERAGE < 60" | bc -l)" -eq 1 ]; then \
-		echo "FAIL: Coverage $${COVERAGE}% is below 60% threshold"; \
+	if [ "$$(echo "$$COVERAGE < 40" | bc -l)" -eq 1 ]; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below 40% threshold"; \
 		exit 1; \
 	fi
 

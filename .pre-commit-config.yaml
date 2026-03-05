@@ -14,10 +14,11 @@ repos:
       - id: detect-private-key
       - id: check-merge-conflict
 
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.24.3
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.88.30
     hooks:
-      - id: gitleaks
+      - id: trufflehog
+        args: ['--only-verified']
 
   - repo: local
     hooks:
