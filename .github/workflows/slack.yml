@@ -47,8 +47,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests
-        run: go test -race -count=1 ./apps/slack/... ./shared/...
+      - name: Run tests with coverage
+        run: |
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic \
+            ./apps/slack/... ./shared/...
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep ^total: | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${COVERAGE}%"
+          if [ "$(echo "$COVERAGE < 60" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below 60% threshold"
+            exit 1
+          fi
 
       - name: Vet
         run: go vet ./apps/slack/... ./shared/...

@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race build-slack security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack security check clean
 
 all: check build-slack
 
@@ -23,6 +23,15 @@ test:
 
 test-race:
 	go test -race -count=1 ./...
+
+coverage:
+	@go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+	@COVERAGE=$$(go tool cover -func=coverage.out | grep ^total: | awk '{print $$3}' | tr -d '%'); \
+	echo "Total coverage: $${COVERAGE}%"; \
+	if [ "$$(echo "$$COVERAGE < 60" | bc -l)" -eq 1 ]; then \
+		echo "FAIL: Coverage $${COVERAGE}% is below 60% threshold"; \
+		exit 1; \
+	fi
 
 ## Building
 
@@ -50,4 +59,4 @@ check: fmt vet lint test-race
 ## Cleanup
 
 clean:
-	rm -rf release/
+	rm -rf release/ coverage.out
