@@ -1,0 +1,12 @@
+# CODEOWNERS - Define code ownership for automatic review requests
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything
+* @layervai/platform
+
+# Infrastructure and CI require platform team review
+/.github/workflows/ @layervai/platform
+apps/*/deploy/ @layervai/platform
+
+# Shared code changes affect all apps — require platform review
+shared/ @layervai/platform
