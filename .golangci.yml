@@ -1,0 +1,129 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+output:
+  sort-order:
+    - linter
+    - severity
+    - file
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/layervai/qurl-integrations
+
+linters:
+  default: none
+  enable:
+    # Bugs & Error Handling
+    - bodyclose        # HTTP response body must be closed
+    - errcheck         # Check error returns are handled
+    - errorlint        # Error wrapping issues (errors.Is/As)
+    - govet            # Reports suspicious constructs
+    - nilerr           # Returns nil when err is not nil
+    - nilnil           # Returns nil error with nil value
+    - noctx            # HTTP requests without context
+    - staticcheck      # Advanced static analysis
+    - unused           # Find unused code
+
+    # Complexity
+    - gocognit         # Cognitive complexity
+    - gocyclo          # Cyclomatic complexity
+
+    # Style & Consistency
+    - dogsled          # Too many blank identifiers
+    - dupl             # Code duplication detection
+    - exhaustive       # Exhaustive switch statements
+    - goconst          # Repeated strings that should be constants
+    - gocritic         # Opinionated style checks
+    - goprintffuncname # Printf-like function naming
+    - misspell         # Spelling mistakes
+    - nakedret         # Naked returns in long functions
+    - nolintlint       # Ill-formed nolint directives
+    - prealloc         # Slice preallocation suggestions
+    - revive           # Fast, extensible linter
+    - unconvert        # Unnecessary type conversions
+    - whitespace       # Unnecessary whitespace
+
+    # Performance
+    - copyloopvar      # Loop variable copy issues
+    - perfsprint       # Performance-aware sprintf
+
+    # Security
+    - gosec            # Security issues
+
+    # Testing
+    - tparallel        # Improper t.Parallel() usage
+
+  settings:
+    gocognit:
+      min-complexity: 30
+    gocyclo:
+      min-complexity: 20
+    dupl:
+      threshold: 150
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+    misspell:
+      locale: US
+    nakedret:
+      max-func-lines: 30
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    perfsprint:
+      sprintf1: true
+      errorf: true
+      int-conversion: true
+    gosec:
+      excludes:
+        - G101  # Hardcoded credentials (false positives on variable names)
+        - G115  # Integer overflow (safe conversions)
+        - G704  # SSRF via taint analysis (API client takes user-provided URLs by design)
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: var-naming
+
+  exclusions:
+    generated: lax
+    rules:
+      # Relax complexity checks in tests
+      - linters:
+          - gocognit
+          - gocyclo
+          - dupl
+        path: _test\.go
