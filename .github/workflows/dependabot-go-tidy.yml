@@ -1,7 +1,7 @@
 name: Dependabot Go Tidy
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - 'go.mod'
       - 'go.sum'
@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout PR branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.head_ref }}
