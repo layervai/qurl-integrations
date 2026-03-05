@@ -96,12 +96,20 @@ jobs:
           path: bootstrap
           retention-days: 7
 
-  deploy:
-    name: Deploy
+  deploy-sandbox:
+    name: Deploy (Sandbox)
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # TODO: Add environment protection rule
-    # environment: slack-sandbox
+    environment: slack-sandbox
+    steps:
+      - run: echo "Deploy step placeholder — will be implemented with Terraform"
+
+  deploy-production:
+    name: Deploy (Production)
+    runs-on: ubuntu-latest
+    needs: deploy-sandbox
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: slack-production
     steps:
       - run: echo "Deploy step placeholder — will be implemented with Terraform"
