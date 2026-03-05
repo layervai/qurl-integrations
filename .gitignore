@@ -28,3 +28,10 @@ Thumbs.db
 
 # Build artifacts
 dist/
+release/
+
+# Secrets — never commit these
+.env
+.env.*
+*.pem
+*.key

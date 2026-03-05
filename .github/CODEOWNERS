@@ -6,7 +6,15 @@
 
 # Infrastructure and CI require platform team review
 /.github/workflows/ @layervai/platform
+/terraform/ @layervai/platform
 apps/*/deploy/ @layervai/platform
 
 # Shared code changes affect all apps — require platform review
 shared/ @layervai/platform
+
+# Repo config
+/.github/ @layervai/platform
+Makefile @layervai/platform
+.golangci.yml @layervai/platform
+.pre-commit-config.yaml @layervai/platform
+.editorconfig @layervai/platform

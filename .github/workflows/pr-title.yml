@@ -36,6 +36,7 @@ jobs:
             cli
             zapier
             shared
+            infra
             ci
             deps
           requireScope: false
