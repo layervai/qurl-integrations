@@ -135,7 +135,7 @@ data "aws_iam_policy_document" "apigateway" {
       "apigateway:TagResource",
       "apigateway:UntagResource",
     ]
-    resources = ["arn:aws:apigateway:${data.aws_region.current.name}::*"]
+    resources = ["arn:aws:apigateway:${data.aws_region.current.id}::*"]
   }
 }
 
@@ -187,7 +187,7 @@ data "aws_iam_policy_document" "ssm" {
       "ssm:ListTagsForResource",
     ]
     resources = [
-      "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter/integrations/*",
+      "arn:aws:ssm:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:parameter/integrations/*",
     ]
   }
 }
@@ -214,7 +214,7 @@ data "aws_iam_policy_document" "secrets" {
       "secretsmanager:UntagResource",
     ]
     resources = [
-      "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:integrations/*",
+      "arn:aws:secretsmanager:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:secret:integrations/*",
     ]
   }
 }
@@ -260,7 +260,7 @@ data "aws_iam_policy_document" "dynamodb" {
       "dynamodb:DeleteItem",
     ]
     resources = [
-      "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/terraform-locks",
+      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/terraform-locks",
     ]
   }
 }
