@@ -1,22 +1,21 @@
 name: Dependabot Go Tidy
 
 on:
-  pull_request_target:
+  push:
+    branches:
+      - 'dependabot/**'
     paths:
       - 'go.mod'
       - 'go.sum'
 
 jobs:
   go-tidy:
-    if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout PR branch
+      - name: Checkout branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ github.head_ref }}
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
