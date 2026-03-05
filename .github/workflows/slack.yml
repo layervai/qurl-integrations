@@ -102,8 +102,32 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: slack-sandbox
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - run: echo "Deploy step placeholder — will be implemented with Terraform"
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: slack-lambda
+          path: .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INTEGRATIONS_SANDBOX_ROLE_ARN }}
+          aws-region: us-east-2
+
+      - name: Package Lambda
+        run: zip slack-lambda.zip bootstrap
+
+      - name: Deploy Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name integrations-slack-sandbox \
+            --zip-file fileb://slack-lambda.zip \
+            --publish
 
   deploy-production:
     name: Deploy (Production)
@@ -111,5 +135,29 @@ jobs:
     needs: deploy-sandbox
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: slack-production
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - run: echo "Deploy step placeholder — will be implemented with Terraform"
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: slack-lambda
+          path: .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_INTEGRATIONS_PROD_ROLE_ARN }}
+          aws-region: us-east-2
+
+      - name: Package Lambda
+        run: zip slack-lambda.zip bootstrap
+
+      - name: Deploy Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name integrations-slack-prod \
+            --zip-file fileb://slack-lambda.zip \
+            --publish
