@@ -137,6 +137,47 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.do(req, nil)
 }
 
+// ResolveInput holds input for headless QURL resolution.
+type ResolveInput struct {
+	AccessToken string `json:"access_token"`
+}
+
+// ResolveOutput holds the result of a headless resolution.
+type ResolveOutput struct {
+	TargetURL   string       `json:"target_url"`
+	ResourceID  string       `json:"resource_id"`
+	SessionID   string       `json:"session_id"`
+	AccessGrant *AccessGrant `json:"access_grant"`
+}
+
+// AccessGrant describes the firewall access that was granted.
+type AccessGrant struct {
+	ExpiresIn int    `json:"expires_in"`
+	GrantedAt string `json:"granted_at"`
+	SrcIP     string `json:"src_ip"`
+}
+
+// Resolve resolves a QURL access token, triggering an NHP knock to open
+// the firewall for the caller's IP. The target_url in the response is
+// accessible for access_grant.expires_in seconds.
+func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal resolve input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/resolve", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out ResolveOutput
+	if err := c.do(req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // APIError represents an error response from the QURL API.
 type APIError struct {
 	StatusCode int    `json:"status_code"`

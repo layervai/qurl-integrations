@@ -93,6 +93,7 @@ linters:
       excludes:
         - G101  # Hardcoded credentials (false positives on variable names)
         - G115  # Integer overflow (safe conversions)
+        - G117  # Exported field matches secret pattern (false positives on JSON field names)
         - G704  # SSRF via taint analysis (API client takes user-provided URLs by design)
     revive:
       rules:

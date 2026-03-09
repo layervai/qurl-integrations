@@ -1,6 +1,8 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli security check clean
 
-all: check build-slack
+VERSION ?= dev
+
+all: check build-slack build-cli
 
 ## Formatting
 
@@ -37,6 +39,9 @@ coverage:
 
 build-slack:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o release/slack/bootstrap ./apps/slack/cmd/
+
+build-cli:
+	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/
 
 ## Security
 
