@@ -27,7 +27,7 @@ Set QURL_API_KEY environment variable or use --api-key flag for authentication.`
 		SilenceErrors: true,
 	}
 
-	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "API key (overrides QURL_API_KEY env)")
+	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "API key (overrides QURL_API_KEY env; prefer env var to avoid exposure in process list)")
 	cmd.PersistentFlags().StringVar(&endpoint, "endpoint", "", "API endpoint (overrides QURL_ENDPOINT env, default: https://api.layerv.ai)")
 	cmd.PersistentFlags().StringVarP(&format, "output", "o", "table", "Output format: table or json")
 

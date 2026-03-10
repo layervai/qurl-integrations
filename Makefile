@@ -40,7 +40,7 @@ coverage:
 build-slack:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o release/slack/bootstrap ./apps/slack/cmd/
 
-build-cli:
+build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually if needed.
 	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/
 
 ## Security

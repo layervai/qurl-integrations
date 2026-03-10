@@ -127,7 +127,10 @@ func formatDuration(d time.Duration) string {
 	if d > time.Hour {
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
-	return fmt.Sprintf("%dm", int(d.Minutes()))
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 // errWriter wraps an io.Writer and stops writing after the first error.

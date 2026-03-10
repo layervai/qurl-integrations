@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -111,12 +112,12 @@ type ListOutput struct {
 
 // List retrieves a paginated list of QURLs.
 func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error) {
-	url := fmt.Sprintf("%s/v1/qurls?limit=%d", c.baseURL, input.Limit)
+	u := fmt.Sprintf("%s/v1/qurls?limit=%d", c.baseURL, input.Limit)
 	if input.Cursor != "" {
-		url += "&cursor=" + input.Cursor
+		u += "&cursor=" + url.QueryEscape(input.Cursor)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
