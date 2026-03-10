@@ -12,8 +12,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -84,10 +84,12 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 	return c
 }
 
+// controlChars matches characters that could enable log injection.
+var controlChars = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
 // sanitizeLogValue replaces control characters that could enable log injection.
 func sanitizeLogValue(v string) string {
-	r := strings.NewReplacer("\n", "", "\r", "", "\t", " ")
-	return r.Replace(v)
+	return controlChars.ReplaceAllString(v, "")
 }
 
 func (c *Client) logf(format string, args ...any) {
