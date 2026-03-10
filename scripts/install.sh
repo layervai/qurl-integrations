@@ -63,6 +63,23 @@ if [ "$VERIFIED" -ne 1 ]; then
     exit 1
 fi
 
+# Verify GPG signature if gpg is available and a signature exists
+SIG_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt.sig"
+if command -v gpg >/dev/null 2>&1; then
+    if curl -fsSL "$SIG_URL" -o "${TMP_DIR}/checksums.txt.sig" 2>/dev/null; then
+        # Import the LayerV release signing key if not already present
+        LAYERV_KEY_URL="https://raw.githubusercontent.com/${REPO}/main/scripts/release-key.pub"
+        if curl -fsSL "$LAYERV_KEY_URL" 2>/dev/null | gpg --import 2>/dev/null; then
+            if gpg --verify "${TMP_DIR}/checksums.txt.sig" "${TMP_DIR}/checksums.txt" 2>/dev/null; then
+                echo "GPG signature verified."
+            else
+                echo "Warning: GPG signature verification failed — checksums may have been tampered with" >&2
+                echo "  Continuing because SHA256 checksum passed, but investigate if unexpected." >&2
+            fi
+        fi
+    fi
+fi
+
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 
 # Install binary

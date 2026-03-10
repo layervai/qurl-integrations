@@ -448,6 +448,7 @@ type apiErrorDetail struct {
 
 func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
+	// NOTE: If you add header logging, redact the Authorization value to avoid leaking API keys.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
