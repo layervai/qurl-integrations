@@ -54,6 +54,7 @@ brews:
     repository:
       owner: layervai
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://layerv.ai"
     description: "QURL CLI - manage secure links from the command line"
