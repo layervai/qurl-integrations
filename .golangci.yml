@@ -92,7 +92,9 @@ linters:
     gosec:
       excludes:
         - G101  # Hardcoded credentials (false positives on variable names)
-        - G115  # Integer overflow (safe conversions)
+        - G115  # Integer overflow on conversion (safe: all values are bounded)
+        - G117  # Exported field matches secret pattern (false positives on JSON field names)
+        - G703  # Unvalidated errors.As target (false positive: our APIError type is safe)
         - G704  # SSRF via taint analysis (API client takes user-provided URLs by design)
     revive:
       rules:

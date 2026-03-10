@@ -1,6 +1,8 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check clean
 
-all: check build-slack
+VERSION ?= dev
+
+all: check build-slack build-cli
 
 ## Formatting
 
@@ -38,6 +40,28 @@ coverage:
 build-slack:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o release/slack/bootstrap ./apps/slack/cmd/
 
+build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually if needed.
+	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/
+
+## Documentation
+
+docs: build-cli # Generate markdown docs for the CLI
+	./release/cli/qurl docs markdown -d ./docs/cli
+
+man: build-cli # Generate man pages for the CLI
+	./release/cli/qurl docs man -d ./man
+
+## Vendoring (for reproducible builds / Homebrew core)
+
+vendor:
+	go mod vendor
+	go mod tidy
+
+## Release (requires goreleaser)
+
+release-snapshot: # Build release artifacts without publishing
+	goreleaser release --snapshot --clean
+
 ## Security
 
 security:
@@ -59,4 +83,4 @@ check: fmt vet lint test-race
 ## Cleanup
 
 clean:
-	rm -rf release/ coverage.out
+	rm -rf release/ coverage.out docs/cli/ man/
