@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -83,9 +84,26 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 	return c
 }
 
+// sanitizeLogValue replaces control characters that could enable log injection.
+func sanitizeLogValue(v string) string {
+	r := strings.NewReplacer("\n", "", "\r", "", "\t", " ")
+	return r.Replace(v)
+}
+
 func (c *Client) logf(format string, args ...any) {
 	if c.logger != nil {
-		c.logger.Printf(format, args...)
+		safe := make([]any, len(args))
+		for i, a := range args {
+			switch v := a.(type) {
+			case fmt.Stringer:
+				safe[i] = sanitizeLogValue(v.String())
+			case string:
+				safe[i] = sanitizeLogValue(v)
+			default:
+				safe[i] = a
+			}
+		}
+		c.logger.Printf(format, safe...)
 	}
 }
 
