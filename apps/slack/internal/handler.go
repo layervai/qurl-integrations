@@ -93,13 +93,13 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 	}
 
 	c := h.cfg.NewClient(apiKey)
-	qurl, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
+	result, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
 	if err != nil {
 		slog.Error("failed to create QURL", "error", err, "target_url", targetURL)
 		return respondSlack("Failed to create QURL: " + err.Error())
 	}
 
-	return respondSlack(fmt.Sprintf("QURL created!\n*Link:* %s\n*Target:* %s", qurl.LinkURL, qurl.TargetURL))
+	return respondSlack(fmt.Sprintf("QURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
 }
 
 func (h *Handler) handleList(ctx context.Context, values url.Values) (events.APIGatewayProxyResponse, error) {
@@ -123,9 +123,9 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 	lines := make([]string, 0, len(result.QURLs))
 	for i := range result.QURLs {
 		q := &result.QURLs[i]
-		line := fmt.Sprintf("• %s → %s (%d clicks)", q.LinkURL, q.TargetURL, q.ClickCount)
-		if q.Title != "" {
-			line = fmt.Sprintf("• *%s* — %s → %s (%d clicks)", q.Title, q.LinkURL, q.TargetURL, q.ClickCount)
+		line := fmt.Sprintf("• `%s` → %s [%s]", q.ResourceID, q.TargetURL, q.Status)
+		if q.Description != "" {
+			line = fmt.Sprintf("• *%s* — `%s` → %s [%s]", q.Description, q.ResourceID, q.TargetURL, q.Status)
 		}
 		lines = append(lines, line)
 	}

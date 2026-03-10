@@ -36,7 +36,10 @@ func main() {
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
-			return client.New(qurlEndpoint, apiKey)
+			return client.New(qurlEndpoint, apiKey,
+				client.WithUserAgent("qurl-slack/dev"),
+				client.WithRetry(0), // Lambda has its own timeout; retries risk exceeding it
+			)
 		},
 	})
 

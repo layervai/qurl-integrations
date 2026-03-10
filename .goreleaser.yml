@@ -1,0 +1,87 @@
+version: 2
+
+project_name: qurl
+
+before:
+  hooks:
+    - go mod tidy
+    # Generate man pages for inclusion in archives
+    - go build -o /tmp/qurl-gendocs ./apps/cli/cmd/
+    - /tmp/qurl-gendocs docs man -d manpages
+
+builds:
+  - id: qurl
+    main: ./apps/cli/cmd/
+    binary: qurl
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: qurl
+    builds:
+      - qurl
+    name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - manpages/*
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+brews:
+  - name: qurl
+    repository:
+      owner: layervai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://layerv.ai"
+    description: "QURL CLI - manage secure links from the command line"
+    license: "MIT"
+    install: |
+      bin.install "qurl"
+
+      # Shell completions
+      generate_completions_from_executable(bin/"qurl", "completion")
+
+      # Man pages (included in archive by goreleaser)
+      man1.install Dir["manpages/*.1"] if Dir.exist?("manpages")
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/qurl version")
+
+nfpms:
+  - id: qurl
+    builds:
+      - qurl
+    vendor: LayerV
+    homepage: "https://layerv.ai"
+    maintainer: "LayerV <support@layerv.ai>"
+    description: "QURL CLI - manage secure links from the command line"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: manpages/qurl.1
+        dst: /usr/share/man/man1/qurl.1
