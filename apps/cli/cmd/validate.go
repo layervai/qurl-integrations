@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -35,7 +36,8 @@ func validateDuration(d string) error {
 	if m == nil {
 		return fmt.Errorf("invalid duration %q: use format like 30m, 1h, 24h, 7d", d)
 	}
-	if m[1] == "0" {
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
 		return fmt.Errorf("invalid duration %q: must be greater than zero", d)
 	}
 	return nil

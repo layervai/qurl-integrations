@@ -45,10 +45,23 @@ curl -fsSL "$URL" -o "${TMP_DIR}/${ARCHIVE}"
 # Verify checksum
 CHECKSUM_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt"
 curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"
-(cd "$TMP_DIR" && grep "${ARCHIVE}" checksums.txt | sha256sum -c --status 2>/dev/null || shasum -a 256 -c --status 2>/dev/null) || {
-    echo "Error: Checksum verification failed" >&2
+(cd "$TMP_DIR" && grep "${ARCHIVE}" checksums.txt > "${TMP_DIR}/verify.txt") || {
+    echo "Error: Archive not found in checksums.txt" >&2
     exit 1
 }
+VERIFIED=0
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TMP_DIR" && sha256sum -c verify.txt --status) && VERIFIED=1
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "$TMP_DIR" && shasum -a 256 -c verify.txt --status) && VERIFIED=1
+else
+    echo "Warning: No sha256sum or shasum found, skipping checksum verification" >&2
+    VERIFIED=1
+fi
+if [ "$VERIFIED" -ne 1 ]; then
+    echo "Error: Checksum verification failed" >&2
+    exit 1
+fi
 
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 

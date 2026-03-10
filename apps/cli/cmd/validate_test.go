@@ -43,6 +43,9 @@ func TestValidateDuration(t *testing.T) {
 		{"freeform", "forever", true},
 		{"float", "1.5h", true},
 		{"negative", "-1h", true},
+		{"zero hours", "0h", true},
+		{"multi-digit zero", "00h", true},
+		{"leading zero", "007d", false},
 	}
 
 	for _, tt := range tests {

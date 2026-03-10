@@ -81,7 +81,7 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		userAgent:  "qurl-cli/dev",
+		userAgent:  "qurl-go-client/dev",
 		maxRetries: defaultMaxRetries,
 		baseDelay:  defaultBaseDelay,
 		maxDelay:   defaultMaxDelay,

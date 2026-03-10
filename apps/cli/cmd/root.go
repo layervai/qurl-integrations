@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -41,8 +42,8 @@ func rootCmd(version string) *cobra.Command {
 		Long: `QURL CLI creates, resolves, and manages QURL secure links.
 
 Authentication (in order of precedence):
-  1. --api-key flag
-  2. QURL_API_KEY environment variable
+  1. --api-key flag (visible in process list — prefer env var)
+  2. QURL_API_KEY environment variable (recommended)
   3. ~/.config/qurl/config.yaml (or --profile <name>)
 
 Get started:
@@ -195,9 +196,9 @@ func formatError(err error) string {
 
 	// Actionable hints
 	switch {
-	case apiErr.StatusCode == 401:
+	case apiErr.StatusCode == http.StatusUnauthorized:
 		msg += "\n\n  " + dim("Hint: Check your API key — set QURL_API_KEY or run `qurl config set api_key <key>`")
-	case apiErr.StatusCode == 429 && apiErr.RetryAfter > 0:
+	case apiErr.StatusCode == http.StatusTooManyRequests && apiErr.RetryAfter > 0:
 		msg += fmt.Sprintf("\n\n  "+dim("Retry after %ds"), apiErr.RetryAfter)
 	case apiErr.Code == "quota_exceeded":
 		msg += "\n\n  " + dim("Hint: Upgrade your plan at https://layerv.ai/pricing")

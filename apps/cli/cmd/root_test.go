@@ -61,13 +61,13 @@ func TestNewClient_MissingAPIKey(t *testing.T) {
 }
 
 func TestGetFormatter(t *testing.T) {
-	opts := &globalOpts{format: "json"}
+	opts := &globalOpts{format: output.FormatJSON}
 	f := opts.formatter()
 	if _, ok := f.(output.JSONFormatter); !ok {
 		t.Errorf("expected JSONFormatter for 'json', got %T", f)
 	}
 
-	opts.format = "table"
+	opts.format = output.FormatTable
 	f = opts.formatter()
 	if _, ok := f.(output.TableFormatter); !ok {
 		t.Errorf("expected TableFormatter for 'table', got %T", f)

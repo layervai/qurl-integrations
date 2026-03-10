@@ -57,7 +57,8 @@ func configSetCmd() *cobra.Command {
 				msg += fmt.Sprintf(" (profile: %s)", profile)
 			}
 			if key == "api_key" {
-				msg += "\n  Note: API key is stored in plaintext with file permissions 0600."
+				msg += "\n  Note: API key is stored in plaintext with file permissions 0600." +
+					"\n  Tip: For tighter control, use QURL_API_KEY env var instead."
 			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), msg)
 			return err

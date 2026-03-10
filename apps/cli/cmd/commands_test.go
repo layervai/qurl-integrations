@@ -453,3 +453,119 @@ func TestInvalidOutputFormat(t *testing.T) {
 		t.Fatal("expected error for invalid output format")
 	}
 }
+
+// --- Config subcommand integration tests ---
+
+// runConfigCmd executes a config CLI command with HOME redirected to a temp dir.
+func runConfigCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	cmd := rootCmd("test")
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(args)
+
+	err := cmd.Execute()
+	return buf.String(), err
+}
+
+func TestConfigSetAndGet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	// Set a value
+	setCmd := rootCmd("test")
+	var setBuf bytes.Buffer
+	setCmd.SetOut(&setBuf)
+	setCmd.SetErr(&setBuf)
+	setCmd.SetArgs([]string{"config", "set", "endpoint", "https://test.example.com"})
+	if err := setCmd.Execute(); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+	if !strings.Contains(setBuf.String(), "Set endpoint") {
+		t.Errorf("expected 'Set endpoint' in output: %s", setBuf.String())
+	}
+
+	// Get the value back (same HOME dir)
+	getCmd := rootCmd("test")
+	var getBuf bytes.Buffer
+	getCmd.SetOut(&getBuf)
+	getCmd.SetErr(&getBuf)
+	getCmd.SetArgs([]string{"config", "get", "endpoint"})
+	if err := getCmd.Execute(); err != nil {
+		t.Fatalf("config get: %v", err)
+	}
+	if !strings.Contains(getBuf.String(), "https://test.example.com") {
+		t.Errorf("expected endpoint value in output: %s", getBuf.String())
+	}
+}
+
+func TestConfigSetAPIKeyWarning(t *testing.T) {
+	out, err := runConfigCmd(t, "config", "set", "api_key", "lv_live_test")
+	if err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+	if !strings.Contains(out, "plaintext") {
+		t.Errorf("expected plaintext warning in output: %s", out)
+	}
+}
+
+func TestConfigGetInvalidKey(t *testing.T) {
+	_, err := runConfigCmd(t, "config", "get", "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for invalid key")
+	}
+}
+
+func TestConfigPath(t *testing.T) {
+	out, err := runConfigCmd(t, "config", "path")
+	if err != nil {
+		t.Fatalf("config path: %v", err)
+	}
+	if !strings.Contains(out, "config.yaml") {
+		t.Errorf("expected config.yaml in path output: %s", out)
+	}
+}
+
+func TestConfigProfiles(t *testing.T) {
+	out, err := runConfigCmd(t, "config", "profiles")
+	if err != nil {
+		t.Fatalf("config profiles: %v", err)
+	}
+	if !strings.Contains(out, "No profiles configured") {
+		t.Errorf("expected empty profiles message: %s", out)
+	}
+}
+
+// --- Quiet flag tests ---
+
+func TestCreateCommandQuiet(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "--quiet", "create", "https://example.com")
+	// Quiet mode should output just the link, not the full table
+	if !strings.Contains(out, "qurl.link") {
+		t.Errorf("expected link in quiet output: %s", out)
+	}
+	if strings.Contains(out, "QURL created") {
+		t.Error("quiet mode should not include table header")
+	}
+}
+
+func TestMintCommandQuiet(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "--quiet", "mint", "r_abc")
+	if !strings.Contains(out, "qurl.link") {
+		t.Errorf("expected link in quiet output: %s", out)
+	}
+	if strings.Contains(out, "Link minted") {
+		t.Error("quiet mode should not include table header")
+	}
+}
