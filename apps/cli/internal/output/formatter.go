@@ -14,6 +14,12 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// Output format constants.
+const (
+	FormatTable = "table"
+	FormatJSON  = "json"
+)
+
 // Formatter is the interface for output formatters.
 type Formatter interface {
 	FormatQURL(w io.Writer, qurl *client.QURL) error
@@ -200,9 +206,9 @@ func (f TableFormatter) FormatQuota(w io.Writer, output *client.QuotaOutput) err
 
 func (f TableFormatter) colorStatus(status string) string {
 	switch status {
-	case "active":
+	case client.StatusActive:
 		return f.green.Sprint(status)
-	case "expired", "revoked", "consumed":
+	case client.StatusExpired, client.StatusRevoked, client.StatusConsumed:
 		return f.red.Sprint(status)
 	default:
 		return status

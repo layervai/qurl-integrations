@@ -173,7 +173,11 @@ func Save(cfg *Config) error {
 }
 
 // SaveProfile writes a named profile config file.
+// If name is empty, it saves to the default config file.
 func SaveProfile(name string, cfg *Config) error {
+	if name == "" {
+		return Save(cfg)
+	}
 	p, err := ProfilePath(name)
 	if err != nil {
 		return err

@@ -23,6 +23,18 @@ const (
 	defaultMaxDelay   = 30 * time.Second
 )
 
+// StatusActive indicates the QURL is live and accepting access requests.
+const StatusActive = "active"
+
+// StatusExpired indicates the QURL's TTL has elapsed.
+const StatusExpired = "expired"
+
+// StatusRevoked indicates the QURL was manually revoked (deleted).
+const StatusRevoked = "revoked"
+
+// StatusConsumed indicates a one-time QURL has been used.
+const StatusConsumed = "consumed"
+
 // Logger is an optional interface for debug logging.
 type Logger interface {
 	Printf(format string, args ...any)
@@ -260,21 +272,7 @@ type ExtendInput struct {
 // Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
 // by request body fields (extend_by/expires_at vs description).
 func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
-	body, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal extend input: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	var qurl QURL
-	if _, err := c.do(req, &qurl, "PATCH /v1/qurls/:id"); err != nil {
-		return nil, err
-	}
-	return &qurl, nil
+	return c.patchQURL(ctx, id, input)
 }
 
 // UpdateInput holds input for updating a QURL's mutable properties.
@@ -284,9 +282,14 @@ type UpdateInput struct {
 
 // Update updates a QURL's mutable properties.
 func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
+	return c.patchQURL(ctx, id, input)
+}
+
+// patchQURL sends a PATCH request to /v1/qurls/:id with the given body.
+func (c *Client) patchQURL(ctx context.Context, id string, input any) (*QURL, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("marshal update input: %w", err)
+		return nil, fmt.Errorf("marshal patch input: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))

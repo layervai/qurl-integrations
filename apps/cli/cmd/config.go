@@ -39,13 +39,7 @@ func configSetCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := args[0], args[1]
 
-			var cfg *config.Config
-			var err error
-			if profile != "" {
-				cfg, err = config.LoadProfile(profile)
-			} else {
-				cfg, err = config.Load()
-			}
+			cfg, err := config.LoadProfile(profile)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -54,12 +48,7 @@ func configSetCmd() *cobra.Command {
 				return err
 			}
 
-			if profile != "" {
-				err = config.SaveProfile(profile, cfg)
-			} else {
-				err = config.Save(cfg)
-			}
-			if err != nil {
+			if err := config.SaveProfile(profile, cfg); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
 
@@ -88,13 +77,7 @@ func configGetCmd() *cobra.Command {
 		Example: "  qurl config get endpoint",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var cfg *config.Config
-			var err error
-			if profile != "" {
-				cfg, err = config.LoadProfile(profile)
-			} else {
-				cfg, err = config.Load()
-			}
+			cfg, err := config.LoadProfile(profile)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}

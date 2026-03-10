@@ -55,8 +55,8 @@ Get started:
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if opts.format != "table" && opts.format != "json" && opts.format != "" {
-				return fmt.Errorf("invalid output format %q: must be \"table\" or \"json\"", opts.format)
+			if opts.format != output.FormatTable && opts.format != output.FormatJSON && opts.format != "" {
+				return fmt.Errorf("invalid output format %q: must be %q or %q", opts.format, output.FormatTable, output.FormatJSON)
 			}
 			return nil
 		},
@@ -64,7 +64,7 @@ Get started:
 
 	cmd.PersistentFlags().StringVar(&opts.apiKey, "api-key", "", "API key (prefer env var or config file to avoid exposure in process list)")
 	cmd.PersistentFlags().StringVar(&opts.endpoint, "endpoint", "", "API endpoint (default: https://api.layerv.ai)")
-	cmd.PersistentFlags().StringVarP(&opts.format, "output", "o", "table", "Output format: table or json")
+	cmd.PersistentFlags().StringVarP(&opts.format, "output", "o", output.FormatTable, "Output format: table or json")
 	cmd.PersistentFlags().BoolVarP(&opts.quiet, "quiet", "q", false, "Minimal output (just the essential value)")
 	cmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Show HTTP request/response details")
 	cmd.PersistentFlags().StringVar(&opts.profile, "profile", "", "Config profile name (reads ~/.config/qurl/profiles/<name>.yaml)")
@@ -125,7 +125,7 @@ func (o *globalOpts) newClient() (*client.Client, error) {
 }
 
 func (o *globalOpts) formatter() output.Formatter {
-	if o.format == "json" {
+	if o.format == output.FormatJSON {
 		return output.JSONFormatter{}
 	}
 	return output.NewTableFormatter()
