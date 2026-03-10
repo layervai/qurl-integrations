@@ -25,6 +25,14 @@ func listCmd(opts *globalOpts) *cobra.Command {
   qurl list --sort created_at:desc
   qurl list --query "dashboard"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if status != "" {
+				switch status {
+				case client.StatusActive, client.StatusExpired, client.StatusRevoked, client.StatusConsumed:
+				default:
+					return fmt.Errorf("invalid status %q: must be active, expired, revoked, or consumed", status)
+				}
+			}
+
 			c, err := opts.newClient()
 			if err != nil {
 				return err

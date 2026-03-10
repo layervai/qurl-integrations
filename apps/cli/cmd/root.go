@@ -187,7 +187,7 @@ func formatError(err error) string {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		var fields []string
+		fields := make([]string, 0, len(keys))
 		for _, field := range keys {
 			fields = append(fields, fmt.Sprintf("    %s: %s", field, apiErr.InvalidFields[field]))
 		}

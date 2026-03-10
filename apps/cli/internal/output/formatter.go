@@ -75,10 +75,7 @@ func (f TableFormatter) FormatQURL(w io.Writer, qurl *client.QURL) error {
 	if qurl.MaxSessions > 0 {
 		wr.printf("%s\t%d\n", f.bold.Sprint("Max sessions:"), qurl.MaxSessions)
 	}
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 // FormatCreate formats a create response.
@@ -92,10 +89,7 @@ func (f TableFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) e
 	if output.ExpiresAt != nil {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Expires:"), formatExpiry(*output.ExpiresAt))
 	}
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 // FormatList formats a list of QURLs as a columnar table.
@@ -139,10 +133,7 @@ func (f TableFormatter) FormatList(w io.Writer, output *client.ListOutput) error
 	if output.NextCursor != "" {
 		wr.printf("\n%s\n", f.cyan.Sprintf("More results available. Use --cursor %s", output.NextCursor))
 	}
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 // FormatResolve formats a resolve result as a key-value table.
@@ -156,10 +147,7 @@ func (f TableFormatter) FormatResolve(w io.Writer, output *client.ResolveOutput)
 		wr.printf("%s\t%ds from %s\n", f.bold.Sprint("Access:"),
 			output.AccessGrant.ExpiresIn, output.AccessGrant.SrcIP)
 	}
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 // FormatMint formats a mint response.
@@ -171,10 +159,7 @@ func (f TableFormatter) FormatMint(w io.Writer, output *client.MintOutput) error
 	if output.ExpiresAt != nil {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Expires:"), formatExpiry(*output.ExpiresAt))
 	}
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 // FormatQuota formats quota information.
@@ -198,10 +183,7 @@ func (f TableFormatter) FormatQuota(w io.Writer, output *client.QuotaOutput) err
 	wr.printf("%s\t%s – %s\n", f.bold.Sprint("Period:"),
 		output.PeriodStart.Format("Jan 2"), output.PeriodEnd.Format("Jan 2, 2006"))
 
-	if wr.err != nil {
-		return wr.err
-	}
-	return tw.Flush()
+	return wr.flush(tw)
 }
 
 func (f TableFormatter) colorStatus(status string) string {
@@ -305,4 +287,12 @@ func (ew *errWriter) printf(format string, args ...any) {
 		return
 	}
 	_, ew.err = fmt.Fprintf(ew.w, format, args...)
+}
+
+// flush returns the first write error, or flushes the underlying tabwriter.
+func (ew *errWriter) flush(tw *tabwriter.Writer) error {
+	if ew.err != nil {
+		return ew.err
+	}
+	return tw.Flush()
 }

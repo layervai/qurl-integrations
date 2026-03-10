@@ -57,10 +57,10 @@ func validateResourceID(id string) error {
 // validateAccessToken checks that the token has the expected prefix.
 func validateAccessToken(token string) error {
 	if !strings.HasPrefix(token, "at_") {
-		return errors.New("invalid access token: expected prefix \"at_\"")
+		return fmt.Errorf("invalid access token %q: expected prefix \"at_\"", token)
 	}
 	if len(token) < 6 {
-		return errors.New("invalid access token: too short")
+		return fmt.Errorf("invalid access token %q: too short", token)
 	}
 	return nil
 }
