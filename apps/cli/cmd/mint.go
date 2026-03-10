@@ -14,8 +14,13 @@ func mintCmd(opts *globalOpts) *cobra.Command {
 Useful for multi-use QURLs where you want to generate additional access links.`,
 		Example: `  qurl mint r_k8xqp9h2sj9
   LINK=$(qurl mint r_k8xqp9h2sj9 -q)`,
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: resourceIDCompletion(opts),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateResourceID(args[0]); err != nil {
+				return err
+			}
+
 			c, err := opts.newClient()
 			if err != nil {
 				return err

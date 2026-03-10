@@ -6,8 +6,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
+
+const testDescription = "updated"
+
+// testClient creates a client with retries disabled for fast unit tests.
+func testClient(url, key string) *Client {
+	return New(url, key, WithRetry(0))
+}
 
 // apiEnvelope wraps data in the API response envelope.
 func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
@@ -50,7 +58,7 @@ func TestCreate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -61,6 +69,27 @@ func TestCreate(t *testing.T) {
 	}
 	if got.QURLLink != "https://qurl.link/at_abc123" {
 		t.Errorf("got QURLLink %q, want %q", got.QURLLink, "https://qurl.link/at_abc123")
+	}
+}
+
+func TestUserAgent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua := r.Header.Get("User-Agent")
+		if ua != "qurl-cli/1.0.0" {
+			t.Errorf("expected User-Agent 'qurl-cli/1.0.0', got %q", ua)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_test",
+			"target_url":  "https://example.com",
+			"status":      "active",
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key", WithRetry(0), WithUserAgent("qurl-cli/1.0.0"))
+	_, err := c.Get(context.Background(), "r_test")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
 	}
 }
 
@@ -78,7 +107,7 @@ func TestGet(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.Get(context.Background(), "r_abc123test")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -120,7 +149,7 @@ func TestList(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.List(context.Background(), ListInput{Limit: 5, Status: "active"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -154,7 +183,7 @@ func TestListCursorEscaping(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	_, err := c.List(context.Background(), ListInput{Limit: 10, Cursor: "a=b&c=d"})
 	if err != nil {
 		t.Fatalf("List with special cursor: %v", err)
@@ -190,7 +219,7 @@ func TestResolve(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.Resolve(context.Background(), ResolveInput{AccessToken: "at_testtoken123"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -218,7 +247,7 @@ func TestMintLink(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.MintLink(context.Background(), "r_abc123test")
 	if err != nil {
 		t.Fatalf("MintLink: %v", err)
@@ -242,7 +271,7 @@ func TestGetQuota(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	got, err := c.GetQuota(context.Background())
 	if err != nil {
 		t.Fatalf("GetQuota: %v", err)
@@ -252,6 +281,43 @@ func TestGetQuota(t *testing.T) {
 	}
 	if got.Usage == nil || got.Usage.ActiveQURLs != 45 {
 		t.Errorf("got Usage.ActiveQURLs %v", got.Usage)
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/qurls/r_abc123test" {
+			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		}
+
+		var input UpdateInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Description == nil || *input.Description != testDescription {
+			t.Errorf("expected description 'updated', got %v", input.Description)
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_abc123test",
+			"target_url":  "https://example.com",
+			"status":      "active",
+			"description": testDescription,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	desc := testDescription
+	got, err := c.Update(context.Background(), "r_abc123test", UpdateInput{Description: &desc})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Description != testDescription {
+		t.Errorf("got Description %q, want %q", got.Description, testDescription)
 	}
 }
 
@@ -278,7 +344,7 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	_, err := c.Get(context.Background(), "r_abc123test")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -323,7 +389,7 @@ func TestAPIErrorRateLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	_, err := c.Get(context.Background(), "r_abc123test")
 
 	var apiErr *APIError
@@ -332,6 +398,92 @@ func TestAPIErrorRateLimit(t *testing.T) {
 	}
 	if apiErr.RetryAfter != 30 {
 		t.Errorf("got RetryAfter %d, want 30", apiErr.RetryAfter)
+	}
+}
+
+func TestRetryOn503(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := attempts.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_test",
+			"target_url":  "https://example.com",
+			"status":      "active",
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		// Use very short delays for test speed.
+		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+	)
+	got, err := c.Get(context.Background(), "r_test")
+	if err != nil {
+		t.Fatalf("Get after retries: %v", err)
+	}
+	if got.ResourceID != "r_test" {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_test")
+	}
+	if attempts.Load() != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts.Load())
+	}
+}
+
+func TestRetryExhausted(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(2),
+		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+	)
+	_, err := c.Get(context.Background(), "r_test")
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 502 {
+		t.Errorf("got status %d, want 502", apiErr.StatusCode)
+	}
+	if attempts.Load() != 3 { // 1 initial + 2 retries
+		t.Errorf("expected 3 attempts, got %d", attempts.Load())
+	}
+}
+
+func TestNoRetryOn4xx(t *testing.T) {
+	var attempts atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+	)
+	_, err := c.Get(context.Background(), "r_test")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("expected 1 attempt (no retry on 404), got %d", attempts.Load())
 	}
 }
 
@@ -344,7 +496,7 @@ func TestDelete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-key")
+	c := testClient(srv.URL, "test-key")
 	if err := c.Delete(context.Background(), "r_abc123test"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}

@@ -35,6 +35,10 @@ The access token can be provided as an argument, via stdin, or interactively:
 				return err
 			}
 
+			if err := validateAccessToken(token); err != nil {
+				return err
+			}
+
 			c, err := opts.newClient()
 			if err != nil {
 				return err

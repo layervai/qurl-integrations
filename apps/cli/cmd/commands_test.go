@@ -34,6 +34,16 @@ func newMockServer(t *testing.T) *httptest.Server {
 				"qurl_site":   "https://r_test123.qurl.site",
 			})
 
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
+			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
+			apiEnvelope(t, w, map[string]any{
+				"resource_id": id,
+				"target_url":  "https://example.com",
+				"status":      "active",
+				"description": "updated",
+				"created_at":  "2026-03-01T00:00:00Z",
+			})
+
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
 			apiEnvelope(t, w, map[string]any{
@@ -97,6 +107,20 @@ func runCmd(t *testing.T, srv *httptest.Server, args ...string) string {
 	return buf.String()
 }
 
+// runCmdErr executes a CLI command expecting an error, returns the error.
+func runCmdErr(t *testing.T, srv *httptest.Server, args ...string) error {
+	t.Helper()
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	cmd := rootCmd("test")
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs(append([]string{"--endpoint", srv.URL}, args...))
+
+	return cmd.Execute()
+}
+
 func TestCreateCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
@@ -107,6 +131,26 @@ func TestCreateCommand(t *testing.T) {
 	}
 }
 
+func TestCreateCommandInvalidURL(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "create", "not-a-url")
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestCreateCommandInvalidDuration(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "create", "https://example.com", "--expires", "forever")
+	if err == nil {
+		t.Fatal("expected error for invalid duration")
+	}
+}
+
 func TestGetCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
@@ -114,6 +158,16 @@ func TestGetCommand(t *testing.T) {
 	out := runCmd(t, srv, "get", "r_abc")
 	if !strings.Contains(out, "r_abc") {
 		t.Errorf("expected r_abc in output:\n%s", out)
+	}
+}
+
+func TestGetCommandInvalidID(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "get", "bad_id")
+	if err == nil {
+		t.Fatal("expected error for invalid resource ID")
 	}
 }
 
@@ -169,6 +223,16 @@ func TestResolveCommand(t *testing.T) {
 	}
 }
 
+func TestResolveCommandInvalidToken(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "resolve", "bad_token")
+	if err == nil {
+		t.Fatal("expected error for invalid access token")
+	}
+}
+
 func TestDeleteCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
@@ -201,6 +265,29 @@ func TestDeleteCommandWithYesFlag(t *testing.T) {
 	}
 }
 
+func TestDeleteCommandWithForceFlag(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "delete", "--force", "r_123")
+	if !strings.Contains(out, "revoked") {
+		t.Errorf("expected 'revoked' in output:\n%s", out)
+	}
+}
+
+func TestDeleteCommandDryRun(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "delete", "--dry-run", "r_123")
+	if !strings.Contains(out, "dry run") {
+		t.Errorf("expected 'dry run' in output:\n%s", out)
+	}
+	if strings.Contains(out, "revoked") {
+		t.Errorf("dry-run should not revoke:\n%s", out)
+	}
+}
+
 func TestDeleteCommandCanceled(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
@@ -220,6 +307,26 @@ func TestDeleteCommandCanceled(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "Canceled") {
 		t.Errorf("expected 'Canceled' in output:\n%s", out)
+	}
+}
+
+func TestUpdateCommand(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "update", "r_abc", "--description", "updated")
+	if !strings.Contains(out, "r_abc") {
+		t.Errorf("expected r_abc in output:\n%s", out)
+	}
+}
+
+func TestUpdateCommandNoFlags(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "update", "r_abc")
+	if err == nil {
+		t.Fatal("expected error when no flags set")
 	}
 }
 
@@ -262,5 +369,17 @@ func TestVersionCommand(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "1.2.3") {
 		t.Errorf("expected version 1.2.3 in output:\n%s", buf.String())
+	}
+}
+
+func TestVerboseFlag(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	// Verbose logging goes to os.Stderr (not cobra's err buffer).
+	// We verify the flag is accepted and the command succeeds.
+	out := runCmd(t, srv, "--verbose", "get", "r_abc")
+	if !strings.Contains(out, "r_abc") {
+		t.Errorf("expected r_abc in output:\n%s", out)
 	}
 }

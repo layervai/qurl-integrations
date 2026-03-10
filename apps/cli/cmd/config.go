@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -12,49 +13,88 @@ func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage CLI configuration",
-		Long: `Manage CLI configuration stored at ~/.config/qurl/config.yaml.
+		Long: fmt.Sprintf(`Manage CLI configuration stored at ~/.config/qurl/config.yaml.
 
-Supported keys: api_key, endpoint, output`,
+Supported keys: %s
+
+Profiles:
+  Use --profile to manage named profiles stored under ~/.config/qurl/profiles/.
+  qurl config set --profile staging api_key lv_live_yyy
+  qurl --profile staging list`, strings.Join(config.ValidKeys(), ", ")),
 	}
 
-	cmd.AddCommand(configSetCmd(), configGetCmd(), configPathCmd())
+	cmd.AddCommand(configSetCmd(), configGetCmd(), configPathCmd(), configListProfilesCmd())
 	return cmd
 }
 
 func configSetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:     "set <key> <value>",
-		Short:   "Set a configuration value",
-		Example: "  qurl config set api_key lv_live_xxx",
-		Args:    cobra.ExactArgs(2),
+	var profile string
+
+	cmd := &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a configuration value",
+		Example: `  qurl config set api_key lv_live_xxx
+  qurl config set --profile staging api_key lv_live_yyy`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			key, value := args[0], args[1]
+
+			var cfg *config.Config
+			var err error
+			if profile != "" {
+				cfg, err = config.LoadProfile(profile)
+			} else {
+				cfg, err = config.Load()
+			}
 			if err != nil {
 				cfg = &config.Config{}
 			}
 
-			if err := cfg.Set(args[0], args[1]); err != nil {
+			if err := cfg.Set(key, value); err != nil {
 				return err
 			}
 
-			if err := config.Save(cfg); err != nil {
+			if profile != "" {
+				err = config.SaveProfile(profile, cfg)
+			} else {
+				err = config.Save(cfg)
+			}
+			if err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}
 
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Set %s\n", args[0])
+			msg := "Set " + key
+			if profile != "" {
+				msg += fmt.Sprintf(" (profile: %s)", profile)
+			}
+			if key == "api_key" {
+				msg += "\n  Note: API key is stored in plaintext with file permissions 0600."
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), msg)
 			return err
 		},
 	}
+
+	cmd.Flags().StringVar(&profile, "profile", "", "Profile name to configure")
+	return cmd
 }
 
 func configGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var profile string
+
+	cmd := &cobra.Command{
 		Use:     "get <key>",
 		Short:   "Get a configuration value",
 		Example: "  qurl config get endpoint",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
+			var cfg *config.Config
+			var err error
+			if profile != "" {
+				cfg, err = config.LoadProfile(profile)
+			} else {
+				cfg, err = config.Load()
+			}
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -68,15 +108,51 @@ func configGetCmd() *cobra.Command {
 			return err
 		},
 	}
+
+	cmd.Flags().StringVar(&profile, "profile", "", "Profile name to read")
+	return cmd
 }
 
 func configPathCmd() *cobra.Command {
-	return &cobra.Command{
+	var profile string
+
+	cmd := &cobra.Command{
 		Use:   "path",
 		Short: "Show config file path",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), config.Path())
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			p := config.Path()
+			if profile != "" {
+				p = config.ProfilePath(profile)
+			}
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), p)
 			return err
+		},
+	}
+
+	cmd.Flags().StringVar(&profile, "profile", "", "Profile name")
+	return cmd
+}
+
+func configListProfilesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "profiles",
+		Short:   "List available configuration profiles",
+		Example: "  qurl config profiles",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			profiles, err := config.ListProfiles()
+			if err != nil {
+				return err
+			}
+			if len(profiles) == 0 {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No profiles configured. Create one with: qurl config set --profile <name> api_key <key>")
+				return err
+			}
+			for _, p := range profiles {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), p); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 }

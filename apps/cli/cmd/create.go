@@ -24,6 +24,13 @@ func createCmd(opts *globalOpts) *cobra.Command {
   qurl create https://dashboard.example.com -d "Admin access" -e 7d`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateURL(args[0]); err != nil {
+				return err
+			}
+			if err := validateDuration(expiresIn); err != nil {
+				return err
+			}
+
 			c, err := opts.newClient()
 			if err != nil {
 				return err

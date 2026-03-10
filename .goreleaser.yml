@@ -1,0 +1,79 @@
+version: 2
+
+project_name: qurl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: qurl
+    main: ./apps/cli/cmd/
+    binary: qurl
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: qurl
+    builds:
+      - qurl
+    name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+brews:
+  - name: qurl
+    repository:
+      owner: layervai
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://layerv.ai"
+    description: "QURL CLI - manage secure links from the command line"
+    license: "MIT"
+    install: |
+      bin.install "qurl"
+
+      # Generate and install shell completions
+      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "bash")
+      (bash_completion/"qurl").write output
+      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "zsh")
+      (zsh_completion/"_qurl").write output
+      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "fish")
+      (fish_completion/"qurl.fish").write output
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/qurl version")
+
+nfpms:
+  - id: qurl
+    builds:
+      - qurl
+    vendor: LayerV
+    homepage: "https://layerv.ai"
+    maintainer: "LayerV <support@layerv.ai>"
+    description: "QURL CLI - manage secure links from the command line"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm

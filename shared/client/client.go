@@ -4,22 +4,40 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 )
 
-const defaultTimeout = 30 * time.Second
+const (
+	defaultTimeout    = 30 * time.Second
+	defaultMaxRetries = 3
+	defaultBaseDelay  = 500 * time.Millisecond
+	defaultMaxDelay   = 30 * time.Second
+)
+
+// Logger is an optional interface for debug logging.
+type Logger interface {
+	Printf(format string, args ...any)
+}
 
 // Client is a QURL API client.
 type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	userAgent  string
+	maxRetries int
+	baseDelay  time.Duration
+	maxDelay   time.Duration
+	logger     Logger
 }
 
 // Option configures a Client.
@@ -30,11 +48,31 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(cl *Client) { cl.httpClient = c }
 }
 
+// WithUserAgent sets the User-Agent header.
+func WithUserAgent(ua string) Option {
+	return func(c *Client) { c.userAgent = ua }
+}
+
+// WithRetry sets the maximum number of retries for transient errors (429, 5xx).
+// Set to 0 to disable retries.
+func WithRetry(maxRetries int) Option {
+	return func(c *Client) { c.maxRetries = maxRetries }
+}
+
+// WithLogger enables debug logging of HTTP requests and responses.
+func WithLogger(l Logger) Option {
+	return func(c *Client) { c.logger = l }
+}
+
 // New creates a QURL API client.
 func New(baseURL, apiKey string, opts ...Option) *Client {
 	c := &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		userAgent:  "qurl-cli/dev",
+		maxRetries: defaultMaxRetries,
+		baseDelay:  defaultBaseDelay,
+		maxDelay:   defaultMaxDelay,
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -43,6 +81,12 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 		o(c)
 	}
 	return c
+}
+
+func (c *Client) logf(format string, args ...any) {
+	if c.logger != nil {
+		c.logger.Printf(format, args...)
+	}
 }
 
 // --- Response envelope ---
@@ -231,6 +275,30 @@ func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QUR
 	return &qurl, nil
 }
 
+// UpdateInput holds input for updating a QURL's mutable properties.
+type UpdateInput struct {
+	Description *string `json:"description,omitempty"`
+}
+
+// Update updates a QURL's mutable properties.
+func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal update input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+id, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var qurl QURL
+	if _, err := c.do(req, &qurl); err != nil {
+		return nil, err
+	}
+	return &qurl, nil
+}
+
 // MintOutput holds the result of minting an access link.
 type MintOutput struct {
 	QURLLink  string     `json:"qurl_link"`
@@ -376,31 +444,81 @@ type apiErrorDetail struct {
 func (c *Client) do(req *http.Request, out any) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	if c.userAgent != "" {
+		req.Header.Set("User-Agent", c.userAgent)
 	}
 
-	if resp.StatusCode >= 400 {
-		return nil, c.parseError(resp, respBody)
+	// Buffer body for potential retries.
+	var bodyBytes []byte
+	if req.Body != nil && req.Body != http.NoBody {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("buffer request body: %w", err)
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	// 204 No Content — nothing to parse
-	if resp.StatusCode == http.StatusNoContent || len(respBody) == 0 {
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := c.retryDelay(attempt, lastErr)
+			c.logf("retry %d/%d after %s", attempt, c.maxRetries, delay)
+			select {
+			case <-time.After(delay):
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
+			// Reset body for retry.
+			if bodyBytes != nil {
+				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
+		}
+
+		c.logf("--> %s %s", req.Method, req.URL)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("http request: %w", err)
+			if attempt < c.maxRetries {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+
+		c.logf("<-- %d %s (%d bytes)", resp.StatusCode, http.StatusText(resp.StatusCode), len(respBody))
+
+		if resp.StatusCode >= 400 {
+			apiErr := c.parseError(resp, respBody)
+			if isRetryable(resp.StatusCode) && attempt < c.maxRetries {
+				lastErr = apiErr
+				continue
+			}
+			return nil, apiErr
+		}
+
+		return c.parseSuccess(respBody, out)
+	}
+
+	return nil, lastErr
+}
+
+func (c *Client) parseSuccess(respBody []byte, out any) (*ResponseMeta, error) {
+	// 204 No Content or empty body — nothing to parse.
+	if len(respBody) == 0 {
 		return &ResponseMeta{}, nil
 	}
 
-	// Unwrap response envelope
+	// Unwrap response envelope.
 	var envelope apiResponse
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		// Fallback: try direct unmarshal (non-envelope response)
+		// Fallback: try direct unmarshal (non-envelope response).
 		if out != nil {
 			if err2 := json.Unmarshal(respBody, out); err2 != nil {
 				return nil, fmt.Errorf("unmarshal response: %w", err2)
@@ -416,6 +534,38 @@ func (c *Client) do(req *http.Request, out any) (*ResponseMeta, error) {
 	}
 
 	return envelope.Meta, nil
+}
+
+// isRetryable returns true for status codes that warrant a retry.
+func isRetryable(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests ||
+		statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
+}
+
+// retryDelay computes the backoff delay for a retry attempt.
+func (c *Client) retryDelay(attempt int, lastErr error) time.Duration {
+	// Use Retry-After header if the last error was a rate limit.
+	var apiErr *APIError
+	if errors.As(lastErr, &apiErr) && apiErr.RetryAfter > 0 {
+		return time.Duration(apiErr.RetryAfter) * time.Second
+	}
+
+	// Exponential backoff with jitter.
+	delay := c.baseDelay * (1 << uint(attempt-1))
+	if delay > c.maxDelay {
+		delay = c.maxDelay
+	}
+	// Jitter: 50-100% of computed delay.
+	half := int64(delay / 2)
+	if half > 0 {
+		n, err := rand.Int(rand.Reader, big.NewInt(half))
+		if err == nil {
+			delay = time.Duration(half + n.Int64())
+		}
+	}
+	return delay
 }
 
 func (c *Client) parseError(resp *http.Response, body []byte) error {

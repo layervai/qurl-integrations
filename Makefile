@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man security check clean
 
 VERSION ?= dev
 
@@ -43,6 +43,19 @@ build-slack:
 build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually if needed.
 	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/
 
+## Documentation
+
+docs: # Generate markdown docs for the CLI
+	go run ./apps/cli/tools/gendocs markdown ./docs/cli
+
+man: # Generate man pages for the CLI
+	go run ./apps/cli/tools/gendocs man ./man
+
+## Release (requires goreleaser)
+
+release-snapshot: # Build release artifacts without publishing
+	goreleaser release --snapshot --clean
+
 ## Security
 
 security:
@@ -64,4 +77,4 @@ check: fmt vet lint test-race
 ## Cleanup
 
 clean:
-	rm -rf release/ coverage.out
+	rm -rf release/ coverage.out docs/cli/ man/

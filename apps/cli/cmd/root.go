@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -20,10 +21,18 @@ type globalOpts struct {
 	endpoint string
 	format   string
 	quiet    bool
+	verbose  bool
+	profile  string
+	version  string
 }
 
 func rootCmd(version string) *cobra.Command {
-	opts := &globalOpts{}
+	opts := &globalOpts{version: version}
+
+	// Respect NO_COLOR convention (https://no-color.org/).
+	if _, ok := os.LookupEnv("NO_COLOR"); ok {
+		color.NoColor = true
+	}
 
 	cmd := &cobra.Command{
 		Use:   "qurl",
@@ -33,13 +42,14 @@ func rootCmd(version string) *cobra.Command {
 Authentication (in order of precedence):
   1. --api-key flag
   2. QURL_API_KEY environment variable
-  3. ~/.config/qurl/config.yaml
+  3. ~/.config/qurl/config.yaml (or --profile <name>)
 
 Get started:
   qurl create https://example.com        Create a QURL
   qurl list                              List active QURLs
   qurl resolve <access-token>            Resolve a token (headless)
-  qurl quota                             Check your usage`,
+  qurl quota                             Check your usage
+  qurl completion bash                   Generate shell completions`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -49,6 +59,8 @@ Get started:
 	cmd.PersistentFlags().StringVar(&opts.endpoint, "endpoint", "", "API endpoint (default: https://api.layerv.ai)")
 	cmd.PersistentFlags().StringVarP(&opts.format, "output", "o", "table", "Output format: table or json")
 	cmd.PersistentFlags().BoolVarP(&opts.quiet, "quiet", "q", false, "Minimal output (just the essential value)")
+	cmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Show HTTP request/response details")
+	cmd.PersistentFlags().StringVar(&opts.profile, "profile", "", "Config profile name (reads ~/.config/qurl/profiles/<name>.yaml)")
 
 	cmd.AddCommand(
 		createCmd(opts),
@@ -56,6 +68,7 @@ Get started:
 		listCmd(opts),
 		getCmd(opts),
 		deleteCmd(opts),
+		updateCmd(opts),
 		extendCmd(opts),
 		mintCmd(opts),
 		quotaCmd(opts),
@@ -71,8 +84,14 @@ Get started:
 const defaultEndpoint = "https://api.layerv.ai"
 
 func (o *globalOpts) newClient() (*client.Client, error) {
-	// Load config once for all lookups.
-	cfg, _ := config.Load()
+	// Resolve profile: flag > env > default.
+	profile := o.profile
+	if profile == "" {
+		profile = os.Getenv("QURL_PROFILE")
+	}
+
+	// Load config from profile or default location.
+	cfg, _ := config.LoadProfile(profile)
 
 	key := resolveValue("QURL_API_KEY", &o.apiKey, "api_key", cfg)
 	if key == "" {
@@ -84,7 +103,14 @@ func (o *globalOpts) newClient() (*client.Client, error) {
 		ep = defaultEndpoint
 	}
 
-	return client.New(ep, key), nil
+	opts := []client.Option{
+		client.WithUserAgent("qurl-cli/" + o.version),
+	}
+	if o.verbose {
+		opts = append(opts, client.WithLogger(log.New(os.Stderr, "[debug] ", 0)))
+	}
+
+	return client.New(ep, key, opts...), nil
 }
 
 func (o *globalOpts) formatter() output.Formatter {
