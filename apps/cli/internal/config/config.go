@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,20 @@ var validKeys = map[string]bool{
 	"api_key":  true,
 	"endpoint": true,
 	"output":   true,
+}
+
+var profileNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+func validateProfileName(name string) error {
+	if !profileNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid profile name %q: must contain only alphanumeric, hyphen, or underscore", name)
+	}
+	return nil
+}
+
+// IsValidKey reports whether key is a recognized configuration key.
+func IsValidKey(key string) bool {
+	return validKeys[key]
 }
 
 // Get returns a config value by key.
@@ -77,12 +92,15 @@ func Path() string {
 }
 
 // ProfilePath returns the config file path for a named profile.
-func ProfilePath(name string) string {
+func ProfilePath(name string) (string, error) {
+	if err := validateProfileName(name); err != nil {
+		return "", err
+	}
 	dir := configDir()
 	if dir == "" {
-		return ""
+		return "", nil
 	}
-	return filepath.Join(dir, "profiles", name+".yaml")
+	return filepath.Join(dir, "profiles", name+".yaml"), nil
 }
 
 // ListProfiles returns the names of available config profiles.
@@ -122,7 +140,11 @@ func LoadProfile(name string) (*Config, error) {
 	if name == "" {
 		return Load()
 	}
-	return loadFile(ProfilePath(name))
+	p, err := ProfilePath(name)
+	if err != nil {
+		return nil, err
+	}
+	return loadFile(p)
 }
 
 func loadFile(p string) (*Config, error) {
@@ -152,7 +174,11 @@ func Save(cfg *Config) error {
 
 // SaveProfile writes a named profile config file.
 func SaveProfile(name string, cfg *Config) error {
-	return saveFile(ProfilePath(name), cfg)
+	p, err := ProfilePath(name)
+	if err != nil {
+		return err
+	}
+	return saveFile(p, cfg)
 }
 
 func saveFile(p string, cfg *Config) error {

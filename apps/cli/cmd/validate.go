@@ -31,8 +31,12 @@ func validateDuration(d string) error {
 	if d == "" {
 		return nil // optional
 	}
-	if !durationPattern.MatchString(d) {
+	m := durationPattern.FindStringSubmatch(d)
+	if m == nil {
 		return fmt.Errorf("invalid duration %q: use format like 30m, 1h, 24h, 7d", d)
+	}
+	if m[1] == "0" {
+		return fmt.Errorf("invalid duration %q: must be greater than zero", d)
 	}
 	return nil
 }

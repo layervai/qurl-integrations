@@ -47,7 +47,7 @@ func configSetCmd() *cobra.Command {
 				cfg, err = config.Load()
 			}
 			if err != nil {
-				cfg = &config.Config{}
+				return fmt.Errorf("load config: %w", err)
 			}
 
 			if err := cfg.Set(key, value); err != nil {
@@ -99,9 +99,13 @@ func configGetCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 
-			v := cfg.Get(args[0])
+			key := args[0]
+			if !config.IsValidKey(key) {
+				return fmt.Errorf("unknown key %q (valid: %s)", key, strings.Join(config.ValidKeys(), ", "))
+			}
+			v := cfg.Get(key)
 			if v == "" {
-				return fmt.Errorf("key %q is not set", args[0])
+				return fmt.Errorf("key %q is not set", key)
 			}
 
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), v)
@@ -120,9 +124,15 @@ func configPathCmd() *cobra.Command {
 		Use:   "path",
 		Short: "Show config file path",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			p := config.Path()
+			var p string
 			if profile != "" {
-				p = config.ProfilePath(profile)
+				var err error
+				p, err = config.ProfilePath(profile)
+				if err != nil {
+					return err
+				}
+			} else {
+				p = config.Path()
 			}
 			_, err := fmt.Fprintln(cmd.OutOrStdout(), p)
 			return err

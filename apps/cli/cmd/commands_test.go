@@ -84,6 +84,25 @@ func newMockServer(t *testing.T) *httptest.Server {
 				},
 			})
 
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mint_link"):
+			apiEnvelope(t, w, map[string]any{
+				"qurl_link":  "https://qurl.link/at_minted",
+				"expires_at": "2026-04-01T00:00:00Z",
+			})
+
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/quota":
+			apiEnvelope(t, w, map[string]any{
+				"plan":         "pro",
+				"period_start": "2026-03-01T00:00:00Z",
+				"period_end":   "2026-03-31T00:00:00Z",
+				"usage": map[string]any{
+					"qurls_created":        42,
+					"active_qurls":         10,
+					"active_qurls_percent": 20.0,
+					"total_accesses":       100,
+				},
+			})
+
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -265,16 +284,6 @@ func TestDeleteCommandWithYesFlag(t *testing.T) {
 	}
 }
 
-func TestDeleteCommandWithForceFlag(t *testing.T) {
-	srv := newMockServer(t)
-	defer srv.Close()
-
-	out := runCmd(t, srv, "delete", "--force", "r_123")
-	if !strings.Contains(out, "revoked") {
-		t.Errorf("expected 'revoked' in output:\n%s", out)
-	}
-}
-
 func TestDeleteCommandDryRun(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
@@ -381,5 +390,66 @@ func TestVerboseFlag(t *testing.T) {
 	out := runCmd(t, srv, "--verbose", "get", "r_abc")
 	if !strings.Contains(out, "r_abc") {
 		t.Errorf("expected r_abc in output:\n%s", out)
+	}
+}
+
+func TestExtendCommand(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "extend", "r_abc", "--by", "24h")
+	if !strings.Contains(out, "r_abc") {
+		t.Errorf("expected r_abc in output:\n%s", out)
+	}
+}
+
+func TestExtendCommandRequiresBy(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "extend", "r_abc")
+	if err == nil {
+		t.Fatal("expected error when --by not provided")
+	}
+}
+
+func TestMintCommand(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "mint", "r_abc")
+	if !strings.Contains(out, "minted") || !strings.Contains(out, "qurl.link") {
+		t.Errorf("expected mint output:\n%s", out)
+	}
+}
+
+func TestQuotaCommand(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	out := runCmd(t, srv, "quota")
+	if !strings.Contains(out, "PRO") && !strings.Contains(out, "pro") {
+		t.Errorf("expected plan name in output:\n%s", out)
+	}
+}
+
+func TestDeleteCommandNoForceFlag(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	// --force flag should no longer exist
+	err := runCmdErr(t, srv, "delete", "--force", "r_123")
+	if err == nil {
+		t.Fatal("expected error: --force flag should not exist")
+	}
+}
+
+func TestInvalidOutputFormat(t *testing.T) {
+	srv := newMockServer(t)
+	defer srv.Close()
+
+	err := runCmdErr(t, srv, "--output", "yaml", "list")
+	if err == nil {
+		t.Fatal("expected error for invalid output format")
 	}
 }

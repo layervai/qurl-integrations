@@ -41,7 +41,8 @@ func extendCmd(opts *globalOpts) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&extendBy, "by", "b", "24h", "Duration to extend by (e.g., 1h, 24h, 7d)")
+	cmd.Flags().StringVarP(&extendBy, "by", "b", "", "Duration to extend by (e.g., 1h, 24h, 7d)")
+	_ = cmd.MarkFlagRequired("by")
 
 	return cmd
 }

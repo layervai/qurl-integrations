@@ -23,8 +23,10 @@ func docsCmd() *cobra.Command {
 				return cmd.Usage()
 			}
 
-			// Disable color in generated docs.
+			// Disable color in generated docs and restore after.
+			origNoColor := color.NoColor
 			color.NoColor = true
+			defer func() { color.NoColor = origNoColor }()
 
 			dir := filepath.Clean(outDir)
 			if err := os.MkdirAll(dir, 0o750); err != nil {

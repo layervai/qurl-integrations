@@ -169,7 +169,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 
 // Get retrieves a QURL by ID.
 func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+id, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -192,9 +192,9 @@ type ListInput struct {
 
 // ListOutput is the output of listing QURLs.
 type ListOutput struct {
-	QURLs      []QURL
-	NextCursor string
-	HasMore    bool
+	QURLs      []QURL `json:"qurls"`
+	NextCursor string `json:"next_cursor,omitempty"`
+	HasMore    bool   `json:"has_more,omitempty"`
 }
 
 // List retrieves a paginated list of QURLs.
@@ -242,7 +242,7 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 
 // Delete revokes a QURL by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+id, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -257,13 +257,15 @@ type ExtendInput struct {
 }
 
 // Extend extends a QURL's expiration.
+// Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
+// by request body fields (extend_by/expires_at vs description).
 func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal extend input: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+id, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -287,7 +289,7 @@ func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QUR
 		return nil, fmt.Errorf("marshal update input: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+id, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -307,7 +309,7 @@ type MintOutput struct {
 
 // MintLink mints a new access link for a QURL.
 func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+id+"/mint_link", http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -448,7 +450,8 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 
-	// Buffer body for potential retries.
+	// Buffer body for potential retries. Always done even when maxRetries=0
+	// because the cost is negligible for the small JSON payloads this client sends.
 	var bodyBytes []byte
 	if req.Body != nil && req.Body != http.NoBody {
 		var err error
@@ -486,7 +489,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 			return nil, lastErr
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max response
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("read response: %w", err)

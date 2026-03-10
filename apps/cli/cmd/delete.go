@@ -63,7 +63,6 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 	}
 
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().BoolVar(&yes, "force", false, "Skip confirmation prompt (alias for --yes)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without making changes")
 
 	return cmd

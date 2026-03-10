@@ -41,6 +41,15 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 curl -fsSL "$URL" -o "${TMP_DIR}/${ARCHIVE}"
+
+# Verify checksum
+CHECKSUM_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt"
+curl -fsSL "$CHECKSUM_URL" -o "${TMP_DIR}/checksums.txt"
+(cd "$TMP_DIR" && grep "${ARCHIVE}" checksums.txt | sha256sum -c --status 2>/dev/null || shasum -a 256 -c --status 2>/dev/null) || {
+    echo "Error: Checksum verification failed" >&2
+    exit 1
+}
+
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 
 # Install binary

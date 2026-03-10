@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/fatih/color"
@@ -53,6 +54,12 @@ Get started:
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if opts.format != "table" && opts.format != "json" && opts.format != "" {
+				return fmt.Errorf("invalid output format %q: must be \"table\" or \"json\"", opts.format)
+			}
+			return nil
+		},
 	}
 
 	cmd.PersistentFlags().StringVar(&opts.apiKey, "api-key", "", "API key (prefer env var or config file to avoid exposure in process list)")
@@ -92,7 +99,10 @@ func (o *globalOpts) newClient() (*client.Client, error) {
 	}
 
 	// Load config from profile or default location.
-	cfg, _ := config.LoadProfile(profile)
+	cfg, err := config.LoadProfile(profile)
+	if err != nil && profile != "" {
+		return nil, fmt.Errorf("load profile %q: %w", profile, err)
+	}
 
 	key := resolveValue("QURL_API_KEY", &o.apiKey, "api_key", cfg)
 	if key == "" {
@@ -149,21 +159,36 @@ func resolveValue(envKey string, flag *string, configKey string, cfg *config.Con
 func formatError(err error) string {
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {
+		// Unwrap to show the root cause while preserving context prefix.
 		return err.Error()
+	}
+
+	// Preserve wrapping context (e.g., "create QURL: ...").
+	prefix := ""
+	if wrapper := err.Error(); wrapper != apiErr.Error() {
+		// Extract the prefix before the APIError message.
+		if idx := strings.Index(wrapper, apiErr.Error()); idx > 0 {
+			prefix = strings.TrimRight(wrapper[:idx], ": ") + ": "
+		}
 	}
 
 	red := color.New(color.FgRed, color.Bold).SprintFunc()
 	dim := color.New(color.Faint).SprintFunc()
 
-	msg := fmt.Sprintf("%s %s (%d)", red("Error:"), apiErr.Title, apiErr.StatusCode)
+	msg := fmt.Sprintf("%s %s%s (%d)", red("Error:"), prefix, apiErr.Title, apiErr.StatusCode)
 	if apiErr.Detail != "" {
 		msg += "\n\n  " + apiErr.Detail
 	}
 
 	if len(apiErr.InvalidFields) > 0 {
+		keys := make([]string, 0, len(apiErr.InvalidFields))
+		for k := range apiErr.InvalidFields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
 		var fields []string
-		for field, reason := range apiErr.InvalidFields {
-			fields = append(fields, fmt.Sprintf("    %s: %s", field, reason))
+		for _, field := range keys {
+			fields = append(fields, fmt.Sprintf("    %s: %s", field, apiErr.InvalidFields[field]))
 		}
 		msg += "\n\n  Invalid fields:\n" + strings.Join(fields, "\n")
 	}

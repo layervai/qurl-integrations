@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"time"
+
 	"github.com/spf13/cobra"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -42,7 +45,9 @@ func resourceIDCompletion(opts *globalOpts) func(*cobra.Command, []string, strin
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 
-		result, err := c.List(cmd.Context(), client.ListInput{Limit: 20, Query: toComplete})
+		ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
+		defer cancel()
+		result, err := c.List(ctx, client.ListInput{Limit: 20, Query: toComplete})
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
