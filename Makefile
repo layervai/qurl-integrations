@@ -45,11 +45,11 @@ build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually
 
 ## Documentation
 
-docs: # Generate markdown docs for the CLI
-	go run ./apps/cli/tools/gendocs markdown ./docs/cli
+docs: build-cli # Generate markdown docs for the CLI
+	./release/cli/qurl docs markdown -d ./docs/cli
 
-man: # Generate man pages for the CLI
-	go run ./apps/cli/tools/gendocs man ./man
+man: build-cli # Generate man pages for the CLI
+	./release/cli/qurl docs man -d ./man
 
 ## Vendoring (for reproducible builds / Homebrew core)
 

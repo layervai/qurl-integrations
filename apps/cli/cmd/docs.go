@@ -18,6 +18,11 @@ func docsCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := args[0]
+			if mode != "man" && mode != "markdown" {
+				return cmd.Usage()
+			}
+
 			// Disable color in generated docs.
 			color.NoColor = true
 
@@ -28,7 +33,7 @@ func docsCmd() *cobra.Command {
 
 			root := cmd.Root()
 
-			switch args[0] {
+			switch mode {
 			case "man":
 				header := &doc.GenManHeader{
 					Title:   "QURL",
@@ -36,10 +41,8 @@ func docsCmd() *cobra.Command {
 					Source:  "LayerV",
 				}
 				return doc.GenManTree(root, header, dir)
-			case "markdown":
-				return doc.GenMarkdownTree(root, dir)
 			default:
-				return cmd.Usage()
+				return doc.GenMarkdownTree(root, dir)
 			}
 		},
 		ValidArgs: []string{"man", "markdown"},
