@@ -7,20 +7,20 @@ import (
 	"github.com/layervai/qurl-integrations/apps/cli/internal/output"
 )
 
-func TestEnvOrFlag(t *testing.T) {
-	t.Run("flag takes precedence", func(t *testing.T) {
+func TestResolveValue(t *testing.T) {
+	t.Run("flag takes precedence over env", func(t *testing.T) {
 		t.Setenv("QURL_API_KEY", "env-key")
 		flag := "flag-key"
-		got := envOrFlag("QURL_API_KEY", &flag)
+		got := resolveValue("QURL_API_KEY", &flag, "api_key", nil)
 		if got != "flag-key" {
 			t.Errorf("got %q, want %q", got, "flag-key")
 		}
 	})
 
-	t.Run("falls back to env", func(t *testing.T) {
+	t.Run("env takes precedence when flag empty", func(t *testing.T) {
 		t.Setenv("QURL_API_KEY", "env-key")
 		empty := ""
-		got := envOrFlag("QURL_API_KEY", &empty)
+		got := resolveValue("QURL_API_KEY", &empty, "api_key", nil)
 		if got != "env-key" {
 			t.Errorf("got %q, want %q", got, "env-key")
 		}
@@ -28,7 +28,7 @@ func TestEnvOrFlag(t *testing.T) {
 
 	t.Run("nil flag falls back to env", func(t *testing.T) {
 		t.Setenv("QURL_API_KEY", "env-key")
-		got := envOrFlag("QURL_API_KEY", nil)
+		got := resolveValue("QURL_API_KEY", nil, "api_key", nil)
 		if got != "env-key" {
 			t.Errorf("got %q, want %q", got, "env-key")
 		}
@@ -36,7 +36,7 @@ func TestEnvOrFlag(t *testing.T) {
 
 	t.Run("returns empty when neither set", func(t *testing.T) {
 		empty := ""
-		got := envOrFlag("QURL_NONEXISTENT_VAR", &empty)
+		got := resolveValue("QURL_NONEXISTENT_VAR", &empty, "nonexistent_key", nil)
 		if got != "" {
 			t.Errorf("got %q, want empty", got)
 		}
@@ -44,8 +44,9 @@ func TestEnvOrFlag(t *testing.T) {
 }
 
 func TestNewClient_MissingAPIKey(t *testing.T) {
-	empty := ""
-	_, err := newClient(&empty, &empty)
+	t.Setenv("QURL_API_KEY", "")
+	opts := &globalOpts{}
+	_, err := opts.newClient()
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -57,21 +58,21 @@ func TestNewClient_MissingAPIKey(t *testing.T) {
 }
 
 func TestGetFormatter(t *testing.T) {
-	jsonFmt := "json"
-	tableFmt := "table"
-
-	f := getFormatter(&jsonFmt)
+	opts := &globalOpts{format: "json"}
+	f := opts.formatter()
 	if _, ok := f.(output.JSONFormatter); !ok {
 		t.Errorf("expected JSONFormatter for 'json', got %T", f)
 	}
 
-	f = getFormatter(&tableFmt)
+	opts.format = "table"
+	f = opts.formatter()
 	if _, ok := f.(output.TableFormatter); !ok {
 		t.Errorf("expected TableFormatter for 'table', got %T", f)
 	}
 
-	f = getFormatter(nil)
+	opts.format = ""
+	f = opts.formatter()
 	if _, ok := f.(output.TableFormatter); !ok {
-		t.Errorf("expected TableFormatter for nil, got %T", f)
+		t.Errorf("expected TableFormatter for empty, got %T", f)
 	}
 }

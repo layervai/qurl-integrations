@@ -7,9 +7,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
+
+// apiEnvelope wraps data in the QURL API response envelope.
+func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"data": data,
+		"meta": map[string]any{"request_id": "req_test"},
+	}); err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+}
 
 // newMockServer creates a test server that handles QURL API routes.
 func newMockServer(t *testing.T) *httptest.Server {
@@ -18,28 +27,35 @@ func newMockServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurls":
-			if err := json.NewEncoder(w).Encode(client.QURL{
-				ID:        "qurl_test",
-				TargetURL: "https://example.com",
-				LinkURL:   "https://qurl.link/abc",
-			}); err != nil {
-				t.Fatalf("encode response: %v", err)
-			}
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurl":
+			apiEnvelope(t, w, map[string]any{
+				"resource_id": "r_test123",
+				"qurl_link":   "https://qurl.link/at_abc",
+				"qurl_site":   "https://r_test123.qurl.site",
+			})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/qurls/"):
-			if err := json.NewEncoder(w).Encode(client.QURL{
-				ID:        strings.TrimPrefix(r.URL.Path, "/v1/qurls/"),
-				TargetURL: "https://example.com",
-				LinkURL:   "https://qurl.link/abc",
-			}); err != nil {
-				t.Fatalf("encode response: %v", err)
-			}
+			id := strings.TrimPrefix(r.URL.Path, "/v1/qurls/")
+			apiEnvelope(t, w, map[string]any{
+				"resource_id": id,
+				"target_url":  "https://example.com",
+				"status":      "active",
+				"created_at":  "2026-03-01T00:00:00Z",
+			})
 
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/qurls":
-			if err := json.NewEncoder(w).Encode(client.ListOutput{
-				QURLs: []client.QURL{
-					{ID: "qurl_1", TargetURL: "https://example.com"},
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{
+						"resource_id": "r_1",
+						"target_url":  "https://example.com",
+						"status":      "active",
+						"created_at":  "2026-03-01T00:00:00Z",
+					},
+				},
+				"meta": map[string]any{
+					"request_id": "req_test",
+					"has_more":   false,
 				},
 			}); err != nil {
 				t.Fatalf("encode response: %v", err)
@@ -49,16 +65,14 @@ func newMockServer(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/resolve":
-			if err := json.NewEncoder(w).Encode(client.ResolveOutput{
-				TargetURL:  "https://api.example.com",
-				ResourceID: "r_test",
-				AccessGrant: &client.AccessGrant{
-					ExpiresIn: 305,
-					SrcIP:     "127.0.0.1",
+			apiEnvelope(t, w, map[string]any{
+				"target_url":  "https://api.example.com",
+				"resource_id": "r_test",
+				"access_grant": map[string]any{
+					"expires_in": 305,
+					"src_ip":     "127.0.0.1",
 				},
-			}); err != nil {
-				t.Fatalf("encode response: %v", err)
-			}
+			})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -88,8 +102,8 @@ func TestCreateCommand(t *testing.T) {
 	defer srv.Close()
 
 	out := runCmd(t, srv, "create", "https://example.com")
-	if !strings.Contains(out, "qurl_test") {
-		t.Errorf("expected qurl_test in output:\n%s", out)
+	if !strings.Contains(out, "r_test123") {
+		t.Errorf("expected r_test123 in output:\n%s", out)
 	}
 }
 
@@ -97,9 +111,9 @@ func TestGetCommand(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	out := runCmd(t, srv, "get", "qurl_abc")
-	if !strings.Contains(out, "qurl_abc") {
-		t.Errorf("expected qurl_abc in output:\n%s", out)
+	out := runCmd(t, srv, "get", "r_abc")
+	if !strings.Contains(out, "r_abc") {
+		t.Errorf("expected r_abc in output:\n%s", out)
 	}
 }
 
@@ -108,8 +122,8 @@ func TestListCommand(t *testing.T) {
 	defer srv.Close()
 
 	out := runCmd(t, srv, "list", "--limit", "5")
-	if !strings.Contains(out, "qurl_1") {
-		t.Errorf("expected qurl_1 in output:\n%s", out)
+	if !strings.Contains(out, "r_1") {
+		t.Errorf("expected r_1 in output:\n%s", out)
 	}
 }
 
@@ -120,8 +134,16 @@ func TestListCommandWithCursor(t *testing.T) {
 			t.Errorf("expected cursor 'page2', got %q", cursor)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(client.ListOutput{
-			QURLs: []client.QURL{{ID: "qurl_page2"}},
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{
+					"resource_id": "r_page2",
+					"target_url":  "https://example.com",
+					"status":      "active",
+					"created_at":  "2026-03-01T00:00:00Z",
+				},
+			},
+			"meta": map[string]any{"request_id": "req_test"},
 		}); err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
@@ -129,8 +151,8 @@ func TestListCommandWithCursor(t *testing.T) {
 	defer srv.Close()
 
 	out := runCmd(t, srv, "list", "--cursor", "page2")
-	if !strings.Contains(out, "qurl_page2") {
-		t.Errorf("expected qurl_page2 in output:\n%s", out)
+	if !strings.Contains(out, "r_page2") {
+		t.Errorf("expected r_page2 in output:\n%s", out)
 	}
 }
 
@@ -157,7 +179,7 @@ func TestDeleteCommand(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetIn(strings.NewReader("y\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "qurl_123"})
+	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
@@ -173,7 +195,7 @@ func TestDeleteCommandWithYesFlag(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	out := runCmd(t, srv, "delete", "--yes", "qurl_123")
+	out := runCmd(t, srv, "delete", "--yes", "r_123")
 	if !strings.Contains(out, "revoked") {
 		t.Errorf("expected 'revoked' in output:\n%s", out)
 	}
@@ -189,7 +211,7 @@ func TestDeleteCommandCanceled(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 	cmd.SetIn(strings.NewReader("n\n"))
-	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "qurl_123"})
+	cmd.SetArgs([]string{"--endpoint", srv.URL, "delete", "r_123"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute delete: %v\noutput: %s", err, buf.String())
@@ -205,18 +227,19 @@ func TestJSONOutput(t *testing.T) {
 	srv := newMockServer(t)
 	defer srv.Close()
 
-	out := runCmd(t, srv, "-o", "json", "get", "qurl_abc")
+	out := runCmd(t, srv, "-o", "json", "get", "r_abc")
 
-	var parsed client.QURL
+	var parsed map[string]any
 	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 		t.Fatalf("expected valid JSON output: %v\n%s", err, out)
 	}
-	if parsed.ID != "qurl_abc" {
-		t.Errorf("got ID %q, want %q", parsed.ID, "qurl_abc")
+	if parsed["resource_id"] != "r_abc" {
+		t.Errorf("got resource_id %q, want %q", parsed["resource_id"], "r_abc")
 	}
 }
 
 func TestMissingAPIKey(t *testing.T) {
+	t.Setenv("QURL_API_KEY", "")
 	cmd := rootCmd("test")
 	cmd.SetArgs([]string{"list"})
 

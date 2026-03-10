@@ -8,15 +8,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func deleteCmd(apiKey, endpoint, format *string) *cobra.Command {
+func deleteCmd(opts *globalOpts) *cobra.Command {
 	var yes bool
 
 	cmd := &cobra.Command{
-		Use:   "delete <resource-id>",
-		Short: "Revoke/delete a QURL",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <resource-id>",
+		Short:   "Revoke/delete a QURL",
+		Example: "  qurl delete r_k8xqp9h2sj9 --yes",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = format
 			id := args[0]
 
 			if !yes {
@@ -34,7 +34,7 @@ func deleteCmd(apiKey, endpoint, format *string) *cobra.Command {
 				}
 			}
 
-			c, err := newClient(apiKey, endpoint)
+			c, err := opts.newClient()
 			if err != nil {
 				return err
 			}

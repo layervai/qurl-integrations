@@ -6,13 +6,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func getCmd(apiKey, endpoint, format *string) *cobra.Command {
+func getCmd(opts *globalOpts) *cobra.Command {
 	return &cobra.Command{
-		Use:   "get <resource-id>",
-		Short: "Get QURL details",
-		Args:  cobra.ExactArgs(1),
+		Use:     "get <resource-id>",
+		Short:   "Get QURL details",
+		Example: "  qurl get r_k8xqp9h2sj9",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := newClient(apiKey, endpoint)
+			c, err := opts.newClient()
 			if err != nil {
 				return err
 			}
@@ -22,8 +23,7 @@ func getCmd(apiKey, endpoint, format *string) *cobra.Command {
 				return fmt.Errorf("get QURL: %w", err)
 			}
 
-			f := getFormatter(format)
-			return f.FormatQURL(cmd.OutOrStdout(), qurl)
+			return opts.formatter().FormatQURL(cmd.OutOrStdout(), qurl)
 		},
 	}
 }

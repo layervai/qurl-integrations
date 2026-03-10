@@ -80,14 +80,20 @@ func TestSlashCommandHelp(t *testing.T) {
 }
 
 func TestSlashCommandCreate(t *testing.T) {
+	// Mock server returns API envelope format
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(client.QURL{
-			ID:        "qurl_123",
-			ShortCode: "abc",
-			TargetURL: "https://example.com",
-			LinkURL:   "https://qurl.link.layerv.xyz/abc",
-		}); err != nil {
+		resp := map[string]any{
+			"data": map[string]any{
+				"resource_id": "r_abc123test",
+				"qurl_link":   "https://qurl.link/at_testtoken",
+				"qurl_site":   "https://r_abc123test.qurl.site",
+			},
+			"meta": map[string]string{
+				"request_id": "req_test",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
 	}))

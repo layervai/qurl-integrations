@@ -8,44 +8,53 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func createCmd(apiKey, endpoint, format *string) *cobra.Command {
+func createCmd(opts *globalOpts) *cobra.Command {
 	var (
 		description string
 		expiresIn   string
+		oneTimeUse  bool
+		maxSessions int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "create <target-url>",
 		Short: "Create a QURL for a target URL",
-		Args:  cobra.ExactArgs(1),
+		Example: `  qurl create https://api.example.com/data
+  qurl create https://internal.example.com --expires 1h --one-time
+  qurl create https://dashboard.example.com -d "Admin access" -e 7d`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := newClient(apiKey, endpoint)
+			c, err := opts.newClient()
 			if err != nil {
 				return err
 			}
 
 			input := client.CreateInput{
-				TargetURL: args[0],
-			}
-			if description != "" {
-				input.Description = description
-			}
-			if expiresIn != "" {
-				input.ExpiresIn = expiresIn
+				TargetURL:   args[0],
+				Description: description,
+				ExpiresIn:   expiresIn,
+				OneTimeUse:  oneTimeUse,
+				MaxSessions: maxSessions,
 			}
 
-			qurl, err := c.Create(cmd.Context(), input)
+			result, err := c.Create(cmd.Context(), input)
 			if err != nil {
 				return fmt.Errorf("create QURL: %w", err)
 			}
 
-			f := getFormatter(format)
-			return f.FormatQURL(cmd.OutOrStdout(), qurl)
+			if opts.quiet {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), result.QURLLink)
+				return err
+			}
+
+			return opts.formatter().FormatCreate(cmd.OutOrStdout(), result)
 		},
 	}
 
 	cmd.Flags().StringVarP(&description, "description", "d", "", "Description")
-	cmd.Flags().StringVarP(&expiresIn, "expires", "e", "", "Expiration duration (e.g., 1h, 24h, 168h)")
+	cmd.Flags().StringVarP(&expiresIn, "expires", "e", "", "Expiration duration (e.g., 1h, 24h, 7d)")
+	cmd.Flags().BoolVar(&oneTimeUse, "one-time", false, "Single-use token (consumed after first access)")
+	cmd.Flags().IntVar(&maxSessions, "max-sessions", 0, "Maximum concurrent sessions (0 = unlimited)")
 
 	return cmd
 }
