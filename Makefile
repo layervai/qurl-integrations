@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check clean
 
 VERSION ?= dev
 
@@ -50,6 +50,12 @@ docs: # Generate markdown docs for the CLI
 
 man: # Generate man pages for the CLI
 	go run ./apps/cli/tools/gendocs man ./man
+
+## Vendoring (for reproducible builds / Homebrew core)
+
+vendor:
+	go mod vendor
+	go mod tidy
 
 ## Release (requires goreleaser)
 

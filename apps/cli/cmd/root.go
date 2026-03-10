@@ -74,6 +74,7 @@ Get started:
 		quotaCmd(opts),
 		configCmd(),
 		completionCmd(),
+		docsCmd(),
 		versionCmd(version),
 	)
 

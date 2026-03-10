@@ -5,6 +5,9 @@ project_name: qurl
 before:
   hooks:
     - go mod tidy
+    # Generate man pages for inclusion in archives
+    - go build -o /tmp/qurl-gendocs ./apps/cli/cmd/
+    - /tmp/qurl-gendocs docs man -d manpages
 
 builds:
   - id: qurl
@@ -27,6 +30,9 @@ archives:
     builds:
       - qurl
     name_template: "qurl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - manpages/*
     format_overrides:
       - goos: windows
         format: zip
@@ -55,13 +61,11 @@ brews:
     install: |
       bin.install "qurl"
 
-      # Generate and install shell completions
-      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "bash")
-      (bash_completion/"qurl").write output
-      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "zsh")
-      (zsh_completion/"_qurl").write output
-      output = Utils.safe_popen_read("#{bin}/qurl", "completion", "fish")
-      (fish_completion/"qurl.fish").write output
+      # Shell completions
+      generate_completions_from_executable(bin/"qurl", "completion")
+
+      # Man pages (included in archive by goreleaser)
+      man1.install Dir["manpages/*.1"] if Dir.exist?("manpages")
     test: |
       assert_match version.to_s, shell_output("#{bin}/qurl version")
 
@@ -77,3 +81,6 @@ nfpms:
     formats:
       - deb
       - rpm
+    contents:
+      - src: manpages/qurl.1
+        dst: /usr/share/man/man1/qurl.1
