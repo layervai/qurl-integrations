@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"time"
 )
@@ -84,28 +83,9 @@ func New(baseURL, apiKey string, opts ...Option) *Client {
 	return c
 }
 
-// controlChars matches characters that could enable log injection.
-var controlChars = regexp.MustCompile(`[\x00-\x1f\x7f]`)
-
-// sanitizeLogValue replaces control characters that could enable log injection.
-func sanitizeLogValue(v string) string {
-	return controlChars.ReplaceAllString(v, "")
-}
-
 func (c *Client) logf(format string, args ...any) {
 	if c.logger != nil {
-		safe := make([]any, len(args))
-		for i, a := range args {
-			switch v := a.(type) {
-			case fmt.Stringer:
-				safe[i] = sanitizeLogValue(v.String())
-			case string:
-				safe[i] = sanitizeLogValue(v)
-			default:
-				safe[i] = a
-			}
-		}
-		c.logger.Printf(format, safe...)
+		c.logger.Printf(format, args...)
 	}
 }
 
@@ -181,7 +161,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	}
 
 	var out CreateOutput
-	if _, err := c.do(req, &out); err != nil {
+	if _, err := c.do(req, &out, "POST /v1/qurl"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -195,7 +175,7 @@ func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 	}
 
 	var qurl QURL
-	if _, err := c.do(req, &qurl); err != nil {
+	if _, err := c.do(req, &qurl, "GET /v1/qurls/:id"); err != nil {
 		return nil, err
 	}
 	return &qurl, nil
@@ -247,7 +227,7 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 	}
 
 	var qurls []QURL
-	meta, err := c.do(req, &qurls)
+	meta, err := c.do(req, &qurls, "GET /v1/qurls")
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +246,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	_, err = c.do(req, nil)
+	_, err = c.do(req, nil, "DELETE /v1/qurls/:id")
 	return err
 }
 
@@ -289,7 +269,7 @@ func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QUR
 	}
 
 	var qurl QURL
-	if _, err := c.do(req, &qurl); err != nil {
+	if _, err := c.do(req, &qurl, "PATCH /v1/qurls/:id"); err != nil {
 		return nil, err
 	}
 	return &qurl, nil
@@ -313,7 +293,7 @@ func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QUR
 	}
 
 	var qurl QURL
-	if _, err := c.do(req, &qurl); err != nil {
+	if _, err := c.do(req, &qurl, "PATCH /v1/qurls/:id"); err != nil {
 		return nil, err
 	}
 	return &qurl, nil
@@ -333,7 +313,7 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 	}
 
 	var out MintOutput
-	if _, err := c.do(req, &out); err != nil {
+	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -374,7 +354,7 @@ func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutpu
 	}
 
 	var out ResolveOutput
-	if _, err := c.do(req, &out); err != nil {
+	if _, err := c.do(req, &out, "POST /v1/resolve"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -417,7 +397,7 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 	}
 
 	var out QuotaOutput
-	if _, err := c.do(req, &out); err != nil {
+	if _, err := c.do(req, &out, "GET /v1/quota"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -461,7 +441,7 @@ type apiErrorDetail struct {
 
 // --- HTTP plumbing ---
 
-func (c *Client) do(req *http.Request, out any) (*ResponseMeta, error) {
+func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if c.userAgent != "" {
@@ -495,7 +475,7 @@ func (c *Client) do(req *http.Request, out any) (*ResponseMeta, error) {
 			}
 		}
 
-		c.logf("--> %s %s", req.Method, req.URL)
+		c.logf("--> %s %s", req.Method, endpoint)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
