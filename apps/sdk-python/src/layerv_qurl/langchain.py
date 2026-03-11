@@ -73,14 +73,14 @@ class ResolveQURLTool(BaseTool):
     ) -> str:
         result = self.client.resolve(access_token)
         grant = result.access_grant
-        return (
-            f"Resolved: {result.target_url}\n"
-            f"Resource: {result.resource_id}\n"
-            f"Access expires in: {grant.expires_in}s\n"
-            f"Granted to IP: {grant.src_ip}"
-            if grant
-            else f"Resolved: {result.target_url}\nResource: {result.resource_id}"
-        )
+        lines = [
+            f"Resolved: {result.target_url}",
+            f"Resource: {result.resource_id}",
+        ]
+        if grant:
+            lines.append(f"Access expires in: {grant.expires_in}s")
+            lines.append(f"Granted to IP: {grant.src_ip}")
+        return "\n".join(lines)
 
 
 class ListQURLsTool(BaseTool):

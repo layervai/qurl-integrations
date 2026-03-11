@@ -112,7 +112,17 @@ class AsyncQURLClient:
         max_sessions: int | None = None,
         access_policy: AccessPolicy | None = None,
     ) -> CreateOutput:
-        """Create a new QURL."""
+        """Create a new QURL.
+
+        Args:
+            target_url: The URL to protect.
+            expires_in: Duration string (e.g. ``"24h"``, ``"7d"``).
+            expires_at: Absolute expiry as datetime or ISO string.
+            description: Human-readable description.
+            one_time_use: If True, the QURL can only be used once.
+            max_sessions: Maximum concurrent sessions allowed.
+            access_policy: IP/geo/user-agent access restrictions.
+        """
         body = build_body({
             "target_url": target_url,
             "expires_in": expires_in,
@@ -202,7 +212,17 @@ class AsyncQURLClient:
         description: str | None = None,
         access_policy: AccessPolicy | None = None,
     ) -> QURL:
-        """Update a QURL — extend expiration, change description, etc."""
+        """Update a QURL — extend expiration, change description, etc.
+
+        All fields are optional; only provided fields are sent.
+
+        Args:
+            resource_id: QURL resource ID.
+            extend_by: Duration to add (e.g. ``"7d"``).
+            expires_at: New absolute expiry.
+            description: New description.
+            access_policy: New access restrictions.
+        """
         validate_id(resource_id)
         body = build_body({
             "extend_by": extend_by,
@@ -219,14 +239,26 @@ class AsyncQURLClient:
         *,
         expires_at: datetime | str | None = None,
     ) -> MintOutput:
-        """Mint a new access link for a QURL."""
+        """Mint a new access link for a QURL.
+
+        Args:
+            resource_id: QURL resource ID.
+            expires_at: Optional expiry override for the minted link.
+        """
         validate_id(resource_id)
         body = build_body({"expires_at": expires_at})
         resp = await self._request("POST", f"/v1/qurls/{resource_id}/mint_link", body=body)
         return parse_mint_output(resp)
 
     async def resolve(self, access_token: str) -> ResolveOutput:
-        """Resolve a QURL access token (headless)."""
+        """Resolve a QURL access token (headless).
+
+        Triggers an NHP knock to open firewall access for the caller's IP.
+        Requires ``qurl:resolve`` scope on the API key.
+
+        Args:
+            access_token: The access token string (e.g. ``"at_k8xqp9h2sj9lx7r4a"``).
+        """
         validate_id(access_token, "access_token")
         resp = await self._request("POST", "/v1/resolve", body={"access_token": access_token})
         return parse_resolve_output(resp)
