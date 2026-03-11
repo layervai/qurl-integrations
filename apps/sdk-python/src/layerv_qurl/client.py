@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         ResolveOutput,
     )
 
+
 class QURLClient:
     """Synchronous QURL API client.
 

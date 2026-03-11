@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from layerv_qurl.langchain import (
@@ -30,7 +31,7 @@ def test_create_qurl_tool() -> None:
         resource_id="r_abc123def45",
         qurl_link="https://qurl.link/#at_test",
         qurl_site="https://r_abc123def45.qurl.site",
-        expires_at="2026-03-15T10:00:00Z",
+        expires_at=datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc),
     )
 
     tool = CreateQURLTool(client=client)
@@ -54,7 +55,7 @@ def test_resolve_qurl_tool() -> None:
         resource_id="r_abc123def45",
         access_grant=AccessGrant(
             expires_in=305,
-            granted_at="2026-03-10T15:30:00Z",
+            granted_at=datetime(2026, 3, 10, 15, 30, 0, tzinfo=timezone.utc),
             src_ip="203.0.113.42",
         ),
     )
@@ -92,8 +93,8 @@ def test_list_qurls_tool() -> None:
                 resource_id="r_abc123def45",
                 target_url="https://example.com",
                 status="active",
-                created_at="2026-03-10T10:00:00Z",
-                expires_at="2026-03-15T10:00:00Z",
+                created_at=datetime(2026, 3, 10, 10, 0, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 3, 15, 10, 0, 0, tzinfo=timezone.utc),
             )
         ],
         has_more=False,

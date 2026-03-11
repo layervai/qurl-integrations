@@ -56,8 +56,12 @@ def validate_id(value: str, name: str = "resource_id") -> str:
     return value
 
 
-def build_body(kwargs: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a request body dict from kwargs, dropping None values."""
+def build_body(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Build a request body dict from kwargs, dropping None values.
+
+    Always returns a dict (at least ``{}``) so POST/PATCH endpoints
+    receive a valid JSON body.
+    """
     body: dict[str, Any] = {}
     for k, v in kwargs.items():
         if v is None:
@@ -72,7 +76,7 @@ def build_body(kwargs: dict[str, Any]) -> dict[str, Any] | None:
             }
         else:
             body[k] = v
-    return body or None
+    return body
 
 
 def parse_qurl(data: dict[str, Any]) -> QURL:
