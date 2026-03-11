@@ -1,10 +1,12 @@
 # Contributing to qurl-integrations
 
+Thank you for your interest in contributing! This guide will help you get started.
+
 ## Quick Start
 
 ```bash
 # Clone and install tools
-git clone git@github.com:layervai/qurl-integrations.git
+git clone https://github.com/layervai/qurl-integrations.git
 cd qurl-integrations
 
 # Install pre-commit hooks (required — CI will catch what these catch, but faster locally)
@@ -14,9 +16,9 @@ pip install pre-commit && pre-commit install
 make check
 ```
 
-## Your Sandbox
+## Project Structure
 
-Each integration lives in `apps/{name}/`. You own your app directory:
+Each integration lives in `apps/{name}/`. Shared libraries live in `shared/`.
 
 ```
 apps/
@@ -24,23 +26,21 @@ apps/
     cmd/main.go   # Lambda entry point
     internal/     # App-private code — put your logic here
     README.md
-  teams/          # Your app here
-  discord/        # Your app here
+  teams/          # Microsoft Teams (planned)
+  discord/        # Discord bot (planned)
+  cli/            # CLI tool
+shared/           # Shared libraries used by all integrations
 ```
-
-**You should primarily be working in `apps/{your-app}/`.**
 
 ## Boundaries
 
 | Directory | Who owns it | Can you modify it? |
 |-----------|------------|-------------------|
-| `apps/{your-app}/` | You | Yes |
-| `apps/{other-app}/` | Other contractor | No — open an issue |
-| `shared/` | Platform team | PR requires platform review |
-| `terraform/` | Platform team | Do not modify |
-| `.github/` | Platform team | Do not modify |
+| `apps/{app}/` | Maintainers | Yes — open a PR |
+| `shared/` | Maintainers | PR requires maintainer review |
+| `.github/` | Maintainers | PR requires maintainer review |
 
-Changes to `shared/` trigger tests for ALL apps, so coordinate with other teams.
+Changes to `shared/` trigger tests for ALL apps, so coordinate with maintainers.
 
 ## Workflow
 
@@ -102,11 +102,11 @@ If you need something that doesn't exist in `shared/`, start by putting it in yo
 2. **Modifying `shared/` without coordination** — Your change runs tests for ALL apps.
 3. **Ignoring linter errors** — `//nolint` requires an explanation AND a specific linter name.
 4. **Adding large dependencies** — Dependency review will flag high-severity or GPL deps.
-5. **Hardcoding secrets** — Use SSM Parameter Store or Secrets Manager. `detect-private-key` hook catches some of this.
+5. **Hardcoding secrets** — Use environment variables. `detect-private-key` hook catches some of this.
 6. **Skipping `make check`** — CI runs the same checks. Save yourself the round-trip.
 
 ## Getting Help
 
-- **Build/CI issues**: Open an issue tagged `ci`
-- **Shared package questions**: Open an issue tagged `shared`
-- **Architecture decisions**: Check the app's README first, then ask in your team channel
+- **Bug reports**: [Open an issue](https://github.com/layervai/qurl-integrations/issues/new?template=bug_report.md)
+- **Feature requests**: [Open an issue](https://github.com/layervai/qurl-integrations/issues/new?template=feature_request.md)
+- **Questions**: [Open an issue](https://github.com/layervai/qurl-integrations/issues) with the `question` label
