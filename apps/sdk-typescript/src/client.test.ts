@@ -8,7 +8,7 @@ function mockFetch(response: {
   headers?: Record<string, string>;
 }): typeof globalThis.fetch {
   return vi.fn().mockResolvedValue({
-    ok: response.status >= 200 && response.status < 400,
+    ok: response.status >= 200 && response.status < 300,
     status: response.status,
     statusText: response.status === 200 ? "OK" : "Error",
     headers: new Headers(response.headers ?? {}),
@@ -142,6 +142,35 @@ describe("QURLClient", () => {
     const result = await client.extend("r_abc123def45", { extend_by: "7d" });
 
     expect(result.expires_at).toBe("2026-03-20T10:00:00Z");
+  });
+
+  it("updates a QURL description", async () => {
+    const fetch = mockFetch({
+      status: 200,
+      body: {
+        data: {
+          resource_id: "r_abc123def45",
+          target_url: "https://example.com",
+          status: "active",
+          description: "Updated description",
+          created_at: "2026-03-10T10:00:00Z",
+        },
+      },
+    });
+
+    const client = createClient(fetch);
+    const result = await client.update("r_abc123def45", {
+      description: "Updated description",
+    });
+
+    expect(result.description).toBe("Updated description");
+    expect(fetch).toHaveBeenCalledWith(
+      "https://api.test.layerv.ai/v1/qurls/r_abc123def45",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({ description: "Updated description" }),
+      }),
+    );
   });
 
   it("resolves a QURL token", async () => {
