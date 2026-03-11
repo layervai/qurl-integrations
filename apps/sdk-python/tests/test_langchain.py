@@ -12,10 +12,10 @@ from layerv_qurl.langchain import (
     ResolveQURLTool,
 )
 from layerv_qurl.types import (
+    QURL,
     AccessGrant,
     CreateOutput,
     ListOutput,
-    QURL,
     ResolveOutput,
 )
 
@@ -38,7 +38,13 @@ def test_create_qurl_tool() -> None:
 
     assert "r_abc123def45" in result
     assert "https://qurl.link/#at_test" in result
-    client.create.assert_called_once()
+    client.create.assert_called_once_with(
+        target_url="https://example.com",
+        expires_in="24h",
+        description=None,
+        one_time_use=None,
+        max_sessions=None,
+    )
 
 
 def test_resolve_qurl_tool() -> None:
@@ -59,7 +65,8 @@ def test_resolve_qurl_tool() -> None:
     assert "https://api.example.com/data" in result
     assert "305" in result
     assert "203.0.113.42" in result
-    client.resolve.assert_called_once()
+    # resolve() now takes a plain string
+    client.resolve.assert_called_once_with("at_k8xqp9h2sj9lx7r4a")
 
 
 def test_resolve_qurl_tool_no_grant() -> None:

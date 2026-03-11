@@ -1,9 +1,8 @@
-"""Synchronous QURL API client."""
+"""Asynchronous QURL API client."""
 
 from __future__ import annotations
 
-import time
-from importlib.metadata import version as _pkg_version
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -21,10 +20,16 @@ from layerv_qurl._utils import (
     parse_resolve_output,
     retry_delay,
 )
+from layerv_qurl.client import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    _default_user_agent,
+)
 from layerv_qurl.errors import QURLError, QURLNetworkError, QURLTimeoutError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator
     from datetime import datetime
 
     from layerv_qurl.types import (
@@ -38,40 +43,21 @@ if TYPE_CHECKING:
         ResolveOutput,
     )
 
-DEFAULT_BASE_URL = "https://api.layerv.ai"
-DEFAULT_TIMEOUT = 30.0
-DEFAULT_MAX_RETRIES = 3
 
-
-def _default_user_agent() -> str:
-    try:
-        v = _pkg_version("layerv-qurl")
-    except Exception:
-        v = "dev"
-    return f"qurl-python-sdk/{v}"
-
-
-class QURLClient:
-    """Synchronous QURL API client.
+class AsyncQURLClient:
+    """Asynchronous QURL API client.
 
     Usage::
 
-        from layerv_qurl import QURLClient
+        import asyncio
+        from layerv_qurl import AsyncQURLClient
 
-        client = QURLClient(api_key="lv_live_xxx")
+        async def main():
+            async with AsyncQURLClient(api_key="lv_live_xxx") as client:
+                result = await client.create(target_url="https://example.com")
+                access = await client.resolve("at_k8xqp9h2sj9lx7r4a")
 
-        # Create a protected link
-        result = client.create(target_url="https://example.com", expires_in="24h")
-
-        # Resolve an access token (opens firewall for your IP)
-        access = client.resolve("at_k8xqp9h2sj9lx7r4a")
-
-        # Update a QURL (extend, change description, etc.)
-        qurl = client.update("r_xxx", extend_by="7d", description="updated")
-
-        # Iterate all active QURLs
-        for qurl in client.list_all(status="active"):
-            print(qurl.resource_id)
+        asyncio.run(main())
     """
 
     def __init__(
@@ -82,7 +68,7 @@ class QURLClient:
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         user_agent: str | None = None,
-        http_client: httpx.Client | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key or not api_key.strip():
             raise ValueError("api_key must not be empty")
@@ -91,7 +77,7 @@ class QURLClient:
         self._api_key = api_key
         self._max_retries = max_retries
         self._user_agent = user_agent or _default_user_agent()
-        self._client = http_client or httpx.Client(timeout=timeout)
+        self._client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = http_client is None
         self._base_headers: dict[str, str] = {
             "Authorization": f"Bearer {api_key}",
@@ -100,22 +86,22 @@ class QURLClient:
         }
 
     def __repr__(self) -> str:
-        return f"QURLClient(api_key='{mask_key(self._api_key)}', base_url='{self._base_url}')"
+        return f"AsyncQURLClient(api_key='{mask_key(self._api_key)}', base_url='{self._base_url}')"
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the underlying HTTP client (only if owned by this instance)."""
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
 
-    def __enter__(self) -> QURLClient:
+    async def __aenter__(self) -> AsyncQURLClient:
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.close()
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
 
     # --- Public API ---
 
-    def create(
+    async def create(
         self,
         target_url: str,
         *,
@@ -126,17 +112,7 @@ class QURLClient:
         max_sessions: int | None = None,
         access_policy: AccessPolicy | None = None,
     ) -> CreateOutput:
-        """Create a new QURL.
-
-        Args:
-            target_url: The URL to protect.
-            expires_in: Duration string (e.g. ``"24h"``, ``"7d"``).
-            expires_at: Absolute expiry as datetime or ISO string.
-            description: Human-readable description.
-            one_time_use: If True, the QURL can only be used once.
-            max_sessions: Maximum concurrent sessions allowed.
-            access_policy: IP/geo/user-agent access restrictions.
-        """
+        """Create a new QURL."""
         body = build_body({
             "target_url": target_url,
             "expires_in": expires_in,
@@ -146,15 +122,15 @@ class QURLClient:
             "max_sessions": max_sessions,
             "access_policy": access_policy,
         })
-        resp = self._request("POST", "/v1/qurl", body=body)
+        resp = await self._request("POST", "/v1/qurl", body=body)
         return parse_create_output(resp)
 
-    def get(self, resource_id: str) -> QURL:
+    async def get(self, resource_id: str) -> QURL:
         """Get a QURL by ID."""
-        resp = self._request("GET", f"/v1/qurls/{resource_id}")
+        resp = await self._request("GET", f"/v1/qurls/{resource_id}")
         return parse_qurl(resp)
 
-    def list(
+    async def list(
         self,
         *,
         limit: int | None = None,
@@ -185,42 +161,37 @@ class QURLClient:
         if sort:
             params["sort"] = sort
 
-        data, meta = self._raw_request("GET", "/v1/qurls", params=params)
+        data, meta = await self._raw_request("GET", "/v1/qurls", params=params)
         return parse_list_output(data, meta)
 
-    def list_all(
+    async def list_all(
         self,
         *,
         status: QURLStatus | None = None,
         q: str | None = None,
         sort: str | None = None,
         page_size: int = 50,
-    ) -> Iterator[QURL]:
+    ) -> AsyncIterator[QURL]:
         """Iterate over all QURLs, automatically paginating.
 
         Yields individual :class:`QURL` objects, fetching pages transparently.
-
-        Args:
-            status: Filter by status (``"active"``, ``"expired"``, etc.).
-            q: Search query string.
-            sort: Sort order.
-            page_size: Number of items per page (default 50).
         """
         cursor: str | None = None
         while True:
-            page = self.list(
+            page = await self.list(
                 limit=page_size, cursor=cursor, status=status, q=q, sort=sort,
             )
-            yield from page.qurls
+            for qurl in page.qurls:
+                yield qurl
             if not page.has_more or not page.next_cursor:
                 break
             cursor = page.next_cursor
 
-    def delete(self, resource_id: str) -> None:
+    async def delete(self, resource_id: str) -> None:
         """Delete (revoke) a QURL."""
-        self._request("DELETE", f"/v1/qurls/{resource_id}")
+        await self._request("DELETE", f"/v1/qurls/{resource_id}")
 
-    def update(
+    async def update(
         self,
         resource_id: str,
         *,
@@ -229,63 +200,40 @@ class QURLClient:
         description: str | None = None,
         access_policy: AccessPolicy | None = None,
     ) -> QURL:
-        """Update a QURL — extend expiration, change description, etc.
-
-        Combines the old ``extend()`` and ``update()`` into a single method.
-        All fields are optional; only provided fields are sent.
-
-        Args:
-            resource_id: QURL resource ID.
-            extend_by: Duration to add (e.g. ``"7d"``).
-            expires_at: New absolute expiry.
-            description: New description.
-            access_policy: New access restrictions.
-        """
+        """Update a QURL — extend expiration, change description, etc."""
         body = build_body({
             "extend_by": extend_by,
             "expires_at": expires_at,
             "description": description,
             "access_policy": access_policy,
         })
-        resp = self._request("PATCH", f"/v1/qurls/{resource_id}", body=body)
+        resp = await self._request("PATCH", f"/v1/qurls/{resource_id}", body=body)
         return parse_qurl(resp)
 
-    def mint_link(
+    async def mint_link(
         self,
         resource_id: str,
         *,
         expires_at: datetime | str | None = None,
     ) -> MintOutput:
-        """Mint a new access link for a QURL.
-
-        Args:
-            resource_id: QURL resource ID.
-            expires_at: Optional expiry override for the minted link.
-        """
+        """Mint a new access link for a QURL."""
         body = build_body({"expires_at": expires_at})
-        resp = self._request("POST", f"/v1/qurls/{resource_id}/mint_link", body=body)
+        resp = await self._request("POST", f"/v1/qurls/{resource_id}/mint_link", body=body)
         return parse_mint_output(resp)
 
-    def resolve(self, access_token: str) -> ResolveOutput:
-        """Resolve a QURL access token (headless).
-
-        Triggers an NHP knock to open firewall access for the caller's IP.
-        Requires ``qurl:resolve`` scope on the API key.
-
-        Args:
-            access_token: The access token string (e.g. ``"at_k8xqp9h2sj9lx7r4a"``).
-        """
-        resp = self._request("POST", "/v1/resolve", body={"access_token": access_token})
+    async def resolve(self, access_token: str) -> ResolveOutput:
+        """Resolve a QURL access token (headless)."""
+        resp = await self._request("POST", "/v1/resolve", body={"access_token": access_token})
         return parse_resolve_output(resp)
 
-    def get_quota(self) -> Quota:
+    async def get_quota(self) -> Quota:
         """Get quota and usage information."""
-        resp = self._request("GET", "/v1/quota")
+        resp = await self._request("GET", "/v1/quota")
         return parse_quota(resp)
 
     # --- Internal HTTP plumbing ---
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -293,10 +241,10 @@ class QURLClient:
         body: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
     ) -> Any:
-        data, _ = self._raw_request(method, path, body=body, params=params)
+        data, _ = await self._raw_request(method, path, body=body, params=params)
         return data
 
-    def _raw_request(
+    async def _raw_request(
         self,
         method: str,
         path: str,
@@ -314,10 +262,10 @@ class QURLClient:
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
                 delay = retry_delay(attempt, last_error)
-                time.sleep(delay)
+                await asyncio.sleep(delay)
 
             try:
-                response = self._client.request(
+                response = await self._client.request(
                     method,
                     url,
                     json=body if body is not None else None,

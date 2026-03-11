@@ -37,20 +37,16 @@ class CreateQURLTool(BaseTool):
         target_url: str,
         expires_in: str = "24h",
         description: str | None = None,
-        one_time_use: bool = False,
+        one_time_use: bool | None = None,
         max_sessions: int | None = None,
         run_manager: CallbackManagerForToolRun | None = None,
     ) -> str:
-        from layerv_qurl.types import CreateInput
-
         result = self.client.create(
-            CreateInput(
-                target_url=target_url,
-                expires_in=expires_in,
-                description=description,
-                one_time_use=one_time_use,
-                max_sessions=max_sessions,
-            )
+            target_url=target_url,
+            expires_in=expires_in,
+            description=description,
+            one_time_use=one_time_use,
+            max_sessions=max_sessions,
         )
         return (
             f"Created QURL {result.resource_id}\n"
@@ -75,9 +71,7 @@ class ResolveQURLTool(BaseTool):
         access_token: str,
         run_manager: CallbackManagerForToolRun | None = None,
     ) -> str:
-        from layerv_qurl.types import ResolveInput
-
-        result = self.client.resolve(ResolveInput(access_token=access_token))
+        result = self.client.resolve(access_token)
         grant = result.access_grant
         return (
             f"Resolved: {result.target_url}\n"

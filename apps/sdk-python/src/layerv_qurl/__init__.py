@@ -2,40 +2,43 @@
 
 from importlib.metadata import version as _pkg_version
 
+from layerv_qurl.async_client import AsyncQURLClient
 from layerv_qurl.client import QURLClient
-from layerv_qurl.errors import QURLError
+from layerv_qurl.errors import QURLError, QURLNetworkError, QURLTimeoutError
 from layerv_qurl.types import (
+    QURL,
     AccessGrant,
     AccessPolicy,
-    CreateInput,
     CreateOutput,
-    ExtendInput,
     ListOutput,
-    MintInput,
     MintOutput,
-    QURL,
     Quota,
-    ResolveInput,
+    QURLStatus,
+    RateLimits,
     ResolveOutput,
-    UpdateInput,
+    Usage,
 )
 
 __all__ = [
+    "AsyncQURLClient",
     "QURLClient",
     "QURLError",
+    "QURLNetworkError",
+    "QURLStatus",
+    "QURLTimeoutError",
     "AccessGrant",
     "AccessPolicy",
-    "CreateInput",
     "CreateOutput",
-    "ExtendInput",
     "ListOutput",
-    "MintInput",
     "MintOutput",
     "QURL",
     "Quota",
-    "ResolveInput",
+    "RateLimits",
     "ResolveOutput",
-    "UpdateInput",
+    "Usage",
 ]
 
-__version__ = _pkg_version("layerv-qurl")
+try:
+    __version__ = _pkg_version("layerv-qurl")
+except Exception:
+    __version__ = "dev"
