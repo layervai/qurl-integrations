@@ -253,7 +253,7 @@ class AsyncQURLClient:
     async def resolve(self, access_token: str) -> ResolveOutput:
         """Resolve a QURL access token (headless).
 
-        Triggers an NHP knock to open firewall access for the caller's IP.
+        Triggers a network access request to open firewall access for the caller's IP.
         Requires ``qurl:resolve`` scope on the API key.
 
         Args:

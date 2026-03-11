@@ -6,7 +6,6 @@
 
 # Infrastructure and CI require platform team review
 /.github/workflows/ @layervai/platform
-apps/*/deploy/ @layervai/platform
 
 # Shared code changes affect all apps — require platform review
 shared/ @layervai/platform
