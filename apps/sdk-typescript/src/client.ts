@@ -51,6 +51,9 @@ export class QURLClient {
   private readonly userAgent: string;
 
   constructor(options: ClientOptions) {
+    if (!options.apiKey) {
+      throw new Error("apiKey is required");
+    }
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchFn = options.fetch ?? globalThis.fetch;
@@ -71,11 +74,11 @@ export class QURLClient {
   /** List QURLs with optional filters. */
   async list(input: ListInput = {}): Promise<ListOutput> {
     const params = new URLSearchParams();
-    if (input.limit) params.set("limit", String(input.limit));
-    if (input.cursor) params.set("cursor", input.cursor);
-    if (input.status) params.set("status", input.status);
-    if (input.q) params.set("q", input.q);
-    if (input.sort) params.set("sort", input.sort);
+    if (input.limit != null) params.set("limit", String(input.limit));
+    if (input.cursor != null) params.set("cursor", input.cursor);
+    if (input.status != null) params.set("status", input.status);
+    if (input.q != null) params.set("q", input.q);
+    if (input.sort != null) params.set("sort", input.sort);
 
     const query = params.toString();
     const path = query ? `/v1/qurls?${query}` : "/v1/qurls";
@@ -156,9 +159,11 @@ export class QURLClient {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
-      "Content-Type": "application/json",
       "User-Agent": this.userAgent,
     };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
 
     let lastError: Error | undefined;
 
@@ -168,11 +173,23 @@ export class QURLClient {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
 
-      const response = await this.fetchFn(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      let response: Response;
+      try {
+        response = await this.fetchFn(url, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } catch (networkError) {
+        lastError =
+          networkError instanceof Error
+            ? networkError
+            : new Error(String(networkError));
+        if (attempt < this.maxRetries) {
+          continue;
+        }
+        throw lastError;
+      }
 
       if (response.ok) {
         if (response.status === 204) {
