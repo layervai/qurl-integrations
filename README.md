@@ -6,7 +6,7 @@ Open-source integrations for [QURL](https://layerv.ai) — quantum-style URLs th
 
 QURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A QURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
-This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool, SDKs, and shared libraries for creating and managing QURLs.
+This monorepo contains Go-based platform integrations (Slack, Teams, Discord), a CLI tool, and shared libraries for creating and managing QURLs.
 
 ## Structure
 
@@ -14,7 +14,6 @@ This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool
 apps/           Per-integration applications (independent release tracks)
   slack/        Slack bot — slash commands, link unfurling, notifications
   cli/          CLI tool for QURL
-  sdk-python/   Python SDK
   teams/        Microsoft Teams (planned)
   discord/      Discord bot (planned)
   zapier/       Zapier integration (planned)
@@ -25,6 +24,15 @@ shared/         Shared libraries used by all integrations
   formatting/   Chat message templates
   observability/ OpenTelemetry setup
 ```
+
+## SDKs (separate repos)
+
+Language-specific SDKs have been extracted into standalone repositories:
+
+| SDK | Package | Repo |
+|-----|---------|------|
+| Python | `pip install layerv-qurl` | [layervai/qurl-python](https://github.com/layervai/qurl-python) |
+| TypeScript | `npm install @layerv/qurl` | [layervai/qurl-typescript](https://github.com/layervai/qurl-typescript) |
 
 ## Configuration
 

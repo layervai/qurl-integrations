@@ -20,9 +20,11 @@
 
 ## Project Overview
 
-Monorepo for QURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
+Go monorepo for QURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
 Each integration lives in `apps/{name}/` with independent release tracks.
 Shared code lives in `shared/`.
+
+SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-python), [qurl-typescript](https://github.com/layervai/qurl-typescript).
 
 ## Commit Format
 
