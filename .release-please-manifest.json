@@ -3,5 +3,6 @@
   "apps/teams": "0.1.0",
   "apps/discord": "0.1.0",
   "apps/cli": "0.1.0",
-  "apps/zapier": "0.1.0"
+  "apps/zapier": "0.1.0",
+  "apps/sdk-python": "0.1.0"
 }

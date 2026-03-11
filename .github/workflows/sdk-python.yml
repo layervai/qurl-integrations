@@ -1,0 +1,40 @@
+name: Python SDK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/sdk-python/**"
+  pull_request:
+    paths:
+      - "apps/sdk-python/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        working-directory: apps/sdk-python
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        working-directory: apps/sdk-python
+        run: ruff check src/ tests/
+
+      - name: Type check
+        if: matrix.python-version == '3.12'
+        working-directory: apps/sdk-python
+        run: mypy src/
+
+      - name: Test
+        working-directory: apps/sdk-python
+        run: pytest tests/ -v
