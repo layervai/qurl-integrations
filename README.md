@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [QURL](https://layerv.ai) — a URL shortening and management API. This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool, SDKs, and shared libraries.
+Open-source integrations for [QURL](https://layerv.ai) — secure, time-limited access links with network-level access control for AI agents and teams. QURLs protect sensitive resources behind expiring tokens that grant firewall access to the caller's IP on resolve. This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool, SDKs, and shared libraries.
 
 ## Structure
 
