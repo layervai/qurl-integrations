@@ -9,11 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 try:
     from langchain_core.tools import BaseTool
-except ImportError as e:
-    raise ImportError(
-        "langchain-core is required for LangChain integration. "
-        "Install with: pip install layerv-qurl[langchain]"
-    ) from e
+    _HAS_LANGCHAIN = True
+except ImportError:
+    _HAS_LANGCHAIN = False
+    BaseTool = object  # type: ignore[misc,assignment]
 
 if TYPE_CHECKING:
     from langchain_core.callbacks import CallbackManagerForToolRun
@@ -144,6 +143,11 @@ class QURLToolkit:
     """
 
     def __init__(self, client: QURLClient) -> None:
+        if not _HAS_LANGCHAIN:
+            raise ImportError(
+                "langchain-core is required for LangChain integration. "
+                "Install with: pip install layerv-qurl[langchain]"
+            )
         self.client = client
 
     def get_tools(self) -> list[BaseTool]:

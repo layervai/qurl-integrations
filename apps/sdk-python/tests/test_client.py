@@ -407,3 +407,97 @@ def test_retry_after_header_respected(retry_client: QURLClient) -> None:
     assert result.plan == "growth"
     # The retry delay should use the Retry-After value of 5 seconds
     mock_sleep.assert_called_once_with(5.0)
+
+# --- Non-JSON error response ---
+
+
+@respx.mock
+def test_non_json_error_response(client: QURLClient) -> None:
+    """Non-JSON error body should still produce a QURLError with detail from response text."""
+    respx.get(f"{BASE_URL}/v1/qurls/r_bad").mock(
+        return_value=httpx.Response(
+            500,
+            text="Internal Server Error",
+            headers={"content-type": "text/plain"},
+        )
+    )
+
+    with pytest.raises(QURLError) as exc_info:
+        client.get("r_bad")
+
+    err = exc_info.value
+    assert err.status == 500
+    assert err.code == "unknown"
+    assert "Internal Server Error" in err.detail
+
+
+# --- Context manager / close() tests ---
+
+
+def test_close_closes_owned_client() -> None:
+    """close() should close the HTTP client when it is owned."""
+    c = QURLClient(api_key="lv_live_test", base_url=BASE_URL)
+    assert c._owns_client is True
+    c.close()
+    # After close, the httpx.Client is closed
+    assert c._client.is_closed
+
+
+def test_close_does_not_close_injected_client() -> None:
+    """close() should NOT close an injected HTTP client."""
+    custom = httpx.Client(timeout=10)
+    c = QURLClient(api_key="lv_live_test", base_url=BASE_URL, http_client=custom)
+    assert c._owns_client is False
+    c.close()
+    # Injected client should still be open
+    assert not custom.is_closed
+    custom.close()
+
+
+def test_context_manager_closes_owned_client() -> None:
+    """Using the client as a context manager should close the owned client on exit."""
+    with QURLClient(api_key="lv_live_test", base_url=BASE_URL) as c:
+        assert c._owns_client is True
+    assert c._client.is_closed
+
+
+def test_context_manager_does_not_close_injected_client() -> None:
+    """Context manager should NOT close an injected HTTP client on exit."""
+    custom = httpx.Client(timeout=10)
+    with QURLClient(api_key="lv_live_test", base_url=BASE_URL, http_client=custom) as c:
+        assert c._owns_client is False
+    assert not custom.is_closed
+    custom.close()
+
+
+# --- Retry-After cap test ---
+
+
+@respx.mock
+def test_retry_after_capped_at_30s(retry_client: QURLClient) -> None:
+    """Retry-After values above 30s should be capped at 30s."""
+    route = respx.get(f"{BASE_URL}/v1/quota")
+    route.side_effect = [
+        httpx.Response(
+            429,
+            headers={"Retry-After": "120"},
+            json={"error": {"status": 429, "code": "rate_limited", "title": "Rate Limited", "detail": "Slow down"}},
+        ),
+        httpx.Response(
+            200,
+            json={
+                "data": {
+                    "plan": "growth",
+                    "period_start": "2026-03-01T00:00:00Z",
+                    "period_end": "2026-04-01T00:00:00Z",
+                },
+            },
+        ),
+    ]
+
+    with patch("layerv_qurl.client.time.sleep") as mock_sleep:
+        result = retry_client.get_quota()
+
+    assert result.plan == "growth"
+    # Retry-After was 120 but should be capped at 30
+    mock_sleep.assert_called_once_with(30.0)
