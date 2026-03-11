@@ -8,8 +8,12 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from layerv_qurl._utils import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
     RETRYABLE_STATUS,
     build_body,
+    default_user_agent,
     mask_key,
     parse_create_output,
     parse_error,
@@ -19,12 +23,7 @@ from layerv_qurl._utils import (
     parse_qurl,
     parse_resolve_output,
     retry_delay,
-)
-from layerv_qurl.client import (
-    DEFAULT_BASE_URL,
-    DEFAULT_MAX_RETRIES,
-    DEFAULT_TIMEOUT,
-    _default_user_agent,
+    validate_id,
 )
 from layerv_qurl.errors import QURLError, QURLNetworkError, QURLTimeoutError
 
@@ -76,7 +75,7 @@ class AsyncQURLClient:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._max_retries = max_retries
-        self._user_agent = user_agent or _default_user_agent()
+        self._user_agent = user_agent or default_user_agent()
         self._client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = http_client is None
         self._base_headers: dict[str, str] = {
@@ -127,6 +126,7 @@ class AsyncQURLClient:
 
     async def get(self, resource_id: str) -> QURL:
         """Get a QURL by ID."""
+        validate_id(resource_id)
         resp = await self._request("GET", f"/v1/qurls/{resource_id}")
         return parse_qurl(resp)
 
@@ -189,6 +189,7 @@ class AsyncQURLClient:
 
     async def delete(self, resource_id: str) -> None:
         """Delete (revoke) a QURL."""
+        validate_id(resource_id)
         await self._request("DELETE", f"/v1/qurls/{resource_id}")
 
     async def update(
@@ -201,6 +202,7 @@ class AsyncQURLClient:
         access_policy: AccessPolicy | None = None,
     ) -> QURL:
         """Update a QURL — extend expiration, change description, etc."""
+        validate_id(resource_id)
         body = build_body({
             "extend_by": extend_by,
             "expires_at": expires_at,
@@ -217,12 +219,14 @@ class AsyncQURLClient:
         expires_at: datetime | str | None = None,
     ) -> MintOutput:
         """Mint a new access link for a QURL."""
+        validate_id(resource_id)
         body = build_body({"expires_at": expires_at})
         resp = await self._request("POST", f"/v1/qurls/{resource_id}/mint_link", body=body)
         return parse_mint_output(resp)
 
     async def resolve(self, access_token: str) -> ResolveOutput:
         """Resolve a QURL access token (headless)."""
+        validate_id(access_token, "access_token")
         resp = await self._request("POST", "/v1/resolve", body={"access_token": access_token})
         return parse_resolve_output(resp)
 

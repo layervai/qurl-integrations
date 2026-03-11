@@ -63,6 +63,17 @@ def retry_client() -> QURLClient:
 # --- Constructor tests ---
 
 
+def test_path_traversal_rejected(client: QURLClient) -> None:
+    """resource_id with path traversal characters is rejected."""
+    with pytest.raises(ValueError, match="Invalid resource_id"):
+        client.get("../../admin/secrets")
+
+
+def test_empty_resource_id_rejected(client: QURLClient) -> None:
+    with pytest.raises(ValueError, match="Invalid resource_id"):
+        client.delete("")
+
+
 def test_empty_api_key_raises() -> None:
     with pytest.raises(ValueError, match="api_key must not be empty"):
         QURLClient(api_key="")

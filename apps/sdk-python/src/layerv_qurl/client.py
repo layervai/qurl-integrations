@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import time
-from importlib.metadata import version as _pkg_version
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from layerv_qurl._utils import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
     RETRYABLE_STATUS,
     build_body,
+    default_user_agent,
     mask_key,
     parse_create_output,
     parse_error,
@@ -20,6 +23,7 @@ from layerv_qurl._utils import (
     parse_qurl,
     parse_resolve_output,
     retry_delay,
+    validate_id,
 )
 from layerv_qurl.errors import QURLError, QURLNetworkError, QURLTimeoutError
 
@@ -37,25 +41,6 @@ if TYPE_CHECKING:
         QURLStatus,
         ResolveOutput,
     )
-
-DEFAULT_BASE_URL = "https://api.layerv.ai"
-DEFAULT_TIMEOUT = 30.0
-DEFAULT_MAX_RETRIES = 3
-
-
-_cached_user_agent: str | None = None
-
-
-def _default_user_agent() -> str:
-    global _cached_user_agent  # noqa: PLW0603
-    if _cached_user_agent is None:
-        try:
-            v = _pkg_version("layerv-qurl")
-        except Exception:
-            v = "dev"
-        _cached_user_agent = f"qurl-python-sdk/{v}"
-    return _cached_user_agent
-
 
 class QURLClient:
     """Synchronous QURL API client.
@@ -96,7 +81,7 @@ class QURLClient:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._max_retries = max_retries
-        self._user_agent = user_agent or _default_user_agent()
+        self._user_agent = user_agent or default_user_agent()
         self._client = http_client or httpx.Client(timeout=timeout)
         self._owns_client = http_client is None
         self._base_headers: dict[str, str] = {
@@ -157,6 +142,7 @@ class QURLClient:
 
     def get(self, resource_id: str) -> QURL:
         """Get a QURL by ID."""
+        validate_id(resource_id)
         resp = self._request("GET", f"/v1/qurls/{resource_id}")
         return parse_qurl(resp)
 
@@ -224,6 +210,7 @@ class QURLClient:
 
     def delete(self, resource_id: str) -> None:
         """Delete (revoke) a QURL."""
+        validate_id(resource_id)
         self._request("DELETE", f"/v1/qurls/{resource_id}")
 
     def update(
@@ -247,6 +234,7 @@ class QURLClient:
             description: New description.
             access_policy: New access restrictions.
         """
+        validate_id(resource_id)
         body = build_body({
             "extend_by": extend_by,
             "expires_at": expires_at,
@@ -268,6 +256,7 @@ class QURLClient:
             resource_id: QURL resource ID.
             expires_at: Optional expiry override for the minted link.
         """
+        validate_id(resource_id)
         body = build_body({"expires_at": expires_at})
         resp = self._request("POST", f"/v1/qurls/{resource_id}/mint_link", body=body)
         return parse_mint_output(resp)
@@ -281,6 +270,7 @@ class QURLClient:
         Args:
             access_token: The access token string (e.g. ``"at_k8xqp9h2sj9lx7r4a"``).
         """
+        validate_id(access_token, "access_token")
         resp = self._request("POST", "/v1/resolve", body={"access_token": access_token})
         return parse_resolve_output(resp)
 

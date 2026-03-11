@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import random
+import re
 from datetime import datetime
+from importlib.metadata import version as _pkg_version
 from typing import TYPE_CHECKING, Any
 
 from layerv_qurl.errors import QURLError
@@ -25,7 +27,32 @@ from layerv_qurl.types import (
 if TYPE_CHECKING:
     import httpx
 
+DEFAULT_BASE_URL = "https://api.layerv.ai"
+DEFAULT_TIMEOUT = 30.0
+DEFAULT_MAX_RETRIES = 3
 RETRYABLE_STATUS = {429, 502, 503, 504}
+
+_cached_user_agent: str | None = None
+_RESOURCE_ID_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+def default_user_agent() -> str:
+    """Return the default User-Agent string, caching the version lookup."""
+    global _cached_user_agent  # noqa: PLW0603
+    if _cached_user_agent is None:
+        try:
+            v = _pkg_version("layerv-qurl")
+        except Exception:
+            v = "dev"
+        _cached_user_agent = f"qurl-python-sdk/{v}"
+    return _cached_user_agent
+
+
+def validate_id(value: str, name: str = "resource_id") -> str:
+    """Validate that an ID is non-empty and contains no path traversal characters."""
+    if not value or not _RESOURCE_ID_RE.match(value):
+        raise ValueError(f"Invalid {name}: {value!r}")
+    return value
 
 
 def build_body(kwargs: dict[str, Any]) -> dict[str, Any] | None:
@@ -171,7 +198,7 @@ def parse_error(response: httpx.Response) -> QURLError:
             request_id=envelope.get("meta", {}).get("request_id"),
             retry_after=retry_after,
         )
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, AttributeError):
         return QURLError(
             status=response.status_code,
             code="unknown",
