@@ -345,8 +345,8 @@ type AccessGrant struct {
 	SrcIP     string `json:"src_ip"`
 }
 
-// Resolve resolves a QURL access token, triggering an NHP knock to open
-// the firewall for the caller's IP.
+// Resolve resolves a QURL access token, triggering a network access request
+// to open the firewall for the caller's IP.
 func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
