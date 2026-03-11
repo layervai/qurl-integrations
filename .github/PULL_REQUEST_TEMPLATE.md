@@ -11,8 +11,8 @@ Brief description of changes.
 - [ ] `apps/discord/`
 - [ ] `apps/cli/`
 - [ ] `apps/zapier/`
-- [ ] `shared/` (triggers tests for ALL apps — coordinate first)
-- [ ] `terraform/` / `.github/` (platform team only)
+- [ ] `shared/` (triggers tests for ALL apps — coordinate with maintainers)
+- [ ] `.github/` (requires maintainer review)
 
 ## Changes
 

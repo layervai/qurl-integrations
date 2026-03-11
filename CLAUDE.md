@@ -40,12 +40,11 @@ Examples:
 
 ## Code Conventions
 
-- **Language:** Go (matches nhp and qurl-service repos)
+- **Language:** Go
 - **Module:** `github.com/layervai/qurl-integrations`
 - **App entry points:** `apps/{name}/cmd/main.go`
 - **App-private code:** `apps/{name}/internal/`
 - **Shared code:** `shared/{package}/` — changes here affect ALL apps
-- **Per-app infra:** `apps/{name}/deploy/terraform/`
 
 ## Linting
 
@@ -108,10 +107,3 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
 - **Runtime (Slack):** AWS Lambda behind API Gateway. Event-driven, scales to zero.
 - **Shared client:** `shared/client/` wraps the QURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.
-- **Terraform:** Per-app in `apps/{name}/deploy/terraform/`. Isolated blast radius.
-
-## Related Repos
-
-- `layervai/nhp` — NHP server, AC, infrastructure
-- `layervai/qurl-service` — QURL API backend
-- `layervai/website` — Marketing site + QURL Playground

@@ -20,12 +20,6 @@ coverage.html
 .DS_Store
 Thumbs.db
 
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.backup
-*.tfplan
-
 # Build artifacts
 dist/
 release/
