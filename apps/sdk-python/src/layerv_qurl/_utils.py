@@ -31,9 +31,10 @@ DEFAULT_BASE_URL = "https://api.layerv.ai"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 RETRYABLE_STATUS = {429, 502, 503, 504}
+RETRYABLE_STATUS_POST = {429}  # POST is not idempotent — only retry rate limits
 
 _cached_user_agent: str | None = None
-_RESOURCE_ID_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+_RESOURCE_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
 def default_user_agent() -> str:
@@ -66,7 +67,7 @@ def build_body(kwargs: dict[str, Any]) -> dict[str, Any] | None:
         elif dataclasses.is_dataclass(v) and not isinstance(v, type):
             body[k] = {
                 fk: fv
-                for fk, fv in v.__dict__.items()
+                for fk, fv in dataclasses.asdict(v).items()
                 if fv is not None
             }
         else:

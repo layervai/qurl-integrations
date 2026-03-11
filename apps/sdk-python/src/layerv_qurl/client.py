@@ -12,6 +12,7 @@ from layerv_qurl._utils import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
     RETRYABLE_STATUS,
+    RETRYABLE_STATUS_POST,
     build_body,
     default_user_agent,
     mask_key,
@@ -334,7 +335,8 @@ class QURLClient:
                 return envelope.get("data"), envelope.get("meta")
 
             err = parse_error(response)
-            if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
+            retryable = RETRYABLE_STATUS_POST if method == "POST" else RETRYABLE_STATUS
+            if response.status_code in retryable and attempt < self._max_retries:
                 last_error = err
                 continue
             raise err
