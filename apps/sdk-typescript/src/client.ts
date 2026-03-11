@@ -159,6 +159,7 @@ export class QURLClient {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
+      Accept: "application/json",
       "User-Agent": this.userAgent,
     };
     if (body !== undefined) {
