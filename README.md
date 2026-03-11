@@ -2,7 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [QURL](https://layerv.ai) — secure, time-limited access links with network-level access control for AI agents and teams. QURLs protect sensitive resources behind expiring tokens that grant firewall access to the caller's IP on resolve. This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool, SDKs, and shared libraries.
+Open-source integrations for [QURL](https://layerv.ai) — quantum-style URLs that make protected resources invisible by default.
+
+QURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A QURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+
+This monorepo contains platform integrations (Slack, Teams, Discord), a CLI tool, SDKs, and shared libraries for creating and managing QURLs.
 
 ## Structure
 
