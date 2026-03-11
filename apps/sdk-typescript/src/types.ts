@@ -142,6 +142,8 @@ export interface ClientOptions {
   fetch?: typeof globalThis.fetch;
   /** Maximum retry attempts for transient errors (429, 5xx). Default: 3. */
   maxRetries?: number;
+  /** Request timeout in milliseconds. Default: 30000. */
+  timeout?: number;
   /** User-Agent header value. */
   userAgent?: string;
 }

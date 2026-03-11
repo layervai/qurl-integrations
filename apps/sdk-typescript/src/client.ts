@@ -18,6 +18,7 @@ import type {
 
 const DEFAULT_BASE_URL = "https://api.layerv.ai";
 const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_TIMEOUT = 30_000;
 const DEFAULT_USER_AGENT = "qurl-typescript-sdk/0.1.0";
 
 interface ApiResponse<T> {
@@ -48,6 +49,7 @@ export class QURLClient {
   private readonly apiKey: string;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly maxRetries: number;
+  private readonly timeout: number;
   private readonly userAgent: string;
 
   constructor(options: ClientOptions) {
@@ -58,7 +60,25 @@ export class QURLClient {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchFn = options.fetch ?? globalThis.fetch;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.timeout = options.timeout ?? DEFAULT_TIMEOUT;
     this.userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
+  }
+
+  /** Returns a JSON-safe representation with the API key masked. */
+  toJSON() {
+    return { baseUrl: this.baseUrl, apiKey: this.maskKey() };
+  }
+
+  /** Custom Node.js inspect output with the API key masked. */
+  [Symbol.for("nodejs.util.inspect.custom")]() {
+    return `QURLClient ${JSON.stringify(this.toJSON())}`;
+  }
+
+  private maskKey(): string {
+    if (this.apiKey.length > 8) {
+      return this.apiKey.slice(0, 4) + "***" + this.apiKey.slice(-4);
+    }
+    return "***";
   }
 
   /** Create a new QURL. */
@@ -180,6 +200,7 @@ export class QURLClient {
           method,
           headers,
           body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(this.timeout),
         });
       } catch (networkError) {
         lastError =
@@ -225,9 +246,11 @@ export class QURLClient {
           detail: json.error.detail,
           invalid_fields: json.error.invalid_fields,
           request_id: json.meta?.request_id,
-          retry_after: response.status === 429
-            ? parseInt(response.headers.get("Retry-After") ?? "", 10) || undefined
-            : undefined,
+          retry_after:
+            response.status === 429
+              ? parseInt(response.headers.get("Retry-After") ?? "", 10) ||
+                undefined
+              : undefined,
         };
       }
     } catch {

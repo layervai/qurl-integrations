@@ -394,9 +394,7 @@ describe("QURLClient", () => {
       text: () => Promise.resolve(""),
     } satisfies Partial<Response> as Response;
 
-    const fetch = vi
-      .fn()
-      .mockResolvedValue(rateLimitResponse);
+    const fetch = vi.fn().mockResolvedValue(rateLimitResponse);
 
     const client = new QURLClient({
       apiKey: "lv_live_test",
@@ -475,5 +473,182 @@ describe("QURLClient", () => {
     expect(quota.usage?.qurls_created).toBe(42);
     expect(quota.usage?.active_qurls).toBe(15);
     expect(quota.usage?.total_accesses).toBe(200);
+  });
+
+  it("passes AbortSignal.timeout to fetch", async () => {
+    const fetch = mockFetch({
+      status: 200,
+      body: {
+        data: {
+          plan: "growth",
+          period_start: "2026-03-01",
+          period_end: "2026-04-01",
+        },
+      },
+    });
+
+    const client = new QURLClient({
+      apiKey: "lv_live_test",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch,
+      maxRetries: 0,
+      timeout: 5000,
+    });
+
+    await client.getQuota();
+
+    const calledOptions = (fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as RequestInit;
+    expect(calledOptions.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("masks API key in toJSON for keys longer than 8 chars", () => {
+    const client = new QURLClient({
+      apiKey: "lv_live_abcdefgh1234",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch: mockFetch({ status: 200 }),
+    });
+
+    const json = client.toJSON();
+    expect(json.apiKey).toBe("lv_l***1234");
+    expect(json.baseUrl).toBe("https://api.test.layerv.ai");
+  });
+
+  it("masks API key completely in toJSON for short keys", () => {
+    const client = new QURLClient({
+      apiKey: "short123",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch: mockFetch({ status: 200 }),
+    });
+
+    const json = client.toJSON();
+    expect(json.apiKey).toBe("***");
+  });
+
+  it("masks API key in Node.js inspect output", () => {
+    const client = new QURLClient({
+      apiKey: "lv_live_abcdefgh1234",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch: mockFetch({ status: 200 }),
+    });
+
+    const inspectSymbol = Symbol.for("nodejs.util.inspect.custom");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inspectFn = (client as any)[inspectSymbol] as () => string;
+    const output = inspectFn.call(client);
+    expect(output).toContain("lv_l***1234");
+    expect(output).not.toContain("lv_live_abcdefgh1234");
+  });
+
+  it("handles non-JSON error responses", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: new Headers({}),
+      json: () => Promise.reject(new Error("not JSON")),
+      text: () => Promise.resolve("Internal Server Error"),
+    } satisfies Partial<Response> as Response);
+
+    const client = new QURLClient({
+      apiKey: "lv_live_test",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch: fetch as typeof globalThis.fetch,
+      maxRetries: 0,
+    });
+
+    try {
+      await client.getQuota();
+      expect.fail("Expected QURLError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(QURLError);
+      const qErr = err as QURLError;
+      expect(qErr.status).toBe(500);
+      expect(qErr.code).toBe("unknown");
+      expect(qErr.message).toContain("Internal Server Error");
+    }
+  });
+
+  it("respects Retry-After header on 429 responses", async () => {
+    const retryAfterResponse = {
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      headers: new Headers({ "Retry-After": "2" }),
+      json: () =>
+        Promise.resolve({
+          error: {
+            title: "Rate Limited",
+            status: 429,
+            detail: "Too many requests",
+            code: "rate_limited",
+          },
+        }),
+      text: () => Promise.resolve(""),
+    } satisfies Partial<Response> as Response;
+
+    const successResponse = {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({}),
+      json: () =>
+        Promise.resolve({
+          data: {
+            plan: "growth",
+            period_start: "2026-03-01",
+            period_end: "2026-04-01",
+          },
+        }),
+      text: () => Promise.resolve(""),
+    } satisfies Partial<Response> as Response;
+
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(retryAfterResponse)
+      .mockResolvedValueOnce(successResponse);
+
+    const client = new QURLClient({
+      apiKey: "lv_live_test",
+      baseUrl: "https://api.test.layerv.ai",
+      fetch: fetch as typeof globalThis.fetch,
+      maxRetries: 1,
+    });
+
+    const start = Date.now();
+    const result = await client.getQuota();
+    const elapsed = Date.now() - start;
+
+    expect(result.plan).toBe("growth");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    // Retry-After: 2 means 2000ms delay; allow some tolerance
+    expect(elapsed).toBeGreaterThanOrEqual(1500);
+  });
+
+  it("normalizes trailing slash in baseUrl", async () => {
+    const fetch = mockFetch({
+      status: 200,
+      body: {
+        data: {
+          plan: "growth",
+          period_start: "2026-03-01",
+          period_end: "2026-04-01",
+        },
+      },
+    });
+
+    const client = new QURLClient({
+      apiKey: "lv_live_test",
+      baseUrl: "https://api.test.layerv.ai/",
+      fetch,
+      maxRetries: 0,
+    });
+
+    await client.getQuota();
+
+    expect(fetch).toHaveBeenCalledWith(
+      "https://api.test.layerv.ai/v1/quota",
+      expect.objectContaining({ method: "GET" }),
+    );
   });
 });
