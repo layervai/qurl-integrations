@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -501,3 +503,68 @@ def test_retry_after_capped_at_30s(retry_client: QURLClient) -> None:
     assert result.plan == "growth"
     # Retry-After was 120 but should be capped at 30
     mock_sleep.assert_called_once_with(30.0)
+
+
+# --- extend vs update request body tests ---
+
+
+@respx.mock
+def test_extend_sends_extend_by_body(client: QURLClient) -> None:
+    """extend() should send {"extend_by": "7d"} as the request body."""
+    route = respx.patch(f"{BASE_URL}/v1/qurls/r_abc123def45").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "resource_id": "r_abc123def45",
+                    "target_url": "https://example.com",
+                    "status": "active",
+                    "created_at": "2026-03-10T10:00:00Z",
+                    "expires_at": "2026-03-20T10:00:00Z",
+                },
+            },
+        )
+    )
+
+    client.extend("r_abc123def45", ExtendInput(extend_by="7d"))
+    assert route.called
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"extend_by": "7d"}
+
+
+@respx.mock
+def test_update_sends_description_body(client: QURLClient) -> None:
+    """update() should send {"description": "new desc"} as the request body."""
+    route = respx.patch(f"{BASE_URL}/v1/qurls/r_abc123def45").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "resource_id": "r_abc123def45",
+                    "target_url": "https://example.com",
+                    "status": "active",
+                    "created_at": "2026-03-10T10:00:00Z",
+                    "description": "new desc",
+                },
+            },
+        )
+    )
+
+    client.update("r_abc123def45", UpdateInput(description="new desc"))
+    assert route.called
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"description": "new desc"}
+
+
+# --- Network-level error test ---
+
+
+@respx.mock
+def test_network_error_propagates(client: QURLClient) -> None:
+    """httpx.ConnectError should propagate without wrapping."""
+    respx.get(f"{BASE_URL}/v1/quota").mock(
+        side_effect=httpx.ConnectError("Connection refused")
+    )
+
+    with pytest.raises(httpx.ConnectError, match="Connection refused"):
+        client.get_quota()

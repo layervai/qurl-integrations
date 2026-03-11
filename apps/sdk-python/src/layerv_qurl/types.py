@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -130,4 +131,4 @@ class Quota:
     period_start: str = ""
     period_end: str = ""
     rate_limits: dict[str, int] | None = None
-    usage: dict[str, object] | None = None
+    usage: dict[str, Any] | None = None

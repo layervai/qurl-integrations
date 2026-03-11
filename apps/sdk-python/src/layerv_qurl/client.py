@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import asdict
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import httpx
@@ -29,7 +30,14 @@ from layerv_qurl.types import (
 DEFAULT_BASE_URL = "https://api.layerv.ai"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
-DEFAULT_USER_AGENT = "qurl-python-sdk/0.1.0"
+
+
+def _default_user_agent() -> str:
+    try:
+        v = _pkg_version("layerv-qurl")
+    except Exception:
+        v = "dev"
+    return f"qurl-python-sdk/{v}"
 
 _RETRYABLE_STATUS = {429, 502, 503, 504}
 
@@ -44,7 +52,7 @@ class QURLClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        user_agent: str = DEFAULT_USER_AGENT,
+        user_agent: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         if not api_key or not api_key.strip():
@@ -53,13 +61,13 @@ class QURLClient:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._max_retries = max_retries
-        self._user_agent = user_agent
+        self._user_agent = user_agent or _default_user_agent()
         self._client = http_client or httpx.Client(
             timeout=timeout,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": user_agent,
+                "User-Agent": self._user_agent,
             },
         )
         self._owns_client = http_client is None

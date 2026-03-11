@@ -32,7 +32,6 @@ dependencies = [
 langchain = ["langchain-core>=0.3,<1"]
 dev = [
     "pytest>=8",
-    "pytest-asyncio>=0.24",
     "respx>=0.22",
     "ruff>=0.11",
     "mypy>=1.14",
@@ -58,4 +57,3 @@ strict = true
 python_version = "3.10"
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
