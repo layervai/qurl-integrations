@@ -255,10 +255,6 @@ class AsyncQURLClient:
         url = f"{self._base_url}{path}"
         last_error: Exception | None = None
 
-        headers = {**self._base_headers}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
                 delay = retry_delay(attempt, last_error)
@@ -270,14 +266,14 @@ class AsyncQURLClient:
                     url,
                     json=body if body is not None else None,
                     params=params,
-                    headers=headers,
+                    headers=self._base_headers,
                 )
             except httpx.TimeoutException as exc:
                 if attempt < self._max_retries:
                     last_error = exc
                     continue
                 raise QURLTimeoutError(str(exc), cause=exc) from exc
-            except httpx.HTTPError as exc:
+            except httpx.TransportError as exc:
                 if attempt < self._max_retries:
                     last_error = exc
                     continue
@@ -297,7 +293,7 @@ class AsyncQURLClient:
 
         if isinstance(last_error, httpx.TimeoutException):
             raise QURLTimeoutError(str(last_error), cause=last_error) from last_error
-        if isinstance(last_error, httpx.HTTPError):
+        if isinstance(last_error, httpx.TransportError):
             raise QURLNetworkError(str(last_error), cause=last_error) from last_error
         raise last_error or QURLError(
             status=0, code="unknown", title="Request failed", detail="Exhausted retries"

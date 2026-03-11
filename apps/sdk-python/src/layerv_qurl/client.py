@@ -43,12 +43,18 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 
 
+_cached_user_agent: str | None = None
+
+
 def _default_user_agent() -> str:
-    try:
-        v = _pkg_version("layerv-qurl")
-    except Exception:
-        v = "dev"
-    return f"qurl-python-sdk/{v}"
+    global _cached_user_agent  # noqa: PLW0603
+    if _cached_user_agent is None:
+        try:
+            v = _pkg_version("layerv-qurl")
+        except Exception:
+            v = "dev"
+        _cached_user_agent = f"qurl-python-sdk/{v}"
+    return _cached_user_agent
 
 
 class QURLClient:
@@ -307,10 +313,6 @@ class QURLClient:
         url = f"{self._base_url}{path}"
         last_error: Exception | None = None
 
-        headers = {**self._base_headers}
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
                 delay = retry_delay(attempt, last_error)
@@ -322,14 +324,14 @@ class QURLClient:
                     url,
                     json=body if body is not None else None,
                     params=params,
-                    headers=headers,
+                    headers=self._base_headers,
                 )
             except httpx.TimeoutException as exc:
                 if attempt < self._max_retries:
                     last_error = exc
                     continue
                 raise QURLTimeoutError(str(exc), cause=exc) from exc
-            except httpx.HTTPError as exc:
+            except httpx.TransportError as exc:
                 if attempt < self._max_retries:
                     last_error = exc
                     continue
@@ -349,7 +351,7 @@ class QURLClient:
 
         if isinstance(last_error, httpx.TimeoutException):
             raise QURLTimeoutError(str(last_error), cause=last_error) from last_error
-        if isinstance(last_error, httpx.HTTPError):
+        if isinstance(last_error, httpx.TransportError):
             raise QURLNetworkError(str(last_error), cause=last_error) from last_error
         raise last_error or QURLError(
             status=0, code="unknown", title="Request failed", detail="Exhausted retries"
