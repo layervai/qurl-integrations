@@ -371,6 +371,76 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	}
 }
 
+func TestAPIErrorRequestIDHeaderFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Request-ID", "req_from_header")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Internal Server Error",
+				"status": 500,
+				"detail": "DynamoDB ValidationException",
+				"code":   "internal_error",
+			},
+			// no "meta" — simulates the missing request_id in body
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.Get(context.Background(), "r_abc123test")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.RequestID != "req_from_header" {
+		t.Errorf("got request_id %q, want %q", apiErr.RequestID, "req_from_header")
+	}
+}
+
+func TestAPIErrorRequestIDBodyTakesPrecedence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Request-ID", "req_from_header")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Bad Request",
+				"status": 400,
+				"code":   "invalid_request",
+			},
+			"meta": map[string]string{"request_id": "req_from_body"},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.Get(context.Background(), "r_abc123test")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	// Body value should take precedence over header
+	if apiErr.RequestID != "req_from_body" {
+		t.Errorf("got request_id %q, want %q (body should take precedence)", apiErr.RequestID, "req_from_body")
+	}
+}
+
 func TestAPIErrorRateLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "30")
