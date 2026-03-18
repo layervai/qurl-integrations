@@ -608,5 +608,10 @@ func (c *Client) parseError(resp *http.Response, body []byte) error {
 		}
 	}
 
+	// Fallback: read request ID from response header if not in body
+	if apiErr.RequestID == "" {
+		apiErr.RequestID = resp.Header.Get("X-Request-ID")
+	}
+
 	return apiErr
 }
