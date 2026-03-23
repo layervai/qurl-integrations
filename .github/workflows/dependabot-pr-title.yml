@@ -1,0 +1,36 @@
+name: Fix Dependabot PR Title
+
+# Dependabot capitalizes the first word of PR titles (e.g., "Bump foo from 1.0 to 2.0"),
+# which fails the Conventional Commits PR title check (subjectPattern: ^[a-z].+$).
+# This workflow lowercases the subject to fix it automatically.
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  fix-title:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lowercase PR title subject
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const title = context.payload.pull_request.title;
+            // Match "type(scope): Subject" or "type: Subject" and lowercase the first letter
+            const fixed = title.replace(/^([a-z]+(?:\([^)]*\))?:\s*)([A-Z])/, (_, prefix, first) => prefix + first.toLowerCase());
+            if (fixed !== title) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                title: fixed,
+              });
+              core.info(`Fixed PR title: "${title}" → "${fixed}"`);
+            } else {
+              core.info(`PR title already valid: "${title}"`);
+            }
