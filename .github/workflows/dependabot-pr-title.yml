@@ -6,7 +6,7 @@ name: Fix Dependabot PR Title
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, edited]
 
 permissions:
   pull-requests: write
@@ -21,8 +21,8 @@ jobs:
         with:
           script: |
             const title = context.payload.pull_request.title;
-            // Match "type(scope): Subject" and lowercase the first letter of Subject
-            const fixed = title.replace(/^([a-z]+\([^)]*\):\s*)([A-Z])/, (_, prefix, first) => prefix + first.toLowerCase());
+            // Match "type(scope): Subject" or "type: Subject" and lowercase the first letter
+            const fixed = title.replace(/^([a-z]+(?:\([^)]*\))?:\s*)([A-Z])/, (_, prefix, first) => prefix + first.toLowerCase());
             if (fixed !== title) {
               await github.rest.pulls.update({
                 owner: context.repo.owner,
