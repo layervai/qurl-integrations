@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	jsonContentType  = "application/json"
-	bearerPrefix     = "Bearer "
-	defaultHTTPTimer = 30 * time.Second
+	jsonContentType    = "application/json"
+	bearerPrefix       = "Bearer "
+	defaultHTTPTimeout = 30 * time.Second
 )
 
 // CreateKeyRequest is the request body for creating an API key via JWT.
@@ -41,7 +41,7 @@ type createKeyEnvelope struct {
 // If httpClient is nil, a default client with 30s timeout is used.
 func CreateAPIKey(ctx context.Context, httpClient *http.Client, baseURL, jwt string, input CreateKeyRequest) (*CreateKeyResponse, error) {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultHTTPTimer}
+		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 
 	body, err := json.Marshal(input)

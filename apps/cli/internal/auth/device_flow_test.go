@@ -105,7 +105,7 @@ func TestRequestDeviceCodeError(t *testing.T) {
 	}
 
 	var dfe *DeviceFlowError
-	if !errorAs(err, &dfe) {
+	if !errors.As(err, &dfe) {
 		t.Fatalf("expected DeviceFlowError, got %T: %v", err, err)
 	}
 	if dfe.Code != "unauthorized_client" {
@@ -245,8 +245,8 @@ func TestPollForTokenSlowDown(t *testing.T) {
 	if token.AccessToken != "jwt-slow" {
 		t.Errorf("AccessToken = %q, want %q", token.AccessToken, "jwt-slow")
 	}
-	// After slow_down, interval increases to defaultPollInterval + slowDownIncrement = 10s.
-	// First poll at 1s (returns slow_down), second poll at 10s. Total >= 5s.
+	// After slow_down, interval increases from 1s to 1s+5s = 6s per RFC 8628 section 3.5.
+	// First poll at 1s (returns slow_down), second poll at 6s. Total >= 5s.
 	if elapsed < 5*time.Second {
 		t.Errorf("elapsed %v too short — slow_down should increase poll interval", elapsed)
 	}
@@ -272,7 +272,7 @@ func TestPollForTokenExpired(t *testing.T) {
 	}
 
 	var dfe *DeviceFlowError
-	if !errorAs(err, &dfe) {
+	if !errors.As(err, &dfe) {
 		t.Fatalf("expected DeviceFlowError, got %T: %v", err, err)
 	}
 	if !dfe.IsExpired() {
@@ -300,7 +300,7 @@ func TestPollForTokenDenied(t *testing.T) {
 	}
 
 	var dfe *DeviceFlowError
-	if !errorAs(err, &dfe) {
+	if !errors.As(err, &dfe) {
 		t.Fatalf("expected DeviceFlowError, got %T: %v", err, err)
 	}
 	if !dfe.IsDenied() {
@@ -373,9 +373,4 @@ func TestAuthBaseURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-// errorAs is a wrapper around errors.As for the DeviceFlowError type.
-func errorAs(err error, target **DeviceFlowError) bool {
-	return errors.As(err, target)
 }

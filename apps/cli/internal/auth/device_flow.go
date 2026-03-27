@@ -190,58 +190,59 @@ func (d *DeviceFlow) PollForToken(ctx context.Context, deviceCode string, interv
 		case <-time.After(pollInterval):
 		}
 
-		token, retry, err := d.pollOnce(ctx, endpoint, encodedForm)
+		token, slowDown, err := d.pollOnce(ctx, endpoint, encodedForm)
 		if err != nil {
 			return nil, err
 		}
 		if token != nil {
 			return token, nil
 		}
-		if retry > 0 {
-			pollInterval = retry
+		if slowDown {
+			// Per RFC 8628 section 3.5, increase the current interval by 5 seconds.
+			pollInterval += slowDownIncrement
 		}
 	}
 }
 
 // pollOnce makes a single token poll request. It returns the token on success,
-// a new poll interval if the server requested slow-down, or an error.
-func (d *DeviceFlow) pollOnce(ctx context.Context, endpoint, encodedForm string) (*TokenResponse, time.Duration, error) {
+// slowDown=true if the server requested a slow-down, or an error.
+func (d *DeviceFlow) pollOnce(ctx context.Context, endpoint, encodedForm string) (*TokenResponse, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(encodedForm))
 	if err != nil {
-		return nil, 0, fmt.Errorf("build token request: %w", err)
+		return nil, false, fmt.Errorf("build token request: %w", err)
 	}
 	req.Header.Set("Content-Type", formContentType)
 
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("poll for token: %w", err)
+		return nil, false, fmt.Errorf("poll for token: %w", err)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	_ = resp.Body.Close()
 	if err != nil {
-		return nil, 0, fmt.Errorf("read token response: %w", err)
+		return nil, false, fmt.Errorf("read token response: %w", err)
 	}
 
 	if resp.StatusCode == http.StatusOK {
 		var token TokenResponse
 		if err := json.Unmarshal(body, &token); err != nil {
-			return nil, 0, fmt.Errorf("parse token response: %w", err)
+			return nil, false, fmt.Errorf("parse token response: %w", err)
 		}
-		return &token, 0, nil
+		return &token, false, nil
 	}
 
 	var oauthErr DeviceFlowError
 	if err := json.Unmarshal(body, &oauthErr); err != nil {
-		return nil, 0, fmt.Errorf("parse error response (status %d): %w", resp.StatusCode, err)
+		return nil, false, fmt.Errorf("parse error response (status %d): %w", resp.StatusCode, err)
 	}
 
 	switch oauthErr.Code {
 	case errCodePending:
-		return nil, 0, nil
+		return nil, false, nil
 	case errCodeSlowDown:
-		return nil, defaultPollInterval + slowDownIncrement, nil
+		return nil, true, nil
 	default:
-		return nil, 0, &oauthErr
+		return nil, false, &oauthErr
 	}
 }

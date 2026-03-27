@@ -81,6 +81,9 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	if len(scopes) == 0 {
 		scopes = allScopes
 	}
+	if err := validateScopes(scopes); err != nil {
+		return err
+	}
 
 	flowCfg := &auth.DeviceFlowConfig{
 		Domain:   domain,
@@ -148,6 +151,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		w.ln()
 		w.printf("  Warning: could not save config: %v\n", saveErr)
 		w.printf("  Your API key (save manually): %s\n", keyResp.APIKey)
+		w.printf("  Store this key securely — it will not be shown again.\n")
 		return saveErr
 	}
 
@@ -288,6 +292,20 @@ func resolveEndpoint(opts *globalOpts) string {
 		ep = defaultEndpoint
 	}
 	return ep
+}
+
+// validateScopes checks that all provided scopes are recognized.
+func validateScopes(scopes []string) error {
+	valid := make(map[string]bool, len(allScopes))
+	for _, s := range allScopes {
+		valid[s] = true
+	}
+	for _, s := range scopes {
+		if !valid[s] {
+			return fmt.Errorf("unknown scope %q (valid: %s)", s, strings.Join(allScopes, ", "))
+		}
+	}
+	return nil
 }
 
 // resolveKeyName returns the key name from flag or generates a default.
