@@ -14,6 +14,7 @@ import (
 // Config holds CLI configuration.
 type Config struct {
 	APIKey   string `yaml:"api_key,omitempty"`
+	KeyID    string `yaml:"key_id,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
 }
