@@ -47,6 +47,7 @@ Authentication (in order of precedence):
   3. ~/.config/qurl/config.yaml (or --profile <name>)
 
 Get started:
+  qurl auth login                        Authenticate via browser
   qurl create https://example.com        Create a QURL
   qurl list                              List active QURLs
   qurl resolve <access-token>            Resolve a token (headless)
@@ -71,6 +72,7 @@ Get started:
 	cmd.PersistentFlags().StringVar(&opts.profile, "profile", "", "Config profile name (reads ~/.config/qurl/profiles/<name>.yaml)")
 
 	cmd.AddCommand(
+		authCmd(opts),
 		createCmd(opts),
 		resolveCmd(opts),
 		listCmd(opts),
@@ -132,7 +134,7 @@ func (o *globalOpts) formatter() output.Formatter {
 	return output.NewTableFormatter()
 }
 
-var errMissingAPIKey = &cliError{msg: "API key required: set QURL_API_KEY, use --api-key, or run `qurl config set api_key <key>`"}
+var errMissingAPIKey = &cliError{msg: "API key required: run `qurl auth login`, set QURL_API_KEY, or run `qurl config set api_key <key>`"}
 
 type cliError struct {
 	msg string
@@ -197,7 +199,7 @@ func formatError(err error) string {
 	// Actionable hints
 	switch {
 	case apiErr.StatusCode == http.StatusUnauthorized:
-		msg += "\n\n  " + dim("Hint: Check your API key — set QURL_API_KEY or run `qurl config set api_key <key>`")
+		msg += "\n\n  " + dim("Hint: Check your API key — run `qurl auth login` or set QURL_API_KEY")
 	case apiErr.StatusCode == http.StatusTooManyRequests && apiErr.RetryAfter > 0:
 		msg += fmt.Sprintf("\n\n  "+dim("Retry after %ds"), apiErr.RetryAfter)
 	case apiErr.Code == "quota_exceeded":
