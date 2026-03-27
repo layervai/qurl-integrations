@@ -352,6 +352,18 @@ func TestAuthLoginCustomScopes(t *testing.T) {
 	}
 }
 
+func TestAuthLoginInvalidScopes(t *testing.T) {
+	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
+
+	_, err := runAuthCmd(t, "auth", "login", "--no-browser", "--scopes", "invalid:scope")
+	if err == nil {
+		t.Fatal("expected error for invalid scope")
+	}
+	if !strings.Contains(err.Error(), "unknown scope") {
+		t.Errorf("error should mention unknown scope: %v", err)
+	}
+}
+
 func TestAuthLogoutSuccess(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
