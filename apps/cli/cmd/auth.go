@@ -25,7 +25,7 @@ func authCmd(opts *globalOpts) *cobra.Command {
 		Short: "Authenticate with the QURL API",
 		Long: `Manage authentication for the QURL CLI.
 
-Use "auth login" to authenticate via your browser using the OAuth device flow.
+Use "auth login" to authenticate via your browser.
 Use "auth status" to check your current authentication.
 Use "auth logout" to remove stored credentials.`,
 	}
@@ -47,7 +47,7 @@ func authLoginCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Log in to QURL via browser-based authentication",
-		Long: `Authenticate with QURL using the OAuth 2.0 Device Authorization flow.
+		Long: `Authenticate with QURL using the OAuth 2.0 Authorization Code flow with PKCE.
 
 This opens your browser to complete authentication, then creates an API key
 and stores it in your local config. The API key persists across sessions until
@@ -85,45 +85,38 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		return err
 	}
 
-	flowCfg := &auth.DeviceFlowConfig{
+	flowCfg := &auth.PKCEConfig{
 		Domain:   domain,
 		ClientID: clientID,
 		Audience: audience,
 		Scopes:   scopes,
 		BaseURL:  os.Getenv("QURL_AUTH0_URL"), // Override for testing.
 	}
-	flow := auth.NewDeviceFlow(flowCfg)
+	flow := auth.NewPKCEFlow(flowCfg)
 
-	dcr, err := flow.RequestDeviceCode(ctx)
+	session, err := flow.StartLogin(ctx)
 	if err != nil {
-		return fmt.Errorf("request device code: %w", err)
+		return fmt.Errorf("start login: %w", err)
 	}
 
-	bold := color.New(color.Bold)
 	faint := color.New(color.Faint)
-
 	w.ln()
-	w.printf("  Your one-time code: %s\n", bold.Sprint(dcr.UserCode))
-	w.ln()
-
-	verifyURL := dcr.VerificationURIComplete
-	if verifyURL == "" {
-		verifyURL = dcr.VerificationURI
-	}
 
 	if !noBrowser {
-		w.printf("  Opening browser to %s\n", faint.Sprint(verifyURL))
-		if browserErr := auth.OpenBrowser(verifyURL); browserErr != nil {
-			w.printf("  Could not open browser. Visit: %s\n", verifyURL)
+		w.printf("  Opening browser to authenticate...\n")
+		if browserErr := auth.OpenBrowser(session.AuthURL); browserErr != nil {
+			w.printf("  Could not open browser. Visit this URL:\n")
+			w.printf("  %s\n", session.AuthURL)
 		}
 	} else {
-		w.printf("  Visit: %s\n", verifyURL)
+		w.printf("  Visit this URL to authenticate:\n")
+		w.printf("  %s\n", session.AuthURL)
 	}
 
 	w.ln()
 	w.printf("  Waiting for authentication...")
 
-	token, err := flow.PollForToken(ctx, dcr.DeviceCode, dcr.Interval)
+	token, err := session.WaitForToken(ctx)
 	if err != nil {
 		w.ln()
 		return fmt.Errorf("authentication failed: %w", err)
@@ -147,7 +140,6 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 
 	profile := resolveProfile(opts)
 	if saveErr := saveAuthConfig(profile, keyResp.APIKey, keyResp.KeyID); saveErr != nil {
-		// Key was created on the server — show it so user doesn't lose it.
 		w.ln()
 		w.printf("  Warning: could not save config: %v\n", saveErr)
 		w.printf("  Your API key (save manually): %s\n", keyResp.APIKey)

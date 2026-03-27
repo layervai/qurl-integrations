@@ -2,14 +2,36 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/layervai/qurl-integrations/apps/cli/internal/config"
 )
+
+// safeBuffer is a thread-safe bytes.Buffer for concurrent read/write in tests.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 const apiKeysPath = "/v1/api-keys"
 
@@ -26,44 +48,22 @@ func runAuthCmd(t *testing.T, args ...string) (string, error) {
 	return buf.String(), err
 }
 
-// newAuth0MockServer creates a mock Auth0 server for device code flow.
-// It returns the server and a cleanup function.
-func newAuth0MockServer(t *testing.T, tokenResponse map[string]any) *httptest.Server {
+// newTokenMockServer creates a mock Auth0 server that handles only /oauth/token.
+func newTokenMockServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
-		switch r.URL.Path {
-		case "/oauth/device/code":
+		if r.URL.Path == "/oauth/token" {
 			if err := json.NewEncoder(w).Encode(map[string]any{
-				"device_code":               "test-device-code",
-				"user_code":                 "TEST-CODE",
-				"verification_uri":          "https://test.auth0.com/activate",
-				"verification_uri_complete": "https://test.auth0.com/activate?user_code=TEST-CODE",
-				"expires_in":                900,
-				"interval":                  1,
+				"access_token": "test-jwt-token",
+				"token_type":   "Bearer",
+				"expires_in":   86400,
 			}); err != nil {
-				t.Fatalf("encode device code: %v", err)
+				t.Fatalf("encode token: %v", err)
 			}
-
-		case "/oauth/token":
-			if tokenResponse != nil {
-				if err := json.NewEncoder(w).Encode(tokenResponse); err != nil {
-					t.Fatalf("encode token: %v", err)
-				}
-			} else {
-				if err := json.NewEncoder(w).Encode(map[string]any{
-					"access_token": "test-jwt-token",
-					"token_type":   "Bearer",
-					"expires_in":   86400,
-				}); err != nil {
-					t.Fatalf("encode token: %v", err)
-				}
-			}
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 }
 
@@ -109,38 +109,117 @@ func newAPIKeyMockServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func TestAuthLoginSuccess(t *testing.T) {
-	auth0Srv := newAuth0MockServer(t, nil)
-	defer auth0Srv.Close()
+// runLoginWithCallback runs the auth login command in a goroutine,
+// polls stderr to find the auth URL, simulates the browser callback,
+// and waits for the command to finish.
+func runLoginWithCallback(t *testing.T, auth0URL, apiURL string, extraArgs ...string) (stdout string, cmdErr error) {
+	t.Helper()
 
+	cmd := rootCmd("test")
+	// stdout uses safeBuffer because we read it from the main goroutine
+	// while the command goroutine may still be writing.
+	stdoutBuf := &safeBuffer{}
+	stderrBuf := &safeBuffer{}
+	cmd.SetOut(stdoutBuf)
+	cmd.SetErr(stderrBuf)
+
+	args := make([]string, 0, 5+len(extraArgs))
+	args = append(args, "--endpoint", apiURL, "auth", "login", "--no-browser")
+	args = append(args, extraArgs...)
+	cmd.SetArgs(args)
+
+	// Run command in goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Execute()
+	}()
+
+	// Poll stderr until we find the auth URL.
+	// The command is blocked on WaitForToken, so errCh won't fire until after we
+	// send the callback. We only need to wait for stderr output.
+	var authURLStr string
+	deadline := time.After(10 * time.Second)
+	for authURLStr == "" {
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for auth URL in stderr:\n%s", stderrBuf.String())
+		case <-time.After(10 * time.Millisecond):
+			authURLStr = extractAuthURL(stderrBuf.String())
+		}
+	}
+
+	// Parse redirect_uri and state from the auth URL.
+	u, parseErr := url.Parse(authURLStr)
+	if parseErr != nil {
+		t.Fatalf("parse auth URL %q: %v", authURLStr, parseErr)
+	}
+	redirectURI := u.Query().Get("redirect_uri")
+	state := u.Query().Get("state")
+
+	if redirectURI == "" || state == "" {
+		t.Fatalf("missing redirect_uri or state in auth URL: %s", authURLStr)
+	}
+
+	// Simulate the browser callback.
+	callbackURL := redirectURI + "?code=test-auth-code&state=" + url.QueryEscape(state)
+	callbackReq, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, callbackURL, http.NoBody)
+	if reqErr != nil {
+		t.Fatalf("build callback request: %v", reqErr)
+	}
+	resp, httpErr := http.DefaultClient.Do(callbackReq)
+	if httpErr != nil {
+		t.Fatalf("callback request: %v", httpErr)
+	}
+	_ = resp.Body.Close()
+
+	// Wait for the command to finish before reading stdout.
+	// Note: <-errCh must be evaluated BEFORE stdoutBuf.String() —
+	// Go evaluates "return a(), b()" left-to-right, so using a temporary.
+	cmdErr = <-errCh
+	return stdoutBuf.String(), cmdErr
+}
+
+// extractAuthURL finds and returns the authorization URL from command output.
+func extractAuthURL(output string) string {
+	idx := strings.Index(output, "/authorize?")
+	if idx <= 0 {
+		return ""
+	}
+	lineStart := strings.LastIndex(output[:idx], "http")
+	if lineStart < 0 {
+		return ""
+	}
+	end := strings.IndexAny(output[lineStart:], "\n\r")
+	if end <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(output[lineStart : lineStart+end])
+}
+
+func TestAuthLoginSuccess(t *testing.T) {
+	tokenSrv := newTokenMockServer(t)
+	defer tokenSrv.Close()
 	apiSrv := newAPIKeyMockServer(t)
 	defer apiSrv.Close()
 
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", auth0Srv.URL)
+	t.Setenv("QURL_AUTH0_URL", tokenSrv.URL)
 
-	out, err := runAuthCmd(t,
-		"--endpoint", apiSrv.URL,
-		"auth", "login",
-		"--no-browser",
-	)
+	out, err := runLoginWithCallback(t, tokenSrv.URL, apiSrv.URL)
 	if err != nil {
 		t.Fatalf("auth login: %v\noutput: %s", err, out)
 	}
 
-	if !strings.Contains(out, "Logged in successfully") {
-		t.Errorf("expected success message in output:\n%s", out)
-	}
 	if !strings.Contains(out, "lv_live_test...") {
 		t.Errorf("expected key prefix in output:\n%s", out)
 	}
 	if !strings.Contains(out, "key_test123") {
 		t.Errorf("expected key ID in output:\n%s", out)
 	}
-	if !strings.Contains(out, "TEST-CODE") {
-		t.Errorf("expected user code in output:\n%s", out)
+	if !strings.Contains(out, "qurl:read") {
+		t.Errorf("expected scopes in output:\n%s", out)
 	}
 
 	// Verify config was saved.
@@ -168,68 +247,9 @@ func TestAuthLoginMissingClientID(t *testing.T) {
 	}
 }
 
-func TestAuthLoginDeviceCodeError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		if err := json.NewEncoder(w).Encode(map[string]string{
-			"error":             "unauthorized_client",
-			"error_description": "Grant type not allowed",
-		}); err != nil {
-			t.Fatalf("encode: %v", err)
-		}
-	}))
-	defer srv.Close()
-
-	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", srv.URL)
-
-	_, err := runAuthCmd(t, "auth", "login", "--no-browser")
-	if err == nil {
-		t.Fatal("expected error for device code failure")
-	}
-}
-
-func TestAuthLoginTokenPollExpired(t *testing.T) {
-	auth0Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/oauth/device/code":
-			if err := json.NewEncoder(w).Encode(map[string]any{
-				"device_code":      "test-code",
-				"user_code":        "ABCD-EFGH",
-				"verification_uri": "https://test.auth0.com/activate",
-				"expires_in":       900,
-				"interval":         1,
-			}); err != nil {
-				t.Fatalf("encode: %v", err)
-			}
-		case "/oauth/token":
-			w.WriteHeader(http.StatusForbidden)
-			if err := json.NewEncoder(w).Encode(map[string]string{
-				"error":             "expired_token",
-				"error_description": "The device code has expired",
-			}); err != nil {
-				t.Fatalf("encode: %v", err)
-			}
-		}
-	}))
-	defer auth0Srv.Close()
-
-	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", auth0Srv.URL)
-
-	_, err := runAuthCmd(t, "auth", "login", "--no-browser")
-	if err == nil {
-		t.Fatal("expected error for expired token")
-	}
-	if !strings.Contains(err.Error(), "expired_token") {
-		t.Errorf("error should mention expiration: %v", err)
-	}
-}
-
 func TestAuthLoginAPIKeyCreateFails(t *testing.T) {
-	auth0Srv := newAuth0MockServer(t, nil)
-	defer auth0Srv.Close()
+	tokenSrv := newTokenMockServer(t)
+	defer tokenSrv.Close()
 
 	// API server that rejects key creation.
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -243,13 +263,9 @@ func TestAuthLoginAPIKeyCreateFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", auth0Srv.URL)
+	t.Setenv("QURL_AUTH0_URL", tokenSrv.URL)
 
-	_, err := runAuthCmd(t,
-		"--endpoint", apiSrv.URL,
-		"auth", "login",
-		"--no-browser",
-	)
+	_, err := runLoginWithCallback(t, tokenSrv.URL, apiSrv.URL)
 	if err == nil {
 		t.Fatal("expected error for API key creation failure")
 	}
@@ -258,8 +274,8 @@ func TestAuthLoginAPIKeyCreateFails(t *testing.T) {
 func TestAuthLoginCustomKeyName(t *testing.T) {
 	var receivedName string
 
-	auth0Srv := newAuth0MockServer(t, nil)
-	defer auth0Srv.Close()
+	tokenSrv := newTokenMockServer(t)
+	defer tokenSrv.Close()
 
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -288,14 +304,9 @@ func TestAuthLoginCustomKeyName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", auth0Srv.URL)
+	t.Setenv("QURL_AUTH0_URL", tokenSrv.URL)
 
-	_, err := runAuthCmd(t,
-		"--endpoint", apiSrv.URL,
-		"auth", "login",
-		"--no-browser",
-		"--key-name", "my-laptop",
-	)
+	_, err := runLoginWithCallback(t, tokenSrv.URL, apiSrv.URL, "--key-name", "my-laptop")
 	if err != nil {
 		t.Fatalf("auth login: %v", err)
 	}
@@ -307,8 +318,8 @@ func TestAuthLoginCustomKeyName(t *testing.T) {
 func TestAuthLoginCustomScopes(t *testing.T) {
 	var receivedScopes []string
 
-	auth0Srv := newAuth0MockServer(t, nil)
-	defer auth0Srv.Close()
+	tokenSrv := newTokenMockServer(t)
+	defer tokenSrv.Close()
 
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -336,14 +347,9 @@ func TestAuthLoginCustomScopes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", auth0Srv.URL)
+	t.Setenv("QURL_AUTH0_URL", tokenSrv.URL)
 
-	_, err := runAuthCmd(t,
-		"--endpoint", apiSrv.URL,
-		"auth", "login",
-		"--no-browser",
-		"--scopes", "qurl:read",
-	)
+	_, err := runLoginWithCallback(t, tokenSrv.URL, apiSrv.URL, "--scopes", "qurl:read")
 	if err != nil {
 		t.Fatalf("auth login: %v", err)
 	}
