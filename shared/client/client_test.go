@@ -11,6 +11,7 @@ import (
 )
 
 const testDescription = "updated"
+const testResourceID = "r_abc123test"
 
 // testClient creates a client with retries disabled for fast unit tests.
 func testClient(url, key string) *Client {
@@ -52,7 +53,7 @@ func TestCreate(t *testing.T) {
 
 		apiEnvelope(t, w, map[string]any{
 			"qurl_id":     "q_abc123test",
-			"resource_id": "r_abc123test",
+			"resource_id": testResourceID,
 			"qurl_link":   "https://qurl.link/at_abc123",
 			"qurl_site":   "https://r_abc123test.qurl.site",
 			"label":       "test",
@@ -66,8 +67,8 @@ func TestCreate(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if got.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_abc123test")
+	if got.ResourceID != testResourceID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testResourceID)
 	}
 	if got.QURLLink != "https://qurl.link/at_abc123" {
 		t.Errorf("got QURLLink %q, want %q", got.QURLLink, "https://qurl.link/at_abc123")
@@ -104,7 +105,7 @@ func TestGet(t *testing.T) {
 			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_abc123test",
+			"resource_id": testResourceID,
 			"target_url":  "https://example.com",
 			"status":      "active",
 			"tags":        []string{"test", "api"},
@@ -113,13 +114,13 @@ func TestGet(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.Get(context.Background(), "r_abc123test")
+	got, err := c.Get(context.Background(), testResourceID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 
-	if got.ResourceID != "r_abc123test" {
-		t.Errorf("got ResourceID %q, want %q", got.ResourceID, "r_abc123test")
+	if got.ResourceID != testResourceID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testResourceID)
 	}
 	if got.Status != "active" {
 		t.Errorf("got Status %q, want %q", got.Status, "active")
@@ -217,7 +218,7 @@ func TestResolve(t *testing.T) {
 
 		apiEnvelope(t, w, map[string]any{
 			"target_url":  "https://api.example.com/data",
-			"resource_id": "r_abc123test",
+			"resource_id": testResourceID,
 			"access_grant": map[string]any{
 				"expires_in": 305,
 				"granted_at": "2026-03-09T15:30:00Z",
@@ -256,7 +257,7 @@ func TestMintLink(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.MintLink(context.Background(), "r_abc123test", nil)
+	got, err := c.MintLink(context.Background(), testResourceID, nil)
 	if err != nil {
 		t.Fatalf("MintLink: %v", err)
 	}
@@ -366,7 +367,7 @@ func TestMintLinkWithInput(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.MintLink(context.Background(), "r_abc123test", &MintLinkInput{
+	got, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{
 		Label:      "test-link",
 		OneTimeUse: true,
 	})
@@ -423,7 +424,7 @@ func TestUpdate(t *testing.T) {
 		}
 
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_abc123test",
+			"resource_id": testResourceID,
 			"target_url":  "https://example.com",
 			"status":      "active",
 			"description": testDescription,
@@ -433,7 +434,7 @@ func TestUpdate(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	desc := testDescription
-	got, err := c.Update(context.Background(), "r_abc123test", UpdateInput{Description: &desc})
+	got, err := c.Update(context.Background(), testResourceID, UpdateInput{Description: &desc})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -466,7 +467,7 @@ func TestAPIErrorRFC7807(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.Get(context.Background(), testResourceID)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -511,7 +512,7 @@ func TestAPIErrorRateLimit(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.Get(context.Background(), "r_abc123test")
+	_, err := c.Get(context.Background(), testResourceID)
 
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -608,6 +609,126 @@ func TestNoRetryOn4xx(t *testing.T) {
 	}
 }
 
+func TestListNilInput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"data": []map[string]any{},
+			"meta": map[string]any{"request_id": "req_test"},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List(nil): %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil output")
+	}
+}
+
+func TestExtend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("expected PATCH, got %s", r.Method)
+		}
+
+		var input UpdateInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.ExtendBy != "24h" {
+			t.Errorf("expected extend_by '24h', got %q", input.ExtendBy)
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+			"target_url":  "https://example.com",
+			"status":      "active",
+			"expires_at":  "2026-04-02T00:00:00Z",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.Extend(context.Background(), testResourceID, "24h")
+	if err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	if got.ResourceID != testResourceID {
+		t.Errorf("got ResourceID %q, want %q", got.ResourceID, testResourceID)
+	}
+	if got.ExpiresAt == nil {
+		t.Error("expected ExpiresAt to be set")
+	}
+}
+
+func TestBatchCreatePartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiEnvelope(t, w, map[string]any{
+			"succeeded": 1,
+			"failed":    1,
+			"results": []map[string]any{
+				{"index": 0, "success": true, "resource_id": "r_1", "qurl_link": "https://qurl.link/at_1"},
+				{"index": 1, "success": false, "error": map[string]string{"code": "invalid_url", "message": "target_url is not valid"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.BatchCreate(context.Background(), []CreateInput{
+		{TargetURL: "https://valid.com"},
+		{TargetURL: "not-a-url"},
+	})
+	if err != nil {
+		t.Fatalf("BatchCreate: %v", err)
+	}
+	if got.Succeeded != 1 {
+		t.Errorf("got Succeeded %d, want 1", got.Succeeded)
+	}
+	if got.Failed != 1 {
+		t.Errorf("got Failed %d, want 1", got.Failed)
+	}
+	if len(got.Results) != 2 {
+		t.Fatalf("got %d results, want 2", len(got.Results))
+	}
+	if got.Results[1].Error == nil {
+		t.Fatal("expected error on second result")
+	}
+	if got.Results[1].Error.Code != "invalid_url" {
+		t.Errorf("got error code %q, want %q", got.Results[1].Error.Code, "invalid_url")
+	}
+}
+
+func TestBatchCreateValidation(t *testing.T) {
+	c := testClient("http://unused", "test-key")
+
+	_, err := c.BatchCreate(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for empty batch")
+	}
+
+	_, err = c.BatchCreate(context.Background(), []CreateInput{})
+	if err == nil {
+		t.Fatal("expected error for empty batch")
+	}
+
+	items := make([]CreateInput, 101)
+	for i := range items {
+		items[i] = CreateInput{TargetURL: "https://example.com"}
+	}
+	_, err = c.BatchCreate(context.Background(), items)
+	if err == nil {
+		t.Fatal("expected error for batch > 100")
+	}
+}
+
 func TestDelete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
@@ -618,7 +739,7 @@ func TestDelete(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if err := c.Delete(context.Background(), "r_abc123test"); err != nil {
+	if err := c.Delete(context.Background(), testResourceID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }

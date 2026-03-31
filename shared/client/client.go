@@ -221,6 +221,10 @@ type ListOutput struct {
 
 // List retrieves a paginated list of QURLs.
 func (c *Client) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
+	if input == nil {
+		input = &ListInput{}
+	}
+
 	params := url.Values{}
 	if input.Limit > 0 {
 		params.Set("limit", strconv.Itoa(input.Limit))
@@ -384,6 +388,10 @@ type BatchItemError struct {
 
 // BatchCreate creates multiple QURLs at once (1-100 items).
 func (c *Client) BatchCreate(ctx context.Context, items []CreateInput) (*BatchCreateOutput, error) {
+	if len(items) == 0 || len(items) > 100 {
+		return nil, fmt.Errorf("batch size must be 1-100, got %d", len(items))
+	}
+
 	payload := struct {
 		Items []CreateInput `json:"items"`
 	}{Items: items}
@@ -529,7 +537,6 @@ type apiErrorDetail struct {
 // --- HTTP plumbing ---
 
 func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta, error) {
-	req.Header.Set("Content-Type", "application/json")
 	// NOTE: If you add header logging, redact the Authorization value to avoid leaking API keys.
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if c.userAgent != "" {
@@ -546,6 +553,7 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 			return nil, fmt.Errorf("buffer request body: %w", err)
 		}
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	var lastErr error
