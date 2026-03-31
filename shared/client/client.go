@@ -166,8 +166,12 @@ type CreateOutput struct {
 	Label      string     `json:"label,omitempty"`
 }
 
-// Create creates a new QURL.
+// Create creates a new QURL. input must not be nil.
 func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput, error) {
+	if input == nil {
+		return nil, errors.New("create input must not be nil")
+	}
+
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)

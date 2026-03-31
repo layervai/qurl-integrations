@@ -729,6 +729,14 @@ func TestBatchCreateValidation(t *testing.T) {
 	}
 }
 
+func TestCreateNilInput(t *testing.T) {
+	c := testClient("http://unused", "test-key")
+	_, err := c.Create(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for nil create input")
+	}
+}
+
 func TestDelete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
