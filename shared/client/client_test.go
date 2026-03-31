@@ -35,8 +35,8 @@ func TestCreate(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/qurl" {
-			t.Errorf("expected /v1/qurl, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/qurls" {
+			t.Errorf("expected /v1/qurls, got %s", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("expected Bearer test-key, got %s", r.Header.Get("Authorization"))
@@ -51,15 +51,17 @@ func TestCreate(t *testing.T) {
 		}
 
 		apiEnvelope(t, w, map[string]any{
+			"qurl_id":     "q_abc123test",
 			"resource_id": "r_abc123test",
 			"qurl_link":   "https://qurl.link/at_abc123",
 			"qurl_site":   "https://r_abc123test.qurl.site",
+			"label":       "test",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	got, err := c.Create(context.Background(), &CreateInput{TargetURL: "https://example.com", Label: "test"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -69,6 +71,9 @@ func TestCreate(t *testing.T) {
 	}
 	if got.QURLLink != "https://qurl.link/at_abc123" {
 		t.Errorf("got QURLLink %q, want %q", got.QURLLink, "https://qurl.link/at_abc123")
+	}
+	if got.QurlID != "q_abc123test" {
+		t.Errorf("got QurlID %q, want %q", got.QurlID, "q_abc123test")
 	}
 }
 
@@ -99,10 +104,10 @@ func TestGet(t *testing.T) {
 			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id":  "r_abc123test",
-			"target_url":   "https://example.com",
-			"status":       "active",
-			"one_time_use": false,
+			"resource_id": "r_abc123test",
+			"target_url":  "https://example.com",
+			"status":      "active",
+			"tags":        []string{"test", "api"},
 		})
 	}))
 	defer srv.Close()
@@ -118,6 +123,9 @@ func TestGet(t *testing.T) {
 	}
 	if got.Status != "active" {
 		t.Errorf("got Status %q, want %q", got.Status, "active")
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "test" {
+		t.Errorf("got Tags %v, want [test api]", got.Tags)
 	}
 }
 
@@ -150,7 +158,7 @@ func TestList(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.List(context.Background(), ListInput{Limit: 5, Status: "active"})
+	got, err := c.List(context.Background(), &ListInput{Limit: 5, Status: "active"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -184,7 +192,7 @@ func TestListCursorEscaping(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	_, err := c.List(context.Background(), ListInput{Limit: 10, Cursor: "a=b&c=d"})
+	_, err := c.List(context.Background(), &ListInput{Limit: 10, Cursor: "a=b&c=d"})
 	if err != nil {
 		t.Fatalf("List with special cursor: %v", err)
 	}
@@ -248,11 +256,124 @@ func TestMintLink(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.MintLink(context.Background(), "r_abc123test")
+	got, err := c.MintLink(context.Background(), "r_abc123test", nil)
 	if err != nil {
 		t.Fatalf("MintLink: %v", err)
 	}
 	if got.QURLLink != "https://qurl.link/at_newtoken" {
+		t.Errorf("got QURLLink %q", got.QURLLink)
+	}
+}
+
+func TestBatchCreate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/qurls/batch" {
+			t.Errorf("expected /v1/qurls/batch, got %s", r.URL.Path)
+		}
+
+		var payload struct {
+			Items []CreateInput `json:"items"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(payload.Items) != 2 {
+			t.Errorf("expected 2 items, got %d", len(payload.Items))
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			"succeeded": 2,
+			"failed":    0,
+			"results": []map[string]any{
+				{"index": 0, "success": true, "resource_id": "r_1", "qurl_link": "https://qurl.link/at_1"},
+				{"index": 1, "success": true, "resource_id": "r_2", "qurl_link": "https://qurl.link/at_2"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.BatchCreate(context.Background(), []CreateInput{
+		{TargetURL: "https://a.com"},
+		{TargetURL: "https://b.com"},
+	})
+	if err != nil {
+		t.Fatalf("BatchCreate: %v", err)
+	}
+	if got.Succeeded != 2 {
+		t.Errorf("got Succeeded %d, want 2", got.Succeeded)
+	}
+	if len(got.Results) != 2 {
+		t.Errorf("got %d results, want 2", len(got.Results))
+	}
+}
+
+func TestListWithDateFilters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("created_after") != "2026-01-01T00:00:00Z" {
+			t.Errorf("expected created_after, got %q", r.URL.Query().Get("created_after"))
+		}
+		if r.URL.Query().Get("expires_before") != "2026-12-31T23:59:59Z" {
+			t.Errorf("expected expires_before, got %q", r.URL.Query().Get("expires_before"))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"data": []map[string]any{},
+			"meta": map[string]any{"request_id": "req_test"},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.List(context.Background(), &ListInput{
+		CreatedAfter:  "2026-01-01T00:00:00Z",
+		ExpiresBefore: "2026-12-31T23:59:59Z",
+	})
+	if err != nil {
+		t.Fatalf("List with date filters: %v", err)
+	}
+}
+
+func TestMintLinkWithInput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/qurls/r_abc123test/mint_link" {
+			t.Errorf("expected mint_link path, got %s", r.URL.Path)
+		}
+
+		var input MintLinkInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Label != "test-link" {
+			t.Errorf("expected label 'test-link', got %q", input.Label)
+		}
+		if !input.OneTimeUse {
+			t.Error("expected one_time_use=true")
+		}
+
+		apiEnvelope(t, w, map[string]any{
+			"qurl_link":  "https://qurl.link/at_minted",
+			"expires_at": "2026-04-01T00:00:00Z",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.MintLink(context.Background(), "r_abc123test", &MintLinkInput{
+		Label:      "test-link",
+		OneTimeUse: true,
+	})
+	if err != nil {
+		t.Fatalf("MintLink: %v", err)
+	}
+	if got.QURLLink != "https://qurl.link/at_minted" {
 		t.Errorf("got QURLLink %q", got.QURLLink)
 	}
 }

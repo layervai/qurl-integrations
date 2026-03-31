@@ -4,8 +4,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-
-	"github.com/layervai/qurl-integrations/shared/client"
 )
 
 func extendCmd(opts *globalOpts) *cobra.Command {
@@ -30,9 +28,7 @@ func extendCmd(opts *globalOpts) *cobra.Command {
 				return err
 			}
 
-			qurl, err := c.Extend(cmd.Context(), args[0], client.ExtendInput{
-				ExtendBy: extendBy,
-			})
+			qurl, err := c.Extend(cmd.Context(), args[0], extendBy)
 			if err != nil {
 				return fmt.Errorf("extend QURL: %w", err)
 			}

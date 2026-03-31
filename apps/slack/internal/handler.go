@@ -213,7 +213,7 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 		return respondSlack(authFailureMessage)
 	}
 
-	result, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
+	result, err := c.Create(ctx, &client.CreateInput{TargetURL: targetURL})
 	if err != nil {
 		slog.Error("failed to create QURL", "error", err, "target_url", targetURL)
 		return respondSlack("Failed to create QURL: " + err.Error())
@@ -229,7 +229,7 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 		return respondSlack(authFailureMessage)
 	}
 
-	result, err := c.List(ctx, client.ListInput{Limit: 5})
+	result, err := c.List(ctx, &client.ListInput{Limit: 5})
 	if err != nil {
 		slog.Error("failed to list QURLs", "error", err)
 		return respondSlack("Failed to list QURLs: " + err.Error())

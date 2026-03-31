@@ -10,10 +10,12 @@ import (
 
 func createCmd(opts *globalOpts) *cobra.Command {
 	var (
-		description string
-		expiresIn   string
-		oneTimeUse  bool
-		maxSessions int
+		label           string
+		expiresIn       string
+		oneTimeUse      bool
+		maxSessions     int
+		sessionDuration string
+		customDomain    string
 	)
 
 	cmd := &cobra.Command{
@@ -21,7 +23,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 		Short: "Create a QURL for a target URL",
 		Example: `  qurl create https://api.example.com/data
   qurl create https://internal.example.com --expires 1h --one-time
-  qurl create https://dashboard.example.com -d "Admin access" -e 7d`,
+  qurl create https://dashboard.example.com -l "Admin access" -e 7d`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateURL(args[0]); err != nil {
@@ -37,14 +39,16 @@ func createCmd(opts *globalOpts) *cobra.Command {
 			}
 
 			input := client.CreateInput{
-				TargetURL:   args[0],
-				Description: description,
-				ExpiresIn:   expiresIn,
-				OneTimeUse:  oneTimeUse,
-				MaxSessions: maxSessions,
+				TargetURL:       args[0],
+				Label:           label,
+				ExpiresIn:       expiresIn,
+				OneTimeUse:      oneTimeUse,
+				MaxSessions:     maxSessions,
+				SessionDuration: sessionDuration,
+				CustomDomain:    customDomain,
 			}
 
-			result, err := c.Create(cmd.Context(), input)
+			result, err := c.Create(cmd.Context(), &input)
 			if err != nil {
 				return fmt.Errorf("create QURL: %w", err)
 			}
@@ -58,10 +62,12 @@ func createCmd(opts *globalOpts) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&description, "description", "d", "", "Description")
+	cmd.Flags().StringVarP(&label, "label", "l", "", "Label for the QURL")
 	cmd.Flags().StringVarP(&expiresIn, "expires", "e", "", "Expiration duration (e.g., 1h, 24h, 7d)")
 	cmd.Flags().BoolVar(&oneTimeUse, "one-time", false, "Single-use token (consumed after first access)")
 	cmd.Flags().IntVar(&maxSessions, "max-sessions", 0, "Maximum concurrent sessions (0 = unlimited)")
+	cmd.Flags().StringVar(&sessionDuration, "session-duration", "", "Session duration (e.g., 30m, 1h)")
+	cmd.Flags().StringVar(&customDomain, "custom-domain", "", "Custom domain for the QURL")
 
 	return cmd
 }

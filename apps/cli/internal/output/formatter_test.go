@@ -66,10 +66,9 @@ func TestTableFormatQURL(t *testing.T) {
 		TargetURL:   "https://example.com",
 		Status:      "active",
 		Description: "Test QURL",
+		Tags:        []string{"prod", "api"},
 		QURLSite:    "https://r_abc123test.qurl.site",
 		CreatedAt:   time.Now().Add(-1 * time.Hour),
-		OneTimeUse:  true,
-		MaxSessions: 5,
 	}
 
 	var buf bytes.Buffer
@@ -79,7 +78,7 @@ func TestTableFormatQURL(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"r_abc123test", "https://example.com", "active", "Test QURL", "yes", "5"} {
+	for _, want := range []string{"r_abc123test", "https://example.com", "active", "Test QURL", "prod, api"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -88,9 +87,11 @@ func TestTableFormatQURL(t *testing.T) {
 
 func TestTableFormatCreate(t *testing.T) {
 	result := &client.CreateOutput{
+		QurlID:     "q_abc123test",
 		ResourceID: "r_abc123test",
 		QURLLink:   "https://qurl.link/at_abc123",
 		QURLSite:   "https://r_abc123test.qurl.site",
+		Label:      "test label",
 	}
 
 	var buf bytes.Buffer
@@ -100,7 +101,7 @@ func TestTableFormatCreate(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"created", "r_abc123test", "https://qurl.link/at_abc123"} {
+	for _, want := range []string{"created", "q_abc123test", "r_abc123test", "https://qurl.link/at_abc123", "test label"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -203,13 +204,15 @@ func TestTableFormatMint(t *testing.T) {
 }
 
 func TestTableFormatQuota(t *testing.T) {
+	pct := 4.5
 	output := &client.QuotaOutput{
 		Plan:        "growth",
 		PeriodStart: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
 		PeriodEnd:   time.Date(2026, 3, 31, 23, 59, 59, 0, time.UTC),
 		Usage: &client.UsageInfo{
-			ActiveQURLs:  45,
-			QURLsCreated: 150,
+			ActiveQURLs:        45,
+			QURLsCreated:       150,
+			ActiveQURLsPercent: &pct,
 		},
 		RateLimits: &client.RateLimits{
 			MaxActiveQURLs: 1000,

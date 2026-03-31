@@ -26,14 +26,8 @@ const (
 // StatusActive indicates the QURL is live and accepting access requests.
 const StatusActive = "active"
 
-// StatusExpired indicates the QURL's TTL has elapsed.
-const StatusExpired = "expired"
-
 // StatusRevoked indicates the QURL was manually revoked (deleted).
 const StatusRevoked = "revoked"
-
-// StatusConsumed indicates a one-time QURL has been used.
-const StatusConsumed = "consumed"
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -121,59 +115,71 @@ type ResponseMeta struct {
 
 // QURL represents a QURL resource as returned by the API.
 type QURL struct {
-	ResourceID   string        `json:"resource_id"`
-	TargetURL    string        `json:"target_url"`
-	Status       string        `json:"status"`
-	CreatedAt    time.Time     `json:"created_at"`
-	ExpiresAt    *time.Time    `json:"expires_at,omitempty"`
-	OneTimeUse   bool          `json:"one_time_use"`
-	MaxSessions  int           `json:"max_sessions,omitempty"`
-	Description  string        `json:"description,omitempty"`
-	QURLSite     string        `json:"qurl_site,omitempty"`
-	QURLLink     string        `json:"qurl_link,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	ResourceID   string     `json:"resource_id"`
+	TargetURL    string     `json:"target_url"`
+	Status       string     `json:"status"`
+	CreatedAt    time.Time  `json:"created_at"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	Description  string     `json:"description,omitempty"`
+	Tags         []string   `json:"tags,omitempty"`
+	QURLSite     string     `json:"qurl_site,omitempty"`
+	CustomDomain *string    `json:"custom_domain"`
+}
+
+// AIAgentPolicy controls access by AI agent categories.
+type AIAgentPolicy struct {
+	BlockAll        bool     `json:"block_all,omitempty"`
+	DenyCategories  []string `json:"deny_categories,omitempty"`
+	AllowCategories []string `json:"allow_categories,omitempty"`
 }
 
 // AccessPolicy defines access restrictions for a QURL.
 type AccessPolicy struct {
-	IPAllowlist  []string `json:"ip_allowlist,omitempty"`
-	IPDenylist   []string `json:"ip_denylist,omitempty"`
-	GeoAllowlist []string `json:"geo_allowlist,omitempty"`
-	GeoDenylist  []string `json:"geo_denylist,omitempty"`
+	IPAllowlist         []string       `json:"ip_allowlist,omitempty"`
+	IPDenylist          []string       `json:"ip_denylist,omitempty"`
+	GeoAllowlist        []string       `json:"geo_allowlist,omitempty"`
+	GeoDenylist         []string       `json:"geo_denylist,omitempty"`
+	UserAgentAllowRegex string         `json:"user_agent_allow_regex,omitempty"`
+	UserAgentDenyRegex  string         `json:"user_agent_deny_regex,omitempty"`
+	AIAgentPolicy       *AIAgentPolicy `json:"ai_agent_policy,omitempty"`
 }
 
 // CreateInput is the input for creating a QURL.
 type CreateInput struct {
-	TargetURL    string        `json:"target_url"`
-	Description  string        `json:"description,omitempty"`
-	ExpiresIn    string        `json:"expires_in,omitempty"`
-	OneTimeUse   bool          `json:"one_time_use,omitempty"`
-	MaxSessions  int           `json:"max_sessions,omitempty"`
-	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	TargetURL       string        `json:"target_url"`
+	Label           string        `json:"label,omitempty"`
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	CustomDomain    string        `json:"custom_domain,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
 }
 
 // CreateOutput is the response from creating a QURL.
 type CreateOutput struct {
+	QurlID     string     `json:"qurl_id"`
 	ResourceID string     `json:"resource_id"`
 	QURLLink   string     `json:"qurl_link"`
 	QURLSite   string     `json:"qurl_site"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Label      string     `json:"label,omitempty"`
 }
 
 // Create creates a new QURL.
-func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
+func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurl", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
 	var out CreateOutput
-	if _, err := c.do(req, &out, "POST /v1/qurl"); err != nil {
+	if _, err := c.do(req, &out, "POST /v1/qurls"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -195,11 +201,15 @@ func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 
 // ListInput is the input for listing QURLs.
 type ListInput struct {
-	Limit  int
-	Cursor string
-	Status string
-	Query  string
-	Sort   string
+	Limit         int
+	Cursor        string
+	Status        string
+	Query         string
+	Sort          string
+	CreatedAfter  string
+	CreatedBefore string
+	ExpiresBefore string
+	ExpiresAfter  string
 }
 
 // ListOutput is the output of listing QURLs.
@@ -210,7 +220,7 @@ type ListOutput struct {
 }
 
 // List retrieves a paginated list of QURLs.
-func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error) {
+func (c *Client) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
 	params := url.Values{}
 	if input.Limit > 0 {
 		params.Set("limit", strconv.Itoa(input.Limit))
@@ -226,6 +236,18 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 	}
 	if input.Sort != "" {
 		params.Set("sort", input.Sort)
+	}
+	if input.CreatedAfter != "" {
+		params.Set("created_after", input.CreatedAfter)
+	}
+	if input.CreatedBefore != "" {
+		params.Set("created_before", input.CreatedBefore)
+	}
+	if input.ExpiresBefore != "" {
+		params.Set("expires_before", input.ExpiresBefore)
+	}
+	if input.ExpiresAfter != "" {
+		params.Set("expires_after", input.ExpiresAfter)
 	}
 
 	u := c.baseURL + "/v1/qurls"
@@ -262,34 +284,24 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// ExtendInput holds input for extending a QURL.
-type ExtendInput struct {
-	ExtendBy  string     `json:"extend_by,omitempty"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+// UpdateInput holds input for updating a QURL.
+type UpdateInput struct {
+	ExtendBy    string     `json:"extend_by,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Tags        *[]string  `json:"tags,omitempty"`
+	Description *string    `json:"description,omitempty"`
 }
 
 // Extend extends a QURL's expiration.
-// Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
-// by request body fields (extend_by/expires_at vs description).
-func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// UpdateInput holds input for updating a QURL's mutable properties.
-type UpdateInput struct {
-	Description *string `json:"description,omitempty"`
+func (c *Client) Extend(ctx context.Context, id, duration string) (*QURL, error) {
+	return c.Update(ctx, id, UpdateInput{ExtendBy: duration})
 }
 
 // Update updates a QURL's mutable properties.
 func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
-	return c.patchQURL(ctx, id, input)
-}
-
-// patchQURL sends a PATCH request to /v1/qurls/:id with the given body.
-func (c *Client) patchQURL(ctx context.Context, id string, input any) (*QURL, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("marshal patch input: %w", err)
+		return nil, fmt.Errorf("marshal update input: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/qurls/"+url.PathEscape(id), bytes.NewReader(body))
@@ -304,6 +316,17 @@ func (c *Client) patchQURL(ctx context.Context, id string, input any) (*QURL, er
 	return &qurl, nil
 }
 
+// MintLinkInput holds optional input for minting an access link.
+type MintLinkInput struct {
+	ExpiresIn       string        `json:"expires_in,omitempty"`
+	ExpiresAt       *time.Time    `json:"expires_at,omitempty"`
+	Label           string        `json:"label,omitempty"`
+	OneTimeUse      bool          `json:"one_time_use,omitempty"`
+	MaxSessions     int           `json:"max_sessions,omitempty"`
+	SessionDuration string        `json:"session_duration,omitempty"`
+	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
+}
+
 // MintOutput holds the result of minting an access link.
 type MintOutput struct {
 	QURLLink  string     `json:"qurl_link"`
@@ -311,14 +334,72 @@ type MintOutput struct {
 }
 
 // MintLink mints a new access link for a QURL.
-func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", http.NoBody)
+func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) (*MintOutput, error) {
+	var bodyReader io.Reader = http.NoBody
+	if input != nil {
+		body, err := json.Marshal(input)
+		if err != nil {
+			return nil, fmt.Errorf("marshal mint input: %w", err)
+		}
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
 	var out MintOutput
 	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// --- Batch ---
+
+// BatchCreateOutput holds the response from batch creating QURLs.
+type BatchCreateOutput struct {
+	Succeeded int               `json:"succeeded"`
+	Failed    int               `json:"failed"`
+	Results   []BatchItemResult `json:"results"`
+}
+
+// BatchItemResult holds the result for a single item in a batch.
+type BatchItemResult struct {
+	Index      int             `json:"index"`
+	Success    bool            `json:"success"`
+	ResourceID string          `json:"resource_id,omitempty"`
+	QURLLink   string          `json:"qurl_link,omitempty"`
+	QURLSite   string          `json:"qurl_site,omitempty"`
+	ExpiresAt  *time.Time      `json:"expires_at,omitempty"`
+	Error      *BatchItemError `json:"error,omitempty"`
+}
+
+// BatchItemError holds error details for a failed batch item.
+type BatchItemError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// BatchCreate creates multiple QURLs at once (1-100 items).
+func (c *Client) BatchCreate(ctx context.Context, items []CreateInput) (*BatchCreateOutput, error) {
+	payload := struct {
+		Items []CreateInput `json:"items"`
+	}{Items: items}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal batch input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/batch", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out BatchCreateOutput
+	if _, err := c.do(req, &out, "POST /v1/qurls/batch"); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -384,14 +465,15 @@ type RateLimits struct {
 	ResolvePerMinute int `json:"resolve_per_minute"`
 	MaxActiveQURLs   int `json:"max_active_qurls"`
 	MaxTokensPerQURL int `json:"max_tokens_per_qurl"`
+	MaxExpirySeconds int `json:"max_expiry_seconds"`
 }
 
 // UsageInfo holds usage statistics.
 type UsageInfo struct {
-	QURLsCreated       int     `json:"qurls_created"`
-	ActiveQURLs        int     `json:"active_qurls"`
-	ActiveQURLsPercent float64 `json:"active_qurls_percent"`
-	TotalAccesses      int     `json:"total_accesses"`
+	QURLsCreated       int      `json:"qurls_created"`
+	ActiveQURLs        int      `json:"active_qurls"`
+	ActiveQURLsPercent *float64 `json:"active_qurls_percent"`
+	TotalAccesses      int      `json:"total_accesses"`
 }
 
 // GetQuota retrieves quota information.

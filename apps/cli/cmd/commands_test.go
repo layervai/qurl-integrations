@@ -27,8 +27,9 @@ func newMockServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurl":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/qurls":
 			apiEnvelope(t, w, map[string]any{
+				"qurl_id":     "q_test123",
 				"resource_id": "r_test123",
 				"qurl_link":   "https://qurl.link/at_abc",
 				"qurl_site":   "https://r_test123.qurl.site",
