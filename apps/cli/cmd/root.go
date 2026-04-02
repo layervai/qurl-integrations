@@ -156,22 +156,28 @@ func resolveValue(envKey string, flag *string, configKey string, cfg *config.Con
 	return ""
 }
 
+// errorPrefix extracts the wrapping context before the APIError message
+// (e.g., "create QURL: " from "create QURL: Not Found (404)").
+func errorPrefix(err error, apiErr *client.APIError) string {
+	wrapper := err.Error()
+	if wrapper == apiErr.Error() {
+		return ""
+	}
+	idx := strings.Index(wrapper, apiErr.Error())
+	if idx <= 0 {
+		return ""
+	}
+	return strings.TrimRight(wrapper[:idx], ": ") + ": "
+}
+
 // formatError renders an APIError with color and actionable hints.
 func formatError(err error) string {
 	var apiErr *client.APIError
 	if !errors.As(err, &apiErr) {
-		// Unwrap to show the root cause while preserving context prefix.
 		return err.Error()
 	}
 
-	// Preserve wrapping context (e.g., "create QURL: ...").
-	prefix := ""
-	if wrapper := err.Error(); wrapper != apiErr.Error() {
-		// Extract the prefix before the APIError message.
-		if idx := strings.Index(wrapper, apiErr.Error()); idx > 0 {
-			prefix = strings.TrimRight(wrapper[:idx], ": ") + ": "
-		}
-	}
+	prefix := errorPrefix(err, apiErr)
 
 	red := color.New(color.FgRed, color.Bold).SprintFunc()
 	dim := color.New(color.Faint).SprintFunc()
