@@ -645,7 +645,7 @@ async def qurl_send(
         return
 
     # Permanent instrumentation: helps diagnose slow /qurl send in production logs.
-    logger.debug("qurl_send: defer took %.0fms", (time.monotonic() - cmd_t0) * 1000)
+    logger.debug("qurl_send: pre-ownership at %.0fms", (time.monotonic() - cmd_t0) * 1000)
     # Check ownership (run in thread since SQLite is synchronous)
     owner_info = await asyncio.to_thread(get_owner, rid)
     if not owner_info:
