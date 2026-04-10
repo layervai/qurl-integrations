@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from urllib.parse import urlparse
 
-import httpx
-
 from config import settings
+from services.http_client import get_client
 from validation import DEFAULT_LINK_EXPIRY
 
 logger = logging.getLogger(__name__)
@@ -47,8 +46,8 @@ async def mint_link(
         "label": f"discord:{recipient_id}",
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+    client = get_client(timeout=10.0)
+    resp = await client.post(url, headers=headers, json=payload)
 
     resp.raise_for_status()
 
@@ -59,7 +58,7 @@ async def mint_link(
 
     qurl_link = data.get("qurl_link") or data.get("qurlLink")
     if not qurl_link:
-        raise Exception("Mint link response missing qurl_link")
+        raise ValueError("Mint link response missing qurl_link")
 
     # Validate qurl_link hostname (configurable)
     parsed = urlparse(qurl_link)

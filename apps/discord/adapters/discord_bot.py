@@ -14,6 +14,7 @@ from typing import Optional
 import discord
 import httpx
 from discord import app_commands
+from services.http_client import get_client as get_http_client
 from discord.ext import commands
 
 import metrics
@@ -217,8 +218,8 @@ async def _dispatch_to_recipient(
                 extra={"audit": {"event": "dispatch_sent", "resource": rid, "sender": sender_id, "recipient": recipient_id, "link_hash": link_hash}},
             )
             return (recipient_id, DispatchStatus.SENT, None, recipient.display_name)
-        except (discord.NotFound, discord.Forbidden, httpx.TimeoutException, httpx.HTTPStatusError, Exception) as exc:
-            # Dispatch error bookkeeping — single path for all failure types
+        except (discord.NotFound, discord.Forbidden, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            # Known dispatch errors — single bookkeeping path
             _DISPATCH_ERRORS = {
                 discord.NotFound:       (DispatchStatus.DM_FAILED,   "user_not_found", "User not found"),
                 discord.Forbidden:      (DispatchStatus.DM_FAILED,   "dms_disabled",   "DMs disabled"),
@@ -226,10 +227,8 @@ async def _dispatch_to_recipient(
             }
             if type(exc) in _DISPATCH_ERRORS:
                 status, error_code, display = _DISPATCH_ERRORS[type(exc)]
-            elif isinstance(exc, httpx.HTTPStatusError):
-                status, error_code, display = DispatchStatus.MINT_FAILED, f"mint_{exc.response.status_code}", "Failed to mint link"
             else:
-                status, error_code, display = DispatchStatus.MINT_FAILED, "mint_error", "Failed to mint link"
+                status, error_code, display = DispatchStatus.MINT_FAILED, f"mint_{exc.response.status_code}", "Failed to mint link"
             metrics.incr("DispatchFailed")
             logger.info(
                 "dispatch_failed",
@@ -237,6 +236,14 @@ async def _dispatch_to_recipient(
             )
             await asyncio.to_thread(update_dispatch, dispatch_id, status, error_code)
             return (recipient_id, status, display, recipient_id)
+        except Exception:
+            # Unexpected error — log full traceback so bugs surface instead of hiding
+            logger.exception("Unexpected dispatch error for %s -> %s", rid, recipient_id)
+            metrics.incr("DispatchFailed")
+            await asyncio.to_thread(
+                update_dispatch, dispatch_id, DispatchStatus.MINT_FAILED, "unexpected_error"
+            )
+            return (recipient_id, DispatchStatus.MINT_FAILED, "Failed to mint link", recipient_id)
 
 
 async def _handle_reply_to_share(message: discord.Message) -> bool:
@@ -777,8 +784,8 @@ async def qurl_revoke(interaction: discord.Interaction, resource: str) -> None:
     try:
         url = f"{settings.mint_link_api_url.rstrip('/')}/{rid}"
         headers = {"Authorization": f"Bearer {settings.qurl_api_key}"}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.delete(url, headers=headers)
+        client = get_http_client(timeout=10.0)
+        resp = await client.delete(url, headers=headers)
         if resp.status_code < 300:
             upstream_ok = True
         else:
@@ -847,8 +854,8 @@ async def qurl_status(interaction: discord.Interaction, resource: str) -> None:
     try:
         url = f"{settings.mint_link_api_url.rstrip('/')}/{rid}"
         headers = {"Authorization": f"Bearer {settings.qurl_api_key}"}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
+        client = get_http_client(timeout=10.0)
+        resp = await client.get(url, headers=headers)
         if resp.status_code == 200:
             data = resp.json()
             payload = data.get("data", data)

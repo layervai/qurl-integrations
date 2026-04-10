@@ -3,9 +3,8 @@
 import logging
 from urllib.parse import urlparse
 
-import httpx
-
 from config import settings
+from services.http_client import get_client
 from validation import validate_resource_id
 
 logger = logging.getLogger(__name__)
@@ -53,8 +52,8 @@ async def upload_file(
         "one_time_use": "true",
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, headers=headers, files=files, data=data)
+    client = get_client(timeout=30.0)
+    resp = await client.post(url, headers=headers, files=files, data=data)
 
     resp.raise_for_status()
 
@@ -67,7 +66,7 @@ async def upload_file(
     qurl_link = payload.get("qurl_link") or payload.get("qurlLink")
 
     if not resource_id or not qurl_link:
-        raise Exception("Upload response missing resource_id or qurl_link")
+        raise ValueError("Upload response missing resource_id or qurl_link")
 
     # Validate resource_id format
     rid = resource_id if isinstance(resource_id, str) else str(resource_id)

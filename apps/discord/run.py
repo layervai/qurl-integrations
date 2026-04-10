@@ -148,6 +148,9 @@ async def main() -> None:
         metrics_task.cancel()
         retention_task.cancel()
         await bot.close()
+        # Close shared HTTP client pool
+        from services.http_client import close_client
+        await close_client()
         await health_runner.cleanup()
 
     loop = asyncio.get_event_loop()

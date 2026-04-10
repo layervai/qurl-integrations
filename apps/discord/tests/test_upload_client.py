@@ -16,10 +16,8 @@ from services.upload_client import upload_file
 
 
 def _mock_client(response):
-    """Build a mock httpx.AsyncClient that returns *response* from .post()."""
+    """Build a mock client that returns *response* from .post()."""
     client = AsyncMock()
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
     client.post = AsyncMock(return_value=response)
     return client
 
@@ -54,7 +52,7 @@ class TestUploadClientSuccess:
     @pytest.mark.asyncio
     async def test_success_returns_expected_keys(self):
         mock = _mock_client(_ok_response())
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             result = await upload_file(
                 file_bytes=b"test content",
                 filename="test.png",
@@ -77,7 +75,7 @@ class TestUploadClientSuccess:
             }
         }
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             result = await upload_file(
                 file_bytes=b"x", filename="f.png",
                 content_type="image/png", owner_id="u",
@@ -94,7 +92,7 @@ class TestUploadClientSuccess:
             "expiresAt": "2027-06-01T00:00:00Z",
         }
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             result = await upload_file(
                 file_bytes=b"x", filename="f.png",
                 content_type="image/png", owner_id="u",
@@ -108,7 +106,7 @@ class TestUploadClientErrors:
     async def test_http_500_raises(self):
         resp = _mock_error_response(500)
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(httpx.HTTPStatusError):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -119,7 +117,7 @@ class TestUploadClientErrors:
     async def test_http_400_raises(self):
         resp = _mock_error_response(400)
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(httpx.HTTPStatusError):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -132,7 +130,7 @@ class TestUploadClientErrors:
         resp.status_code = 200
         resp.json.return_value = {"qurl_link": "https://qurl.link/at_x"}
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(Exception, match="missing resource_id"):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -145,7 +143,7 @@ class TestUploadClientValidation:
     async def test_invalid_resource_id_rejected(self):
         resp = _ok_response(resource_id="INVALID")
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(ValueError, match="invalid resource_id"):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -156,7 +154,7 @@ class TestUploadClientValidation:
     async def test_invalid_qurl_link_rejected(self):
         resp = _ok_response(qurl_link="https://evil.com/phishing")
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(ValueError, match="unexpected hostname"):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -167,7 +165,7 @@ class TestUploadClientValidation:
     async def test_http_scheme_rejected(self):
         resp = _ok_response(qurl_link="http://qurl.link/at_abc123")
         mock = _mock_client(resp)
-        with patch("services.upload_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.upload_client.get_client", return_value=mock):
             with pytest.raises(ValueError, match="unexpected hostname"):
                 await upload_file(
                     file_bytes=b"test", filename="test.png",
@@ -179,7 +177,7 @@ class TestUploadClientValidation:
         resp = _ok_response(qurl_link="https://custom.example.com/at_abc123")
         mock = _mock_client(resp)
         with (
-            patch("services.upload_client.httpx.AsyncClient", return_value=mock),
+            patch("services.upload_client.get_client", return_value=mock),
             patch("services.upload_client.settings") as mock_settings,
         ):
             mock_settings.qurl_api_key = "lv_test_fake"

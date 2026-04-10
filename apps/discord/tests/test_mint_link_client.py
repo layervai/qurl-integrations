@@ -44,7 +44,7 @@ class TestMintLinkSuccess:
             "expires_at": "2026-12-31T23:59:59Z",
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             result = await mint_link("r_test123456", "recipient1")
         assert result["qurl_link"] == "https://qurl.link/at_mint123"
         assert result["expires_at"] == "2026-12-31T23:59:59Z"
@@ -60,7 +60,7 @@ class TestMintLinkSuccess:
             }
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             result = await mint_link("r_test123456", "recipient1")
         assert result["qurl_link"] == "https://qurl.link/at_env123"
 
@@ -73,7 +73,7 @@ class TestMintLinkSuccess:
             "expiresAt": "2027-06-15T00:00:00Z",
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             result = await mint_link("r_test123456", "recipient1")
         assert result["qurl_link"] == "https://qurl.link/at_camel1"
         assert result["expires_at"] == "2027-06-15T00:00:00Z"
@@ -84,7 +84,7 @@ class TestMintLinkErrors:
     async def test_http_500_raises(self):
         resp = _mock_error_response(500)
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             with pytest.raises(httpx.HTTPStatusError):
                 await mint_link("r_test123456", "recipient1")
 
@@ -94,7 +94,7 @@ class TestMintLinkErrors:
         resp.status_code = 200
         resp.json.return_value = {"expires_at": "2026-12-31T00:00:00Z"}
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             with pytest.raises(Exception, match="missing qurl_link"):
                 await mint_link("r_test123456", "recipient1")
 
@@ -108,7 +108,7 @@ class TestMintLinkValidation:
             "qurl_link": "https://evil.com/steal_data",
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             with pytest.raises(ValueError, match="invalid qurl_link"):
                 await mint_link("r_test123456", "recipient1")
 
@@ -120,7 +120,7 @@ class TestMintLinkValidation:
             "qurl_link": "http://qurl.link/at_abc123",
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             with pytest.raises(ValueError, match="invalid qurl_link"):
                 await mint_link("r_test123456", "recipient1")
 
@@ -134,7 +134,7 @@ class TestMintLinkValidation:
         }
         mock = _mock_client(resp)
         with (
-            patch("services.mint_link_client.httpx.AsyncClient", return_value=mock),
+            patch("services.mint_link_client.get_client", return_value=mock),
             patch("services.mint_link_client.settings") as mock_settings,
         ):
             mock_settings.qurl_api_key = "lv_test_fake"
@@ -154,7 +154,7 @@ class TestMintLinkRequestBody:
             "expires_at": "",
         }
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             await mint_link("r_test123456", "recipient_xyz")
 
         # Inspect the call arguments
@@ -173,7 +173,7 @@ class TestMintLinkExpiry:
         resp.status_code = 200
         resp.json.return_value = {"qurl_link": "https://qurl.link/at_x", "expires_at": ""}
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             await mint_link("r_test123456", "r1", expires_in="1h")
         payload = mock.post.call_args.kwargs["json"]
         assert payload["expires_in"] == "1h"
@@ -184,7 +184,7 @@ class TestMintLinkExpiry:
         resp.status_code = 200
         resp.json.return_value = {"qurl_link": "https://qurl.link/at_x", "expires_at": ""}
         mock = _mock_client(resp)
-        with patch("services.mint_link_client.httpx.AsyncClient", return_value=mock):
+        with patch("services.mint_link_client.get_client", return_value=mock):
             await mint_link("r_test123456", "r1")
         payload = mock.post.call_args.kwargs["json"]
         assert payload["expires_in"] == "15m"
