@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")
 os.environ.setdefault("DISCORD_CLIENT_ID", "123456")

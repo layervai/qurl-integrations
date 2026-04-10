@@ -1,4 +1,3 @@
-import pytest
 from validation import validate_resource_id, validate_file_size, validate_file_type, sanitize_filename, validate_cdn_url, validate_snowflake, split_message, validate_expires, DEFAULT_LINK_EXPIRY, EXPIRY_CHOICES_VALUES
 
 class TestValidateResourceId:

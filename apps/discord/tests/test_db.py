@@ -1,5 +1,3 @@
-import os
-import tempfile
 import pytest
 from db import init_db, register_owner, get_owner, list_resources, delete_resource, bind_guild, log_dispatch, update_dispatch, get_dispatch_stats
 

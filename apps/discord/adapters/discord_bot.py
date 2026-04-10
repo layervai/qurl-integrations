@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 import discord
@@ -444,7 +444,7 @@ async def _handle_maps_url(message: discord.Message, user_id: str) -> bool:
             f"\\_resource\\_id:{result['resource_id']}\\_"
         )
         return True
-    except Exception as e:
+    except Exception:
         metrics.incr("UploadFailed")
         logger.exception("Map upload failed for user %s", user_id)
         await message.reply("Something went wrong protecting the map location. Please try again.")

@@ -1,6 +1,5 @@
 """Integration tests for the on_message Google Maps flow in discord_bot.py."""
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

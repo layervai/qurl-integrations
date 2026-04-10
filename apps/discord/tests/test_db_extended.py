@@ -4,7 +4,6 @@ expires_at round-trip, full round-trip, and recover_stale_dispatches."""
 
 import os
 import stat
-import tempfile
 
 import pytest
 
@@ -101,7 +100,7 @@ class TestGetDispatchStats:
         d1 = log_dispatch("r_stats_test1", "s", "r1")
         d2 = log_dispatch("r_stats_test1", "s", "r2")
         d3 = log_dispatch("r_stats_test1", "s", "r3")
-        d4 = log_dispatch("r_stats_test1", "s", "r4")
+        log_dispatch("r_stats_test1", "s", "r4")
 
         update_dispatch(d1, DispatchStatus.SENT)
         update_dispatch(d2, DispatchStatus.SENT)
@@ -203,8 +202,8 @@ class TestRecoverStaleDispatches:
     def test_marks_pending_as_failed_recovered(self, db_path):
         register_owner("r_recover_001", "user1", None, "file.png")
         d1 = log_dispatch("r_recover_001", "user1", "recip1")
-        d2 = log_dispatch("r_recover_001", "user1", "recip2")
-        d3 = log_dispatch("r_recover_001", "user1", "recip3")
+        log_dispatch("r_recover_001", "user1", "recip2")
+        log_dispatch("r_recover_001", "user1", "recip3")
 
         # Mark d1 as sent — should not be affected
         update_dispatch(d1, DispatchStatus.SENT)

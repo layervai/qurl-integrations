@@ -1,4 +1,3 @@
-import time
 from rate_limiter import RateLimiter
 
 class TestRateLimiter:

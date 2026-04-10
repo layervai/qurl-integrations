@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 os.environ.setdefault("DISCORD_BOT_TOKEN", "test-token")

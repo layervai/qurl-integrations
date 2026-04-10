@@ -8,7 +8,6 @@ from services.maps_parser import detect_maps_url, is_short_link, is_unsupported_
 
 class TestDetectMapsUrl:
     def test_place_url(self):
-        text = "check this out google.com/maps/place/Seattle,WA cool right?"
         # detect_maps_url needs https://
         text2 = "check https://www.google.com/maps/place/Seattle,WA out"
         assert detect_maps_url(text2) is not None
