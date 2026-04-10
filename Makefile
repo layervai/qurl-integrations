@@ -79,7 +79,7 @@ pre-commit-run:
 ## Discord bot (Python)
 
 test-discord:
-	cd apps/discord && pip install -q -r requirements.txt && python -m pytest tests/ -q
+	cd apps/discord && pip install -q -r requirements-dev.txt && python -m pytest tests/ -q
 
 check-discord: test-discord
 

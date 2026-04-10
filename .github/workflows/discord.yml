@@ -41,14 +41,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('apps/discord/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('apps/discord/requirements-dev.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Verify imports
         run: python -c "from validation import validate_resource_id; print('Import OK')"
