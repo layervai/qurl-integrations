@@ -12,6 +12,9 @@ on:
       - 'apps/discord/**'
       - '.github/workflows/discord.yml'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -76,4 +79,4 @@ jobs:
           token: ${{ secrets.DEPLOY_PAT }}
           repository: layervai/qurl-integrations-infra
           event-type: discord-bot-deploy
-          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
