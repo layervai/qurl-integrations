@@ -18,6 +18,8 @@ import (
 
 const methodPost = "POST"
 
+const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
+
 // Config holds the Slack handler configuration.
 type Config struct {
 	QURLEndpoint       string
@@ -86,13 +88,12 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 		return respondSlack("Usage: `/qurl create <url>`")
 	}
 
-	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, values.Get("team_id"))
+	c, err := h.authenticatedClient(ctx, values.Get("team_id"))
 	if err != nil {
 		slog.Error("failed to get API key", "error", err)
-		return respondSlack("Failed to authenticate. Please check your QURL API key configuration.")
+		return respondSlack(authFailureMessage)
 	}
 
-	c := h.cfg.NewClient(apiKey)
 	result, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
 	if err != nil {
 		slog.Error("failed to create QURL", "error", err, "target_url", targetURL)
@@ -103,13 +104,12 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 }
 
 func (h *Handler) handleList(ctx context.Context, values url.Values) (events.APIGatewayProxyResponse, error) {
-	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, values.Get("team_id"))
+	c, err := h.authenticatedClient(ctx, values.Get("team_id"))
 	if err != nil {
 		slog.Error("failed to get API key", "error", err)
-		return respondSlack("Failed to authenticate. Please check your QURL API key configuration.")
+		return respondSlack(authFailureMessage)
 	}
 
-	c := h.cfg.NewClient(apiKey)
 	result, err := c.List(ctx, client.ListInput{Limit: 5})
 	if err != nil {
 		slog.Error("failed to list QURLs", "error", err)
@@ -131,6 +131,15 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 	}
 
 	return respondSlack("*Recent QURLs:*\n" + strings.Join(lines, "\n"))
+}
+
+// authenticatedClient resolves an API key for the team and returns a configured client.
+func (h *Handler) authenticatedClient(ctx context.Context, teamID string) (*client.Client, error) {
+	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	return h.cfg.NewClient(apiKey), nil
 }
 
 func (h *Handler) handleEvent(req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {

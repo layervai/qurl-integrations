@@ -469,12 +469,8 @@ func (c *Client) do(req *http.Request, out any, endpoint string) (*ResponseMeta,
 	var lastErr error
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := c.retryDelay(attempt, lastErr)
-			c.logf("retry %d/%d after %s", attempt, c.maxRetries, delay)
-			select {
-			case <-time.After(delay):
-			case <-req.Context().Done():
-				return nil, req.Context().Err()
+			if err := c.waitForRetry(req.Context(), attempt, lastErr); err != nil {
+				return nil, err
 			}
 			// Reset body for retry.
 			if bodyBytes != nil {
@@ -551,6 +547,18 @@ func isRetryable(statusCode int) bool {
 		statusCode == http.StatusGatewayTimeout
 }
 
+// waitForRetry sleeps for the computed backoff delay or returns early if the context is canceled.
+func (c *Client) waitForRetry(ctx context.Context, attempt int, lastErr error) error {
+	delay := c.retryDelay(attempt, lastErr)
+	c.logf("retry %d/%d after %s", attempt, c.maxRetries, delay)
+	select {
+	case <-time.After(delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // retryDelay computes the backoff delay for a retry attempt.
 func (c *Client) retryDelay(attempt int, lastErr error) time.Duration {
 	// Use Retry-After header if the last error was a rate limit.
@@ -601,12 +609,17 @@ func (c *Client) parseError(resp *http.Response, body []byte) error {
 
 	// Parse Retry-After for rate limiting
 	if resp.StatusCode == http.StatusTooManyRequests {
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if secs, err := strconv.Atoi(ra); err == nil {
-				apiErr.RetryAfter = secs
-			}
-		}
+		apiErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 	}
 
 	return apiErr
+}
+
+// parseRetryAfter parses the Retry-After header value as seconds, returning 0 if absent or invalid.
+func parseRetryAfter(header string) int {
+	secs, err := strconv.Atoi(header)
+	if err != nil {
+		return 0
+	}
+	return secs
 }
