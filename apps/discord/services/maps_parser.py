@@ -179,11 +179,18 @@ async def resolve_short_link(url: str) -> str | None:
     Follow redirects from a Google Maps short link to get the final URL.
 
     SSRF hardening:
-    - Only follows redirects to allowlisted domains
-    - Blocks private/reserved IPs
+    - Only follows redirects to allowlisted domains (Google/goo.gl only)
+    - Blocks private/reserved IPs via async DNS check
     - Max 3 redirects
     - 3-second timeout
     - Single httpx client reused across hops
+
+    Known limitation (TOCTOU): _is_private_ip() resolves DNS separately from
+    the actual HTTP request. An attacker controlling DNS could return a public
+    IP for the check and a private IP for the request. This is mitigated by
+    the domain allowlist — only Google-owned domains are followed, making DNS
+    rebinding attacks impractical. If the allowlist is ever broadened, this
+    should be replaced with a custom transport that validates resolved IPs.
 
     Returns the final URL or None if resolution fails.
     """
