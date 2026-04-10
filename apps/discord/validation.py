@@ -23,8 +23,12 @@ ALLOWED_CONTENT_TYPES = {
     "image/gif",
     "image/webp",
     "application/pdf",
-    "application/json",  # Used by Google Maps upload (type: google-map)
 }
+
+# Maps uploads use application/json but bypass validate_file_type
+# (they go through _handle_maps_url, not the DM upload path).
+# Do NOT add application/json to ALLOWED_CONTENT_TYPES — it would
+# let users DM arbitrary .json files through the upload flow.
 
 # Allowed file extensions (fallback when content_type is missing)
 ALLOWED_EXTENSIONS = {
