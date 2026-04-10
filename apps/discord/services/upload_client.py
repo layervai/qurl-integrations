@@ -57,7 +57,10 @@ async def upload_file(
 
     resp.raise_for_status()
 
-    body = resp.json()
+    try:
+        body = resp.json()
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Upload API returned non-JSON response: {e}") from e
 
     # Support nested "data" envelope
     payload = body.get("data", body)

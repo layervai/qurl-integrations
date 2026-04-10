@@ -49,7 +49,7 @@ class ApiKeyRedactor(logging.Filter):
     # M8: Expanded patterns to catch Bearer tokens
     _patterns = [
         re.compile(r"lv_(live|test)_[A-Za-z0-9_\-]+"),
-        re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}"),
+        re.compile(r"Bearer\s+\S{10,}"),
     ]
 
     def filter(self, record: logging.LogRecord) -> bool:

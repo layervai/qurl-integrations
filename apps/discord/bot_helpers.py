@@ -45,16 +45,20 @@ def format_dispatch_summary(filename: str, results: list[tuple]) -> str:
     return "\n".join(lines)
 
 
+_guild_check_sem = asyncio.Semaphore(5)
+
+
 async def check_guild_members(
     guild: discord.Guild, user_ids: list[str]
 ) -> list[str]:
-    """Verify which user_ids are members of a guild. Parallel fetch, returns valid IDs."""
+    """Verify which user_ids are members of a guild. Parallel fetch with rate-limit semaphore."""
     async def _check_one(uid: str) -> str | None:
-        try:
-            await guild.fetch_member(int(uid))
-            return uid
-        except (discord.NotFound, discord.HTTPException):
-            return None
+        async with _guild_check_sem:
+            try:
+                await guild.fetch_member(int(uid))
+                return uid
+            except (discord.NotFound, discord.HTTPException):
+                return None
 
     checks = await asyncio.gather(*[_check_one(uid) for uid in user_ids])
     return [uid for uid in checks if uid]

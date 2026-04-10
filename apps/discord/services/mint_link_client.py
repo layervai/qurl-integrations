@@ -51,7 +51,10 @@ async def mint_link(
 
     resp.raise_for_status()
 
-    body = resp.json()
+    try:
+        body = resp.json()
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Mint API returned non-JSON response: {e}") from e
 
     # Support nested "data" envelope
     data = body.get("data", body)

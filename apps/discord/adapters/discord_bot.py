@@ -163,6 +163,14 @@ async def _resource_autocomplete(
 
 # --- Shared Dispatch Helper (used by both reply-to-share and /qurl send) ---
 
+# Known dispatch error mappings — module level so it's not recreated per exception.
+# HTTPStatusError handled separately (needs dynamic status code).
+_DISPATCH_ERRORS = {
+    discord.NotFound:       (DispatchStatus.DM_FAILED,   "user_not_found", "User not found"),
+    discord.Forbidden:      (DispatchStatus.DM_FAILED,   "dms_disabled",   "DMs disabled"),
+    httpx.TimeoutException: (DispatchStatus.MINT_FAILED, "mint_timeout",   "Failed to mint link"),
+}
+
 # Per-user semaphore: prevents one user's bulk dispatch from starving others.
 # 10 concurrent dispatches per sender; LRU eviction at 1000 entries.
 _user_sems: dict[str, asyncio.Semaphore] = {}
@@ -171,7 +179,12 @@ _USER_SEM_MAX_ENTRIES = 1000
 
 
 def _get_user_sem(sender_id: str) -> asyncio.Semaphore:
-    """Get or create a per-user dispatch semaphore with LRU eviction."""
+    """Get or create a per-user dispatch semaphore with LRU eviction.
+
+    No asyncio.Lock needed: this function is fully synchronous (no await points),
+    so the GIL prevents interleaving between coroutines. The entire pop-check-insert
+    sequence runs atomically.
+    """
     sem = _user_sems.pop(sender_id, None)  # Remove to re-insert at end (LRU refresh)
     if sem is None:
         # Evict oldest entry if at capacity
@@ -219,12 +232,7 @@ async def _dispatch_to_recipient(
             )
             return (recipient_id, DispatchStatus.SENT, None, recipient.display_name)
         except (discord.NotFound, discord.Forbidden, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
-            # Known dispatch errors — single bookkeeping path
-            _DISPATCH_ERRORS = {
-                discord.NotFound:       (DispatchStatus.DM_FAILED,   "user_not_found", "User not found"),
-                discord.Forbidden:      (DispatchStatus.DM_FAILED,   "dms_disabled",   "DMs disabled"),
-                httpx.TimeoutException: (DispatchStatus.MINT_FAILED, "mint_timeout",   "Failed to mint link"),
-            }
+            # Known dispatch errors — uses module-level _DISPATCH_ERRORS mapping
             if type(exc) in _DISPATCH_ERRORS:
                 status, error_code, display = _DISPATCH_ERRORS[type(exc)]
             else:
@@ -374,7 +382,7 @@ async def _handle_maps_url(message: discord.Message, user_id: str) -> bool:
 
     has_query = validate_query(maps_data.get("query"))
     has_coords = maps_data.get("lat") is not None and validate_coordinates(
-        maps_data["lat"], maps_data.get("lng")
+        maps_data.get("lat"), maps_data.get("lng")
     )
     if not has_query and not has_coords:
         await message.reply("Could not parse the Google Maps URL. Please send a valid Maps link.")
@@ -384,7 +392,7 @@ async def _handle_maps_url(message: discord.Message, user_id: str) -> bool:
     caption = re.sub(MAPS_URL_RE, "", message.content or "").strip()[:500]
     caption = sanitize_query(caption) if caption else None
 
-    location_label = maps_data.get("query") or f"{maps_data['lat']},{maps_data['lng']}"
+    location_label = maps_data.get("query") or f"{maps_data.get('lat')},{maps_data.get('lng')}"
 
     try:
         payload = {
@@ -857,7 +865,10 @@ async def qurl_status(interaction: discord.Interaction, resource: str) -> None:
         client = get_http_client()
         resp = await client.get(url, headers=headers, timeout=10.0)
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (ValueError, TypeError):
+                data = {}
             payload = data.get("data", data)
             upstream_status = payload.get("status", "unknown")
             upstream_created = payload.get("created_at", "unknown")
