@@ -1,23 +1,24 @@
-FROM python:3.11-slim
+FROM node:25-alpine
+
+# Install build dependencies for better-sqlite3
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# Copy package files
+COPY package*.json ./
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN npm ci --only=production
 
+# Copy source
 COPY . .
 
-RUN adduser --disabled-password --gecos "" appuser \
-    && mkdir -p /app/data \
-    && chown -R appuser:appuser /app/data
+# Create data directory for SQLite
+RUN mkdir -p /app/data
 
+# Expose port
 EXPOSE 3000
 
-USER appuser
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
-
-CMD ["python", "run.py"]
+# Start the bot
+CMD ["npm", "start"]

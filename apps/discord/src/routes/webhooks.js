@@ -1,0 +1,318 @@
+// GitHub webhook routes
+const express = require('express');
+const crypto = require('crypto');
+const { EmbedBuilder } = require('discord.js');
+const config = require('../config');
+const db = require('../database');
+const logger = require('../logger');
+const { COLORS, GOOD_FIRST_ISSUE_PATTERNS } = require('../constants');
+const {
+  assignContributorRole,
+  notifyPRMerge,
+  notifyBadgeEarned,
+  postGoodFirstIssue,
+  postReleaseAnnouncement,
+  postStarMilestone,
+  postToGitHubFeed,
+} = require('../discord');
+
+const router = express.Router();
+
+// Verify GitHub webhook signature
+function verifySignature(req) {
+  const signature = req.headers['x-hub-signature-256'];
+
+  if (!config.GITHUB_WEBHOOK_SECRET) {
+    logger.error('GITHUB_WEBHOOK_SECRET not configured - rejecting webhook');
+    return false;
+  }
+
+  if (!signature) {
+    logger.warn('Webhook request missing signature');
+    return false;
+  }
+
+  const hmac = crypto.createHmac('sha256', config.GITHUB_WEBHOOK_SECRET);
+  const digest = 'sha256=' + hmac.update(req.rawBody).digest('hex');
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  } catch {
+    return false;
+  }
+}
+
+// Check if repo belongs to allowed organization
+function isAllowedRepo(repoFullName) {
+  const [org] = repoFullName.split('/');
+  return config.ALLOWED_GITHUB_ORGS.includes(org.toLowerCase());
+}
+
+// Check if PR is from an automated bot (dependabot, renovate, etc.)
+function isAutomatedBot(prUser) {
+  if (!prUser) return false;
+  const botNames = ['dependabot', 'renovate', 'snyk-bot', 'whitesource-renovate'];
+  const username = prUser.login?.toLowerCase() || '';
+  return prUser.type === 'Bot' || botNames.some(bot => username.includes(bot));
+}
+
+// Main webhook handler
+router.post('/github', async (req, res) => {
+  if (!verifySignature(req)) {
+    logger.warn('Invalid webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const event = req.headers['x-github-event'];
+  const payload = req.body;
+  const repo = payload.repository?.full_name;
+
+  logger.info(`Received GitHub event: ${event}`, { repo, action: payload.action });
+
+  if (repo && !isAllowedRepo(repo)) {
+    logger.debug(`Ignoring webhook from non-allowed repo: ${repo}`);
+    return res.status(200).send('OK - ignored');
+  }
+
+  try {
+    switch (event) {
+      case 'pull_request':
+        await handlePullRequest(payload);
+        break;
+      case 'issues':
+        await handleIssue(payload);
+        break;
+      case 'release':
+        await handleRelease(payload);
+        break;
+      case 'star':
+        await handleStar(payload);
+        break;
+      case 'push':
+      case 'create':
+      case 'delete':
+        await handleActivityFeed(event, payload);
+        break;
+      default:
+        logger.debug(`Unhandled event type: ${event}`);
+    }
+  } catch (error) {
+    logger.error(`Error handling ${event} webhook`, { error: error.message });
+  }
+
+  res.status(200).send('OK');
+});
+
+// Handle pull_request events
+async function handlePullRequest(payload) {
+  if (payload.action !== 'closed' || !payload.pull_request?.merged) {
+    if (payload.action === 'opened') {
+      const pr = payload.pull_request;
+      const embed = new EmbedBuilder()
+        .setColor(COLORS.GITHUB_GREEN)
+        .setTitle(`🔀 PR Opened: #${pr.number}`)
+        .setDescription(`**${pr.title}**`)
+        .addFields(
+          { name: 'Author', value: `@${pr.user.login}`, inline: true },
+          { name: 'Repo', value: payload.repository.full_name, inline: true }
+        )
+        .setURL(pr.html_url)
+        .setTimestamp();
+      await postToGitHubFeed(embed);
+    }
+    return;
+  }
+
+  const pr = payload.pull_request;
+  const repo = payload.repository.full_name;
+  const githubUsername = pr.user.login;
+  const prNumber = pr.number;
+  const prTitle = pr.title;
+  const prUrl = pr.html_url;
+
+  logger.info(`PR #${prNumber} merged by @${githubUsername} in ${repo}`);
+
+  // Post to activity feed
+  const mergeEmbed = new EmbedBuilder()
+    .setColor(0x8957e5)
+    .setTitle(`✅ PR Merged: #${prNumber}`)
+    .setDescription(`**${prTitle}**`)
+    .addFields(
+      { name: 'Author', value: `@${githubUsername}`, inline: true },
+      { name: 'Repo', value: repo, inline: true }
+    )
+    .setURL(prUrl)
+    .setTimestamp();
+  await postToGitHubFeed(mergeEmbed);
+
+  const link = db.getLinkByGithub(githubUsername);
+
+  if (link) {
+    const result = await assignContributorRole(link.discord_id, prNumber, repo, githubUsername);
+    db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+
+    const newBadges = db.checkAndAwardBadges(link.discord_id, prTitle, repo);
+    if (newBadges.length > 0) {
+      await notifyBadgeEarned(link.discord_id, newBadges);
+    }
+
+    if (result.success) {
+      logger.info(`Assigned Contributor role for PR #${prNumber}`);
+    } else {
+      logger.debug(`Role not assigned: ${result.reason}`);
+    }
+  } else if (!isAutomatedBot(pr.user)) {
+    await notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl);
+  } else {
+    logger.debug(`Skipping #general notification for automated bot: @${githubUsername}`);
+  }
+}
+
+// Handle issues events
+async function handleIssue(payload) {
+  const issue = payload.issue;
+  const repo = payload.repository.full_name;
+  const labels = issue.labels?.map(l => l.name) || [];
+  const githubUsername = issue.user?.login;
+
+  if (payload.action === 'opened' || payload.action === 'labeled') {
+    const isGoodFirstIssue = labels.some(l =>
+      GOOD_FIRST_ISSUE_PATTERNS.some(pattern => l.toLowerCase().includes(pattern))
+    );
+
+    if (isGoodFirstIssue) {
+      await postGoodFirstIssue(repo, issue.number, issue.title, issue.html_url, labels);
+    }
+  }
+
+  if (payload.action === 'opened' && githubUsername) {
+    const link = db.getLinkByGithub(githubUsername);
+    if (link) {
+      const awarded = db.awardFirstIssueBadge(link.discord_id);
+      if (awarded.length > 0) {
+        await notifyBadgeEarned(link.discord_id, awarded);
+      }
+    }
+  }
+
+  if (payload.action === 'opened') {
+    const embed = new EmbedBuilder()
+      .setColor(COLORS.GITHUB_GREEN)
+      .setTitle(`📝 Issue Opened: #${issue.number}`)
+      .setDescription(`**${issue.title}**`)
+      .addFields(
+        { name: 'Author', value: `@${githubUsername}`, inline: true },
+        { name: 'Repo', value: repo, inline: true }
+      )
+      .setURL(issue.html_url)
+      .setTimestamp();
+
+    if (labels.length > 0) {
+      embed.addFields({ name: 'Labels', value: labels.slice(0, 5).map(l => `\`${l}\``).join(' '), inline: false });
+    }
+
+    await postToGitHubFeed(embed);
+  }
+}
+
+// Handle release events
+async function handleRelease(payload) {
+  if (payload.action !== 'published') return;
+
+  const release = payload.release;
+  const repo = payload.repository.full_name;
+
+  await postReleaseAnnouncement(repo, release.tag_name, release.name, release.html_url, release.body);
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PRIMARY)
+    .setTitle(`🚀 Release: ${release.tag_name}`)
+    .setDescription(`**${release.name || release.tag_name}**`)
+    .addFields({ name: 'Repo', value: repo, inline: true })
+    .setURL(release.html_url)
+    .setTimestamp();
+  await postToGitHubFeed(embed);
+}
+
+// Handle star events
+async function handleStar(payload) {
+  if (payload.action !== 'created') return;
+
+  const repo = payload.repository.full_name;
+  const stars = payload.repository.stargazers_count;
+  const repoUrl = payload.repository.html_url;
+
+  // Iterate in descending order to find the highest applicable milestone
+  const milestonesDesc = [...config.STAR_MILESTONES].sort((a, b) => b - a);
+  for (const milestone of milestonesDesc) {
+    if (stars >= milestone && !db.hasMilestoneBeenAnnounced('stars', milestone, repo)) {
+      if (db.recordMilestone('stars', milestone, repo)) {
+        await postStarMilestone(repo, milestone, repoUrl);
+        break;
+      }
+    }
+  }
+}
+
+// Handle activity feed events
+async function handleActivityFeed(event, payload) {
+  const repo = payload.repository?.full_name;
+  if (!repo) return;
+
+  let embed;
+
+  switch (event) {
+    case 'push':
+      const commits = payload.commits || [];
+      if (commits.length === 0) return;
+
+      const branch = payload.ref?.replace('refs/heads/', '') || 'unknown';
+      const pusher = payload.pusher?.name || 'Unknown';
+
+      embed = new EmbedBuilder()
+        .setColor(COLORS.GITHUB_PURPLE)
+        .setTitle(`📤 ${commits.length} commit(s) pushed to ${branch}`)
+        .setDescription(
+          commits.slice(0, 3).map(c => `• \`${c.id.substring(0, 7)}\` ${c.message.split('\n')[0].substring(0, 50)}`).join('\n') +
+          (commits.length > 3 ? `\n... and ${commits.length - 3} more` : '')
+        )
+        .addFields(
+          { name: 'Pusher', value: `@${pusher}`, inline: true },
+          { name: 'Repo', value: repo, inline: true }
+        )
+        .setTimestamp();
+      break;
+
+    case 'create':
+      if (payload.ref_type === 'branch') {
+        embed = new EmbedBuilder()
+          .setColor(COLORS.GITHUB_GREEN)
+          .setTitle(`🌿 Branch Created: ${payload.ref}`)
+          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTimestamp();
+      } else if (payload.ref_type === 'tag') {
+        embed = new EmbedBuilder()
+          .setColor(COLORS.PRIMARY)
+          .setTitle(`🏷️ Tag Created: ${payload.ref}`)
+          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTimestamp();
+      }
+      break;
+
+    case 'delete':
+      if (payload.ref_type === 'branch') {
+        embed = new EmbedBuilder()
+          .setColor(COLORS.ERROR)
+          .setTitle(`🗑️ Branch Deleted: ${payload.ref}`)
+          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTimestamp();
+      }
+      break;
+  }
+
+  if (embed) {
+    await postToGitHubFeed(embed);
+  }
+}
+
+module.exports = router;
