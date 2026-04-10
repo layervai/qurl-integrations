@@ -46,8 +46,8 @@ async def mint_link(
         "label": f"discord:{recipient_id}",
     }
 
-    client = get_client(timeout=10.0)
-    resp = await client.post(url, headers=headers, json=payload)
+    client = get_client()
+    resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
 
     resp.raise_for_status()
 

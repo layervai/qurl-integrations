@@ -261,7 +261,7 @@ def get_dispatch_stats(resource_id: str) -> dict[str, int]:
         return stats
 
 
-def _prune_old_dispatches() -> int:
+def prune_old_dispatches() -> int:
     """Delete dispatch log entries older than 90 days. Returns count deleted."""
     with _db_conn() as conn:
         cursor = conn.execute(

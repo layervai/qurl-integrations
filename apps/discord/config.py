@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     qurl_api_key: str
     upload_api_url: str = "https://getqurllink.layerv.ai"
     mint_link_api_url: str = "https://api.layerv.ai/v1/qurls"
+    host: str = "0.0.0.0"
     port: int = 3000
     cdn_url_allowlist: str = "cdn.discordapp.com,media.discordapp.net"
     rate_limit_per_minute: int = 5

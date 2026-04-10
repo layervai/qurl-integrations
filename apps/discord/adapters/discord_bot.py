@@ -784,8 +784,8 @@ async def qurl_revoke(interaction: discord.Interaction, resource: str) -> None:
     try:
         url = f"{settings.mint_link_api_url.rstrip('/')}/{rid}"
         headers = {"Authorization": f"Bearer {settings.qurl_api_key}"}
-        client = get_http_client(timeout=10.0)
-        resp = await client.delete(url, headers=headers)
+        client = get_http_client()
+        resp = await client.delete(url, headers=headers, timeout=10.0)
         if resp.status_code < 300:
             upstream_ok = True
         else:
@@ -854,8 +854,8 @@ async def qurl_status(interaction: discord.Interaction, resource: str) -> None:
     try:
         url = f"{settings.mint_link_api_url.rstrip('/')}/{rid}"
         headers = {"Authorization": f"Bearer {settings.qurl_api_key}"}
-        client = get_http_client(timeout=10.0)
-        resp = await client.get(url, headers=headers)
+        client = get_http_client()
+        resp = await client.get(url, headers=headers, timeout=10.0)
         if resp.status_code == 200:
             data = resp.json()
             payload = data.get("data", data)

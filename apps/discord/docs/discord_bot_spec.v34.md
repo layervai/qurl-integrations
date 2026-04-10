@@ -371,7 +371,7 @@ async def mint_links(resource_id: str, n: int = 1, expires_at: str | None = None
         payload["n"] = min(max(n, 1), 10)
     if expires_at:
         payload["expires_at"] = expires_at
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, json=payload or {})
 ```
 

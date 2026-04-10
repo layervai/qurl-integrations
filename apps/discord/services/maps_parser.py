@@ -199,6 +199,9 @@ async def resolve_short_link(url: str) -> str | None:
 
     current_url = url
     try:
+        # Intentionally NOT using the shared http_client pool: this resolver
+        # needs follow_redirects=False and isolated connection state for SSRF
+        # safety (each redirect is validated before following).
         async with httpx.AsyncClient(
             timeout=_RESOLVE_TIMEOUT,
             follow_redirects=False,

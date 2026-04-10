@@ -52,8 +52,8 @@ async def upload_file(
         "one_time_use": "true",
     }
 
-    client = get_client(timeout=30.0)
-    resp = await client.post(url, headers=headers, files=files, data=data)
+    client = get_client()
+    resp = await client.post(url, headers=headers, files=files, data=data, timeout=30.0)
 
     resp.raise_for_status()
 

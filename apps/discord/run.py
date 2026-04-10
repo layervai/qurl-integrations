@@ -12,7 +12,7 @@ import time
 from aiohttp import web
 
 from config import settings
-from db import _prune_old_dispatches, init_db, recover_stale_dispatches
+from db import prune_old_dispatches, init_db, recover_stale_dispatches
 from metrics import periodic_flush as metrics_flush
 
 
@@ -96,9 +96,9 @@ async def start_health_server() -> web.AppRunner:
     app.router.add_get("/ready", ready_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", settings.port)
+    site = web.TCPSite(runner, settings.host, settings.port)
     await site.start()
-    logger.info("Health server on 0.0.0.0:%d (/health, /ready)", settings.port)
+    logger.info("Health server on %s:%d (/health, /ready)", settings.host, settings.port)
     return runner
 
 
@@ -107,7 +107,7 @@ async def _periodic_retention() -> None:
     while True:
         await asyncio.sleep(86400)  # 24 hours
         try:
-            deleted = await asyncio.to_thread(_prune_old_dispatches)
+            deleted = await asyncio.to_thread(prune_old_dispatches)
             if deleted:
                 logger.info("Retention: pruned %d old dispatch log entries", deleted)
         except Exception as e:
@@ -153,7 +153,7 @@ async def main() -> None:
         await close_client()
         await health_runner.cleanup()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
 

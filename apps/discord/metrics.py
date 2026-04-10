@@ -112,19 +112,15 @@ async def _flush() -> None:
         )
 
 
-_flush_running = False
+_flush_lock = asyncio.Lock()
 
 
 async def periodic_flush() -> None:
     """Background task that flushes metrics every FLUSH_INTERVAL seconds."""
-    global _flush_running
     while True:
         await asyncio.sleep(_FLUSH_INTERVAL)
-        if _flush_running:
+        if _flush_lock.locked():
             logger.warning("Previous metrics flush still running, skipping this cycle")
             continue
-        _flush_running = True
-        try:
+        async with _flush_lock:
             await _flush()
-        finally:
-            _flush_running = False
