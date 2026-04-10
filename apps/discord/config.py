@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # (upload service type:google-map support) is deployed. Set
     # GOOGLE_MAPS_ENABLED=true in ECS task definition env vars to enable.
     # TODO: read from SSM Parameter Store at runtime for no-redeploy toggle.
-    google_maps_enabled: bool = False
+    google_maps_enabled: bool = True
 
     @field_validator("qurl_link_hostname")
     @classmethod

@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'apps/discord/**'
+      - 'shared/**'
       - '.github/workflows/discord.yml'
   pull_request:
     branches: [main]
     paths:
       - 'apps/discord/**'
+      - 'shared/**'
       - '.github/workflows/discord.yml'
 
 permissions:
