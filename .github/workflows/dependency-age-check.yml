@@ -111,3 +111,4 @@ jobs:
           fi
 
           echo "Checked ${checked} dependencies — all at least ${MIN_AGE_DAYS} days old"
+          echo "✅ Checked ${checked} dependencies — all at least ${MIN_AGE_DAYS} days old" >> "$GITHUB_STEP_SUMMARY"
