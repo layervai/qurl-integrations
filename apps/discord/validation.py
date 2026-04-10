@@ -23,6 +23,7 @@ ALLOWED_CONTENT_TYPES = {
     "image/gif",
     "image/webp",
     "application/pdf",
+    "application/json",  # Used by Google Maps upload (type: google-map)
 }
 
 # Allowed file extensions (fallback when content_type is missing)

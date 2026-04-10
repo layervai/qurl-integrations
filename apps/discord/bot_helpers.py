@@ -45,6 +45,9 @@ def format_dispatch_summary(filename: str, results: list[tuple]) -> str:
     return "\n".join(lines)
 
 
+# Global semaphore for guild member lookups — limits Discord API rate impact.
+# Shared across all users intentionally: Discord's rate limit is per-bot, not per-user.
+# 5 concurrent slots is conservative; increase if 3-second interaction timeouts occur.
 _guild_check_sem = asyncio.Semaphore(5)
 
 

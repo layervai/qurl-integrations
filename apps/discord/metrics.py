@@ -112,15 +112,24 @@ async def _flush() -> None:
         )
 
 
-_flush_lock = asyncio.Lock()
+_flush_lock: asyncio.Lock | None = None
+
+
+def _get_flush_lock() -> asyncio.Lock:
+    """Lazily create flush lock inside the running event loop (Python 3.12 compat)."""
+    global _flush_lock
+    if _flush_lock is None:
+        _flush_lock = asyncio.Lock()
+    return _flush_lock
 
 
 async def periodic_flush() -> None:
     """Background task that flushes metrics every FLUSH_INTERVAL seconds."""
     while True:
         await asyncio.sleep(_FLUSH_INTERVAL)
-        if _flush_lock.locked():
+        lock = _get_flush_lock()
+        if lock.locked():
             logger.warning("Previous metrics flush still running, skipping this cycle")
             continue
-        async with _flush_lock:
+        async with lock:
             await _flush()

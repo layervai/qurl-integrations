@@ -110,8 +110,8 @@ class TestGetDispatchStats:
 
         stats = get_dispatch_stats("r_stats_test1")
         assert stats["sent"] == 2
-        # pending + dm_failed = 2
-        assert stats["failed"] == 2
+        assert stats["pending"] == 1  # d4 still pending
+        assert stats["failed"] == 1   # d3 dm_failed
 
     def test_no_dispatches_returns_zeros(self, db_path):
         register_owner("r_stats_empty1", "user1", None, "file.png")
@@ -192,7 +192,8 @@ class TestFullRegisterDispatchStatsRoundtrip:
 
         stats = get_dispatch_stats("r_roundtrip01")
         assert stats["sent"] == 1
-        assert stats["failed"] == 2  # dm_failed + pending
+        assert stats["pending"] == 1  # d3 still pending
+        assert stats["failed"] == 1   # d2 dm_failed
 
 
 # --- B5 / M9: recover_stale_dispatches ---

@@ -37,13 +37,14 @@ class TestMetricsFlush:
     @pytest.mark.asyncio
     async def test_flush_lock_prevents_overlap(self):
         import metrics
+        lock = metrics._get_flush_lock()
         # Lock should not be locked initially
-        assert not metrics._flush_lock.locked()
+        assert not lock.locked()
 
         # Acquire lock to simulate in-progress flush
-        await metrics._flush_lock.acquire()
-        assert metrics._flush_lock.locked()
+        await lock.acquire()
+        assert lock.locked()
 
         # Release
-        metrics._flush_lock.release()
-        assert not metrics._flush_lock.locked()
+        lock.release()
+        assert not lock.locked()

@@ -143,12 +143,17 @@ async def main() -> None:
     retention_task = asyncio.create_task(_periodic_retention())
     metrics_task = asyncio.create_task(metrics_flush())
 
+    _shutting_down = False
+
     async def shutdown() -> None:
+        nonlocal _shutting_down
+        if _shutting_down:
+            return
+        _shutting_down = True
         logger.info("Shutting down...")
         metrics_task.cancel()
         retention_task.cancel()
         await bot.close()
-        # Close shared HTTP client pool
         from services.http_client import close_client
         await close_client()
         await health_runner.cleanup()

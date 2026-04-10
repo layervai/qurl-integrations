@@ -446,7 +446,7 @@ async def _handle_maps_url(message: discord.Message, user_id: str) -> bool:
         return True
     except Exception as e:
         metrics.incr("UploadFailed")
-        logger.error("Map upload failed for user %s: %s", user_id, e)
+        logger.exception("Map upload failed for user %s", user_id)
         await message.reply("Something went wrong protecting the map location. Please try again.")
         return True
 

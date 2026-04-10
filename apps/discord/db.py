@@ -247,17 +247,16 @@ def get_dispatch_stats(resource_id: str) -> dict[str, int]:
             "SELECT status, COUNT(*) as cnt FROM dispatch_log WHERE resource_id = ? GROUP BY status",
             (resource_id,),
         ).fetchall()
-        stats: dict[str, int] = {}
-        failed_count = 0
+        stats: dict[str, int] = {"sent": 0, "pending": 0, "failed": 0}
         for row in rows:
             status = row["status"]
             count = row["cnt"]
             if status == "sent":
                 stats["sent"] = count
+            elif status == "pending":
+                stats["pending"] = count
             else:
-                failed_count += count
-        stats["sent"] = stats.get("sent", 0)
-        stats["failed"] = failed_count
+                stats["failed"] += count
         return stats
 
 
