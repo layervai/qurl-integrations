@@ -547,7 +547,7 @@ func isRetryable(statusCode int) bool {
 		statusCode == http.StatusGatewayTimeout
 }
 
-// waitForRetry sleeps for the computed backoff delay or returns early if the context is cancelled.
+// waitForRetry sleeps for the computed backoff delay or returns early if the context is canceled.
 func (c *Client) waitForRetry(ctx context.Context, attempt int, lastErr error) error {
 	delay := c.retryDelay(attempt, lastErr)
 	c.logf("retry %d/%d after %s", attempt, c.maxRetries, delay)
