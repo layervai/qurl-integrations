@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 25
     db_path: str = "data/qurl_bot.db"
     sync_commands_globally: bool = False
+    sync_guild_id: str = ""
     qurl_link_hostname: str = "qurl.link"
     link_expires_in: str = "15m"
     # Feature gate: Maps support is disabled by default until Phase 2

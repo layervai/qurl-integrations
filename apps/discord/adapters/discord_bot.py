@@ -103,6 +103,11 @@ class QurlBot(commands.Bot):
             logger.info("Slash commands synced globally (may take up to 1 hour to propagate)")
         else:
             logger.info("Skipping global command sync (set SYNC_COMMANDS_GLOBALLY=true to enable)")
+        if settings.sync_guild_id:
+            guild = discord.Object(id=int(settings.sync_guild_id))
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            logger.info("Slash commands synced to guild %s (instant)", settings.sync_guild_id)
 
 
 # M1: Simple module-level singleton — no get_bot() facade
@@ -612,6 +617,7 @@ async def qurl_send(
     expires: Optional[app_commands.Choice[str]] = None,
 ) -> None:
     """Dispatch per-recipient QURL links."""
+    cmd_t0 = time.monotonic()
     user_id = str(interaction.user.id)
 
     if not rate_limiter.check(user_id):
@@ -644,6 +650,7 @@ async def qurl_send(
         return
 
     # Check ownership (run in thread since SQLite is synchronous)
+    logger.debug("qurl_send: defer took %.0fms", (time.monotonic() - cmd_t0) * 1000)
     owner_info = await asyncio.to_thread(get_owner, rid)
     if not owner_info:
         await interaction.followup.send(
@@ -721,8 +728,10 @@ async def qurl_send(
         return
 
     # Verify guild membership (parallel, shared helper)
+    logger.debug("qurl_send: pre-guild-check at %.0fms", (time.monotonic() - cmd_t0) * 1000)
     if interaction.guild:
         mentioned_ids = await check_guild_members(interaction.guild, mentioned_ids)
+    logger.debug("qurl_send: post-guild-check at %.0fms", (time.monotonic() - cmd_t0) * 1000)
 
     if not mentioned_ids:
         await interaction.followup.send(
@@ -733,6 +742,7 @@ async def qurl_send(
     await interaction.followup.send(
         f"Dispatching links to {len(mentioned_ids)} user(s)...", ephemeral=True
     )
+    logger.debug("qurl_send: pre-dispatch at %.0fms", (time.monotonic() - cmd_t0) * 1000)
 
     # Use shared dispatch helper
     tasks = [
@@ -740,6 +750,7 @@ async def qurl_send(
         for uid in mentioned_ids
     ]
     results = await asyncio.gather(*tasks)
+    logger.info("qurl_send: total=%.0fms recipients=%d", (time.monotonic() - cmd_t0) * 1000, len(mentioned_ids))
 
     filename = owner_info.get("filename", rid)
     summary = format_dispatch_summary(filename, results)
