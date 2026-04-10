@@ -1,8 +1,8 @@
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+node_modules/
 .env
+!.env.example
 data/
 *.db
-.venv/
+*.log
+.DS_Store
+coverage/
