@@ -612,6 +612,7 @@ async def qurl_send(
     expires: Optional[app_commands.Choice[str]] = None,
 ) -> None:
     """Dispatch per-recipient QURL links."""
+    cmd_t0 = time.monotonic()
     user_id = str(interaction.user.id)
 
     if not rate_limiter.check(user_id):
@@ -643,6 +644,8 @@ async def qurl_send(
         await interaction.followup.send("Invalid resource ID format.", ephemeral=True)
         return
 
+    # Permanent instrumentation: helps diagnose slow /qurl send in production logs.
+    logger.debug("qurl_send: defer took %.0fms", (time.monotonic() - cmd_t0) * 1000)
     # Check ownership (run in thread since SQLite is synchronous)
     owner_info = await asyncio.to_thread(get_owner, rid)
     if not owner_info:
@@ -679,6 +682,8 @@ async def qurl_send(
             "This resource is bound to a different server.", ephemeral=True
         )
         return
+
+    logger.debug("qurl_send: ownership+guild took %.0fms", (time.monotonic() - cmd_t0) * 1000)
 
     # Parse mentioned users — handle commas, mentions, and raw IDs
     tokens = [t.strip() for t in users.replace(" ", ",").split(",") if t.strip()]
@@ -722,7 +727,9 @@ async def qurl_send(
 
     # Verify guild membership (parallel, shared helper)
     if interaction.guild:
+        logger.debug("qurl_send: pre-guild-check at %.0fms", (time.monotonic() - cmd_t0) * 1000)
         mentioned_ids = await check_guild_members(interaction.guild, mentioned_ids)
+        logger.debug("qurl_send: post-guild-check at %.0fms", (time.monotonic() - cmd_t0) * 1000)
 
     if not mentioned_ids:
         await interaction.followup.send(
@@ -740,6 +747,8 @@ async def qurl_send(
         for uid in mentioned_ids
     ]
     results = await asyncio.gather(*tasks)
+    # INFO intentionally: summary visible in prod; bump to DEBUG for per-stage breakdown.
+    logger.info("qurl_send: total=%.0fms dispatched_to=%d", (time.monotonic() - cmd_t0) * 1000, len(mentioned_ids))
 
     filename = owner_info.get("filename", rid)
     summary = format_dispatch_summary(filename, results)
