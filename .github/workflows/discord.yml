@@ -1,0 +1,88 @@
+name: "discord: Build and Test"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/discord/**'
+      - 'shared/**'
+      - '.github/workflows/discord.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/discord/**'
+      - 'shared/**'
+      - '.github/workflows/discord.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/discord
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('apps/discord/requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install ruff==0.11.8
+
+      - name: Lint with ruff
+        run: ruff check --select E,F,W,B,UP --ignore E501,UP007 .
+
+      - name: Verify imports
+        run: python -c "from validation import validate_resource_id; print('Import OK')"
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
+  docker-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Dockerfile builds
+        working-directory: apps/discord
+        run: docker build -t discord-bot-test .
+
+  trigger-deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Trigger deploy in infra repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DEPLOY_PAT }}
+          repository: layervai/qurl-integrations-infra
+          event-type: discord-bot-deploy
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'

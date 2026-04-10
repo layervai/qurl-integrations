@@ -1,4 +1,4 @@
-.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check clean
+.PHONY: all fmt lint vet test test-race coverage build-slack build-cli docs man vendor release-snapshot security check check-discord test-discord clean
 
 VERSION ?= dev
 
@@ -75,6 +75,13 @@ pre-commit-install:
 
 pre-commit-run:
 	pre-commit run --all-files
+
+## Discord bot (Python)
+
+test-discord:
+	cd apps/discord && pip install -q -r requirements-dev.txt && python -m pytest tests/ -q
+
+check-discord: test-discord
 
 ## Full check (CI parity)
 
