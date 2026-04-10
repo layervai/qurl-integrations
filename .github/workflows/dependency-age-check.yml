@@ -59,10 +59,10 @@ jobs:
             while IFS=' ' read -r module version; do
               [[ "$version" =~ ^v ]] || continue
 
-              # Pseudo-versions (v0.0.0-YYYYMMDDHHMMSS-hash) are pinned commits,
-              # not published releases. The proxy may 404 or return misleading
-              # timestamps. Skip them — they are not supply chain attack vectors.
-              if [[ "$version" =~ ^v0\.0\.0-[0-9]{14}- ]]; then
+              # Pseudo-versions are pinned commits, not published releases.
+              # All three Go pseudo-version forms (v0.0.0-..., vX.Y.Z-0.…, vX.Y.(Z+1)-0.…)
+              # contain -0.YYYYMMDDHHMMSS-hash. The proxy may 404 or return misleading timestamps.
+              if [[ "$version" =~ -0\.[0-9]{14}-[0-9a-f]{12}$ ]]; then
                 echo "  SKIP: ${module}@${version} (pseudo-version)"
                 continue
               fi
