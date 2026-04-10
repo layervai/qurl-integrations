@@ -103,6 +103,11 @@ class QurlBot(commands.Bot):
             logger.info("Slash commands synced globally (may take up to 1 hour to propagate)")
         else:
             logger.info("Skipping global command sync (set SYNC_COMMANDS_GLOBALLY=true to enable)")
+        if settings.sync_guild_id:
+            guild = discord.Object(id=int(settings.sync_guild_id))
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            logger.info("Slash commands synced to guild %s (instant)", settings.sync_guild_id)
 
 
 # M1: Simple module-level singleton — no get_bot() facade
