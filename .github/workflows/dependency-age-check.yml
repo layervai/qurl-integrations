@@ -1,0 +1,114 @@
+# ============================================================================
+# DEPENDENCY AGE CHECK - Block newly published Go modules (supply chain)
+# ============================================================================
+name: Dependency Age Check
+
+on:
+  pull_request:
+    paths:
+      - "**/go.sum"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-dependency-age:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'age-check-bypass') }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check Go module release ages
+        env:
+          MIN_AGE_DAYS: "7"
+          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+        run: |
+          set -euo pipefail
+
+          failed=false
+          checked=0
+          now_epoch=$(date +%s)
+          base_ref="origin/${BASE_REF}"
+
+          changed_sums=$(git diff --name-only "${base_ref}...HEAD" -- '**/go.sum' 'go.sum' || true)
+
+          if [ -z "$changed_sums" ]; then
+            echo "No go.sum changes detected"
+            exit 0
+          fi
+
+          while IFS= read -r sum_file; do
+            echo "::group::Checking ${sum_file}"
+
+            new_deps=$(git diff "${base_ref}...HEAD" -- "$sum_file" \
+              | grep '^+[^+]' \
+              | awk '{sub(/^\+/, "", $1); print $1 " " $2}' \
+              | sed 's|/go.mod$||' \
+              | sort -u)
+
+            if [ -z "$new_deps" ]; then
+              echo "No new dependencies in ${sum_file}"
+              echo "::endgroup::"
+              continue
+            fi
+
+            while IFS=' ' read -r module version; do
+              [[ "$version" =~ ^v ]] || continue
+
+              # Pseudo-versions are pinned commits, not published releases.
+              # All three Go pseudo-version forms (v0.0.0-..., vX.Y.Z-0.…, vX.Y.(Z+1)-0.…)
+              # contain -0.YYYYMMDDHHMMSS-hash. The proxy may 404 or return misleading timestamps.
+              if [[ "$version" =~ -0\.[0-9]{14}-[0-9a-f]{12}$ ]]; then
+                echo "  SKIP: ${module}@${version} (pseudo-version)"
+                continue
+              fi
+
+              checked=$((checked + 1))
+
+              # Go module proxy encoding: uppercase letters become !lowercase
+              # per https://pkg.go.dev/cmd/go#hdr-Module_proxy_protocol
+              encoded_module=$(echo "$module" | sed 's/\([A-Z]\)/!\L\1/g')
+              info_url="https://proxy.golang.org/${encoded_module}/@v/${version}.info"
+
+              # Fail-closed: if we can't verify a module's age, treat it as too young.
+              # This prevents bypass when proxy.golang.org is unreachable.
+              response=$(curl -sf -m 10 "$info_url" 2>/dev/null || echo "")
+              if [ -z "$response" ]; then
+                echo "::error file=${sum_file}::Could not verify age for ${module}@${version} (proxy.golang.org unreachable or module not found)"
+                failed=true
+                continue
+              fi
+
+              publish_time=$(echo "$response" | jq -r '.Time')
+              if ! publish_epoch=$(date -d "$publish_time" +%s 2>/dev/null); then
+                echo "::error file=${sum_file}::Could not parse publish timestamp for ${module}@${version}: ${publish_time}"
+                failed=true
+                continue
+              fi
+
+              age_days=$(( (now_epoch - publish_epoch) / 86400 ))
+
+              if [ "$age_days" -lt "$MIN_AGE_DAYS" ]; then
+                echo "::error file=${sum_file}::${module}@${version} published ${age_days} day(s) ago (minimum: ${MIN_AGE_DAYS})"
+                failed=true
+              else
+                echo "  OK: ${module}@${version} (${age_days} days old)"
+              fi
+            done <<< "$new_deps"
+
+            echo "::endgroup::"
+          done <<< "$changed_sums"
+
+          if [ "$failed" = true ]; then
+            echo ""
+            echo "::error::One or more Go dependencies failed the age check."
+            echo "To bypass for emergency security updates, add the 'age-check-bypass' label to this PR."
+            exit 1
+          fi
+
+          echo "Checked ${checked} dependencies — all at least ${MIN_AGE_DAYS} days old"
+          echo "✅ Checked ${checked} dependencies — all at least ${MIN_AGE_DAYS} days old" >> "$GITHUB_STEP_SUMMARY"
