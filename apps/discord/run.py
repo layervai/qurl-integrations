@@ -166,9 +166,11 @@ async def main() -> None:
         logger.info("Starting Qurl Discord Bot...")
         await bot.start(settings.discord_bot_token)
     finally:
-        metrics_task.cancel()
-        retention_task.cancel()
-        await health_runner.cleanup()
+        if not _shutting_down:
+            # Signal handler didn't run — clean up here
+            metrics_task.cancel()
+            retention_task.cancel()
+            await health_runner.cleanup()
 
 
 if __name__ == "__main__":

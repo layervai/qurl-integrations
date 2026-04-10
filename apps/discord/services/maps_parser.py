@@ -127,6 +127,9 @@ def validate_coordinates(lat: float | None, lng: float | None) -> bool:
         return False  # One present, one missing
     if lat is None and lng is None:
         return True  # Both absent is valid (query-only)
+    import math
+    if math.isnan(lat) or math.isinf(lat) or math.isnan(lng) or math.isinf(lng):
+        return False
     if lat < -90 or lat > 90:
         return False
     if lng < -180 or lng > 180:

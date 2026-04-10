@@ -483,7 +483,10 @@ async def on_message(message: discord.Message) -> None:
             if handled:
                 return
 
-        await message.reply("Send me a file or Google Maps link to protect it, or reply to a protected resource and @mention users to share.")
+        help_msg = "Send me a file to protect it, or reply to a protected resource and @mention users to share."
+        if settings.google_maps_enabled:
+            help_msg = "Send me a file or Google Maps link to protect it, or reply to a protected resource and @mention users to share."
+        await message.reply(help_msg)
         return
 
     user_id = str(message.author.id)
