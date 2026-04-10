@@ -21,4 +21,8 @@ jobs:
         with:
           fail-on-severity: high
           deny-licenses: GPL-3.0, AGPL-3.0
+          # TruffleHog is AGPL-3.0 but runs only in CI (secret scanning),
+          # not in distributed code. AGPL obligations don't apply to tools
+          # you execute — only to code you distribute or expose as a service.
+          allow-dependencies-licenses: "pkg:githubactions/trufflesecurity/trufflehog"
           comment-summary-in-pr: always
