@@ -8,6 +8,9 @@ const {
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const crypto = require('crypto');
 const config = require('./config');
@@ -15,7 +18,7 @@ const db = require('./database');
 const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
-const { createOneTimeLink, deleteLink } = require('./qurl');
+const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
 const { uploadToConnector, mintLinks } = require('./connector');
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 const { searchPlaces } = require('./places');
@@ -114,172 +117,422 @@ function expiryToISO(expiresIn) {
   return new Date(Date.now() + ms).toISOString();
 }
 
+// --- Shared DM embed builder ---
+function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+  const isFile = resourceType === 'file';
+  const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
+  const embed = new EmbedBuilder()
+    .setColor(0x00d4ff)
+    .setAuthor({ name: 'QURL Secure Delivery' })
+    .setDescription(
+      `**${senderUsername}** shared a protected resource with you\n${divider}`
+    )
+  if (isFile) {
+    embed.addFields(
+      { name: 'Resource Type', value: 'File', inline: true },
+      { name: 'Filename', value: filename, inline: true },
+      { name: '\u200b', value: '\u200b', inline: true },
+    );
+  } else {
+    embed.addFields(
+      { name: 'Resource Type', value: 'Location', inline: true },
+    );
+  }
+
+  if (personalMessage) {
+    embed.addFields({ name: 'Message', value: `> ${personalMessage}` });
+  }
+
+  embed.addFields(
+    { name: 'QURL Link', value: qurlLink },
+    { name: divider, value:
+      `\u23f3 Expires in **${expiresIn}**\n` +
+      '\ud83d\udd12 One-time access\n' +
+      `${divider}\n` +
+      '\u26a0\ufe0f Invisible before accessed\n' +
+      '\ud83d\udca5 Self-destructs after viewing\n' +
+      divider,
+    }
+  )
+  .setFooter({ text: '\ud83d\udd10 QURL (Quantum URL): Invisible by default. Visible by permission.' })
+  .setTimestamp();
+
+  return embed;
+}
+
+// --- Link status monitor ---
+function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered) {
+  // Returns a control object: call monitor.addRecipients(count) when new recipients are added
+  let currentBaseMsg = baseMsg;
+  const control = {
+    addRecipients(count) {
+      expectedCount += count;
+      trackedQurlIds = null;
+    },
+    updateBaseMsg(msg) {
+      currentBaseMsg = msg;
+    },
+    getFullMsg() {
+      return buildStatusMsg();
+    },
+  };
+  const expiryUnits = { m: 60000, h: 3600000, d: 86400000 };
+  const match = expiresIn.match(/^(\d+)([mhd])$/);
+  const expiryMs = match ? parseInt(match[1]) * expiryUnits[match[2]] : 86400000;
+  const maxMonitorMs = expiryMs + 60000;
+
+  const resourceIds = [...new Set(qurlLinks.map(l => l.resourceId))];
+  let expectedCount = delivered;
+
+  // Track status per qurl_id: { status, username }
+  const linkStatus = new Map();
+  let trackedQurlIds = null;
+  let allDone = false;
+
+  const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
+  const startTime = Date.now();
+
+  const MAX_NAMES_SHOWN = 5;
+  let expanded = false;
+
+  function truncateNames(names) {
+    if (names.length <= MAX_NAMES_SHOWN || expanded) return names.join(', ');
+    return names.slice(0, MAX_NAMES_SHOWN).join(', ') + ` +${names.length - MAX_NAMES_SHOWN} more`;
+  }
+
+  function buildStatusMsg() {
+    let opened = 0, expired = 0, pending = 0;
+    for (const s of linkStatus.values()) {
+      if (s.status === 'opened') opened++;
+      else if (s.status === 'expired') expired++;
+      else pending++;
+    }
+    let msg = currentBaseMsg;
+    if (linkStatus.size > 0) {
+      msg += '\n\n**Link Status:**';
+      if (opened > 0) msg += `\n\u2705 ${opened} of ${linkStatus.size} opened`;
+      if (expired > 0) msg += `\n\u23f0 ${expired} expired`;
+      if (pending > 0) msg += `\n\u23f3 ${pending} pending`;
+      if (pending === 0) msg += `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
+    }
+    return msg;
+  }
+
+  const timer = setInterval(async () => {
+    if (allDone || Date.now() - startTime > maxMonitorMs) {
+      clearInterval(timer);
+      const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
+      await interaction.editReply({ content: finalMsg, components: [] }).catch(() => {});
+      return;
+    }
+    try {
+      let changed = false;
+
+      // Initialize tracking on first poll — scan all resources
+      if (!trackedQurlIds) {
+        trackedQurlIds = new Set();
+        let recipientIdx = 0;
+
+        if (resourceIds.length === 1) {
+          // File send: one resource, N qurls — pick the N most recent
+          const data = await getResourceStatus(resourceIds[0]);
+          if (data && data.qurls) {
+            const sorted = [...data.qurls].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+            const recentN = sorted.slice(-expectedCount);
+            recentN.forEach((q) => {
+              trackedQurlIds.add(q.qurl_id);
+              const username = recipients[recipientIdx] ? recipients[recipientIdx].username : `user-${recipientIdx + 1}`;
+              linkStatus.set(q.qurl_id, { status: 'pending', username });
+              recipientIdx++;
+            });
+          }
+        } else {
+          // Location send: one resource per recipient — pick the most recent qurl from each
+          for (const resourceId of resourceIds) {
+            const data = await getResourceStatus(resourceId);
+            if (!data || !data.qurls || data.qurls.length === 0) continue;
+            const sorted = [...data.qurls].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const q = sorted[0]; // most recent
+            trackedQurlIds.add(q.qurl_id);
+            const username = recipients[recipientIdx] ? recipients[recipientIdx].username : `user-${recipientIdx + 1}`;
+            linkStatus.set(q.qurl_id, { status: 'pending', username });
+            recipientIdx++;
+          }
+        }
+        logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
+      }
+
+      // Poll all resources for status changes
+      for (const resourceId of resourceIds) {
+        const data = await getResourceStatus(resourceId);
+        if (!data || !data.qurls) continue;
+        for (const qurl of data.qurls) {
+          if (!trackedQurlIds.has(qurl.qurl_id)) continue;
+          const current = linkStatus.get(qurl.qurl_id);
+          if (qurl.use_count > 0 && current.status !== 'opened') {
+            linkStatus.set(qurl.qurl_id, { ...current, status: 'opened' }); changed = true;
+          } else if (qurl.status === 'expired' && current.status === 'pending') {
+            linkStatus.set(qurl.qurl_id, { ...current, status: 'expired' }); changed = true;
+          }
+        }
+      }
+      if (changed) {
+        const pending = [...linkStatus.values()].filter(s => s.status === 'pending').length;
+        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(() => {});
+        if (pending === 0) { allDone = true; clearInterval(timer); }
+      }
+    } catch (err) {
+      logger.error('Link monitor poll failed', { sendId, error: err.message });
+    }
+  }, pollInterval);
+
+  return control;
+}
+
 // --- /qurl send handler ---
 
 async function handleSend(interaction) {
   const target = interaction.options.getString('target');
-  const locationValue = interaction.options.getString('location');
-  const attachment = interaction.options.getAttachment('file');
-  const targetUser = interaction.options.getUser('user');
   const expiresIn = interaction.options.getString('expiry') || '24h';
   const rawMessage = interaction.options.getString('message');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
-
-  // At least one resource required
-  if (!attachment && !locationValue) {
-    return interaction.reply({
-      content: 'Provide at least one of: `file` (upload) or `location` (place search).',
-      ephemeral: true,
-    });
-  }
-
-  if (target === 'user' && !targetUser) {
-    return interaction.reply({
-      content: 'Select a user with the `user` option when target is "A specific user".',
-      ephemeral: true,
-    });
-  }
-
-  if (attachment && !isAllowedFileType(attachment.contentType)) {
-    return interaction.reply({
-      content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
-      ephemeral: true,
-    });
-  }
-
-  // File size limit (25 MB — matches Discord's default limit)
-  const MAX_FILE_SIZE = 25 * 1024 * 1024;
-  if (attachment && attachment.size > MAX_FILE_SIZE) {
-    return interaction.reply({
-      content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
-      ephemeral: true,
-    });
-  }
+  const commandAttachment = interaction.options.getAttachment('file_optional');
 
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
   }
-
   if (!config.QURL_API_KEY) {
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
 
-  // Resolve location URL if provided
-  let locationUrl = null;
-  let locationName = null;
+  const sendNonce = crypto.randomBytes(8).toString('hex');
 
-  if (locationValue) {
-    if (locationValue.startsWith('place_id:')) {
-      const [placeIdPart, ...nameParts] = locationValue.split('|');
-      const placeId = placeIdPart.replace('place_id:', '');
-      locationName = nameParts.join('|');
-      locationUrl = `https://www.google.com/maps/place/?q=place_id:${placeId}`;
-    } else if (isGoogleMapsURL(locationValue)) {
-      locationUrl = locationValue;
-    } else {
-      return interaction.reply({
-        content: 'Invalid location. Pick a suggestion from autocomplete or paste a Google Maps link in the `location` field.',
-        ephemeral: true,
-      });
-    }
-  }
-
-  // Build list of resources to send
-  const resources = [];
-  if (attachment) resources.push({ type: 'file', attachment });
-  if (locationUrl) resources.push({ type: 'maps', url: locationUrl, locationName });
-
-  const resourceType = resources.map(r => r.type).join('+');
-
-  // Resolve recipients
+  // --- Step 1: Collect user (if specific user target) ---
   let recipients = [];
 
   if (target === 'user') {
-    if (targetUser.bot) {
-      return interaction.reply({ content: 'Cannot send to a bot.', ephemeral: true });
+    const userSelectRow = new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(`qurl_user_${sendNonce}`)
+        .setPlaceholder('Select a user to send to')
+        .setMinValues(1)
+        .setMaxValues(1)
+    );
+
+    await interaction.reply({ content: '**Select the user to send to:**', components: [userSelectRow], ephemeral: true });
+
+    try {
+      const selectInteraction = await interaction.channel.awaitMessageComponent({
+        filter: (i) => i.customId === `qurl_user_${sendNonce}` && i.user.id === interaction.user.id,
+        componentType: ComponentType.UserSelect,
+        time: 60000,
+      });
+
+      const selectedUser = selectInteraction.users.first();
+      if (selectedUser.bot) {
+        return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
+      }
+      if (selectedUser.id === interaction.user.id) {
+        return selectInteraction.update({ content: 'Cannot send to yourself.', components: [] });
+      }
+      recipients = [selectedUser];
+      await selectInteraction.deferUpdate();
+    } catch {
+      return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
-    if (targetUser.id === interaction.user.id) {
-      return interaction.reply({ content: 'Cannot send to yourself.', ephemeral: true });
-    }
-    recipients = [targetUser];
   } else if (target === 'channel') {
-    // Fetch members to ensure cache is populated
+    await interaction.deferReply({ ephemeral: true });
     await interaction.guild.members.fetch();
     recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
-      return interaction.reply({ content: 'No other members in this channel.', ephemeral: true });
+      return interaction.editReply({ content: 'No other members in this channel.' });
     }
   } else if (target === 'voice') {
+    await interaction.deferReply({ ephemeral: true });
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
-      return interaction.reply({ content: 'You must be in a voice channel to use this target.', ephemeral: true });
+      return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
     }
     if (result.members.length === 0) {
-      return interaction.reply({ content: 'No other users in your voice channel.', ephemeral: true });
+      return interaction.editReply({ content: 'No other users in your voice channel.' });
     }
     recipients = result.members;
   }
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    return interaction.reply({
-      content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`,
-      ephemeral: true,
+    return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
+  }
+
+  // --- Step 2: Resource — auto-detect from file attachment ---
+  let attachment = null;
+  let locationUrl = null;
+  let locationName = null;
+  let resourceType = null;
+  let resourceLabel = null;
+
+  const targetLabel = target === 'user' ? recipients[0].username : target === 'channel' ? 'this channel' : 'voice channel';
+
+  if (commandAttachment) {
+    // File attached — show only Send File button
+    const fileRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`qurl_res_file_${sendNonce}`)
+        .setLabel('\ud83d\udcc1 Send File')
+        .setStyle(ButtonStyle.Primary),
+    );
+
+    await interaction.editReply({
+      content: `**Sending to ${targetLabel}** — file detected: **${commandAttachment.name}**`,
+      components: [fileRow],
+    });
+  } else {
+    // No file — show only Send Location button
+    const locRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`qurl_res_loc_${sendNonce}`)
+        .setLabel('\ud83d\uddfa\ufe0f Send Location')
+        .setStyle(ButtonStyle.Primary),
+    );
+
+    await interaction.editReply({
+      content: `**Sending to ${targetLabel}** — share a location:`,
+      components: [locRow],
     });
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  let resInteraction;
+  try {
+    resInteraction = await interaction.channel.awaitMessageComponent({
+      filter: (i) => i.user.id === interaction.user.id &&
+        (i.customId === `qurl_res_file_${sendNonce}` || i.customId === `qurl_res_loc_${sendNonce}`),
+      time: 60000,
+    });
+  } catch {
+    return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
+  }
 
-  // Create QURL links for each resource
+  if (resInteraction.customId === `qurl_res_loc_${sendNonce}`) {
+    // --- Location: show modal ---
+    resourceType = 'maps';
+
+    const modal = new ModalBuilder()
+      .setCustomId(`qurl_loc_modal_${sendNonce}`)
+      .setTitle('Share a Location');
+
+    const locationInput = new TextInputBuilder()
+      .setCustomId('location_value')
+      .setLabel('Google Maps link or place name')
+      .setPlaceholder('https://maps.app.goo.gl/... or Eiffel Tower, Paris')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
+    await resInteraction.showModal(modal);
+
+    let modalSubmit;
+    try {
+      modalSubmit = await resInteraction.awaitModalSubmit({
+        filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
+        time: 120000,
+      });
+    } catch {
+      return interaction.editReply({ content: 'Location input timed out. Send cancelled.', components: [] });
+    }
+
+    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
+    await modalSubmit.deferUpdate();
+
+    const mapsPatterns = [
+      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
+      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
+      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
+    ];
+
+    let detectedUrl = null;
+    for (const pattern of mapsPatterns) {
+      const match = locationValue.match(pattern);
+      if (match) { detectedUrl = match[0]; break; }
+    }
+
+    if (detectedUrl) {
+      locationUrl = detectedUrl;
+      const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+      const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
+      if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+      else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+    } else {
+      locationName = locationValue;
+      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
+    }
+    resourceLabel = locationName || 'Location';
+
+  } else {
+    // --- File: use attachment from slash command ---
+    resourceType = 'file';
+    attachment = commandAttachment;
+
+    if (!attachment) {
+      await resInteraction.update({
+        content: 'No file attached. Please rerun `/qurl send` with a file in the `file` option.',
+        components: [],
+      });
+      return;
+    }
+
+    await resInteraction.deferUpdate();
+
+    if (!isAllowedFileType(attachment.contentType)) {
+      return interaction.editReply({
+        content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
+        components: [],
+      });
+    }
+    const MAX_FILE_SIZE = 25 * 1024 * 1024;
+    if (attachment.size > MAX_FILE_SIZE) {
+      return interaction.editReply({
+        content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
+        components: [],
+      });
+    }
+    resourceLabel = `File (${sanitizeFilename(attachment.name)})`;
+  }
+
+  // --- Step 3: Process and send ---
+  await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] });
+
   const sendId = crypto.randomUUID();
-  // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
-  const recipientLinks = {};
+  let qurlLinks = [];
   let connectorResourceId = null;
 
   try {
-    for (const res of resources) {
-      if (res.type === 'file') {
-        const filename = sanitizeFilename(res.attachment.name);
-        const uploadResult = await uploadToConnector(res.attachment.url, filename, res.attachment.contentType);
-        connectorResourceId = uploadResult.resource_id;
+    if (resourceType === 'file') {
+      const filename = sanitizeFilename(attachment.name);
+      const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
+      connectorResourceId = uploadResult.resource_id;
 
-        const expiresAt = expiryToISO(expiresIn);
-        const allLinks = [];
-        for (let i = 0; i < recipients.length; i += 10) {
-          const batchSize = Math.min(10, recipients.length - i);
-          const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
-          allLinks.push(...minted);
-        }
+      const expiresAt = expiryToISO(expiresIn);
+      const allLinks = [];
+      for (let i = 0; i < recipients.length; i += 10) {
+        const batchSize = Math.min(10, recipients.length - i);
+        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
+        allLinks.push(...minted);
+      }
 
-        recipients.forEach((r, i) => {
-          if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
-          recipientLinks[r.id].push({
-            qurlLink: allLinks[i].qurl_link,
-            resourceId: connectorResourceId,
-            resType: 'file',
-            label: `File (${sanitizeFilename(res.attachment.name)})`,
-          });
-        });
-      } else if (res.type === 'maps') {
-        const description = res.locationName || 'Google Maps Location';
-        const results = await batchSettled(recipients, async (recipient) => {
-          const result = await createOneTimeLink(res.url, expiresIn, description);
-          return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
-        }, 5);
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: connectorResourceId,
+      }));
+    } else {
+      const description = locationName || locationUrl;
+      const results = await batchSettled(recipients, async (recipient) => {
+        const result = await createOneTimeLink(locationUrl, expiresIn, description);
+        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
+      }, 5);
 
-        for (const r of results) {
-          if (r.status === 'fulfilled') {
-            const v = r.value;
-            if (!recipientLinks[v.recipientId]) recipientLinks[v.recipientId] = [];
-            recipientLinks[v.recipientId].push({
-              qurlLink: v.qurlLink,
-              resourceId: v.resourceId,
-              resType: 'maps',
-              label: res.locationName || 'Google Maps',
-            });
-          } else {
-            logger.error('Failed to create QURL link', { error: r.reason?.message });
-          }
-        }
+      for (const r of results) {
+        if (r.status === 'fulfilled') qurlLinks.push(r.value);
+        else logger.error('Failed to create QURL link', { error: r.reason?.message });
       }
     }
   } catch (error) {
@@ -287,51 +540,38 @@ async function handleSend(interaction) {
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   }
 
-  const recipientIds = Object.keys(recipientLinks);
-  if (recipientIds.length === 0) {
+  if (qurlLinks.length === 0) {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
   // Persist ALL links to DB BEFORE sending DMs
-  for (const [rid, links] of Object.entries(recipientLinks)) {
-    for (const link of links) {
-      db.recordQURLSend(
-        sendId, interaction.user.id, rid, link.resourceId,
-        link.resType, link.qurlLink, expiresIn, interaction.channelId, target,
-      );
-    }
+  for (const link of qurlLinks) {
+    db.recordQURLSend(
+      sendId, interaction.user.id, link.recipientId, link.resourceId,
+      resourceType, link.qurlLink, expiresIn, interaction.channelId, target,
+    );
   }
 
-  // Send DMs — one message per recipient with all their links
+  // Send DMs
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
 
-  const dmResults = await batchSettled(recipients, async (recipient) => {
-    const links = recipientLinks[recipient.id];
-    if (!links || links.length === 0) return { recipientId: recipient.id, username: recipient.username, sent: false };
+  const dmResults = await batchSettled(qurlLinks, async (link) => {
+    const recipient = recipients.find(r => r.id === link.recipientId);
+    const embed = buildDeliveryEmbed({
+      senderUsername: interaction.user.username,
+      resourceType,
+      resourceLabel,
+      qurlLink: link.qurlLink,
+      expiresIn,
+      filename: attachment ? sanitizeFilename(attachment.name) : null,
+      personalMessage,
+    });
 
-    const resourceLabel = links.map(l => l.label).join(' + ');
-    const embed = new EmbedBuilder()
-      .setColor(COLORS.PRIMARY)
-      .setTitle('Resource shared with you')
-      .setDescription(
-        `**${interaction.user.username}** sent you ${links.length > 1 ? `${links.length} resources` : `a ${links[0].resType === 'file' ? 'file' : 'location'}`}` +
-        (personalMessage ? `\n\n> ${personalMessage}` : '')
-      )
-      .setFooter({ text: 'One-time links — they expire after you open them.' })
-      .setTimestamp();
-
-    for (const link of links) {
-      embed.addFields({ name: link.label, value: link.qurlLink });
-    }
-    embed.addFields({ name: 'Expires', value: expiresIn, inline: true });
-
-    const sent = await sendDM(recipient.id, { embeds: [embed] });
-    for (const link of links) {
-      db.updateSendDMStatus(sendId, recipient.id, sent ? 'sent' : 'failed');
-    }
-    return { recipientId: recipient.id, username: recipient.username, sent };
+    const sent = await sendDM(link.recipientId, { embeds: [embed] });
+    db.updateSendDMStatus(sendId, link.recipientId, sent ? 'sent' : 'failed');
+    return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
   for (const r of dmResults) {
@@ -353,19 +593,26 @@ async function handleSend(interaction) {
   );
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
-  let confirmMsg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+  const TRUNC_LIMIT = 5;
+  const successNames = recipients.filter(r => !failedUsers.includes(r.username)).map(r => r.username);
 
-  if (failed > 0) {
-    confirmMsg += `\n${failed} could not be reached: ${failedUsers.join(', ')}`;
+  function buildConfirmMsg(showAll) {
+    let msg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+    if (failed > 0) {
+      msg += `\n${failed} could not be reached: ${failedUsers.join(', ')}`;
+    }
+    if (successNames.length > 0) {
+      if (showAll || successNames.length <= TRUNC_LIMIT) {
+        msg += `\nRecipients: ${successNames.join(', ')}`;
+      } else {
+        msg += `\nRecipients: ${successNames.slice(0, TRUNC_LIMIT).join(', ')} +${successNames.length - TRUNC_LIMIT} more`;
+      }
+    }
+    return msg;
   }
 
-  if (recipients.length <= 10) {
-    const names = recipients
-      .filter(r => !failedUsers.includes(r.username))
-      .map(r => r.username)
-      .join(', ');
-    if (names) confirmMsg += `\nRecipients: ${names}`;
-  }
+  let confirmMsg = buildConfirmMsg(false);
+  const needsExpand = successNames.length > TRUNC_LIMIT;
 
   const buttonRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -377,6 +624,14 @@ async function handleSend(interaction) {
       .setLabel('Revoke All Links')
       .setStyle(ButtonStyle.Danger),
   );
+  if (needsExpand) {
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`qurl_expand_${sendId}`)
+        .setLabel('Show All')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
 
   const response = await interaction.editReply({
     content: confirmMsg,
@@ -396,14 +651,33 @@ async function handleSend(interaction) {
       time: TIMEOUTS.QURL_REVOKE_WINDOW,
     });
 
+    let showAllRecipients = false;
+
     collector.on('collect', async (btnInteraction) => {
+      if (btnInteraction.customId === `qurl_expand_${sendId}`) {
+        await btnInteraction.deferUpdate().catch(() => {});
+        showAllRecipients = !showAllRecipients;
+        confirmMsg = buildConfirmMsg(showAllRecipients);
+        monitor.updateBaseMsg(confirmMsg);
+        const fullMsg = monitor.getFullMsg();
+        const updatedRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`qurl_add_${sendId}`).setLabel('Add Recipients').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All Links').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(() => {});
+        return;
+      }
+
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
-        collector.stop('revoked');
+        await btnInteraction.deferUpdate().catch(() => {});
+        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(() => {});
         const revoked = await revokeAllLinks(sendId, interaction.user.id);
-        await btnInteraction.update({
+        await interaction.editReply({
           content: `Revoked ${revoked.success}/${revoked.total} links.`,
           components: [],
-        });
+        }).catch(() => {});
+        collector.stop('revoked');
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
         // Enforce cumulative recipient cap
@@ -453,11 +727,15 @@ async function handleSend(interaction) {
           // Count how many were added
           const addedMatch = addResult.match(/^Added (\d+)/);
           if (addedMatch) {
-            addRecipientsCount += parseInt(addedMatch[1]);
+            const addedCount = parseInt(addedMatch[1]);
+            addRecipientsCount += addedCount;
+            // Tell the monitor to track the new links
+            monitor.addRecipients(addedCount);
             const totalSent = delivered + addRecipientsCount;
-            let updatedMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
-            if (failed > 0) updatedMsg += `\n${failed} could not be reached`;
-            await interaction.editReply({ content: updatedMsg, components: [buttonRow] });
+            confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+            if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
+            monitor.updateBaseMsg(confirmMsg);
+            await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
           }
 
           setCooldown(interaction.user.id);
@@ -471,12 +749,15 @@ async function handleSend(interaction) {
     collector.on('end', (_, reason) => {
       if (reason === 'time') {
         interaction.editReply({
-          content: confirmMsg + '\n(Use `/qurl revoke` to revoke later)',
+          content: confirmMsg + '\n\n\u23f0 **Links expired** — buttons disabled.',
           components: [],
         }).catch(() => {});
       }
     });
   }
+
+  // Start link status monitor — updates the confirmation message in-place
+  const monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered);
 }
 
 // Handle adding new recipients to an existing send
@@ -570,23 +851,19 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     const links = recipientLinks[recipient.id];
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
-    const embed = new EmbedBuilder()
-      .setColor(COLORS.PRIMARY)
-      .setTitle('Resource shared with you')
-      .setDescription(
-        `**${originalInteraction.user.username}** sent you ${links.length > 1 ? `${links.length} resources` : `a ${links[0].resType === 'file' ? 'file' : 'location'}`}` +
-        (sendConfig.personal_message ? `\n\n> ${sendConfig.personal_message}` : '')
-      )
-      .setFooter({ text: 'One-time links — they expire after you open them.' })
-      .setTimestamp();
-
-    for (const link of links) {
-      embed.addFields({ name: link.label, value: link.qurlLink });
-    }
-    embed.addFields({ name: 'Expires', value: sendConfig.expires_in, inline: true });
+    const link = links[0];
+    const embed = buildDeliveryEmbed({
+      senderUsername: originalInteraction.user.username,
+      resourceType: link.resType,
+      resourceLabel: link.label,
+      qurlLink: link.qurlLink,
+      expiresIn: sendConfig.expires_in,
+      filename: sendConfig.attachment_name ? sanitizeFilename(sendConfig.attachment_name) : null,
+      personalMessage: sendConfig.personal_message,
+    });
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
-    for (const link of links) {
+    for (const l of links) {
       db.updateSendDMStatus(sendId, recipient.id, sent ? 'sent' : 'failed');
     }
     return { sent, username: recipient.username };
@@ -1279,21 +1556,8 @@ const commands = [
               .addChoices(
                 { name: 'Everyone in this channel', value: 'channel' },
                 { name: 'Users in my voice channel', value: 'voice' },
-                { name: 'A specific user (set the user option)', value: 'user' },
+                { name: 'A specific user', value: 'user' },
               ))
-          .addStringOption(opt =>
-            opt.setName('location')
-              .setDescription('Search for a place (autocomplete)')
-              .setRequired(false)
-              .setAutocomplete(true))
-          .addAttachmentOption(opt =>
-            opt.setName('file')
-              .setDescription('Upload a file to share')
-              .setRequired(false))
-          .addUserOption(opt =>
-            opt.setName('user')
-              .setDescription('Specific user to send to (when target is "A specific user")')
-              .setRequired(false))
           .addStringOption(opt =>
             opt.setName('expiry')
               .setDescription('Link expiry (default: 24h)')
@@ -1305,6 +1569,10 @@ const commands = [
                 { name: '24 hours', value: '24h' },
                 { name: '7 days', value: '7d' },
               ))
+          .addAttachmentOption(opt =>
+            opt.setName('file_optional')
+              .setDescription('Optional — attach a file here if sharing a file')
+              .setRequired(false))
           .addStringOption(opt =>
             opt.setName('message')
               .setDescription('Optional note sent alongside the link')

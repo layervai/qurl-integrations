@@ -47,4 +47,8 @@ async function deleteLink(resourceId) {
   logger.info('Revoked QURL', { resource_id: resourceId });
 }
 
-module.exports = { createOneTimeLink, deleteLink };
+async function getResourceStatus(resourceId) {
+  return qurlFetch('GET', `/qurls/${resourceId}`);
+}
+
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus };
