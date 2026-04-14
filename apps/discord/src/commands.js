@@ -312,6 +312,9 @@ async function handleSend(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
   }
+  // Set cooldown immediately to prevent concurrent request bypass
+  setCooldown(interaction.user.id);
+
   if (!config.QURL_API_KEY) {
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
@@ -603,8 +606,6 @@ async function handleSend(interaction) {
       failedUsers.push(username);
     }
   }
-
-  setCooldown(interaction.user.id);
 
   // Save send config for "Add Recipients" reuse (uses first file resource if present)
   db.saveSendConfig(
@@ -1375,7 +1376,7 @@ const commands = [
       if (!await requireAdmin(interaction)) return;
 
       const targetUser = interaction.options.getUser('user');
-      const githubUsername = interaction.options.getString('github').replace('@', '');
+      const githubUsername = interaction.options.getString('github').replace(/^@+/, '');
 
       const existingLink = db.getLinkByGithub(githubUsername);
       if (existingLink && existingLink.discord_id !== targetUser.id) {

@@ -76,7 +76,7 @@ process.on('SIGINT', () => {
 // Start everything
 async function start() {
   logger.info('Starting OpenNHP Bot...');
-  logger.info(`Version: 1.1.0`);
+  logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
   // Start web server

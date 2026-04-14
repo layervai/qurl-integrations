@@ -163,8 +163,8 @@ function getPreviousMonthString(date = new Date()) {
 function cleanupExpiredPendingLinks() {
   const result = db.prepare(`
     DELETE FROM pending_links
-    WHERE datetime(created_at) < datetime('now', '-${config.PENDING_LINK_EXPIRY_MINUTES} minutes')
-  `).run();
+    WHERE datetime(created_at) < datetime('now', '-' || ? || ' minutes')
+  `).run(config.PENDING_LINK_EXPIRY_MINUTES);
 
   if (result.changes > 0) {
     logger.info(`Cleaned up ${result.changes} expired pending links`);

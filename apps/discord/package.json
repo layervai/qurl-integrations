@@ -22,7 +22,6 @@
     "better-sqlite3": "^12.8.0",
     "discord.js": "^14.14.1",
     "express": "^5.2.1",
-    "form-data": "^4.0.5",
     "node-cron": "^4.2.1"
   },
   "devDependencies": {

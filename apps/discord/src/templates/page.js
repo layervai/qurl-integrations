@@ -6,6 +6,14 @@ function hexToColor(hex) {
   return '#' + hex.toString(16).padStart(6, '0');
 }
 
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 const TYPE_COLORS = {
   success: { bg: hexToColor(COLORS.SUCCESS), icon: hexToColor(COLORS.SUCCESS) },
   error: { bg: hexToColor(COLORS.ERROR), icon: hexToColor(COLORS.ERROR) },
@@ -110,9 +118,9 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
     <body>
       <div class="container">
         <div class="icon">${icon}</div>
-        <h1>${heading}</h1>
-        <p class="message">${message}</p>
-        ${subtext ? `<p class="subtext">${subtext}</p>` : ''}
+        <h1>${escapeHtml(heading)}</h1>
+        <p class="message">${escapeHtml(message)}</p>
+        ${subtext ? `<p class="subtext">${escapeHtml(subtext)}</p>` : ''}
         ${showDiscordButton ? `
           <a href="discord://" class="btn">Open Discord</a>
           <button onclick="window.close()" class="btn btn-secondary">Close Tab</button>

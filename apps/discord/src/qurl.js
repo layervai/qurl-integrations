@@ -17,6 +17,7 @@ async function qurlFetch(method, path, body) {
     },
   };
   if (body) opts.body = JSON.stringify(body);
+  opts.signal = AbortSignal.timeout(30000);
 
   const resp = await fetch(url, opts);
   if (!resp.ok) {

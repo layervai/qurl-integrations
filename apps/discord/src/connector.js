@@ -29,16 +29,16 @@ function connectorAuthHeaders() {
 }
 
 /**
- * Upload a file to the qurl-s3-connector by streaming from a source URL.
- * The file is piped from Discord CDN -> bot (in transit) -> connector -> S3.
- * Memory usage is O(chunk size), not O(file size).
+ * Upload a file to the qurl-s3-connector.
+ * Downloads from Discord CDN, then uploads to connector.
+ * Note: file is fully buffered in memory (up to 25MB max).
  */
 async function uploadToConnector(sourceUrl, filename, contentType) {
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
-  const downloadResponse = await fetch(sourceUrl);
+  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000) });
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }
@@ -53,6 +53,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
     method: 'POST',
     body: form,
     headers: { ...connectorAuthHeaders() },
+    signal: AbortSignal.timeout(60000),
   });
 
   if (!uploadResponse.ok) {
@@ -81,6 +82,7 @@ async function mintLinks(resourceId, expiresAt, n) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders() },
     body: JSON.stringify({ expires_at: expiresAt, n }),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!response.ok) {
