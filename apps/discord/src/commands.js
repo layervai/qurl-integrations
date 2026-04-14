@@ -165,8 +165,13 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
   const control = {
-    addRecipients(count) {
+    addRecipients(count, newResourceIds) {
       expectedCount += count;
+      if (newResourceIds) {
+        for (const rid of newResourceIds) {
+          if (!resourceIds.includes(rid)) resourceIds.push(rid);
+        }
+      }
       trackedQurlIds = null;
     },
     updateBaseMsg(msg) {
@@ -454,12 +459,16 @@ async function handleSend(interaction) {
       if (match) { detectedUrl = match[0]; break; }
     }
 
-    if (detectedUrl) {
+    if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
       locationUrl = detectedUrl;
       const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
       const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
       if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
       else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+    } else if (detectedUrl) {
+      // Regex matched but isGoogleMapsURL() rejected — treat as text search
+      locationName = locationValue;
+      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     } else {
       locationName = locationValue;
       locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
@@ -516,6 +525,11 @@ async function handleSend(interaction) {
         const batchSize = Math.min(10, recipients.length - i);
         const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
         allLinks.push(...minted);
+      }
+
+      if (allLinks.length < recipients.length) {
+        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
+        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
       qurlLinks = recipients.map((r, i) => ({
@@ -642,6 +656,11 @@ async function handleSend(interaction) {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
+  // Start link status monitor BEFORE collector so `monitor` is available in callbacks
+  const monitor = delivered > 0
+    ? monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered)
+    : null;
+
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
   if (delivered > 0) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
@@ -672,11 +691,19 @@ async function handleSend(interaction) {
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
         await btnInteraction.deferUpdate().catch(() => {});
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(() => {});
-        const revoked = await revokeAllLinks(sendId, interaction.user.id);
-        await interaction.editReply({
-          content: `Revoked ${revoked.success}/${revoked.total} links.`,
-          components: [],
-        }).catch(() => {});
+        try {
+          const revoked = await revokeAllLinks(sendId, interaction.user.id);
+          await interaction.editReply({
+            content: `Revoked ${revoked.success}/${revoked.total} links.`,
+            components: [],
+          }).catch(() => {});
+        } catch (err) {
+          logger.error('Revoke failed', { sendId, error: err.message });
+          await interaction.editReply({
+            content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+            components: [],
+          }).catch(() => {});
+        }
         collector.stop('revoked');
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
@@ -725,12 +752,12 @@ async function handleSend(interaction) {
           );
 
           // Count how many were added
-          const addedMatch = addResult.match(/^Added (\d+)/);
+          const addedMatch = addResult.msg.match(/^Added (\d+)/);
           if (addedMatch) {
             const addedCount = parseInt(addedMatch[1]);
             addRecipientsCount += addedCount;
-            // Tell the monitor to track the new links
-            monitor.addRecipients(addedCount);
+            // Tell the monitor to track the new links (including new resource IDs for location sends)
+            monitor.addRecipients(addedCount, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
             confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
             if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
@@ -739,9 +766,12 @@ async function handleSend(interaction) {
           }
 
           setCooldown(interaction.user.id);
-          await selectInteraction.editReply({ content: addResult, components: [] });
-        } catch {
-          await btnInteraction.editReply({ content: 'Selection timed out.', components: [] }).catch(() => {});
+          await selectInteraction.editReply({ content: addResult.msg, components: [] });
+        } catch (err) {
+          const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
+          const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
+          logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
+          await btnInteraction.editReply({ content: msg, components: [] }).catch(() => {});
         }
       }
     });
@@ -749,15 +779,13 @@ async function handleSend(interaction) {
     collector.on('end', (_, reason) => {
       if (reason === 'time') {
         interaction.editReply({
-          content: confirmMsg + '\n\n\u23f0 **Links expired** — buttons disabled.',
+          content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
         }).catch(() => {});
       }
     });
   }
 
-  // Start link status monitor — updates the confirmation message in-place
-  const monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered);
 }
 
 // Handle adding new recipients to an existing send
@@ -874,10 +902,12 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     else failed++;
   }
 
+  const allLinks = Object.values(recipientLinks).flat();
+  const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return msg;
+  return { msg, newResourceIds };
 }
 
 // --- /qurl revoke handler ---
@@ -1650,10 +1680,14 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply);
-    } else {
-      await interaction.reply(reply);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(reply);
+      } else {
+        await interaction.reply(reply);
+      }
+    } catch (replyError) {
+      logger.error('Failed to send error response', { error: replyError.message });
     }
   }
 }

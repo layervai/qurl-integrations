@@ -92,6 +92,9 @@ async function mintLinks(resourceId, expiresAt, n) {
   if (!result.success) {
     throw new Error('Connector mint_link returned success: false');
   }
+  if (!result.links || !Array.isArray(result.links)) {
+    throw new Error('Connector mint_link returned no links array');
+  }
 
   logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
   return result.links;
