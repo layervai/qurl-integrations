@@ -164,6 +164,8 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
 function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered) {
   // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
+  let stopped = false;
+  let timer = null; // assigned after control object
   const control = {
     addRecipients(count, newResourceIds) {
       expectedCount += count;
@@ -173,6 +175,10 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         }
       }
       trackedQurlIds = null;
+    },
+    stop() {
+      stopped = true;
+      clearInterval(timer);
     },
     updateBaseMsg(msg) {
       currentBaseMsg = msg;
@@ -223,8 +229,8 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     return msg;
   }
 
-  const timer = setInterval(async () => {
-    if (allDone || Date.now() - startTime > maxMonitorMs) {
+  timer = setInterval(async () => {
+    if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
       clearInterval(timer);
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
       await interaction.editReply({ content: finalMsg, components: [] }).catch(() => {});
@@ -704,6 +710,7 @@ async function handleSend(interaction) {
             components: [],
           }).catch(() => {});
         }
+        if (monitor) monitor.stop();
         collector.stop('revoked');
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
@@ -792,7 +799,7 @@ async function handleSend(interaction) {
 async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction) {
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
-    return 'Send configuration not found.';
+    return { msg: 'Send configuration not found.', newResourceIds: [] };
   }
 
   // Filter out bots and the sender
@@ -801,7 +808,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     .map(u => u);
 
   if (newRecipients.length === 0) {
-    return 'No valid recipients selected (bots and yourself are excluded).';
+    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [] };
   }
 
   // Create new QURL links for each resource type in the send config
@@ -811,7 +818,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   const hasLocation = sendConfig.actual_url;
 
   if (!hasFile && !hasLocation) {
-    return 'Cannot add recipients — send configuration is incomplete.';
+    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [] };
   }
 
   try {
@@ -822,6 +829,10 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         const batchSize = Math.min(10, newRecipients.length - i);
         const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
         allLinks.push(...minted);
+      }
+      if (allLinks.length < newRecipients.length) {
+        logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
@@ -852,12 +863,12 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    return 'Failed to create links for new recipients.';
+    return { msg: 'Failed to create links for new recipients.', newResourceIds: [] };
   }
 
   const recipientIds = Object.keys(recipientLinks);
   if (recipientIds.length === 0) {
-    return 'Failed to create any links.';
+    return { msg: 'Failed to create any links.', newResourceIds: [] };
   }
 
   // Persist to DB before DMs
