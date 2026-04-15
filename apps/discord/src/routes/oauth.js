@@ -24,6 +24,7 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
           'Accept': 'application/vnd.github.v3+json',
           'User-Agent': 'OpenNHP-Bot',
         },
+        signal: AbortSignal.timeout(30000),
       });
 
       if (!response.ok) {
@@ -208,6 +209,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(30000),
       body: JSON.stringify({
         client_id: config.GITHUB_CLIENT_ID,
         client_secret: config.GITHUB_CLIENT_SECRET,
@@ -236,6 +238,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         'Accept': 'application/json',
         'User-Agent': 'OpenNHP-Bot',
       },
+      signal: AbortSignal.timeout(30000),
     });
 
     const userData = await userResponse.json();
@@ -294,7 +297,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       title: 'Success',
       icon: '✅',
       heading: 'Linked Successfully!',
-      message: `Your Discord account is now linked to GitHub <span class="username">@${userData.login}</span>`,
+      message: `Your Discord account is now linked to GitHub @${userData.login}`,
       subtext: responseSubtext,
       type: 'success',
       showDiscordButton: true,

@@ -356,7 +356,12 @@ async function handleSend(interaction) {
     }
   } else if (target === 'channel') {
     await interaction.deferReply({ ephemeral: true });
-    await interaction.guild.members.fetch();
+    try {
+      await interaction.guild.members.fetch();
+    } catch (err) {
+      logger.error('Failed to fetch guild members', { error: err.message });
+      return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
+    }
     recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
       return interaction.editReply({ content: 'No other members in this channel.' });
