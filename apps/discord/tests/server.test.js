@@ -51,7 +51,7 @@ describe('Server', () => {
       const res = await request(app).get('/');
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
-      expect(res.body.service).toBe('OpenNHP Discord Bot');
+      expect(res.body.service).toBe('QURL Discord Bot');
     });
   });
 
@@ -69,19 +69,25 @@ describe('Server', () => {
     it('rejects missing state', async () => {
       const res = await request(app).get('/auth/github');
       expect(res.status).toBe(400);
-      expect(res.text).toContain('Missing State');
+      expect(res.text).toContain('Invalid Link');
     });
 
-    it('rejects invalid state', async () => {
-      db.getPendingLink.mockReturnValue(null);
+    it('rejects invalid state format', async () => {
       const res = await request(app).get('/auth/github?state=invalid');
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Invalid Link');
+    });
+
+    it('rejects valid-format state not in DB', async () => {
+      db.getPendingLink.mockReturnValue(null);
+      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Link Expired');
     });
 
     it('redirects to GitHub with valid state', async () => {
       db.getPendingLink.mockReturnValue({ discord_id: '123' });
-      const res = await request(app).get('/auth/github?state=valid-state');
+      const res = await request(app).get('/auth/github?state=aabbccddaabbccddaabbccddaabbccdd');
       expect(res.status).toBe(302);
       expect(res.headers.location).toContain('github.com/login/oauth/authorize');
     });
@@ -303,10 +309,8 @@ describe('Server', () => {
       );
     });
 
-    // TODO: Re-enable when layervai/discord#19 is fixed.
-    // Test expects milestone 10 but code correctly announces 100.
-    it.skip('handles star milestone events', async () => {
-      // When stars = 100 and no milestones announced, it announces the first one (10)
+    it('handles star milestone events', async () => {
+      // When stars = 100 and no milestones announced, it announces all milestones up to 100
       const payload = {
         action: 'created',
         repository: {
@@ -326,10 +330,10 @@ describe('Server', () => {
       expect(res.status).toBe(200);
       expect(db.hasMilestoneBeenAnnounced).toHaveBeenCalled();
       expect(db.recordMilestone).toHaveBeenCalled();
-      // Announces the first unannounced milestone (10) even when count is 100
+      // Announces the highest reached milestone
       expect(discord.postStarMilestone).toHaveBeenCalledWith(
         'OpenNHP/opennhp',
-        10,
+        100,
         'https://github.com/OpenNHP/opennhp'
       );
     });

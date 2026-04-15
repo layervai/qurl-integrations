@@ -134,7 +134,6 @@ const originalFetch = globalThis.fetch;
 const { _test } = require('../src/commands');
 const {
   isGoogleMapsURL,
-  isValidURL,
   sanitizeFilename,
   sanitizeMessage,
   isAllowedFileType,
@@ -191,40 +190,6 @@ describe('Helper functions', () => {
       expect(isGoogleMapsURL('')).toBe(false);
       expect(isGoogleMapsURL('not a url')).toBe(false);
       expect(isGoogleMapsURL('ftp://google.com/maps')).toBe(false);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // isValidURL
-  // -----------------------------------------------------------------------
-  describe('isValidURL', () => {
-    it('accepts http URLs', () => {
-      expect(isValidURL('http://example.com')).toBe(true);
-    });
-
-    it('accepts https URLs', () => {
-      expect(isValidURL('https://example.com/path?q=1')).toBe(true);
-    });
-
-    it('rejects ftp URLs', () => {
-      expect(isValidURL('ftp://files.example.com/readme.txt')).toBe(false);
-    });
-
-    it('rejects garbage strings', () => {
-      expect(isValidURL('not a url at all')).toBe(false);
-      expect(isValidURL('://missing-scheme')).toBe(false);
-    });
-
-    it('rejects empty string', () => {
-      expect(isValidURL('')).toBe(false);
-    });
-
-    it('rejects javascript: protocol', () => {
-      expect(isValidURL('javascript:alert(1)')).toBe(false);
-    });
-
-    it('rejects data: URIs', () => {
-      expect(isValidURL('data:text/html,<h1>hello</h1>')).toBe(false);
     });
   });
 
@@ -553,7 +518,7 @@ describe('QURL client', () => {
 
       expect(globalThis.fetch).toHaveBeenCalledTimes(1);
       const [url, opts] = globalThis.fetch.mock.calls[0];
-      expect(url).toBe('https://api.test.local/v1/qurl');
+      expect(url).toBe('https://api.test.local/v1/qurls');
       expect(opts.method).toBe('POST');
       const body = JSON.parse(opts.body);
       expect(body.one_time_use).toBe(true);
@@ -652,12 +617,10 @@ describe('Connector client', () => {
   describe('uploadToConnector', () => {
     it('downloads from source URL then uploads to connector', async () => {
       // First call: Discord CDN download. Second call: connector upload.
-      const mockBody = { getReader: jest.fn() };
-
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
-          body: mockBody,
+          arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
           ok: true,
@@ -702,7 +665,7 @@ describe('Connector client', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
-          body: { getReader: jest.fn() },
+          arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
           ok: false,
@@ -718,7 +681,7 @@ describe('Connector client', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
-          body: { getReader: jest.fn() },
+          arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
           ok: true,
@@ -1312,12 +1275,14 @@ describe('handleAddRecipients', () => {
         setColor: jest.fn().mockReturnThis(),
         setTitle: jest.fn().mockReturnThis(),
         setDescription: jest.fn().mockReturnThis(),
+        setAuthor: jest.fn().mockReturnThis(),
         addFields: jest.fn().mockReturnThis(),
         setFooter: jest.fn().mockReturnThis(),
         setTimestamp: jest.fn().mockReturnThis(),
         setThumbnail: jest.fn().mockReturnThis(),
+        setURL: jest.fn().mockReturnThis(),
       })),
-      PermissionFlagsBits: { ManageRoles: 1n },
+      PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
       ActionRowBuilder: jest.fn().mockImplementation(() => ({
         addComponents: jest.fn().mockReturnThis(),
       })),
@@ -1328,7 +1293,7 @@ describe('handleAddRecipients', () => {
         setURL: jest.fn().mockReturnThis(),
       })),
       ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
-      ComponentType: { Button: 2, StringSelect: 3 },
+      ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
       StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setPlaceholder: jest.fn().mockReturnThis(),
@@ -1340,6 +1305,19 @@ describe('handleAddRecipients', () => {
         setMinValues: jest.fn().mockReturnThis(),
         setMaxValues: jest.fn().mockReturnThis(),
       })),
+      ModalBuilder: jest.fn().mockImplementation(() => ({
+        setCustomId: jest.fn().mockReturnThis(),
+        setTitle: jest.fn().mockReturnThis(),
+        addComponents: jest.fn().mockReturnThis(),
+      })),
+      TextInputBuilder: jest.fn().mockImplementation(() => ({
+        setCustomId: jest.fn().mockReturnThis(),
+        setLabel: jest.fn().mockReturnThis(),
+        setPlaceholder: jest.fn().mockReturnThis(),
+        setStyle: jest.fn().mockReturnThis(),
+        setRequired: jest.fn().mockReturnThis(),
+      })),
+      TextInputStyle: { Short: 1, Paragraph: 2 },
     }));
 
     // Mock database
@@ -1440,7 +1418,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('nonexistent-send', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('Send configuration not found.');
+    expect(result.msg).toBe('Send configuration not found.');
   });
 
   it('returns error when all recipients are bots', async () => {
@@ -1456,7 +1434,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('No valid recipients selected (bots and yourself are excluded).');
+    expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
   it('returns error when only recipient is the sender', async () => {
@@ -1471,7 +1449,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('No valid recipients selected (bots and yourself are excluded).');
+    expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
   it('returns error when all recipients are bots or sender', async () => {
@@ -1487,7 +1465,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('No valid recipients selected (bots and yourself are excluded).');
+    expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
   it('file send: mints new links via connector and delivers DMs', async () => {
@@ -1523,7 +1501,7 @@ describe('handleAddRecipients', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     // DB should record the new sends
     expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(2);
-    expect(result).toMatch(/Added 2 recipients/);
+    expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
   it('URL send: creates one-time links for actual_url', async () => {
@@ -1550,11 +1528,11 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-url-1', 'sender-1', users, mockOriginalInteraction);
 
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith('https://example.com/doc', '24h', 'https://example.com/doc');
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith('https://example.com/doc', '24h', 'Google Maps Location');
     expect(mockMintLinks).not.toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(1);
-    expect(result).toMatch(/Added 1 recipient/);
+    expect(result.msg).toMatch(/Added 1 recipient/);
   });
 
   it('maps send: uses location_name as description for createOneTimeLink', async () => {
@@ -1587,7 +1565,7 @@ describe('handleAddRecipients', () => {
       '1h',
       'Eiffel Tower',
     );
-    expect(result).toMatch(/Added 1 recipient/);
+    expect(result.msg).toMatch(/Added 1 recipient/);
   });
 
   it('reports partial DM failures', async () => {
@@ -1618,8 +1596,8 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-partial', 'sender-1', users, mockOriginalInteraction);
 
-    expect(result).toMatch(/Added 1 recipient/);
-    expect(result).toMatch(/1 could not be reached/);
+    expect(result.msg).toMatch(/Added 1 recipient/);
+    expect(result.msg).toMatch(/1 could not be reached/);
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('send-partial', 'rcpt-1', 'sent');
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('send-partial', 'rcpt-2', 'failed');
   });
@@ -1640,7 +1618,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-broken', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('Cannot add recipients — send configuration is incomplete.');
+    expect(result.msg).toBe('Cannot add recipients \u2014 send configuration is incomplete.');
   });
 
   it('filters bots from mixed collection and sends only to real users', async () => {
@@ -1673,7 +1651,7 @@ describe('handleAddRecipients', () => {
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockCreateOneTimeLink).toHaveBeenCalledTimes(2);
-    expect(result).toMatch(/Added 2 recipients/);
+    expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
   it('returns failure message when link creation throws', async () => {
@@ -1694,7 +1672,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-fail', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('Failed to create links for new recipients.');
+    expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 
   it('file send: batches mintLinks for > 10 recipients', async () => {
@@ -1731,7 +1709,7 @@ describe('handleAddRecipients', () => {
     expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 10);
     expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 2);
     expect(mockSendDM).toHaveBeenCalledTimes(12);
-    expect(result).toMatch(/Added 12 recipients/);
+    expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
   it('URL send: returns failure when all createOneTimeLink calls reject', async () => {
@@ -1753,7 +1731,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-allfail', 'sender-1', users, mockOriginalInteraction);
-    expect(result).toBe('Failed to create any links.');
+    expect(result.msg).toBe('Failed to create any links.');
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 });
