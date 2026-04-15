@@ -36,6 +36,13 @@ app.get('/health', (req, res) => {
 
 // Metrics endpoint
 app.get('/metrics', (req, res) => {
+  // Require bearer token if METRICS_TOKEN is configured (production)
+  if (process.env.METRICS_TOKEN) {
+    const auth = req.headers.authorization || '';
+    if (auth !== `Bearer ${process.env.METRICS_TOKEN}`) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
   const stats = db.getStats();
   res.json({
     status: 'ok',

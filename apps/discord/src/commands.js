@@ -93,6 +93,10 @@ function setCooldown(userId) {
   sendCooldowns.set(userId, Date.now());
 }
 
+function clearCooldown(userId) {
+  sendCooldowns.delete(userId);
+}
+
 async function batchSettled(items, fn, batchSize = 5) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
@@ -537,6 +541,7 @@ async function handleSend(interaction) {
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
+        clearCooldown(interaction.user.id);
         return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
@@ -559,10 +564,12 @@ async function handleSend(interaction) {
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
+    clearCooldown(interaction.user.id); // allow retry on failure
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   }
 
   if (qurlLinks.length === 0) {
+    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
@@ -1012,7 +1019,7 @@ setInterval(() => {
   for (const [k, v] of autocompleteLimits) {
     if (now - v.windowStart > AUTOCOMPLETE_WINDOW_MS * 2) autocompleteLimits.delete(k);
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 async function handleLocationAutocomplete(interaction, query) {
   if (!query || query.length < 2) {
