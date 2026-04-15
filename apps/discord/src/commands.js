@@ -50,14 +50,7 @@ function isGoogleMapsURL(url) {
   }
 }
 
-function isValidURL(str) {
-  try {
-    const url = new URL(str);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
+
 
 function sanitizeFilename(name) {
   return name
@@ -1433,6 +1426,11 @@ const commands = [
           errors.push(`Invalid format: "${pair}"`);
           continue;
         }
+        if (!/^\d{17,20}$/.test(discordId)) {
+          failed++;
+          errors.push(`Invalid Discord ID: "${discordId}"`);
+          continue;
+        }
 
         try {
           const existing = db.getLinkByGithub(github);
@@ -1495,6 +1493,9 @@ const commands = [
       if (!await requireAdmin(interaction)) return;
 
       const repo = interaction.options.getString('repo');
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+        return interaction.reply({ content: 'Invalid repo format. Use `owner/repo` (e.g., `OpenNHP/opennhp`).', ephemeral: true });
+      }
       const stars = interaction.options.getInteger('stars');
 
       let backfilled = 0;
@@ -1716,7 +1717,6 @@ module.exports = {
   // Exported for testing
   _test: {
     isGoogleMapsURL,
-    isValidURL,
     sanitizeFilename,
     sanitizeMessage,
     isAllowedFileType,

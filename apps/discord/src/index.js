@@ -6,13 +6,19 @@ const { startServer } = require('./server');
 const db = require('./database');
 
 // Validate required config
-const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET'];
+const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID'];
 const missing = required.filter(key => !config[key]);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
   missing.forEach(key => logger.error(`  - ${key}`));
   logger.error('See .env.example for required variables.');
+  process.exit(1);
+}
+
+// Validate numeric config values
+if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINUTES <= 0) {
+  logger.error('PENDING_LINK_EXPIRY_MINUTES must be a positive integer');
   process.exit(1);
 }
 

@@ -101,8 +101,18 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
   }
 }
 
-// Simple in-memory rate limiter
+// Simple in-memory rate limiter with periodic eviction
 const rateLimitStore = new Map();
+
+// Evict stale entries every 5 minutes to prevent unbounded growth
+setInterval(() => {
+  const cutoff = Date.now() - config.RATE_LIMIT_WINDOW_MS * 2;
+  for (const [ip, requests] of rateLimitStore) {
+    const recent = requests.filter(t => t > cutoff);
+    if (recent.length === 0) rateLimitStore.delete(ip);
+    else rateLimitStore.set(ip, recent);
+  }
+}, 5 * 60 * 1000).unref();
 
 function rateLimit(req, res, next) {
   const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
