@@ -11,7 +11,8 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 const TYPE_COLORS = {
@@ -118,20 +119,14 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
     </head>
     <body>
       <div class="container">
-        <div class="icon">${icon}</div>
+        <div class="icon">${escapeHtml(icon)}</div>
         <h1>${escapeHtml(heading)}</h1>
         <p class="message">${escapeHtml(message)}</p>
         ${subtext ? `<p class="subtext">${escapeHtml(subtext)}</p>` : ''}
         ${showDiscordButton ? `
           <a href="discord://" class="btn">Open Discord</a>
-          <button onclick="window.close()" class="btn btn-secondary">Close Tab</button>
         ` : ''}
       </div>
-      ${showDiscordButton ? `
-        <script>
-          setTimeout(() => { window.close(); }, 5000);
-        </script>
-      ` : ''}
     </body>
     </html>
   `;

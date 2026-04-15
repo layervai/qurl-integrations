@@ -1,3 +1,9 @@
+// Safe int parser: handles NaN and falsy-zero correctly
+function intEnv(key, defaultVal) {
+  const v = parseInt(process.env[key], 10);
+  return isNaN(v) ? defaultVal : v;
+}
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -12,9 +18,9 @@ module.exports = {
   CHAMPION_ROLE_NAME: process.env.CHAMPION_ROLE_NAME || 'Champion',
 
   // Role thresholds (lowered for realistic contribution cadence)
-  ACTIVE_CONTRIBUTOR_THRESHOLD: parseInt(process.env.ACTIVE_CONTRIBUTOR_THRESHOLD) || 3,
-  CORE_CONTRIBUTOR_THRESHOLD: parseInt(process.env.CORE_CONTRIBUTOR_THRESHOLD) || 10,
-  CHAMPION_THRESHOLD: parseInt(process.env.CHAMPION_THRESHOLD) || 25,
+  ACTIVE_CONTRIBUTOR_THRESHOLD: intEnv('ACTIVE_CONTRIBUTOR_THRESHOLD', 3),
+  CORE_CONTRIBUTOR_THRESHOLD: intEnv('CORE_CONTRIBUTOR_THRESHOLD', 10),
+  CHAMPION_THRESHOLD: intEnv('CHAMPION_THRESHOLD', 25),
 
   // Channel names
   GENERAL_CHANNEL_NAME: process.env.GENERAL_CHANNEL_NAME || 'general',
@@ -36,11 +42,11 @@ module.exports = {
   BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
 
   // Rate limiting
-  RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000, // 1 minute
-  RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 30,
+  RATE_LIMIT_WINDOW_MS: intEnv('RATE_LIMIT_WINDOW_MS', 60000), // 1 minute
+  RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
 
   // OAuth link expiry (in minutes)
-  PENDING_LINK_EXPIRY_MINUTES: parseInt(process.env.PENDING_LINK_EXPIRY_MINUTES) || 30,
+  PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 30),
 
   // Database
   DATABASE_PATH: process.env.DATABASE_PATH || './data/opennhp-bot.db',
@@ -68,6 +74,6 @@ module.exports = {
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
   // /qurl send limits
-  QURL_SEND_MAX_RECIPIENTS: parseInt(process.env.QURL_SEND_MAX_RECIPIENTS) || 50,
-  QURL_SEND_COOLDOWN_MS: parseInt(process.env.QURL_SEND_COOLDOWN_MS) || 30000,
+  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50),
+  QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000),
 };

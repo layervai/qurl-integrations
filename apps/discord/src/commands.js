@@ -63,7 +63,8 @@ function sanitizeFilename(name) {
 function sanitizeMessage(msg) {
   return msg
     .replace(/@(everyone|here)/gi, '@\u200b$1')
-    .replace(/<@[!&]?\d+>/g, '[mention]');
+    .replace(/<@[!&]?\d+>/g, '[mention]')
+    .slice(0, 500); // cap to fit Discord embed field limit (1024) with room for formatting
 }
 
 const ALLOWED_FILE_TYPES = [
