@@ -141,12 +141,12 @@ function rateLimit(req, res, next) {
 router.get('/github', rateLimit, (req, res) => {
   const { state } = req.query;
 
-  if (!state) {
+  if (!state || !/^[a-f0-9]{32}$/.test(state)) {
     return res.status(400).send(renderPage({
-      title: 'Missing State',
+      title: 'Invalid Link',
       icon: '❌',
-      heading: 'Missing State Parameter',
-      message: 'This link is invalid. Please use the <strong>/link</strong> command in Discord to get a valid link.',
+      heading: 'Invalid Link',
+      message: 'This link is invalid. Please use the /link command in Discord to get a valid link.',
       type: 'error',
     }));
   }
@@ -157,7 +157,7 @@ router.get('/github', rateLimit, (req, res) => {
       title: 'Link Expired',
       icon: '⏰',
       heading: 'Link Expired',
-      message: 'This link has expired or was already used. Please use the <strong>/link</strong> command in Discord to get a new link.',
+      message: 'This link has expired or was already used. Please use the /link command in Discord to get a new link.',
       subtext: `Links expire after ${config.PENDING_LINK_EXPIRY_MINUTES} minutes for security.`,
       type: 'warning',
     }));
@@ -189,12 +189,12 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
-  if (!code || !state) {
+  if (!code || !state || !/^[a-f0-9]{32}$/.test(state)) {
     return res.status(400).send(renderPage({
       title: 'Invalid Request',
       icon: '❌',
       heading: 'Invalid Request',
-      message: 'Missing required parameters. Please use <strong>/link</strong> in Discord to try again.',
+      message: 'Missing required parameters. Please use /link in Discord to try again.',
       type: 'error',
     }));
   }
@@ -205,7 +205,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       title: 'Link Expired',
       icon: '⏰',
       heading: 'Session Expired',
-      message: 'Your session has expired. Please use <strong>/link</strong> in Discord to start over.',
+      message: 'Your session has expired. Please use /link in Discord to start over.',
       subtext: `Sessions expire after ${config.PENDING_LINK_EXPIRY_MINUTES} minutes for security.`,
       type: 'warning',
     }));

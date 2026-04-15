@@ -9,6 +9,9 @@ const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
 
+// Trust proxy headers (ECS behind ALB/CloudFront) for correct req.ip in rate limiting
+app.set('trust proxy', 1);
+
 // Parse JSON for webhooks with raw body for signature verification
 app.use('/webhook', express.json({
   verify: (req, res, buf) => {

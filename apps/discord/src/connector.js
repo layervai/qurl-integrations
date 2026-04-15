@@ -78,6 +78,9 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
  * Mint one-time links for an uploaded resource via the connector.
  */
 async function mintLinks(resourceId, expiresAt, n) {
+  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
+    throw new Error(`Invalid resource ID format: ${resourceId}`);
+  }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders() },

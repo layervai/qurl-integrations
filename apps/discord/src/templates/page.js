@@ -27,7 +27,7 @@ const TYPE_COLORS = {
  * @param {string} options.title - Page title
  * @param {string} options.icon - Emoji icon
  * @param {string} options.heading - Main heading
- * @param {string} options.message - Message body (can contain HTML)
+ * @param {string} options.message - Message body (HTML-escaped at render time)
  * @param {string} [options.subtext] - Optional subtext
  * @param {'success'|'error'|'warning'|'info'} [options.type='info'] - Page type for coloring
  * @param {boolean} [options.showDiscordButton=false] - Show "Open Discord" button
@@ -41,6 +41,7 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
       <title>${escapeHtml(title)} - QURL</title>
       <style>
         * { box-sizing: border-box; }
