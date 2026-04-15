@@ -266,7 +266,12 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     let dmMessage = `✅ **GitHub account linked!**\n\nYou're now linked to GitHub **@${userData.login}**.`;
 
     // Wait for historical check to complete for better UX
-    const historical = await historicalCheck;
+    let historical = { count: 0, newBadges: [] };
+    try {
+      historical = await historicalCheck;
+    } catch (err) {
+      logger.error('Historical contributions check failed', { error: err.message, discordId: pending.discord_id });
+    }
 
     if (historical.count > 0) {
       dmMessage += `\n\n🎉 **Found ${historical.count} past contribution(s)!**\nYou've been credited for your previous merged PRs to OpenNHP repos.`;

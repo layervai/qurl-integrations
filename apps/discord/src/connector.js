@@ -38,7 +38,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
-  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000) });
+  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }

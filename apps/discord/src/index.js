@@ -45,15 +45,14 @@ async function gracefulShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
+  // Force exit after 10s if shutdown hangs
+  setTimeout(() => { logger.error('Shutdown timed out, forcing exit'); process.exit(1); }, 10000).unref();
+
   logger.info('Graceful shutdown initiated...');
 
   try {
-    // Close Discord client
     discordShutdown();
-
-    // Close database
     db.close();
-
     logger.info('Shutdown complete');
   } catch (error) {
     logger.error('Error during shutdown', { error: error.message });

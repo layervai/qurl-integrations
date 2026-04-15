@@ -3,7 +3,7 @@ module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
-  GUILD_ID: process.env.GUILD_ID || '1453469901972046079',
+  GUILD_ID: process.env.GUILD_ID,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',

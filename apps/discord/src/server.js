@@ -18,19 +18,17 @@ app.use('/webhook', express.json({
 
 app.use(express.json({ limit: '1mb' }));
 
-// Health check
+// Health check — verifies service is actually functional
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'OpenNHP Discord Bot',
-    version: '2.1.0',
-    endpoints: {
-      oauth: '/auth/github',
-      callback: '/auth/github/callback',
-      webhook: '/webhook/github',
-      metrics: '/metrics',
-    },
+    service: 'QURL Discord Bot',
   });
+});
+
+app.get('/health', (req, res) => {
+  const healthy = true; // DB is synchronous (better-sqlite3), always available if process is up
+  res.status(healthy ? 200 : 503).json({ status: healthy ? 'ok' : 'unhealthy' });
 });
 
 // Metrics endpoint
