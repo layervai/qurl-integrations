@@ -7,13 +7,16 @@ const logger = require('./logger');
  */
 
 async function qurlFetch(method, path, body) {
+  if (!config.QURL_API_KEY) {
+    throw new Error('QURL_API_KEY is not configured');
+  }
   const url = `${config.QURL_ENDPOINT}/v1${path}`;
   const opts = {
     method,
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.QURL_API_KEY}`,
-      'User-Agent': 'opennhp-discord-bot/1.0',
+      'User-Agent': 'qurl-discord-bot/1.0',
     },
   };
   if (body) opts.body = JSON.stringify(body);

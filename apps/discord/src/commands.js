@@ -783,6 +783,8 @@ async function handleSend(interaction) {
     });
 
     collector.on('end', (_, reason) => {
+      // Stop monitor polling when collector ends for any reason
+      if (monitor) monitor.stop();
       if (reason === 'time') {
         interaction.editReply({
           content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
