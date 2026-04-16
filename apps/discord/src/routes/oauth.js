@@ -115,7 +115,7 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref();
 
 function rateLimit(req, res, next) {
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
   const now = Date.now();
   const windowStart = now - config.RATE_LIMIT_WINDOW_MS;
 

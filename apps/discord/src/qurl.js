@@ -46,12 +46,20 @@ async function createOneTimeLink(targetUrl, expiresIn, description) {
   return result;
 }
 
+function validateResourceId(resourceId) {
+  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
+    throw new Error(`Invalid resource ID format: ${resourceId}`);
+  }
+}
+
 async function deleteLink(resourceId) {
+  validateResourceId(resourceId);
   await qurlFetch('DELETE', `/qurls/${resourceId}`);
   logger.info('Revoked QURL', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId) {
+  validateResourceId(resourceId);
   return qurlFetch('GET', `/qurls/${resourceId}`);
 }
 
