@@ -365,19 +365,23 @@ async function handleSend(interaction) {
       await interaction.guild.members.fetch();
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
     }
     recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
     }
   } else if (target === 'voice') {
     await interaction.deferReply({ ephemeral: true });
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
     }
     if (result.members.length === 0) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other users in your voice channel.' });
     }
     recipients = result.members;
@@ -791,8 +795,8 @@ async function handleSend(interaction) {
             sendId, interaction.user.id, selectInteraction.users, interaction,
           );
 
-          // Count how many were added — update monitor if new recipients were added
-          const addedCount = addResult.newResourceIds?.length || 0;
+          // Count how many were added — update monitor if new recipients were delivered
+          const addedCount = addResult.delivered || 0;
           if (addedCount > 0) {
             addRecipientsCount += addedCount;
             monitor.addRecipients(addedCount, addResult.newResourceIds);
@@ -951,7 +955,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newResourceIds };
+  return { msg, newResourceIds, delivered };
 }
 
 // --- /qurl revoke handler ---
