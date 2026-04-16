@@ -148,21 +148,30 @@ client.once('ready', async () => {
 
 // Handle role/channel deletion - refresh cache
 client.on('roleDelete', async (role) => {
-  if (Object.values(roles).some(r => r?.id === role.id)) {
-    logger.warn('A tracked role was deleted, refreshing cache');
-    await refreshCache();
+  try {
+    if (Object.values(roles).some(r => r?.id === role.id)) {
+      logger.warn('A tracked role was deleted, refreshing cache');
+      await refreshCache();
+    }
+  } catch (error) {
+    logger.error('Error handling roleDelete', { error: error.message });
   }
 });
 
 client.on('channelDelete', async (channel) => {
-  if (Object.values(channels).some(c => c?.id === channel.id)) {
-    logger.warn('A tracked channel was deleted, refreshing cache');
-    await refreshCache();
+  try {
+    if (Object.values(channels).some(c => c?.id === channel.id)) {
+      logger.warn('A tracked channel was deleted, refreshing cache');
+      await refreshCache();
+    }
+  } catch (error) {
+    logger.error('Error handling channelDelete', { error: error.message });
   }
 });
 
 // Welcome new members
 client.on('guildMemberAdd', async (member) => {
+  try {
   if (member.guild.id !== config.GUILD_ID) return;
 
   logger.info(`New member joined: ${member.user.tag}`);
@@ -215,6 +224,9 @@ client.on('guildMemberAdd', async (member) => {
     } catch (error) {
       logger.warn(`Failed to send welcome DM to ${member.user.tag}`, { error: error.message });
     }
+  }
+  } catch (error) {
+    logger.error('Error handling guildMemberAdd', { error: error.message });
   }
 });
 

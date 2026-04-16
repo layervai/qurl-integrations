@@ -316,6 +316,7 @@ async function handleSend(interaction) {
   setCooldown(interaction.user.id);
 
   if (!config.QURL_API_KEY) {
+    clearCooldown(interaction.user.id);
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
 
@@ -344,14 +345,17 @@ async function handleSend(interaction) {
 
       const selectedUser = selectInteraction.users.first();
       if (selectedUser.bot) {
+        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
       }
       if (selectedUser.id === interaction.user.id) {
+        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to yourself.', components: [] });
       }
       recipients = [selectedUser];
       await selectInteraction.deferUpdate();
     } catch {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
   } else if (target === 'channel') {
@@ -427,6 +431,7 @@ async function handleSend(interaction) {
       time: 60000,
     });
   } catch {
+    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
   }
 
@@ -455,37 +460,49 @@ async function handleSend(interaction) {
         time: 120000,
       });
     } catch {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'Location input timed out. Send cancelled.', components: [] });
     }
 
-    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
+    const rawLocationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
     await modalSubmit.deferUpdate();
 
-    const mapsPatterns = [
-      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
-      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
-      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
-    ];
-
-    let detectedUrl = null;
-    for (const pattern of mapsPatterns) {
-      const match = locationValue.match(pattern);
-      if (match) { detectedUrl = match[0]; break; }
+    // Handle place_id: prefix from autocomplete selections
+    const placeIdMatch = rawLocationValue.match(/^place_id:([^|]+)\|(.+)$/);
+    if (placeIdMatch) {
+      locationUrl = `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeIdMatch[1])}`;
+      locationName = placeIdMatch[2];
     }
 
-    if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
-      locationUrl = detectedUrl;
-      const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
-      const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-      if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
-      else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
-    } else if (detectedUrl) {
-      // Regex matched but isGoogleMapsURL() rejected — treat as text search
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-    } else {
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
+    const locationValue = placeIdMatch ? null : rawLocationValue; // skip pattern matching if place_id handled
+
+    if (locationValue) {
+      const mapsPatterns = [
+        /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
+        /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
+        /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
+      ];
+
+      let detectedUrl = null;
+      for (const pattern of mapsPatterns) {
+        const match = locationValue.match(pattern);
+        if (match) { detectedUrl = match[0]; break; }
+      }
+
+      if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
+        locationUrl = detectedUrl;
+        const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+        const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
+        if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+        else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+      } else if (detectedUrl) {
+        // Regex matched but isGoogleMapsURL() rejected — treat as text search
+        locationName = locationValue;
+        locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
+      } else {
+        locationName = locationValue;
+        locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
+      }
     }
     resourceLabel = locationName || 'Location';
 
@@ -495,6 +512,7 @@ async function handleSend(interaction) {
     attachment = commandAttachment;
 
     if (!attachment) {
+      clearCooldown(interaction.user.id);
       await resInteraction.update({
         content: 'No file attached. Please rerun `/qurl send` with a file in the `file` option.',
         components: [],
@@ -505,6 +523,7 @@ async function handleSend(interaction) {
     await resInteraction.deferUpdate();
 
     if (!isAllowedFileType(attachment.contentType)) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
         components: [],
@@ -512,6 +531,7 @@ async function handleSend(interaction) {
     }
     const MAX_FILE_SIZE = 25 * 1024 * 1024;
     if (attachment.size > MAX_FILE_SIZE) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
         components: [],
@@ -767,12 +787,10 @@ async function handleSend(interaction) {
             sendId, interaction.user.id, selectInteraction.users, interaction,
           );
 
-          // Count how many were added
-          const addedMatch = addResult.msg.match(/^Added (\d+)/);
-          if (addedMatch) {
-            const addedCount = parseInt(addedMatch[1]);
+          // Count how many were added — update monitor if new recipients were added
+          const addedCount = addResult.newResourceIds?.length || 0;
+          if (addedCount > 0) {
             addRecipientsCount += addedCount;
-            // Tell the monitor to track the new links (including new resource IDs for location sends)
             monitor.addRecipients(addedCount, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
             confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
@@ -782,7 +800,7 @@ async function handleSend(interaction) {
           }
 
           setCooldown(interaction.user.id);
-          await selectInteraction.editReply({ content: addResult.msg, components: [] });
+          await btnInteraction.editReply({ content: addResult.msg, components: [] });
         } catch (err) {
           const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
           const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;

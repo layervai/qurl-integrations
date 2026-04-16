@@ -34,6 +34,11 @@ app.get('/health', (req, res) => {
   res.status(healthy ? 200 : 503).json({ status: healthy ? 'ok' : 'unhealthy' });
 });
 
+// Warn on startup if METRICS_TOKEN is not set in production
+if (process.env.NODE_ENV === 'production' && !process.env.METRICS_TOKEN) {
+  logger.warn('METRICS_TOKEN is not set — /metrics endpoint is unauthenticated in production');
+}
+
 // Metrics endpoint
 app.get('/metrics', (req, res) => {
   // Require bearer token if METRICS_TOKEN is configured (production)

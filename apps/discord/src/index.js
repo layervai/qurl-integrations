@@ -24,7 +24,11 @@ if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINU
 
 // Register commands when ready
 client.once('ready', async () => {
-  await registerCommands(client);
+  try {
+    await registerCommands(client);
+  } catch (error) {
+    logger.error('Failed to register commands', { error: error.message });
+  }
 });
 
 // Handle interactions
