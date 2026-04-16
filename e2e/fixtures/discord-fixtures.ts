@@ -1,20 +1,19 @@
 /**
  * Custom Playwright fixtures for QURL Discord bot E2E tests.
  *
- * Discord stores auth tokens in IndexedDB, which storageState doesn't capture.
- * So instead of reusing cached state, we log in fresh per-context and keep
- * the context alive for the duration of the test.
+ * Uses launchPersistentContext with user-data-dir to preserve Discord's
+ * IndexedDB auth tokens across global-setup and test runs.
  */
 
-import { test as base, Page, BrowserContext } from '@playwright/test';
+import { test as base, Page, BrowserContext, chromium } from '@playwright/test';
 import { DiscordChannelPage } from '../pages/discord-channel.page';
 import { DiscordDmPage } from '../pages/discord-dm.page';
 import { DiscordEmbedPage } from '../pages/discord-embed.page';
 import { DiscordModalPage } from '../pages/discord-modal.page';
 import { DiscordVoicePage } from '../pages/discord-voice.page';
 import { DiscordUserPickerPage } from '../pages/discord-user-picker.page';
-import { DiscordLoginPage } from '../pages/discord-login.page';
 import { loadEnv, E2EEnv } from '../helpers/env';
+import { profileDir } from '../helpers/auth-state';
 
 export interface DiscordFixtures {
   env: E2EEnv;
@@ -35,40 +34,35 @@ export const test = base.extend<DiscordFixtures>({
     use(loadEnv());
   },
 
-  senderContext: async ({ browser, env }, use) => {
-    const context = await browser.newContext({
+  senderContext: async ({}, use) => {
+    const context = await chromium.launchPersistentContext(profileDir('sender'), {
+      headless: !!process.env.CI || process.env.HEADLESS === 'true',
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
+      args: ['--no-sandbox', '--disable-gpu'],
     });
-    // Log in within this context
-    const page = await context.newPage();
-    const login = new DiscordLoginPage(page);
-    await login.login(env.DISCORD_SENDER_EMAIL, env.DISCORD_SENDER_PASSWORD, env.DISCORD_SENDER_TOTP_SECRET);
-    await page.close();
     await use(context);
     await context.close();
   },
 
-  recipientContext: async ({ browser, env }, use) => {
-    const context = await browser.newContext({
+  recipientContext: async ({}, use) => {
+    const context = await chromium.launchPersistentContext(profileDir('recipient'), {
+      headless: !!process.env.CI || process.env.HEADLESS === 'true',
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
+      args: ['--no-sandbox', '--disable-gpu'],
     });
-    const page = await context.newPage();
-    const login = new DiscordLoginPage(page);
-    await login.login(env.DISCORD_RECIPIENT_EMAIL, env.DISCORD_RECIPIENT_PASSWORD, env.DISCORD_RECIPIENT_TOTP_SECRET);
-    await page.close();
     await use(context);
     await context.close();
   },
 
   senderPage: async ({ senderContext }, use) => {
-    const page = await senderContext.newPage();
+    const page = senderContext.pages()[0] || await senderContext.newPage();
     await use(page);
   },
 
   recipientPage: async ({ recipientContext }, use) => {
-    const page = await recipientContext.newPage();
+    const page = recipientContext.pages()[0] || await recipientContext.newPage();
     await use(page);
   },
 

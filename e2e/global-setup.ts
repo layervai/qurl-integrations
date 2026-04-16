@@ -1,16 +1,13 @@
 /**
- * Global setup — runs before all tests.
- * Logs in both sender and recipient accounts, saves storageState.
+ * Global setup — logs in both Discord accounts using persistent browser
+ * profiles (user-data-dir). This preserves IndexedDB where Discord stores
+ * auth tokens, unlike storageState which only captures cookies + localStorage.
  */
 
 import { chromium, FullConfig } from '@playwright/test';
 import { DiscordLoginPage } from './pages/discord-login.page';
 import { loadEnv } from './helpers/env';
-import {
-  authFilePath,
-  ensureAuthDir,
-  isAuthStateFresh,
-} from './helpers/auth-state';
+import { profileDir, isProfileFresh, ensureAuthDir } from './helpers/auth-state';
 
 async function globalSetup(_config: FullConfig): Promise<void> {
   const env = loadEnv();
@@ -32,41 +29,35 @@ async function globalSetup(_config: FullConfig): Promise<void> {
   ];
 
   for (const account of accounts) {
-    const stateFile = authFilePath(account.name);
+    const userDataDir = profileDir(account.name);
 
-    if (isAuthStateFresh(account.name)) {
-      console.log(`[global-setup] Auth state for ${account.name} is fresh, skipping login`);
+    if (isProfileFresh(account.name)) {
+      console.log(`[global-setup] Profile for ${account.name} is fresh, skipping login`);
       continue;
     }
 
     console.log(`[global-setup] Logging in ${account.name}...`);
 
-    const browser = await chromium.launch({
-      headless: !!process.env.CI || !!process.env.HEADLESS,
-    });
-
-    const context = await browser.newContext({
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: !!process.env.CI || process.env.HEADLESS === 'true',
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
+      args: ['--no-sandbox', '--disable-gpu'],
     });
 
-    const page = await context.newPage();
+    const page = context.pages()[0] || await context.newPage();
     const loginPage = new DiscordLoginPage(page);
 
     await loginPage.login(account.email, account.password, account.totp);
 
-    // Verify login succeeded
     const loggedIn = await loginPage.isLoggedIn();
     if (!loggedIn) {
+      await context.close();
       throw new Error(`Failed to log in as ${account.name} (${account.email})`);
     }
 
-    // Save storage state
-    await context.storageState({ path: stateFile });
-    console.log(`[global-setup] Saved auth state for ${account.name} -> ${stateFile}`);
-
+    console.log(`[global-setup] Logged in ${account.name}, profile saved to ${userDataDir}`);
     await context.close();
-    await browser.close();
   }
 }
 

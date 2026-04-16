@@ -1,53 +1,48 @@
 /**
- * Auth state persistence — save/restore browser storageState so we
- * don't re-login on every test run.
+ * Auth state management using persistent browser profiles (user-data-dir).
+ * Discord stores auth tokens in IndexedDB, which Playwright's storageState
+ * doesn't capture. Persistent profiles preserve everything.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 
 const AUTH_DIR = path.resolve(__dirname, '..', 'auth');
-const MAX_AGE_MS = 30 * 60 * 1_000; // 30 minutes
+const PROFILE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+export function profileDir(account: 'sender' | 'recipient'): string {
+  return path.join(AUTH_DIR, `${account}-profile`);
+}
 
 export function authFilePath(account: 'sender' | 'recipient'): string {
   return path.join(AUTH_DIR, `${account}.json`);
 }
 
-export function ensureAuthDir(): void {
-  if (!fs.existsSync(AUTH_DIR)) {
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
-  }
-}
-
-/**
- * Returns true if the stored auth state exists and is younger than MAX_AGE_MS.
- */
-export function isAuthStateFresh(account: 'sender' | 'recipient'): boolean {
-  const filePath = authFilePath(account);
-  if (!fs.existsSync(filePath)) return false;
-
+export function isProfileFresh(account: 'sender' | 'recipient'): boolean {
+  const dir = profileDir(account);
   try {
-    const stat = fs.statSync(filePath);
-    const ageMs = Date.now() - stat.mtimeMs;
-    return ageMs < MAX_AGE_MS;
+    const stat = fs.statSync(dir);
+    return stat.isDirectory() && (Date.now() - stat.mtimeMs < PROFILE_TTL_MS);
   } catch {
     return false;
   }
 }
 
-/**
- * Remove stored auth state, forcing a fresh login on next run.
- */
+export function isAuthStateFresh(account: 'sender' | 'recipient'): boolean {
+  return isProfileFresh(account);
+}
+
+export function ensureAuthDir(): void {
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+}
+
 export function invalidateAuthState(account: 'sender' | 'recipient'): void {
-  const filePath = authFilePath(account);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
+  const dir = profileDir(account);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
-/**
- * Remove all stored auth states.
- */
 export function invalidateAllAuthStates(): void {
   invalidateAuthState('sender');
   invalidateAuthState('recipient');
