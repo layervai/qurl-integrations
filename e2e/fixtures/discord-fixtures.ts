@@ -1,5 +1,9 @@
 /**
  * Custom Playwright fixtures for QURL Discord bot E2E tests.
+ *
+ * Discord stores auth tokens in IndexedDB, which storageState doesn't capture.
+ * So instead of reusing cached state, we log in fresh per-context and keep
+ * the context alive for the duration of the test.
  */
 
 import { test as base, Page, BrowserContext } from '@playwright/test';
@@ -9,31 +13,20 @@ import { DiscordEmbedPage } from '../pages/discord-embed.page';
 import { DiscordModalPage } from '../pages/discord-modal.page';
 import { DiscordVoicePage } from '../pages/discord-voice.page';
 import { DiscordUserPickerPage } from '../pages/discord-user-picker.page';
+import { DiscordLoginPage } from '../pages/discord-login.page';
 import { loadEnv, E2EEnv } from '../helpers/env';
-import { authFilePath } from '../helpers/auth-state';
 
 export interface DiscordFixtures {
-  /** Environment config */
   env: E2EEnv;
-  /** Sender's page (logged in) */
   senderPage: Page;
-  /** Recipient's page (logged in) */
   recipientPage: Page;
-  /** Sender's browser context */
   senderContext: BrowserContext;
-  /** Recipient's browser context */
   recipientContext: BrowserContext;
-  /** Channel POM for sender */
   channelPage: DiscordChannelPage;
-  /** DM POM for recipient */
   dmPage: DiscordDmPage;
-  /** Modal POM */
   modalPage: DiscordModalPage;
-  /** Embed POM factory */
   embedPage: DiscordEmbedPage;
-  /** Voice POM */
   voicePage: DiscordVoicePage;
-  /** User picker POM */
   userPickerPage: DiscordUserPickerPage;
 }
 
@@ -42,22 +35,29 @@ export const test = base.extend<DiscordFixtures>({
     use(loadEnv());
   },
 
-  senderContext: async ({ browser }, use) => {
+  senderContext: async ({ browser, env }, use) => {
     const context = await browser.newContext({
-      storageState: authFilePath('sender'),
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
     });
+    // Log in within this context
+    const page = await context.newPage();
+    const login = new DiscordLoginPage(page);
+    await login.login(env.DISCORD_SENDER_EMAIL, env.DISCORD_SENDER_PASSWORD, env.DISCORD_SENDER_TOTP_SECRET);
+    await page.close();
     await use(context);
     await context.close();
   },
 
-  recipientContext: async ({ browser }, use) => {
+  recipientContext: async ({ browser, env }, use) => {
     const context = await browser.newContext({
-      storageState: authFilePath('recipient'),
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
     });
+    const page = await context.newPage();
+    const login = new DiscordLoginPage(page);
+    await login.login(env.DISCORD_RECIPIENT_EMAIL, env.DISCORD_RECIPIENT_PASSWORD, env.DISCORD_RECIPIENT_TOTP_SECRET);
+    await page.close();
     await use(context);
     await context.close();
   },
@@ -85,7 +85,6 @@ export const test = base.extend<DiscordFixtures>({
   },
 
   embedPage: async ({ senderPage }, use) => {
-    // Factory-like: creates embed page from the last embed in the channel
     const channelPage = new DiscordChannelPage(senderPage);
     const embedLocator = channelPage.getLastEmbed();
     await use(new DiscordEmbedPage(embedLocator));
