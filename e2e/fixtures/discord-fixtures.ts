@@ -26,8 +26,8 @@ async function getBrowser(): Promise<Browser> {
   if (!sharedBrowser || !sharedBrowser.isConnected()) {
     const headless = !!process.env.CI || process.env.HEADLESS === 'true';
     sharedBrowser = await chromium.launch({
-      headless,
-      args: ['--no-sandbox', '--disable-gpu'],
+      headless: false, // Discord blocks headless browsers; use headful on Xvfb
+      args: ['--no-sandbox', '--disable-gpu', '--disable-blink-features=AutomationControlled'],
     });
   }
   return sharedBrowser;

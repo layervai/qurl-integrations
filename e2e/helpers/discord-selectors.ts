@@ -12,7 +12,7 @@ export const DiscordSelectors = {
     totpInput: 'input[placeholder="6-digit authentication code"]',
     totpSubmit: 'button[type="submit"]',
     captchaFrame: 'iframe[src*="captcha"]',
-    appLoaded: '[class*="app-"]',
+    appLoaded: 'nav[aria-label*="Servers"], [class*="guilds-"], [data-list-id="guildsnav"]',
   },
 
   // Channel / server
