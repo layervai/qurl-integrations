@@ -49,6 +49,7 @@ process.on('uncaughtException', error => {
 });
 
 // Graceful shutdown
+let httpServer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -61,6 +62,7 @@ async function gracefulShutdown(code = 0) {
   logger.info('Graceful shutdown initiated...');
 
   try {
+    if (httpServer) httpServer.close();
     discordShutdown();
     db.close();
     logger.info('Shutdown complete');
@@ -89,7 +91,7 @@ async function start() {
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
   // Start web server
-  startServer();
+  httpServer = startServer();
 
   // Login to Discord
   await client.login(config.DISCORD_TOKEN);

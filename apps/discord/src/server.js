@@ -1,4 +1,5 @@
 // Express server for OAuth and webhooks
+const crypto = require('crypto');
 const express = require('express');
 const config = require('./config');
 const db = require('./database');
@@ -44,7 +45,10 @@ app.get('/metrics', (req, res) => {
   // Require bearer token if METRICS_TOKEN is configured (production)
   if (process.env.METRICS_TOKEN) {
     const auth = req.headers.authorization || '';
-    if (auth !== `Bearer ${process.env.METRICS_TOKEN}`) {
+    const expected = `Bearer ${process.env.METRICS_TOKEN}`;
+    const authBuf = Buffer.from(auth);
+    const expectedBuf = Buffer.from(expected);
+    if (authBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(authBuf, expectedBuf)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }
@@ -75,12 +79,13 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
-  app.listen(config.PORT, () => {
+  const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
     logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
     logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
   });
+  return server;
 }
 
 module.exports = { app, startServer };

@@ -297,6 +297,23 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
     await sendDM(pending.discord_id, dmMessage);
 
+    // Revoke the OAuth token — we only needed it for the historical check
+    try {
+      await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Basic ${Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64')}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'OpenNHP-Bot',
+        },
+        body: JSON.stringify({ access_token: tokenData.access_token }),
+        signal: AbortSignal.timeout(10000),
+      });
+      logger.debug('Revoked GitHub OAuth token', { discordId: pending.discord_id });
+    } catch (err) {
+      logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
+    }
+
     // Build response message
     let responseSubtext = 'When your PRs are merged, you\'ll automatically receive the @Contributor role!';
     if (historical.count > 0) {
