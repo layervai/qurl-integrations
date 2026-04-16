@@ -1,12 +1,16 @@
 /**
  * Custom Playwright fixtures for QURL Discord bot E2E tests.
  *
- * Uses launchPersistentContext to preserve Discord's IndexedDB auth tokens.
- * Each fixture launches its own persistent context, checks if already logged
- * in, and logs in if needed.
+ * Discord auth tokens exist only in-memory during a browser session — they
+ * don't persist to disk (not in cookies, localStorage, or IndexedDB in a
+ * way that survives context restart). So we must login and run tests in
+ * the SAME browser context without closing it.
+ *
+ * Each test gets its own sender + recipient page from long-lived contexts
+ * that were authenticated at the start of the test run.
  */
 
-import { test as base, Page, BrowserContext, chromium } from '@playwright/test';
+import { test as base, Page, BrowserContext, chromium, Browser } from '@playwright/test';
 import { DiscordChannelPage } from '../pages/discord-channel.page';
 import { DiscordDmPage } from '../pages/discord-dm.page';
 import { DiscordEmbedPage } from '../pages/discord-embed.page';
@@ -15,7 +19,71 @@ import { DiscordVoicePage } from '../pages/discord-voice.page';
 import { DiscordUserPickerPage } from '../pages/discord-user-picker.page';
 import { DiscordLoginPage } from '../pages/discord-login.page';
 import { loadEnv, E2EEnv } from '../helpers/env';
-import { profileDir, ensureAuthDir } from '../helpers/auth-state';
+
+// Shared state across all tests in the worker (workers=1, so these are singletons)
+let sharedBrowser: Browser | null = null;
+let senderCtx: BrowserContext | null = null;
+let recipientCtx: BrowserContext | null = null;
+let senderLoggedIn = false;
+let recipientLoggedIn = false;
+
+async function getOrCreateBrowser(): Promise<Browser> {
+  if (!sharedBrowser) {
+    const headless = !!process.env.CI || process.env.HEADLESS === 'true';
+    sharedBrowser = await chromium.launch({
+      headless,
+      args: ['--no-sandbox', '--disable-gpu'],
+    });
+  }
+  return sharedBrowser;
+}
+
+async function getAuthenticatedContext(
+  browser: Browser,
+  role: 'sender' | 'recipient',
+  email: string,
+  password: string,
+  totp?: string,
+): Promise<BrowserContext> {
+  const isLoggedIn = role === 'sender' ? senderLoggedIn : recipientLoggedIn;
+  const existingCtx = role === 'sender' ? senderCtx : recipientCtx;
+
+  if (existingCtx && isLoggedIn) {
+    return existingCtx;
+  }
+
+  const context = existingCtx || await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    locale: 'en-US',
+  });
+
+  // Login
+  const page = await context.newPage();
+  const loginPage = new DiscordLoginPage(page);
+
+  console.log(`[fixture] Logging in ${role}...`);
+  await loginPage.login(email, password, totp);
+
+  const loggedIn = await loginPage.isLoggedIn();
+  if (!loggedIn) {
+    throw new Error(`Failed to log in as ${role} (${email})`);
+  }
+  console.log(`[fixture] ${role} logged in successfully`);
+
+  // Store for reuse
+  if (role === 'sender') {
+    senderCtx = context;
+    senderLoggedIn = true;
+  } else {
+    recipientCtx = context;
+    recipientLoggedIn = true;
+  }
+
+  // Close the login page (tests will create their own pages)
+  await page.close();
+
+  return context;
+}
 
 export interface DiscordFixtures {
   env: E2EEnv;
@@ -31,85 +99,45 @@ export interface DiscordFixtures {
   userPickerPage: DiscordUserPickerPage;
 }
 
-async function launchDiscordContext(
-  account: 'sender' | 'recipient',
-  email: string,
-  password: string,
-  totp?: string,
-): Promise<BrowserContext> {
-  ensureAuthDir();
-  const headless = !!process.env.CI || process.env.HEADLESS === 'true';
-  const context = await chromium.launchPersistentContext(profileDir(account), {
-    headless,
-    viewport: { width: 1440, height: 900 },
-    locale: 'en-US',
-    args: ['--no-sandbox', '--disable-gpu'],
-  });
-
-  // Check if already logged in by navigating to Discord and waiting for
-  // either the app shell (logged in) or the login form (not logged in).
-  const page = context.pages()[0] || await context.newPage();
-  await page.goto('https://discord.com/channels/@me', { waitUntil: 'domcontentloaded', timeout: 30_000 });
-
-  // Race: app shell loads (logged in) vs login form appears (need auth)
-  const result = await Promise.race([
-    page.waitForSelector('nav[aria-label*="Servers"], [class*="guilds"]', { timeout: 30_000 })
-      .then(() => 'logged_in' as const),
-    page.waitForSelector('input[name="email"]', { timeout: 30_000 })
-      .then(() => 'login_page' as const),
-  ]).catch(() => 'login_page' as const);
-
-  if (result === 'login_page') {
-    console.log(`[fixture] ${account} not logged in, authenticating...`);
-    const loginPage = new DiscordLoginPage(page);
-    await loginPage.login(email, password, totp);
-    const loggedIn = await loginPage.isLoggedIn();
-    if (!loggedIn) {
-      throw new Error(`Failed to log in as ${account} (${email})`);
-    }
-    console.log(`[fixture] ${account} logged in successfully`);
-  } else {
-    console.log(`[fixture] ${account} already logged in (app shell detected)`);
-  }
-
-  return context;
-}
-
 export const test = base.extend<DiscordFixtures>({
   env: async ({}, use) => {
     use(loadEnv());
   },
 
   senderContext: async ({ env }, use) => {
-    const context = await launchDiscordContext(
-      'sender',
+    const browser = await getOrCreateBrowser();
+    const context = await getAuthenticatedContext(
+      browser, 'sender',
       env.DISCORD_SENDER_EMAIL,
       env.DISCORD_SENDER_PASSWORD,
       env.DISCORD_SENDER_TOTP_SECRET,
     );
     await use(context);
-    await context.close();
+    // Don't close — reused across tests
   },
 
   recipientContext: async ({ env }, use) => {
-    const context = await launchDiscordContext(
-      'recipient',
+    const browser = await getOrCreateBrowser();
+    const context = await getAuthenticatedContext(
+      browser, 'recipient',
       env.DISCORD_RECIPIENT_EMAIL,
       env.DISCORD_RECIPIENT_PASSWORD,
       env.DISCORD_RECIPIENT_TOTP_SECRET,
     );
     await use(context);
-    await context.close();
+    // Don't close — reused across tests
   },
 
   senderPage: async ({ senderContext }, use) => {
-    const page = senderContext.pages()[0] || await senderContext.newPage();
+    const page = await senderContext.newPage();
     await use(page);
+    await page.close();
   },
 
   recipientPage: async ({ recipientContext }, use) => {
-    const page = recipientContext.pages()[0] || await recipientContext.newPage();
+    const page = await recipientContext.newPage();
     await use(page);
+    await page.close();
   },
 
   channelPage: async ({ senderPage }, use) => {
