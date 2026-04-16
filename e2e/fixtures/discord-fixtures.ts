@@ -46,13 +46,20 @@ async function launchDiscordContext(
     args: ['--no-sandbox', '--disable-gpu'],
   });
 
-  // Check if already logged in by navigating to Discord
+  // Check if already logged in by navigating to Discord and waiting for
+  // either the app shell (logged in) or the login form (not logged in).
   const page = context.pages()[0] || await context.newPage();
   await page.goto('https://discord.com/channels/@me', { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
-  // If we land on login page, we need to authenticate
-  const isLoginPage = await page.locator('input[name="email"]').isVisible({ timeout: 5_000 }).catch(() => false);
-  if (isLoginPage) {
+  // Race: app shell loads (logged in) vs login form appears (need auth)
+  const result = await Promise.race([
+    page.waitForSelector('nav[aria-label*="Servers"], [class*="guilds"]', { timeout: 30_000 })
+      .then(() => 'logged_in' as const),
+    page.waitForSelector('input[name="email"]', { timeout: 30_000 })
+      .then(() => 'login_page' as const),
+  ]).catch(() => 'login_page' as const);
+
+  if (result === 'login_page') {
     console.log(`[fixture] ${account} not logged in, authenticating...`);
     const loginPage = new DiscordLoginPage(page);
     await loginPage.login(email, password, totp);
@@ -62,7 +69,7 @@ async function launchDiscordContext(
     }
     console.log(`[fixture] ${account} logged in successfully`);
   } else {
-    console.log(`[fixture] ${account} already logged in`);
+    console.log(`[fixture] ${account} already logged in (app shell detected)`);
   }
 
   return context;
