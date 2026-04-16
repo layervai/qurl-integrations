@@ -19,6 +19,12 @@ concurrency:
   group: e2e-discord-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  id-token: write
+  contents: read
+  pages: write
+  checks: write
+
 env:
   DISCORD_SENDER_EMAIL: ${{ secrets.E2E_DISCORD_SENDER_EMAIL }}
   DISCORD_SENDER_PASSWORD: ${{ secrets.E2E_DISCORD_SENDER_PASSWORD }}
@@ -126,22 +132,28 @@ jobs:
           path: |
             e2e/playwright-report/
             e2e/test-results/
-          retention-days: 7
+          retention-days: 14
 
   report:
-    name: Merge Reports
+    name: Publish Results
     needs: test
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download all test results
+        uses: actions/download-artifact@v4
         with:
           pattern: test-results-*
           path: all-results
           merge-multiple: true
 
+      # --- JUnit report in GitHub Checks ---
       - name: Publish Test Report
         if: always()
         uses: dorny/test-reporter@v1
@@ -150,3 +162,85 @@ jobs:
           path: all-results/**/junit.xml
           reporter: java-junit
           fail-on-error: false
+
+      # --- CloudWatch Metrics ---
+      - name: Configure AWS credentials
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.E2E_AWS_ROLE_ARN }}
+          aws-region: us-east-2
+        continue-on-error: true
+
+      - name: Install e2e deps
+        if: always()
+        run: cd e2e && npm ci
+
+      - name: Publish CloudWatch metrics
+        if: always()
+        run: cd e2e && npx ts-node scripts/publish-metrics.ts ../all-results ${{ github.run_id }}
+        continue-on-error: true
+
+      # --- GitHub Pages (Playwright HTML report) ---
+      - name: Merge Playwright HTML reports
+        if: always()
+        run: |
+          mkdir -p gh-pages-report
+          # Copy all HTML reports; last one wins for shared files, which is fine
+          for dir in all-results/*/; do
+            if [ -d "$dir" ]; then
+              cp -r "$dir"* gh-pages-report/ 2>/dev/null || true
+            fi
+          done
+          # Add an index with run metadata
+          cat > gh-pages-report/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head><title>QURL E2E Test Results</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+            h1 { color: #1a1a1a; }
+            .meta { color: #666; font-size: 14px; margin-bottom: 24px; }
+            .groups { list-style: none; padding: 0; }
+            .groups li { padding: 12px 16px; border: 1px solid #e1e4e8; border-radius: 6px; margin-bottom: 8px; }
+            .groups a { color: #0366d6; text-decoration: none; font-weight: 500; }
+            .groups a:hover { text-decoration: underline; }
+          </style>
+          </head>
+          <body>
+            <h1>QURL Discord Bot — E2E Test Results</h1>
+            <div class="meta">
+              Run: <strong>#${{ github.run_id }}</strong> |
+              Branch: <code>${{ github.ref_name }}</code> |
+              Commit: <code>${{ github.sha }}</code> |
+              Date: $(date -u +"%Y-%m-%d %H:%M UTC")
+            </div>
+            <h2>Test Groups</h2>
+            <ul class="groups">
+              <li><a href="a-happy-path/">A — Happy Path Matrix</a></li>
+              <li><a href="b-files/">B — File Dimension</a></li>
+              <li><a href="c-locations/">C — Location Dimension</a></li>
+              <li><a href="d-recipients/">D — Recipient Dimension</a></li>
+              <li><a href="e-expiry/">E — Expiry</a></li>
+              <li><a href="f-messages/">F — Message Sanitization</a></li>
+              <li><a href="g-negative/">G — Negative Paths</a></li>
+              <li><a href="h-lifecycle/">H — Link Lifecycle</a></li>
+              <li><a href="i-concurrency/">I — Concurrency</a></li>
+              <li><a href="j-ephemeral/">J — Ephemeral Visibility</a></li>
+              <li><a href="k-autocomplete/">K — Autocomplete</a></li>
+              <li><a href="l-management-window/">L — Management Window</a></li>
+            </ul>
+            <p><a href="https://github.com/layervai/qurl-integrations/actions/runs/${{ github.run_id }}">View full run on GitHub Actions</a></p>
+          </body>
+          </html>
+          EOF
+
+      - name: Deploy to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: gh-pages-report
+          destination_dir: e2e
+          keep_files: false
+          commit_message: "e2e: update test report from run #${{ github.run_id }}"
