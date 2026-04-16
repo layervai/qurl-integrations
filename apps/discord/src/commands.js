@@ -222,7 +222,9 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       if (opened > 0) msg += `\n\u2705 ${opened} of ${linkStatus.size} opened`;
       if (expired > 0) msg += `\n\u23f0 ${expired} expired`;
       if (pending > 0) msg += `\n\u23f3 ${pending} pending`;
-      if (pending === 0) msg += `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
+      if (pending === 0) msg += linkStatus.size === 1
+        ? `\n\n\u2714\ufe0f **Link resolved**`
+        : `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
     }
     return msg;
   }
