@@ -354,7 +354,8 @@ async function handleSend(interaction) {
       }
       recipients = [selectedUser];
       await selectInteraction.deferUpdate();
-    } catch {
+    } catch (err) {
+      logger.debug('User select timed out or dismissed', { error: err?.message });
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
@@ -383,6 +384,7 @@ async function handleSend(interaction) {
   }
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
   }
 
@@ -430,7 +432,8 @@ async function handleSend(interaction) {
         (i.customId === `qurl_res_file_${sendNonce}` || i.customId === `qurl_res_loc_${sendNonce}`),
       time: 60000,
     });
-  } catch {
+  } catch (err) {
+    logger.debug('Resource selection timed out or dismissed', { error: err?.message });
     clearCooldown(interaction.user.id);
     return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
   }
@@ -459,7 +462,8 @@ async function handleSend(interaction) {
         filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
         time: 120000,
       });
-    } catch {
+    } catch (err) {
+      logger.debug('Location modal timed out or dismissed', { error: err?.message });
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'Location input timed out. Send cancelled.', components: [] });
     }

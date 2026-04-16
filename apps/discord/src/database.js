@@ -99,6 +99,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_sender ON qurl_sends(sender_discord_id);
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_send_id ON qurl_sends(send_id);
+  CREATE INDEX IF NOT EXISTS idx_qurl_sends_created ON qurl_sends(created_at);
 
   -- QURL send configuration (one row per send, used for "Add Recipients")
   CREATE TABLE IF NOT EXISTS qurl_send_configs (
