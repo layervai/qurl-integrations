@@ -1,8 +1,9 @@
 /**
  * Custom Playwright fixtures for QURL Discord bot E2E tests.
  *
- * Uses launchPersistentContext with user-data-dir to preserve Discord's
- * IndexedDB auth tokens across global-setup and test runs.
+ * Uses launchPersistentContext to preserve Discord's IndexedDB auth tokens.
+ * Each fixture launches its own persistent context, checks if already logged
+ * in, and logs in if needed.
  */
 
 import { test as base, Page, BrowserContext, chromium } from '@playwright/test';
@@ -12,8 +13,9 @@ import { DiscordEmbedPage } from '../pages/discord-embed.page';
 import { DiscordModalPage } from '../pages/discord-modal.page';
 import { DiscordVoicePage } from '../pages/discord-voice.page';
 import { DiscordUserPickerPage } from '../pages/discord-user-picker.page';
+import { DiscordLoginPage } from '../pages/discord-login.page';
 import { loadEnv, E2EEnv } from '../helpers/env';
-import { profileDir } from '../helpers/auth-state';
+import { profileDir, ensureAuthDir } from '../helpers/auth-state';
 
 export interface DiscordFixtures {
   env: E2EEnv;
@@ -29,29 +31,66 @@ export interface DiscordFixtures {
   userPickerPage: DiscordUserPickerPage;
 }
 
+async function launchDiscordContext(
+  account: 'sender' | 'recipient',
+  email: string,
+  password: string,
+  totp?: string,
+): Promise<BrowserContext> {
+  ensureAuthDir();
+  const headless = !!process.env.CI || process.env.HEADLESS === 'true';
+  const context = await chromium.launchPersistentContext(profileDir(account), {
+    headless,
+    viewport: { width: 1440, height: 900 },
+    locale: 'en-US',
+    args: ['--no-sandbox', '--disable-gpu'],
+  });
+
+  // Check if already logged in by navigating to Discord
+  const page = context.pages()[0] || await context.newPage();
+  await page.goto('https://discord.com/channels/@me', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+
+  // If we land on login page, we need to authenticate
+  const isLoginPage = await page.locator('input[name="email"]').isVisible({ timeout: 5_000 }).catch(() => false);
+  if (isLoginPage) {
+    console.log(`[fixture] ${account} not logged in, authenticating...`);
+    const loginPage = new DiscordLoginPage(page);
+    await loginPage.login(email, password, totp);
+    const loggedIn = await loginPage.isLoggedIn();
+    if (!loggedIn) {
+      throw new Error(`Failed to log in as ${account} (${email})`);
+    }
+    console.log(`[fixture] ${account} logged in successfully`);
+  } else {
+    console.log(`[fixture] ${account} already logged in`);
+  }
+
+  return context;
+}
+
 export const test = base.extend<DiscordFixtures>({
   env: async ({}, use) => {
     use(loadEnv());
   },
 
-  senderContext: async ({}, use) => {
-    const context = await chromium.launchPersistentContext(profileDir('sender'), {
-      headless: !!process.env.CI || process.env.HEADLESS === 'true',
-      viewport: { width: 1440, height: 900 },
-      locale: 'en-US',
-      args: ['--no-sandbox', '--disable-gpu'],
-    });
+  senderContext: async ({ env }, use) => {
+    const context = await launchDiscordContext(
+      'sender',
+      env.DISCORD_SENDER_EMAIL,
+      env.DISCORD_SENDER_PASSWORD,
+      env.DISCORD_SENDER_TOTP_SECRET,
+    );
     await use(context);
     await context.close();
   },
 
-  recipientContext: async ({}, use) => {
-    const context = await chromium.launchPersistentContext(profileDir('recipient'), {
-      headless: !!process.env.CI || process.env.HEADLESS === 'true',
-      viewport: { width: 1440, height: 900 },
-      locale: 'en-US',
-      args: ['--no-sandbox', '--disable-gpu'],
-    });
+  recipientContext: async ({ env }, use) => {
+    const context = await launchDiscordContext(
+      'recipient',
+      env.DISCORD_RECIPIENT_EMAIL,
+      env.DISCORD_RECIPIENT_PASSWORD,
+      env.DISCORD_RECIPIENT_TOTP_SECRET,
+    );
     await use(context);
     await context.close();
   },

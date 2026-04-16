@@ -17,7 +17,8 @@ export default defineConfig({
     ['json', { outputFile: 'playwright-report/results.json' }],
     ['junit', { outputFile: 'playwright-report/junit.xml' }],
   ],
-  globalSetup: require.resolve('./global-setup.ts'),
+  // globalSetup disabled — login handled in fixtures via launchPersistentContext
+  // globalSetup: require.resolve('./global-setup.ts'),
   use: {
     baseURL: 'https://discord.com',
     headless: CI ? true : !!process.env.HEADLESS,
