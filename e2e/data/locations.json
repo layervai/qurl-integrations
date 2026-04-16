@@ -1,0 +1,17 @@
+[
+  { "id": "https-basic", "url": "https://example.com", "label": "Basic HTTPS", "type": "https" },
+  { "id": "https-path", "url": "https://example.com/path/to/resource", "label": "HTTPS with path", "type": "https" },
+  { "id": "https-query", "url": "https://example.com/search?q=hello&page=1", "label": "HTTPS with query params", "type": "https" },
+  { "id": "https-fragment", "url": "https://example.com/page#section-2", "label": "HTTPS with fragment", "type": "https" },
+  { "id": "https-port", "url": "https://example.com:8443/api", "label": "HTTPS with port", "type": "https" },
+  { "id": "http-basic", "url": "http://example.com", "label": "Plain HTTP", "type": "http" },
+  { "id": "https-long", "url": "https://example.com/very/long/path/that/goes/on/and/on/for/a/while/to/test/length/limits", "label": "Long URL path", "type": "https" },
+  { "id": "https-encoded", "url": "https://example.com/path%20with%20spaces?key=val%26ue", "label": "URL-encoded characters", "type": "https" },
+  { "id": "https-unicode", "url": "https://example.com/\u00fcnicode/p\u00e4th", "label": "Unicode in path", "type": "https" },
+  { "id": "https-subdomain", "url": "https://api.v2.staging.example.com/health", "label": "Deep subdomain", "type": "https" },
+  { "id": "s3-basic", "url": "s3://my-bucket/path/file.txt", "label": "S3 URI", "type": "s3" },
+  { "id": "s3-nested", "url": "s3://my-bucket/deep/nested/path/to/object.json", "label": "S3 nested path", "type": "s3" },
+  { "id": "gcs-basic", "url": "gs://my-gcs-bucket/file.csv", "label": "GCS URI", "type": "gcs" },
+  { "id": "https-ip", "url": "https://192.168.1.1:9090/dashboard", "label": "IP address URL", "type": "https" },
+  { "id": "https-trailing-slash", "url": "https://example.com/api/v1/", "label": "Trailing slash", "type": "https" }
+]

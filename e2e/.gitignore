@@ -1,0 +1,10 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+auth/*.json
+data/files/*
+!data/files/.gitkeep
+.env
+.env.local
+*.log

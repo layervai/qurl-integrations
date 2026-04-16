@@ -1,0 +1,23 @@
+{
+  "name": "qurl-discord-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end tests for the QURL Discord bot using Playwright against Discord web.",
+  "scripts": {
+    "setup": "ts-node scripts/setup.ts",
+    "generate-matrix": "ts-node scripts/generate-matrix.ts",
+    "generate-files": "bash data/generate-test-files.sh",
+    "test": "playwright test",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:group": "playwright test tests/groups/$GROUP",
+    "report": "playwright show-report",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "@types/node": "^20.10.0",
+    "otplib": "^12.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

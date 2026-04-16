@@ -1,0 +1,17 @@
+[
+  { "id": "txt-small", "extension": "txt", "mimeType": "text/plain", "sizeBytes": 1024, "label": "Small text file (1 KB)" },
+  { "id": "txt-medium", "extension": "txt", "mimeType": "text/plain", "sizeBytes": 102400, "label": "Medium text file (100 KB)" },
+  { "id": "pdf-small", "extension": "pdf", "mimeType": "application/pdf", "sizeBytes": 51200, "label": "Small PDF (50 KB)" },
+  { "id": "json-small", "extension": "json", "mimeType": "application/json", "sizeBytes": 2048, "label": "Small JSON (2 KB)" },
+  { "id": "csv-medium", "extension": "csv", "mimeType": "text/csv", "sizeBytes": 204800, "label": "Medium CSV (200 KB)" },
+  { "id": "png-small", "extension": "png", "mimeType": "image/png", "sizeBytes": 10240, "label": "Small PNG (10 KB)" },
+  { "id": "jpg-medium", "extension": "jpg", "mimeType": "image/jpeg", "sizeBytes": 512000, "label": "Medium JPEG (500 KB)" },
+  { "id": "gif-small", "extension": "gif", "mimeType": "image/gif", "sizeBytes": 5120, "label": "Small GIF (5 KB)" },
+  { "id": "zip-medium", "extension": "zip", "mimeType": "application/zip", "sizeBytes": 1048576, "label": "Medium ZIP (1 MB)" },
+  { "id": "mp4-large", "extension": "mp4", "mimeType": "video/mp4", "sizeBytes": 5242880, "label": "Large MP4 (5 MB)" },
+  { "id": "xml-small", "extension": "xml", "mimeType": "application/xml", "sizeBytes": 4096, "label": "Small XML (4 KB)" },
+  { "id": "html-small", "extension": "html", "mimeType": "text/html", "sizeBytes": 8192, "label": "Small HTML (8 KB)" },
+  { "id": "bin-medium", "extension": "bin", "mimeType": "application/octet-stream", "sizeBytes": 262144, "label": "Medium binary (256 KB)" },
+  { "id": "svg-small", "extension": "svg", "mimeType": "image/svg+xml", "sizeBytes": 3072, "label": "Small SVG (3 KB)" },
+  { "id": "txt-large", "extension": "txt", "mimeType": "text/plain", "sizeBytes": 8388608, "label": "Large text file (8 MB)" }
+]

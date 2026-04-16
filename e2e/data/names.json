@@ -1,0 +1,17 @@
+[
+  { "id": "simple", "filename": "report.pdf", "message": "Here is the quarterly report." },
+  { "id": "spaces", "filename": "my document.docx", "message": "Document with spaces in name." },
+  { "id": "special-chars", "filename": "file-v2.1_final (copy).txt", "message": "Special characters in filename." },
+  { "id": "long-name", "filename": "this-is-a-very-long-filename-that-tests-the-limits-of-what-discord-can-handle.pdf", "message": "Testing long filenames." },
+  { "id": "unicode-name", "filename": "\u00fcbersicht-b\u00e9richt.pdf", "message": "Unicode characters in filename." },
+  { "id": "no-extension", "filename": "README", "message": "File without extension." },
+  { "id": "double-ext", "filename": "archive.tar.gz", "message": "Double file extension." },
+  { "id": "dotfile", "filename": ".env.example", "message": "Dotfile pattern." },
+  { "id": "emoji-msg", "filename": "notes.txt", "message": "Check this out! Great stuff here." },
+  { "id": "long-msg", "filename": "data.csv", "message": "This is a longer message that includes multiple sentences. It tests how the bot handles paragraph-length messages in the send flow. The message should be preserved exactly as typed." },
+  { "id": "empty-msg", "filename": "photo.jpg", "message": "" },
+  { "id": "url-in-msg", "filename": "link.txt", "message": "See also: https://example.com/related" },
+  { "id": "markdown-msg", "filename": "styled.md", "message": "**Bold** and _italic_ text with `code`." },
+  { "id": "multiline-msg", "filename": "multi.txt", "message": "Line one.\nLine two.\nLine three." },
+  { "id": "minimal", "filename": "a.txt", "message": "." }
+]

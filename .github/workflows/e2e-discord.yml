@@ -1,0 +1,152 @@
+name: E2E Discord Bot Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      group:
+        description: 'Test group to run (e.g., a-happy-path, b-files, or "all")'
+        required: false
+        default: 'all'
+      headless:
+        description: 'Run headless'
+        required: false
+        default: 'true'
+  schedule:
+    # Run nightly at 3 AM UTC
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: e2e-discord-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DISCORD_SENDER_EMAIL: ${{ secrets.E2E_DISCORD_SENDER_EMAIL }}
+  DISCORD_SENDER_PASSWORD: ${{ secrets.E2E_DISCORD_SENDER_PASSWORD }}
+  DISCORD_SENDER_TOTP_SECRET: ${{ secrets.E2E_DISCORD_SENDER_TOTP_SECRET }}
+  DISCORD_RECIPIENT_EMAIL: ${{ secrets.E2E_DISCORD_RECIPIENT_EMAIL }}
+  DISCORD_RECIPIENT_PASSWORD: ${{ secrets.E2E_DISCORD_RECIPIENT_PASSWORD }}
+  DISCORD_RECIPIENT_TOTP_SECRET: ${{ secrets.E2E_DISCORD_RECIPIENT_TOTP_SECRET }}
+  DISCORD_GUILD_ID: ${{ secrets.E2E_DISCORD_GUILD_ID }}
+  DISCORD_CHANNEL_ID: ${{ secrets.E2E_DISCORD_CHANNEL_ID }}
+  DISCORD_RECIPIENT_USERNAME: ${{ secrets.E2E_DISCORD_RECIPIENT_USERNAME }}
+  CI: true
+  HEADLESS: true
+
+jobs:
+  setup:
+    name: Setup & Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate test files
+        run: bash data/generate-test-files.sh
+
+      - name: Run setup check
+        run: npx ts-node scripts/setup.ts
+
+      - name: Upload test files artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-files
+          path: e2e/data/files/
+          retention-days: 1
+
+  test:
+    name: E2E Tests (${{ matrix.group }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: e2e
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - a-happy-path
+          - b-files
+          - c-locations
+          - d-recipients
+          - e-expiry
+          - f-messages
+          - g-negative
+          - h-lifecycle
+          - i-concurrency
+          - j-ephemeral
+          - k-autocomplete
+          - l-management-window
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Download test files
+        uses: actions/download-artifact@v4
+        with:
+          name: test-files
+          path: e2e/data/files/
+
+      - name: Run test group ${{ matrix.group }}
+        if: github.event.inputs.group == 'all' || github.event.inputs.group == matrix.group || github.event_name == 'schedule'
+        run: npx playwright test tests/groups/${{ matrix.group }}
+        env:
+          GROUP: ${{ matrix.group }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.group }}
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
+  report:
+    name: Merge Reports
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: all-results
+          merge-multiple: true
+
+      - name: Publish Test Report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: E2E Discord Bot Results
+          path: all-results/**/junit.xml
+          reporter: java-junit
+          fail-on-error: false

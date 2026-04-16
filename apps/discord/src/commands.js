@@ -107,11 +107,25 @@ async function batchSettled(items, fn, batchSize = 5) {
   return results;
 }
 
+// TEST_MODE_EXPIRY_SCALE lets E2E tests shrink all expiry durations so they
+// can verify expiry enforcement in seconds instead of hours. Gated behind a
+// non-production env allowlist so it can never apply in production.
+function expiryScale() {
+  if (process.env.NODE_ENV === 'production') return 1;
+  const allowed = new Set(['development', 'test', 'staging', 'e2e']);
+  if (!allowed.has(process.env.NODE_ENV || 'development')) return 1;
+  const raw = process.env.TEST_MODE_EXPIRY_SCALE;
+  if (!raw) return 1;
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 1) return 1;
+  return n;
+}
+
 function expiryToISO(expiresIn) {
   const units = { m: 60, h: 3600, d: 86400 };
   const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) return new Date(Date.now() + 86400000).toISOString();
-  const ms = parseInt(match[1]) * units[match[2]] * 1000;
+  if (!match) return new Date(Date.now() + 86400000 * expiryScale()).toISOString();
+  const ms = parseInt(match[1]) * units[match[2]] * 1000 * expiryScale();
   return new Date(Date.now() + ms).toISOString();
 }
 
@@ -187,7 +201,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   };
   const expiryUnits = { m: 60000, h: 3600000, d: 86400000 };
   const match = expiresIn.match(/^(\d+)([mhd])$/);
-  const expiryMs = match ? parseInt(match[1]) * expiryUnits[match[2]] : 86400000;
+  const expiryMs = (match ? parseInt(match[1]) * expiryUnits[match[2]] : 86400000) * expiryScale();
   const maxMonitorMs = expiryMs + 60000;
 
   const resourceIds = [...new Set(qurlLinks.map(l => l.resourceId))];
@@ -1734,6 +1748,7 @@ module.exports = {
     setCooldown,
     batchSettled,
     expiryToISO,
+    expiryScale,
     sendCooldowns,
     handleAddRecipients,
   },
