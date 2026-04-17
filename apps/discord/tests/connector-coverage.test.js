@@ -73,6 +73,21 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('uploadToConnector — redirect:error SSRF protection', () => {
+    it('rejects when Discord CDN responds with a redirect', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 301,
+        type: 'error',
+        text: async () => 'Redirected',
+      });
+
+      await expect(
+        connector.uploadToConnector('https://cdn.discordapp.com/redirect-test.png', 'test.png', 'image/png'),
+      ).rejects.toThrow(/Failed to download from Discord CDN: 301/);
+    });
+  });
+
   describe('uploadToConnector — auth headers and arrayBuffer (line 26)', () => {
     it('includes Authorization header in upload when QURL_API_KEY is set', async () => {
       globalThis.fetch = jest.fn()

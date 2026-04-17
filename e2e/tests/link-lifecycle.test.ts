@@ -7,6 +7,8 @@
  * - Multiple links to same target
  */
 
+// TODO: Add afterAll cleanup to revoke/delete test resources
+
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -119,23 +121,8 @@ describe('Link Lifecycle: Revocation', () => {
 });
 
 describe('Link Lifecycle: Expiry', () => {
-  test('link with 1m TTL expires after 1 minute', async () => {
-    const result = await qurl.mintLink(env.MINT_API_URL, env.QURL_API_KEY, {
-      target_url: 'https://example.com/short-ttl',
-      expires_in: '1m',
-    });
-    expect(result.qurl_link).toBeDefined();
-
-    // Wait for expiry
-    await new Promise((r) => setTimeout(r, 3000));
-
-    // Resource should be expired — status check should indicate this
-    try {
-      const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, result.resource_id);
-      console.log('Status after expiry:', JSON.stringify(status));
-    } catch (e) {
-      // 404 or error = expired, which is expected
-      console.log('Expired as expected:', (e as Error).message);
-    }
-  }, 15_000);
+  // TODO: This test waits only 3s for a 1m TTL link and catches all errors,
+  // making it a false-green no-op. To properly test expiry, either use a
+  // sub-second TTL (if the API supports it) or poll until the status shows expired.
+  test.todo('link with short TTL expires after timeout');
 });

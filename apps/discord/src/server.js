@@ -10,7 +10,7 @@ const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
 
-// Trust proxy headers (ECS behind ALB/CloudFront) for correct req.ip in rate limiting
+// trust proxy 1: assumes single ALB hop. If exposed directly, attackers can spoof X-Forwarded-For.
 app.set('trust proxy', 1);
 
 // Parse JSON for webhooks with raw body for signature verification

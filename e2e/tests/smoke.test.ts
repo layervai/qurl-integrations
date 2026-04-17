@@ -7,6 +7,8 @@
  * 5. Bot can read/write in test channel
  */
 
+// TODO: Add afterAll cleanup to revoke/delete test resources
+
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -98,20 +100,11 @@ describe('Smoke: Revocation', () => {
     console.log(`Revoked resource: ${resourceId}`);
   });
 
-  test('access after revoke returns error in body or via API', async () => {
-    // The SPA page itself loads (200) but the resolve endpoint should reject.
-    // Test the resolve endpoint directly instead of the SPA.
-    const res = await qurl.accessLink(qurlLink);
-    // SPA loads but body should contain error indicators after revoke
-    console.log(`Post-revoke SPA status: ${res.status}, body length: ${res.body?.length}`);
-    // The real check: resource status API should show revoked/deleted
-    try {
-      const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, resourceId);
-      console.log(`Resource status: ${JSON.stringify(status)}`);
-    } catch (e) {
-      // 404 = resource deleted = revoke worked
-      console.log(`Resource lookup failed (expected after revoke): ${(e as Error).message}`);
-      expect((e as Error).message).toMatch(/404|not found/i);
-    }
+  test('resource status returns 404 after revoke', async () => {
+    // After revocation, the resource status API should return 404.
+    // Use a definitive assertion instead of catch-all error swallowing.
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, resourceId),
+    ).rejects.toThrow(/404/);
   });
 });

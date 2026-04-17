@@ -134,7 +134,9 @@ function rateLimit(req, res, next) {
   }
 
   requests.push(now);
-  rateLimitStore.set(ip, requests);
+  if (rateLimitStore.size < 10000) {
+    rateLimitStore.set(ip, requests);
+  }
   next();
 }
 
@@ -212,6 +214,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
+  let accessToken = null;
   try {
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -229,6 +232,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
+    accessToken = tokenData.access_token || null;
 
     if (tokenData.error) {
       logger.error('GitHub OAuth error', { error: tokenData.error_description });
@@ -245,7 +249,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     // Get user info
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
-        'Authorization': `Bearer ${tokenData.access_token}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Accept': 'application/json',
         'User-Agent': 'OpenNHP-Bot',
       },
@@ -273,7 +277,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     const historicalCheck = checkHistoricalContributions(
       pending.discord_id,
       userData.login,
-      tokenData.access_token
+      accessToken
     );
 
     // Send initial DM
@@ -297,23 +301,6 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }
 
     await sendDM(pending.discord_id, dmMessage);
-
-    // Revoke the OAuth token — we only needed it for the historical check
-    try {
-      await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Basic ${Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64')}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'OpenNHP-Bot',
-        },
-        body: JSON.stringify({ access_token: tokenData.access_token }),
-        signal: AbortSignal.timeout(10000),
-      });
-      logger.debug('Revoked GitHub OAuth token', { discordId: pending.discord_id });
-    } catch (err) {
-      logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
-    }
 
     // Build response message
     let responseSubtext = 'When your PRs are merged, you\'ll automatically receive the @Contributor role!';
@@ -341,6 +328,26 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       subtext: 'Please try again with /link in Discord. If the problem persists, contact a moderator.',
       type: 'error',
     }));
+  } finally {
+    // Revoke the OAuth token — we only needed it for the historical check.
+    // In finally so it fires even if an exception occurs after token exchange.
+    if (accessToken) {
+      try {
+        await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Basic ${Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64')}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'OpenNHP-Bot',
+          },
+          body: JSON.stringify({ access_token: accessToken }),
+          signal: AbortSignal.timeout(10000),
+        });
+        logger.debug('Revoked GitHub OAuth token', { discordId: pending.discord_id });
+      } catch (err) {
+        logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
+      }
+    }
   }
 });
 

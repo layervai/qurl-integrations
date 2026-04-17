@@ -8,6 +8,8 @@
  * - Verify guild membership checks
  */
 
+// TODO: Add afterAll cleanup to revoke/delete test resources
+
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -16,25 +18,10 @@ import { loadEnv } from '../helpers/env';
 import * as discord from '../helpers/discord-api';
 
 const env = loadEnv();
-const API = 'https://discord.com/api/v9';
 
-/** Helper: make an authenticated Discord API call */
+/** Thin wrapper: calls the shared discord-api helper with the bot token */
 async function discordApi(method: string, path: string, body?: unknown): Promise<any> {
-  const headers: Record<string, string> = {
-    Authorization: `Bot ${env.BOT_TOKEN}`,
-  };
-  const opts: RequestInit = { method, headers };
-  if (body) {
-    headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(`${API}${path}`, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Discord ${method} ${path}: ${res.status} ${text}`);
-  }
-  if (res.status === 204) return null;
-  return res.json();
+  return discord.api(env.BOT_TOKEN, method, path, body);
 }
 
 describe('Discord: Channel Operations', () => {
@@ -140,27 +127,18 @@ describe('Discord: Send to Channel', () => {
   });
 
   test('bot can send an embed to the test channel', async () => {
-    const res = await fetch(`${API}/channels/${env.CHANNEL_ID}/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bot ${env.BOT_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        embeds: [{
-          title: 'E2E Test Embed',
-          description: 'Testing embed delivery',
-          color: 0x00d4ff,
-          fields: [
-            { name: 'Resource Type', value: 'Test', inline: true },
-            { name: 'Status', value: 'Passing', inline: true },
-          ],
-          footer: { text: 'QURL E2E Test Suite' },
-        }],
-      }),
+    const msg = await discordApi('POST', `/channels/${env.CHANNEL_ID}/messages`, {
+      embeds: [{
+        title: 'E2E Test Embed',
+        description: 'Testing embed delivery',
+        color: 0x00d4ff,
+        fields: [
+          { name: 'Resource Type', value: 'Test', inline: true },
+          { name: 'Status', value: 'Passing', inline: true },
+        ],
+        footer: { text: 'QURL E2E Test Suite' },
+      }],
     });
-    expect(res.ok).toBe(true);
-    const msg = await res.json() as any;
     expect(msg.embeds.length).toBe(1);
     expect(msg.embeds[0].title).toBe('E2E Test Embed');
   });

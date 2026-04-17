@@ -37,6 +37,7 @@ function requireApiKey() {
   if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 }
 
+// TODO: AbortSignal.timeout is not unit-tested — testing it requires real timing which is flaky.
 async function postToConnector(form, timeoutMs = 60000) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
@@ -51,6 +52,9 @@ async function postToConnector(form, timeoutMs = 60000) {
   const result = await response.json();
   if (!result.success) {
     throw new Error('Connector upload returned success: false');
+  }
+  if (!result.resource_id) {
+    logger.warn('Connector response missing resource_id', { result });
   }
   return result;
 }

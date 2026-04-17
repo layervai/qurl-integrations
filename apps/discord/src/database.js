@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
-const { DM_STATUS } = require('./constants');
+// DM_STATUS constants inlined directly in SQL below to avoid template literal interpolation
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.DATABASE_PATH);
@@ -589,8 +589,7 @@ module.exports = {
     const stmt = db.prepare(`
       SELECT send_id, resource_type, target_type, channel_id, expires_in, created_at,
              COUNT(*) as recipient_count,
-             -- DM_STATUS.SENT is a compile-time constant ('sent'), safe for SQL interpolation
-             SUM(CASE WHEN dm_status = '${DM_STATUS.SENT}' THEN 1 ELSE 0 END) as delivered_count
+             SUM(CASE WHEN dm_status = 'sent' THEN 1 ELSE 0 END) as delivered_count
       FROM qurl_sends
       WHERE sender_discord_id = ?
       GROUP BY send_id

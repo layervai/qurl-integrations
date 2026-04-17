@@ -3,7 +3,7 @@
  * Uses bot token to read/write messages and verify bot behavior.
  */
 
-const API = 'https://discord.com/api/v9';
+const API = 'https://discord.com/api/v10';
 
 export interface DiscordMessage {
   id: string;
@@ -32,7 +32,7 @@ export interface DiscordMessage {
   timestamp: string;
 }
 
-async function api(token: string, method: string, path: string, body?: unknown): Promise<any> {
+export async function api(token: string, method: string, path: string, body?: unknown): Promise<any> {
   const headers: Record<string, string> = {
     Authorization: `Bot ${token}`,
   };

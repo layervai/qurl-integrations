@@ -90,3 +90,35 @@ describe('QURL client — getResourceStatus (line 51)', () => {
     expect(result.qurls).toEqual([]);
   });
 });
+
+describe('validateResourceId', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      QURL_API_KEY: 'test-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+    }));
+    qurl = require('../src/qurl');
+  });
+
+  it('rejects path traversal attempts', () => {
+    expect(() => qurl.validateResourceId('../../../etc/passwd')).toThrow();
+    expect(() => qurl.validateResourceId('res%00id')).toThrow();
+    expect(() => qurl.validateResourceId('res id spaces')).toThrow();
+    expect(() => qurl.validateResourceId('')).toThrow();
+    expect(() => qurl.validateResourceId(null)).toThrow();
+  });
+
+  it('accepts valid resource IDs', () => {
+    expect(() => qurl.validateResourceId('r_abc123')).not.toThrow();
+    expect(() => qurl.validateResourceId('res-with-dashes')).not.toThrow();
+  });
+});

@@ -112,7 +112,7 @@ jest.mock('../src/utils/admin', () => ({
   isAdmin: jest.fn(() => false),
 }));
 
-// Mock form-data (for connector.js)
+// Note: production uses native FormData/Blob (Node 18+), not the npm form-data package
 jest.mock('form-data', () => {
   return jest.fn().mockImplementation(() => ({
     append: jest.fn(),

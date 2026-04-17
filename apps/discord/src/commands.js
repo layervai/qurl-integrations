@@ -91,7 +91,9 @@ function isOnCooldown(userId) {
 }
 
 function setCooldown(userId) {
-  sendCooldowns.set(userId, Date.now());
+  if (sendCooldowns.size < 10000) {
+    sendCooldowns.set(userId, Date.now());
+  }
 }
 
 function clearCooldown(userId) {
@@ -316,7 +318,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
-  }, pollInterval);
+  }, pollInterval).unref();
 
   return control;
 }
@@ -325,6 +327,10 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 // TODO: Split into sub-functions (target selection, resource detection, delivery, monitoring)
 
 async function handleSend(interaction) {
+  if (!interaction.channel) {
+    return interaction.reply({ content: 'This command must be used in a server channel.', ephemeral: true });
+  }
+
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry') || '24h';
   const rawMessage = interaction.options.getString('message');
@@ -384,7 +390,8 @@ async function handleSend(interaction) {
   } else if (target === TARGET_TYPES.CHANNEL) {
     await interaction.deferReply({ ephemeral: true });
     try {
-      // Full fetch needed for getVoiceChannelViewers which checks permissionsFor() on all members
+      // Full fetch required for permissionsFor() check on voice channels.
+      // For very large guilds (100K+), consider caching or using channel.members for text channels.
       await interaction.guild.members.fetch();
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
@@ -1040,6 +1047,7 @@ async function handleRevoke(interaction) {
 
   try {
     const selectInteraction = await response.awaitMessageComponent({
+      filter: (i) => i.user.id === interaction.user.id,
       componentType: ComponentType.StringSelect,
       time: 60000,
     });
@@ -1085,7 +1093,9 @@ function isAutocompleteLimited(userId) {
   const now = Date.now();
   const entry = autocompleteLimits.get(userId);
   if (!entry || now - entry.windowStart > AUTOCOMPLETE_WINDOW_MS) {
-    autocompleteLimits.set(userId, { windowStart: now, count: 1 });
+    if (autocompleteLimits.size < 10000) {
+      autocompleteLimits.set(userId, { windowStart: now, count: 1 });
+    }
     return false;
   }
   entry.count++;
