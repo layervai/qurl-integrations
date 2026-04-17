@@ -97,7 +97,10 @@ router.post('/github', async (req, res) => {
         logger.debug(`Unhandled event type: ${event}`);
     }
   } catch (error) {
+    // Return 500 so GitHub retries: 2xx = "delivered successfully, don't
+    // retry", which would silently drop events on transient DB/Discord errors.
     logger.error(`Error handling ${event} webhook`, { error: error.message });
+    return res.status(500).send('Internal error');
   }
 
   res.status(200).send('OK');

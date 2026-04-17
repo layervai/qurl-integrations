@@ -25,8 +25,12 @@ async function qurlFetch(method, path, body, apiKey) {
 
   const resp = await fetch(url, opts);
   if (!resp.ok) {
+    // Keep the raw response body in debug logs only — it may echo request
+    // headers/tokens. The thrown error stays generic so it won't leak into
+    // Discord ephemeral replies or warn-level logs.
     const text = await resp.text();
-    throw new Error(`QURL API ${method} ${path} failed (${resp.status}): ${text}`);
+    logger.debug('QURL API error response', { method, path, status: resp.status, body: text });
+    throw new Error(`QURL API ${method} ${path} failed (${resp.status})`);
   }
 
   if (resp.status === 204) return null;

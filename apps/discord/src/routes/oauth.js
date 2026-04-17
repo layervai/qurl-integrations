@@ -79,9 +79,16 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
       );
     }
 
-    // Check for badges
+    // Check for badges. Aggregate badges (count/streak/unique-repo) only
+    // need to be checked once; title-based badges (Docs Hero, Bug Hunter)
+    // short-circuit on the first match via hasBadge(), so iterate distinct
+    // (title, repo) pairs instead of every contribution to avoid N*4 queries.
     const newBadges = [];
+    const seenTitleKeys = new Set();
     for (const contrib of contributions) {
+      const key = `${contrib.title}\x00${contrib.repo}`;
+      if (seenTitleKeys.has(key)) continue;
+      seenTitleKeys.add(key);
       const badges = db.checkAndAwardBadges(discordId, contrib.title, contrib.repo);
       newBadges.push(...badges);
     }

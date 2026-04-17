@@ -75,7 +75,7 @@ Your existing bot needs a few more permissions.
    ```
    DISCORD_TOKEN=your_discord_bot_token
    DISCORD_CLIENT_ID=your_discord_app_client_id
-   GUILD_ID=1453469901972046079
+   GUILD_ID=your_discord_guild_id
    GITHUB_CLIENT_ID=your_github_oauth_client_id
    GITHUB_CLIENT_SECRET=your_github_oauth_client_secret
    BASE_URL=https://your-app.up.railway.app

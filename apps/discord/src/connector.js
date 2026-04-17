@@ -12,7 +12,16 @@ const ALLOWED_CDN_HOSTS = [
 function isAllowedSourceUrl(sourceUrl) {
   try {
     const parsed = new URL(sourceUrl);
-    return parsed.protocol === 'https:' && ALLOWED_CDN_HOSTS.includes(parsed.hostname);
+    // Reject URLs with userinfo or non-default ports: `https://cdn.discordapp.com@evil.com/...`
+    // parses to hostname `evil.com`, and `cdn.discordapp.com:9999` would route to a
+    // non-standard port. Only allow plain https on the default port.
+    return (
+      parsed.protocol === 'https:'
+      && ALLOWED_CDN_HOSTS.includes(parsed.hostname)
+      && !parsed.username
+      && !parsed.password
+      && (parsed.port === '' || parsed.port === '443')
+    );
   } catch {
     return false;
   }

@@ -13,6 +13,17 @@ const app = express();
 // Trust proxy headers (ECS behind ALB/CloudFront) for correct req.ip in rate limiting
 app.set('trust proxy', 1);
 
+// Global security headers on every response. The OAuth template already sets
+// its own inline CSP for the HTML pages; these harden the JSON endpoints
+// (health, metrics, webhooks) against common browser-level attacks.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
 // Parse JSON for webhooks with raw body for signature verification
 app.use('/webhook', express.json({
   verify: (req, res, buf) => {
