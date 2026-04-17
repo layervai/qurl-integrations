@@ -268,6 +268,9 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       const pollResults = await Promise.all(
         resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
       );
+      // control.addRecipients() can null out trackedQurlIds during the await
+      // above — skip this tick and let the next one re-init the tracking set.
+      if (!trackedQurlIds) return;
       for (const data of pollResults) {
         if (!data || !data.qurls) continue;
         for (const qurl of data.qurls) {
@@ -645,12 +648,24 @@ async function handleSend(interaction) {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
-  // Persist ALL links to DB BEFORE sending DMs
-  db.recordQURLSendBatch(qurlLinks.map(link => ({
-    sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
-    resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
-    expiresIn, channelId: interaction.channelId, targetType: target,
-  })));
+  // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
+  // still exist on the QURL side but there's no local record to revoke them
+  // later — abort the send and surface the error instead of continuing to DMs.
+  try {
+    db.recordQURLSendBatch(qurlLinks.map(link => ({
+      sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
+      resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
+      expiresIn, channelId: interaction.channelId, targetType: target,
+    })));
+  } catch (err) {
+    logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
+      sendId, error: err.message, linkCount: qurlLinks.length,
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: 'Failed to save link records. Links were not sent. Please try again.',
+    });
+  }
 
   // Send DMs
   let delivered = 0;
@@ -688,13 +703,23 @@ async function handleSend(interaction) {
   // Save send config for "Add Recipients" reuse. For file sends, also stash
   // the Discord CDN URL + content type so we can re-download + re-upload when
   // adding recipients (the original resource's 10-token pool may be drained).
-  db.saveSendConfig({
-    sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-    actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
-    attachmentName: attachment?.name || null,
-    attachmentContentType: attachment?.contentType || null,
-    attachmentUrl: attachment?.url || null,
-  });
+  // Logged-and-swallowed: a failure here doesn't block DM delivery (already
+  // done above) but it disables future Add Recipients / revoke-via-ui for
+  // this send. The per-link rows in qurl_sends persisted above, so /qurl
+  // revoke by sendId still works even if this row is missing.
+  try {
+    db.saveSendConfig({
+      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+      attachmentName: attachment?.name || null,
+      attachmentContentType: attachment?.contentType || null,
+      attachmentUrl: attachment?.url || null,
+    });
+  } catch (err) {
+    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
+      sendId, error: err.message,
+    });
+  }
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
   const TRUNC_LIMIT = 5;

@@ -28,7 +28,21 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
       });
 
       if (!response.ok) {
-        logger.warn(`Failed to search PRs for ${githubUsername} in ${org}`, { status: response.status });
+        // Inspect GitHub's rate-limit headers so we don't silently burn through
+        // the remaining org list after a 403/429: stop early and surface that
+        // historical results are incomplete rather than pretending they're empty.
+        const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '-1', 10);
+        const retryAfter = response.headers.get('retry-after');
+        logger.warn(`Failed to search PRs for ${githubUsername} in ${org}`, {
+          status: response.status, remaining, retryAfter,
+        });
+        if (response.status === 403 || response.status === 429 || remaining === 0) {
+          return {
+            count: contributions.length,
+            newBadges: [],
+            error: `GitHub rate limit hit (status ${response.status}); historical results incomplete`,
+          };
+        }
         continue;
       }
 
@@ -124,6 +138,10 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+// Absolute cap on how many timestamps we keep per IP so an abusive IP can't
+// grow its array unboundedly between eviction sweeps.
+const MAX_REQUESTS_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
+
 function rateLimit(req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
   const now = Date.now();
@@ -143,6 +161,11 @@ function rateLimit(req, res, next) {
   }
 
   requests.push(now);
+  // Trim the per-IP array to MAX_REQUESTS_PER_IP so one IP can't accumulate
+  // thousands of timestamps between sweeps. Keep the most recent entries.
+  if (requests.length > MAX_REQUESTS_PER_IP) {
+    requests.splice(0, requests.length - MAX_REQUESTS_PER_IP);
+  }
   rateLimitStore.set(ip, requests);
   if (rateLimitStore.size >= 10000) {
     const oldest = rateLimitStore.keys().next().value;
@@ -344,23 +367,27 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       type: 'error',
     }));
   } finally {
-    // Revoke the GitHub OAuth token — we only needed it for the initial API calls
+    // Revoke the GitHub OAuth token — we only needed it for the initial API
+    // calls. Awaited (with a tight 5s timeout) so the request completes before
+    // the response resolves; leaving a read:user token alive on GitHub would
+    // be a real credential leak.
     if (accessToken) {
-      fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'OpenNHP-Bot',
-        },
-        body: JSON.stringify({ access_token: accessToken }),
-        signal: AbortSignal.timeout(10000),
-      }).catch(err => {
-        // error (not warn): a leaked user token left active is a real security
-        // concern — surface it in the oncall dashboard.
+      try {
+        await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'OpenNHP-Bot',
+          },
+          body: JSON.stringify({ access_token: accessToken }),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch (err) {
+        // Page oncall: the user's GitHub token is now orphaned-alive.
         logger.error('Failed to revoke GitHub OAuth token', { error: err.message });
-      });
+      }
     }
   }
 });
