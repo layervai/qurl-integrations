@@ -70,10 +70,19 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
+  // Sanitize filename to prevent path traversal (defense-in-depth; commands.js also sanitizes)
+  filename = filename.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').replace(/\.\./g, '_').substring(0, 200);
+
   // redirect: 'error' prevents SSRF via open redirects. Discord CDN rarely redirects for direct attachment URLs.
   const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+  }
+
+  // Defense-in-depth file size check (commands.js also validates attachment.size)
+  const contentLength = parseInt(downloadResponse.headers.get('content-length') || '0', 10);
+  if (contentLength > 25 * 1024 * 1024) {
+    throw new Error(`File too large (${Math.round(contentLength / 1024 / 1024)}MB). Maximum is 25MB.`);
   }
 
   const fileBuffer = await downloadResponse.arrayBuffer();

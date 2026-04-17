@@ -41,6 +41,7 @@ client.on('error', error => {
 
 process.on('unhandledRejection', error => {
   logger.error('Unhandled promise rejection', { error: error?.message || error });
+  gracefulShutdown(1);
 });
 
 process.on('uncaughtException', error => {

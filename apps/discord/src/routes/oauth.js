@@ -134,9 +134,12 @@ function rateLimit(req, res, next) {
   }
 
   requests.push(now);
-  if (rateLimitStore.size < 10000) {
-    rateLimitStore.set(ip, requests);
+  if (rateLimitStore.size >= 10000 && !rateLimitStore.has(ip)) {
+    // Evict oldest entry to prevent DoS via store filling
+    const oldest = rateLimitStore.keys().next().value;
+    rateLimitStore.delete(oldest);
   }
+  rateLimitStore.set(ip, requests);
   next();
 }
 

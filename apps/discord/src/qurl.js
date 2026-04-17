@@ -35,6 +35,15 @@ async function qurlFetch(method, path, body) {
 }
 
 async function createOneTimeLink(targetUrl, expiresIn, description) {
+  try {
+    const parsed = new URL(targetUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Only http/https URLs are allowed');
+    }
+  } catch (err) {
+    throw new Error(`Invalid target URL: ${err.message}`);
+  }
+
   const result = await qurlFetch('POST', '/qurls', {
     target_url: targetUrl,
     one_time_use: true,

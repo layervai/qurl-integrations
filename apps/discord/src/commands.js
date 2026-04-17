@@ -91,9 +91,12 @@ function isOnCooldown(userId) {
 }
 
 function setCooldown(userId) {
-  if (sendCooldowns.size < 10000) {
-    sendCooldowns.set(userId, Date.now());
+  if (sendCooldowns.size >= 10000) {
+    // Evict oldest entry to prevent DoS via store filling
+    const oldest = sendCooldowns.keys().next().value;
+    sendCooldowns.delete(oldest);
   }
+  sendCooldowns.set(userId, Date.now());
 }
 
 function clearCooldown(userId) {
@@ -296,11 +299,12 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       }
 
       // Poll all resources for status changes
+      if (!trackedQurlIds) return; // addRecipients() may have reset tracking mid-poll
       for (const resourceId of resourceIds) {
         const data = await getResourceStatus(resourceId);
         if (!data || !data.qurls) continue;
         for (const qurl of data.qurls) {
-          if (!trackedQurlIds.has(qurl.qurl_id)) continue;
+          if (!trackedQurlIds || !trackedQurlIds.has(qurl.qurl_id)) continue;
           const current = linkStatus.get(qurl.qurl_id);
           if (!current) continue;
           if (qurl.use_count > 0 && current.status !== 'opened') {
@@ -340,7 +344,8 @@ async function handleSend(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
   }
-  // Set cooldown immediately to prevent concurrent request bypass
+  // Set cooldown immediately (before any async work) to prevent concurrent request bypass.
+  // This is intentionally before deferReply — cleared on error paths that allow retry.
   setCooldown(interaction.user.id);
 
   if (!config.QURL_API_KEY) {
@@ -511,6 +516,10 @@ async function handleSend(interaction) {
     }
 
     const rawLocationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
+    if (!rawLocationValue) {
+      clearCooldown(interaction.user.id);
+      return modalSubmit.reply({ content: 'Location cannot be empty.', ephemeral: true });
+    }
     await modalSubmit.deferUpdate();
 
     // Handle place_id: prefix from autocomplete selections
@@ -895,6 +904,8 @@ async function handleSend(interaction) {
 
 // Handle adding new recipients to an existing send
 async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction) {
+  // Note: no transaction guard between read and write — acceptable risk since config
+  // deletion during add-recipients is not a realistic concurrent operation.
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [] };
@@ -1093,9 +1104,12 @@ function isAutocompleteLimited(userId) {
   const now = Date.now();
   const entry = autocompleteLimits.get(userId);
   if (!entry || now - entry.windowStart > AUTOCOMPLETE_WINDOW_MS) {
-    if (autocompleteLimits.size < 10000) {
-      autocompleteLimits.set(userId, { windowStart: now, count: 1 });
+    if (autocompleteLimits.size >= 10000) {
+      // Evict oldest entry to prevent DoS via store filling
+      const oldest = autocompleteLimits.keys().next().value;
+      autocompleteLimits.delete(oldest);
     }
+    autocompleteLimits.set(userId, { windowStart: now, count: 1 });
     return false;
   }
   entry.count++;

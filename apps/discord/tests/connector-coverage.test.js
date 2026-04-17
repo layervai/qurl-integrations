@@ -93,6 +93,7 @@ describe('Connector client — coverage boost', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
+          headers: { get: () => '0' },
           arrayBuffer: async () => new ArrayBuffer(10),
         })
         .mockResolvedValueOnce({

@@ -96,7 +96,8 @@ async function refreshCache() {
     const allRoles = await guild.roles.fetch();
     const allChannels = await guild.channels.fetch();
 
-    // Cache roles
+    // Roles are tracked by name (from config) — if an admin renames a role in Discord,
+    // the bot's refreshCache() will fail to find it and log a warning.
     roles.contributor = allRoles.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
     roles.activeContributor = allRoles.find(r => r.name === config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
     roles.coreContributor = allRoles.find(r => r.name === config.CORE_CONTRIBUTOR_ROLE_NAME);

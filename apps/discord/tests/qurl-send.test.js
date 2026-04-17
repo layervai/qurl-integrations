@@ -622,6 +622,7 @@ describe('Connector client', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
+          headers: { get: () => '0' },
           arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
@@ -667,6 +668,7 @@ describe('Connector client', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
+          headers: { get: () => '0' },
           arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
@@ -683,6 +685,7 @@ describe('Connector client', () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
+          headers: { get: () => '0' },
           arrayBuffer: async () => new ArrayBuffer(0),
         })
         .mockResolvedValueOnce({
