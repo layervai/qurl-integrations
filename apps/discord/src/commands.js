@@ -311,6 +311,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 }
 
 // --- /qurl send handler ---
+// TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 
 async function handleSend(interaction) {
   const target = interaction.options.getString('target');
