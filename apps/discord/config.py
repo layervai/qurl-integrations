@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # GOOGLE_MAPS_ENABLED=true in ECS task definition env vars to enable.
     # TODO: read from SSM Parameter Store at runtime for no-redeploy toggle.
     google_maps_enabled: bool = False
+    log_level: str = "INFO"
 
     @field_validator("qurl_link_hostname")
     @classmethod
