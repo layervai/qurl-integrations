@@ -19,7 +19,11 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { uploadToConnector, mintLinks } = require('./connector');
+const { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks } = require('./connector');
+
+// Max tokens the QURL API allows per resource. When exceeded, a new
+// resource must be created (re-upload) to get a fresh token pool.
+const TOKENS_PER_RESOURCE = 10;
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 
 
@@ -556,15 +560,32 @@ async function handleSend(interaction) {
   try {
     if (resourceType === 'file') {
       const filename = sanitizeFilename(attachment.name);
-      const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
-      connectorResourceId = uploadResult.resource_id;
-
       const expiresAt = expiryToISO(expiresIn);
-      const allLinks = [];
-      for (let i = 0; i < recipients.length; i += 10) {
-        const batchSize = Math.min(10, recipients.length - i);
-        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
-        allLinks.push(...minted);
+
+      // Download once, cache the buffer for re-uploads.
+      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType);
+      connectorResourceId = firstUpload.resource_id;
+      const fileBuffer = firstUpload.fileBuffer;
+
+      // Mint tokens in batches of TOKENS_PER_RESOURCE per QURL resource.
+      // When exhausted, re-upload the cached buffer to create a new resource.
+      const allLinks = []; // { qurl_link, resourceId }
+      let currentResourceId = firstUpload.resource_id;
+      let tokensUsed = 0;
+
+      for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
+        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+          const reUpload = await reUploadBuffer(fileBuffer, filename, attachment.contentType);
+          currentResourceId = reUpload.resource_id;
+          tokensUsed = 0;
+        }
+
+        const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
+        const minted = await mintLinks(currentResourceId, expiresAt, batchSize);
+        for (const link of minted) {
+          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+        }
+        tokensUsed += batchSize;
       }
 
       if (allLinks.length < recipients.length) {
@@ -576,7 +597,7 @@ async function handleSend(interaction) {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
-        resourceId: connectorResourceId,
+        resourceId: allLinks[i].resourceId,
       }));
     } else {
       const description = locationName || locationUrl;
@@ -861,13 +882,15 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
   try {
     if (hasFile) {
-      const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = [];
-      for (let i = 0; i < newRecipients.length; i += 10) {
-        const batchSize = Math.min(10, newRecipients.length - i);
-        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
-        allLinks.push(...minted);
+      // Add Recipients is limited to TOKENS_PER_RESOURCE (10) file recipients
+      // because the original file buffer is not stored — we can't re-upload to
+      // create new resources. For >10, the user should do a new /qurl send.
+      if (newRecipients.length > TOKENS_PER_RESOURCE) {
+        return { msg: `Cannot add more than ${TOKENS_PER_RESOURCE} file recipients at once. Use a new /qurl send for larger groups.`, newResourceIds: [] };
       }
+      const expiresAt = expiryToISO(sendConfig.expires_in);
+      const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length);
+      const allLinks = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };

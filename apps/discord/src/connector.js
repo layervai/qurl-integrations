@@ -76,6 +76,63 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
 }
 
 /**
+ * Re-register an already-downloaded file buffer with the connector.
+ * Creates a new QURL resource (with a fresh token pool) without
+ * re-downloading from Discord CDN. Used when the per-resource token
+ * quota (10) is exhausted and more recipients need links.
+ */
+async function reUploadBuffer(fileBuffer, filename, contentType) {
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+
+  const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
+  const form = new FormData();
+  form.append('file', blob, filename);
+
+  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
+    method: 'POST',
+    body: form,
+    headers: { ...connectorAuthHeaders() },
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text();
+    throw new Error(`Connector re-upload failed (${uploadResponse.status}): ${text}`);
+  }
+
+  const result = await uploadResponse.json();
+  if (!result.success) {
+    throw new Error('Connector re-upload returned success: false');
+  }
+
+  logger.info('Re-uploaded to connector (new resource)', {
+    hash: result.hash,
+    resource_id: result.resource_id,
+  });
+
+  return result;
+}
+
+/**
+ * Download a file from Discord CDN and return the buffer + upload result.
+ * The buffer is cached so subsequent re-uploads don't re-download.
+ */
+async function downloadAndUpload(sourceUrl, filename, contentType) {
+  if (!isAllowedSourceUrl(sourceUrl)) {
+    throw new Error('Source URL is not a valid Discord CDN URL');
+  }
+
+  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
+  if (!downloadResponse.ok) {
+    throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
+  }
+
+  const fileBuffer = await downloadResponse.arrayBuffer();
+  const result = await reUploadBuffer(fileBuffer, filename, contentType);
+  return { ...result, fileBuffer };
+}
+
+/**
  * Mint one-time links for an uploaded resource via the connector.
  */
 async function mintLinks(resourceId, expiresAt, n) {
@@ -107,4 +164,4 @@ async function mintLinks(resourceId, expiresAt, n) {
   return result.links;
 }
 
-module.exports = { uploadToConnector, mintLinks, isAllowedSourceUrl };
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, isAllowedSourceUrl };
