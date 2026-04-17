@@ -3,6 +3,46 @@ const logger = require('./logger');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// Read the response body chunk-by-chunk and abort as soon as we cross the cap.
+// Guards against a CDN that returns a missing/incorrect Content-Length — the
+// old code would buffer the whole body into memory before noticing it was
+// oversized, which is an OOM vector if invoked concurrently.
+async function readBodyWithCap(response, capBytes) {
+  // Prefer streaming so we can abort as soon as we cross the cap — critical
+  // for a lying/missing Content-Length. Fall back to arrayBuffer() when the
+  // response lacks a readable body (e.g. jest mocks) and re-check size there.
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const buf = await response.arrayBuffer();
+    if (buf.byteLength > capBytes) {
+      throw new Error(`File too large: ${Math.round(buf.byteLength / 1024 / 1024)}MB, max ${Math.round(capBytes / 1024 / 1024)}MB`);
+    }
+    return buf;
+  }
+  const reader = response.body.getReader();
+  let received = 0;
+  const chunks = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > capBytes) {
+        await reader.cancel();
+        throw new Error(`File too large: > ${Math.round(capBytes / 1024 / 1024)}MB cap`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) { out.set(c, offset); offset += c.byteLength; }
+  return out.buffer;
+}
+
 // Allowed Discord CDN domains for attachment URLs (SSRF prevention)
 const ALLOWED_CDN_HOSTS = [
   'cdn.discordapp.com',
@@ -58,15 +98,11 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   }
 
   const contentLength = parseInt(downloadResponse.headers.get('content-length') || '0', 10);
-  if (contentLength > 25 * 1024 * 1024) {
+  if (contentLength > MAX_FILE_SIZE) {
     throw new Error(`File too large: ${Math.round(contentLength / 1024 / 1024)}MB, max 25MB`);
   }
 
-  const fileBuffer = await downloadResponse.arrayBuffer();
-  // Defense-in-depth: check actual size after download (Content-Length may be absent/wrong)
-  if (fileBuffer.byteLength > 25 * 1024 * 1024) {
-    throw new Error(`File too large: ${Math.round(fileBuffer.byteLength / 1024 / 1024)}MB, max 25MB`);
-  }
+  const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
 
   const form = new FormData();
@@ -152,11 +188,11 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
   }
 
   const contentLength = parseInt(downloadResponse.headers.get('content-length') || '0', 10);
-  if (contentLength > 25 * 1024 * 1024) {
+  if (contentLength > MAX_FILE_SIZE) {
     throw new Error(`File too large: ${Math.round(contentLength / 1024 / 1024)}MB, max 25MB`);
   }
 
-  const fileBuffer = await downloadResponse.arrayBuffer();
+  const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
   const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey);
   return { ...result, fileBuffer };
 }
