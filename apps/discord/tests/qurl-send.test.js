@@ -1232,6 +1232,8 @@ describe('handleAddRecipients', () => {
   let handleAddRecipients;
   let mockDb;
   let mockMintLinks;
+  let mockDownloadAndUpload;
+  let mockReUploadBuffer;
   let mockCreateOneTimeLink;
   let mockSendDM;
 
@@ -1366,8 +1368,12 @@ describe('handleAddRecipients', () => {
 
     // Mock connector
     mockMintLinks = jest.fn();
+    mockDownloadAndUpload = jest.fn();
+    mockReUploadBuffer = jest.fn();
     jest.mock('../src/connector', () => ({
       uploadToConnector: jest.fn(),
+      downloadAndUpload: mockDownloadAndUpload,
+      reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
     }));
 
@@ -1682,7 +1688,7 @@ describe('handleAddRecipients', () => {
     expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 
-  it('file send: batches mintLinks for > 10 recipients', async () => {
+  it('file send: rejects > 10 new recipients (quota cap)', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'file',
       connector_resource_id: 'conn-res-50',
@@ -1693,30 +1699,46 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    // 12 recipients = 2 batches (10 + 2)
+    // 12 recipients exceeds the TOKENS_PER_RESOURCE cap
     const userList = [];
     for (let i = 0; i < 12; i++) {
       userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
     }
 
-    const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/b1-${i}` }));
-    const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_link: `https://q.test/b2-${i}` }));
+    const users = makeUsersCollection(userList);
+    const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction);
 
-    mockMintLinks
-      .mockResolvedValueOnce(batch1Links)
-      .mockResolvedValueOnce(batch2Links);
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(result.msg).toMatch(/Cannot add more than 10/);
+  });
 
+  it('file send: addRecipients works for ≤ 10 new recipients', async () => {
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-ok',
+      actual_url: null,
+      expires_in: '24h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: null,
+    });
+
+    const userList = [];
+    for (let i = 0; i < 8; i++) {
+      userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
+    }
+
+    const links = Array.from({ length: 8 }, (_, i) => ({ qurl_link: `https://q.test/l-${i}` }));
+    mockMintLinks.mockResolvedValueOnce(links);
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection(userList);
+    const result = await handleAddRecipients('send-ok', 'sender-1', users, mockOriginalInteraction);
 
-    const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction);
-
-    expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 10);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 2);
-    expect(mockSendDM).toHaveBeenCalledTimes(12);
-    expect(result.msg).toMatch(/Added 12 recipients/);
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-ok', expect.any(String), 8);
+    expect(mockSendDM).toHaveBeenCalledTimes(8);
+    expect(result.msg).toMatch(/Added 8 recipients/);
   });
 
   it('URL send: returns failure when all createOneTimeLink calls reject', async () => {

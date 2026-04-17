@@ -19,7 +19,7 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks } = require('./connector');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
