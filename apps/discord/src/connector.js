@@ -105,4 +105,41 @@ async function mintLinks(resourceId, expiresAt, n) {
   return result.links;
 }
 
-module.exports = { uploadToConnector, mintLinks, isAllowedSourceUrl };
+/**
+ * Upload a JSON payload directly to the connector (e.g., google-map location data).
+ * The fileviewer renders these based on their type field.
+ */
+async function uploadJsonToConnector(jsonData, filename) {
+  const jsonStr = JSON.stringify(jsonData);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+
+  const form = new FormData();
+  form.append('file', blob, filename || 'location.json');
+
+  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
+    method: 'POST',
+    body: form,
+    headers: { ...connectorAuthHeaders() },
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text();
+    throw new Error(`Connector JSON upload failed (${uploadResponse.status}): ${text}`);
+  }
+
+  const result = await uploadResponse.json();
+  if (!result.success) {
+    throw new Error('Connector JSON upload returned success: false');
+  }
+
+  logger.info('Uploaded JSON to connector', {
+    hash: result.hash,
+    resource_id: result.resource_id,
+    type: jsonData.type,
+  });
+
+  return result;
+}
+
+module.exports = { uploadToConnector, uploadJsonToConnector, mintLinks, isAllowedSourceUrl };

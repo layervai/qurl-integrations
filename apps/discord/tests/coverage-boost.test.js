@@ -74,7 +74,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -83,7 +83,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -94,6 +94,7 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ActionRowBuilder: jest.fn().mockImplementation(() => ({
     addComponents: jest.fn().mockReturnThis(),
   })),
@@ -181,9 +182,11 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
+const mockUploadJsonToConnector = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
+  uploadJsonToConnector: mockUploadJsonToConnector,
   mintLinks: mockMintLinks,
 }));
 
@@ -276,10 +279,8 @@ describe('buildDeliveryEmbed — location resource type', () => {
   it('adds Location field (no filename) for maps resource with personalMessage', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/loc',
-      resource_id: 'res-loc',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-embed', hash: 'he', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -583,7 +584,8 @@ describe('/qurl send — location URL param extraction', () => {
   it('extracts from ?q= parameter', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/q1', resource_id: 'res-q1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-q1', hash: 'hq1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/q1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/search/?q=Eiffel+Tower') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -603,13 +605,18 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockCreateOneTimeLink).toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower' }),
+      'location.json',
+    );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('extracts from /place/ path', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/p1', resource_id: 'res-p1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-p1', hash: 'hp1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/p1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/place/Eiffel+Tower/@48.8,2.29,15z') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -629,7 +636,11 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockCreateOneTimeLink).toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower', lat: 48.8, lng: 2.29 }),
+      'location.json',
+    );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 });
 
@@ -689,7 +700,7 @@ describe('/qurl send — all location link creation fails', () => {
   it('returns failed message', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockRejectedValue(new Error('API error'));
+    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector error'));
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'Some Place') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
     const resInteraction = { customId: `qurl_res_loc_${MOCK_NONCE}`, showModal: jest.fn().mockResolvedValue(undefined), awaitModalSubmit: jest.fn().mockResolvedValue(modalSubmit) };
@@ -706,7 +717,7 @@ describe('/qurl send — all location link creation fails', () => {
     });
 
     await cmd.execute(interaction);
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create any links') }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create links') }));
   });
 });
 

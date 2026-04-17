@@ -63,7 +63,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -72,7 +72,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -83,6 +83,7 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ActionRowBuilder: jest.fn().mockImplementation(() => ({
     addComponents: jest.fn().mockReturnThis(),
   })),
@@ -170,9 +171,11 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
+const mockUploadJsonToConnector = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
+  uploadJsonToConnector: mockUploadJsonToConnector,
   mintLinks: mockMintLinks,
 }));
 
@@ -1218,10 +1221,8 @@ describe('/qurl send — location flow (channel target)', () => {
   it('creates one-time links for location URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/loc1',
-      resource_id: 'res-loc-1',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
     mockSendDM.mockResolvedValue(true);
 
     // The flow: channel target -> no file -> location button -> modal -> submit
@@ -1265,17 +1266,19 @@ describe('/qurl send — location flow (channel target)', () => {
     await cmd.execute(interaction);
 
     expect(resInteraction.showModal).toHaveBeenCalled();
-    expect(mockCreateOneTimeLink).toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+    );
+    expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(1);
   });
 
   it('creates search URL for plain text location', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/loc2',
-      resource_id: 'res-loc-2',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-2', hash: 'h2', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc2' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -1315,12 +1318,12 @@ describe('/qurl send — location flow (channel target)', () => {
 
     await cmd.execute(interaction);
 
-    // Should create a search URL, not a direct maps link
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      expect.stringContaining('google.com/maps/search/'),
-      expect.any(String),
-      expect.any(String),
+    // Should upload a google-map JSON with the location name as query
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower, Paris' }),
+      'location.json',
     );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 });
 
@@ -1861,7 +1864,7 @@ describe('/qurl send — zero created links', () => {
   it('shows failure message when all link creations fail', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockRejectedValue(new Error('API down'));
+    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector down'));
 
     const modalSubmit = {
       fields: { getTextInputValue: jest.fn(() => 'Eiffel Tower') },
@@ -1893,7 +1896,7 @@ describe('/qurl send — zero created links', () => {
     await cmd.execute(interaction);
 
     expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Failed to create any links') }),
+      expect.objectContaining({ content: expect.stringContaining('Failed to create links') }),
     );
   });
 });
@@ -1938,7 +1941,8 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
   it('detects standard google.com/maps/place URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-place', hash: 'hp', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -1976,18 +1980,19 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    // Should use the detected URL directly
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      expect.stringContaining('google.com/maps/place/Eiffel'),
-      expect.any(String),
-      expect.any(String),
+    // Should upload a google-map JSON with extracted place name and lat/lng
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower', lat: 48.8, lng: 2.29 }),
+      'location.json',
     );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects goo.gl short link', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-goo', hash: 'hg', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2025,17 +2030,19 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      expect.stringContaining('goo.gl/maps/abc123'),
-      expect.any(String),
-      expect.any(String),
+    // Should upload a google-map JSON — the URL was detected as Google Maps
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
     );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects maps.app.goo.gl short link', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mapp', hash: 'hm', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2073,17 +2080,18 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      expect.stringContaining('maps.app.goo.gl'),
-      expect.any(String),
-      expect.any(String),
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
     );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects embed URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-embed', hash: 'he', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2121,11 +2129,11 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      expect.stringContaining('google.com/maps/embed'),
-      expect.any(String),
-      expect.any(String),
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
     );
+    expect(mockMintLinks).toHaveBeenCalled();
   });
 });
 

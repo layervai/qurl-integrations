@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -19,7 +20,7 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { uploadToConnector, mintLinks } = require('./connector');
+const { uploadToConnector, uploadJsonToConnector, mintLinks } = require('./connector');
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 const { searchPlaces } = require('./places');
 
@@ -361,14 +362,31 @@ async function handleSend(interaction) {
     }
   } else if (target === 'channel') {
     await interaction.deferReply({ ephemeral: true });
-    try {
-      await interaction.guild.members.fetch();
-    } catch (err) {
-      logger.error('Failed to fetch guild members', { error: err.message });
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
+    const isVoiceChannel = interaction.channel && (
+      interaction.channel.type === ChannelType.GuildVoice ||
+      interaction.channel.type === ChannelType.GuildStageVoice
+    );
+    if (isVoiceChannel) {
+      // Voice channel "Everyone" = all members who can see this channel, not just connected
+      try {
+        await interaction.guild.members.fetch();
+      } catch (err) {
+        logger.error('Failed to fetch guild members', { error: err.message });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
+      }
+      recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
+    } else {
+      // Text channel "Everyone" = all members who can see this text channel
+      try {
+        await interaction.guild.members.fetch();
+      } catch (err) {
+        logger.error('Failed to fetch guild members', { error: err.message });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
+      }
+      recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     }
-    recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
@@ -378,11 +396,11 @@ async function handleSend(interaction) {
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
       clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
+      return interaction.editReply({ content: 'You must be in a voice channel to use this target. Select "Everyone in this channel" to include all channel members.' });
     }
     if (result.members.length === 0) {
       clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No other users in your voice channel.' });
+      return interaction.editReply({ content: 'No other users currently on voice in this channel.' });
     }
     recipients = result.members;
   }
@@ -581,16 +599,40 @@ async function handleSend(interaction) {
         resourceId: connectorResourceId,
       }));
     } else {
-      const description = locationName || locationUrl;
-      const results = await batchSettled(recipients, async (recipient) => {
-        const result = await createOneTimeLink(locationUrl, expiresIn, description);
-        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
-      }, 5);
-
-      for (const r of results) {
-        if (r.status === 'fulfilled') qurlLinks.push(r.value);
-        else logger.error('Failed to create QURL link', { error: r.reason?.message });
+      // Upload location as google-map JSON to connector — fileviewer renders it in an iframe
+      const mapData = { type: 'google-map' };
+      // Extract lat/lng from Google Maps URL if present
+      const latLngMatch = locationUrl.match(/@(-?\d+\.?\d*),(-?\d+\.?\d*)/);
+      if (latLngMatch) {
+        mapData.lat = parseFloat(latLngMatch[1]);
+        mapData.lng = parseFloat(latLngMatch[2]);
       }
+      if (locationName) mapData.query = locationName;
+      // Fallback: if no lat/lng and no name, use the URL as query
+      if (!mapData.lat && !mapData.query) mapData.query = locationUrl;
+
+      const uploadResult = await uploadJsonToConnector(mapData, 'location.json');
+      connectorResourceId = uploadResult.resource_id;
+
+      const expiresAt = expiryToISO(expiresIn);
+      const allLinks = [];
+      for (let i = 0; i < recipients.length; i += 10) {
+        const batchSize = Math.min(10, recipients.length - i);
+        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
+        allLinks.push(...minted);
+      }
+
+      if (allLinks.length < recipients.length) {
+        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+      }
+
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: connectorResourceId,
+      }));
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
@@ -698,6 +740,17 @@ async function handleSend(interaction) {
   logger.info('/qurl send completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
+
+  // Notify the channel when sending to "Everyone" (non-ephemeral so all members see it)
+  if ((target === 'channel' || target === 'voice') && delivered > 0) {
+    try {
+      await interaction.channel.send({
+        content: `📩 **${interaction.user.displayName}** has shared something with everyone via **QURL Bot** — check your DMs from Qurl Bot.`,
+      });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message });
+    }
+  }
 
   // Start link status monitor BEFORE collector so `monitor` is available in callbacks
   const monitor = delivered > 0
@@ -851,8 +904,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.actual_url;
+  const hasFile = sendConfig.resource_type === 'file' && sendConfig.connector_resource_id;
+  const hasLocation = sendConfig.resource_type === 'maps' && sendConfig.connector_resource_id;
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [] };
@@ -882,21 +935,31 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       });
     }
     if (hasLocation) {
-      const description = sendConfig.location_name || 'Google Maps Location';
-      const results = await batchSettled(newRecipients, async (recipient) => {
-        const result = await createOneTimeLink(sendConfig.actual_url, sendConfig.expires_in, description);
-        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
-      }, 5);
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          const v = r.value;
-          if (!recipientLinks[v.recipientId]) recipientLinks[v.recipientId] = [];
-          recipientLinks[v.recipientId].push({
-            qurlLink: v.qurlLink, resourceId: v.resourceId,
-            resType: 'maps', label: sendConfig.location_name || 'Google Maps',
-          });
-        }
+      // Location was uploaded as google-map JSON to connector — mint links from the same resource
+      const locationResourceId = sendConfig.connector_resource_id;
+      if (!locationResourceId) {
+        return { msg: 'Location resource not found. Please resend.', newResourceIds: [] };
       }
+      const expiresAt = expiryToISO(sendConfig.expires_in);
+      const allLinks = [];
+      for (let i = 0; i < newRecipients.length; i += 10) {
+        const batchSize = Math.min(10, newRecipients.length - i);
+        const minted = await mintLinks(locationResourceId, expiresAt, batchSize);
+        allLinks.push(...minted);
+      }
+      if (allLinks.length < newRecipients.length) {
+        logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
+      }
+      newRecipients.forEach((r, i) => {
+        if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
+        recipientLinks[r.id].push({
+          qurlLink: allLinks[i].qurl_link,
+          resourceId: locationResourceId,
+          resType: 'maps',
+          label: sendConfig.location_name || 'Google Maps',
+        });
+      });
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
@@ -1048,6 +1111,24 @@ setInterval(() => {
     if (now - v.windowStart > AUTOCOMPLETE_WINDOW_MS * 2) autocompleteLimits.delete(k);
   }
 }, 5 * 60 * 1000).unref();
+
+// Return target choices based on channel type
+function handleTargetAutocomplete(interaction) {
+  const channel = interaction.channel;
+  const isVoice = channel && (
+    channel.type === ChannelType.GuildVoice ||
+    channel.type === ChannelType.GuildStageVoice
+  );
+
+  const choices = [
+    { name: 'Everyone in this channel', value: 'channel' },
+    { name: 'A specific user', value: 'user' },
+  ];
+  if (isVoice) {
+    choices.push({ name: 'Only voice users', value: 'voice' });
+  }
+  return interaction.respond(choices);
+}
 
 async function handleLocationAutocomplete(interaction, query) {
   if (!query || query.length < 2) {
@@ -1639,11 +1720,7 @@ const commands = [
             opt.setName('target')
               .setDescription('Who receives this')
               .setRequired(true)
-              .addChoices(
-                { name: 'Everyone in this channel', value: 'channel' },
-                { name: 'Users in my voice channel', value: 'voice' },
-                { name: 'A specific user', value: 'user' },
-              ))
+              .setAutocomplete(true))
           .addStringOption(opt =>
             opt.setName('expiry')
               .setDescription('Link expiry (default: 24h)')
@@ -1684,7 +1761,10 @@ const commands = [
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
-            '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
+            '  1. Use `/qurl send` and choose a target\n' +
+            '     • **Everyone in this channel** — sends to all members\n' +
+            '     • **A specific user** — pick one recipient\n' +
+            '     • **Only voice users** — appears in voice channels only\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on access\n\n' +
@@ -1711,10 +1791,13 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  // Autocomplete for /qurl send location
+  // Autocomplete for /qurl send
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'qurl') {
       const focused = interaction.options.getFocused(true);
+      if (focused.name === 'target') {
+        return handleTargetAutocomplete(interaction);
+      }
       if (focused.name === 'location') {
         return handleLocationAutocomplete(interaction, focused.value);
       }
