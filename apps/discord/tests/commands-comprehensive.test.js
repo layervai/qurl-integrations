@@ -122,6 +122,7 @@ jest.mock('discord.js', () => ({
 
 const mockDb = {
   getLinkByDiscord: jest.fn(),
+  getLinkedDiscordIds: jest.fn(() => new Set()),
   createPendingLink: jest.fn(),
   getLinkByGithub: jest.fn(),
   deleteLink: jest.fn().mockReturnValue({ changes: 1 }),
@@ -798,7 +799,7 @@ describe('/unlinked command', () => {
       return result;
     };
 
-    mockDb.getLinkByDiscord.mockReturnValue(null);
+    mockDb.getLinkedDiscordIds.mockReturnValue(new Set());
 
     const interaction = makeInteraction({
       commandName: 'unlinked',
@@ -843,7 +844,7 @@ describe('/unlinked command', () => {
       return result;
     };
 
-    mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'ghuser' });
+    mockDb.getLinkedDiscordIds.mockReturnValue(new Set(['u1']));
 
     const interaction = makeInteraction({
       commandName: 'unlinked',

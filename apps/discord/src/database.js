@@ -239,6 +239,11 @@ const dbModule = {
     return stmt.get(discordId);
   },
 
+  getLinkedDiscordIds() {
+    const stmt = db.prepare('SELECT discord_id FROM github_links');
+    return new Set(stmt.all().map(r => r.discord_id));
+  },
+
   getLinkByGithub(githubUsername) {
     const stmt = db.prepare('SELECT * FROM github_links WHERE github_username = ?');
     return stmt.get(githubUsername.toLowerCase());

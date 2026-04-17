@@ -255,8 +255,10 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
           }
         } else {
           // Location send: one resource per recipient — pick the most recent qurl from each
-          for (const resourceId of resourceIds) {
-            const data = await getResourceStatus(resourceId, apiKey);
+          const statuses = await Promise.all(
+            resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
+          );
+          for (const data of statuses) {
             if (!data || !data.qurls || data.qurls.length === 0) continue;
             const sorted = [...data.qurls].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             const q = sorted[0]; // most recent
@@ -269,9 +271,11 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
       }
 
-      // Poll all resources for status changes
-      for (const resourceId of resourceIds) {
-        const data = await getResourceStatus(resourceId, apiKey);
+      // Poll all resources for status changes (parallel to avoid N sequential API calls per tick)
+      const pollResults = await Promise.all(
+        resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
+      );
+      for (const data of pollResults) {
         if (!data || !data.qurls) continue;
         for (const qurl of data.qurls) {
           if (!trackedQurlIds.has(qurl.qurl_id)) continue;
@@ -1579,13 +1583,11 @@ const commands = [
         const members = await guild.members.fetch();
         const contributors = members.filter(m => m.roles.cache.has(contributorRole.id));
 
-        // Check which ones are not linked
+        // Check which ones are not linked (single bulk query, not N+1)
+        const linkedIds = db.getLinkedDiscordIds();
         const unlinked = [];
         for (const [id, member] of contributors) {
-          const link = db.getLinkByDiscord(id);
-          if (!link) {
-            unlinked.push(member);
-          }
+          if (!linkedIds.has(id)) unlinked.push(member);
         }
 
         if (unlinked.length === 0) {

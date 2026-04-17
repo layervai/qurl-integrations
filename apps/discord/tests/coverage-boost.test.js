@@ -133,6 +133,7 @@ jest.mock('discord.js', () => ({
 
 const mockDb = {
   getLinkByDiscord: jest.fn(),
+  getLinkedDiscordIds: jest.fn(() => new Set()),
   createPendingLink: jest.fn(),
   getLinkByGithub: jest.fn(),
   deleteLink: jest.fn().mockReturnValue({ changes: 1 }),
