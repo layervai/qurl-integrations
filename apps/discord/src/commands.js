@@ -21,7 +21,7 @@ const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
 const { uploadToConnector, mintLinks } = require('./connector');
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
-const { searchPlaces } = require('./places');
+
 
 // Generate secure random state
 function generateState() {
@@ -117,7 +117,10 @@ async function batchSettled(items, fn, batchSize = 5) {
 function expiryToISO(expiresIn) {
   const units = { m: 60, h: 3600, d: 86400 };
   const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) return new Date(Date.now() + 86400000).toISOString();
+  if (!match) {
+    logger.warn('expiryToISO: invalid expiry format, defaulting to 24h', { expiresIn });
+    return new Date(Date.now() + 86400000).toISOString();
+  }
   const ms = parseInt(match[1]) * units[match[2]] * 1000;
   return new Date(Date.now() + ms).toISOString();
 }
@@ -210,10 +213,9 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   const startTime = Date.now();
 
   const MAX_NAMES_SHOWN = 5;
-  let expanded = false;
 
   function truncateNames(names) {
-    if (names.length <= MAX_NAMES_SHOWN || expanded) return names.join(', ');
+    if (names.length <= MAX_NAMES_SHOWN) return names.join(', ');
     return names.slice(0, MAX_NAMES_SHOWN).join(', ') + ` +${names.length - MAX_NAMES_SHOWN} more`;
   }
 
@@ -290,6 +292,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         for (const qurl of data.qurls) {
           if (!trackedQurlIds.has(qurl.qurl_id)) continue;
           const current = linkStatus.get(qurl.qurl_id);
+          if (!current) continue;
           if (qurl.use_count > 0 && current.status !== 'opened') {
             linkStatus.set(qurl.qurl_id, { ...current, status: 'opened' }); changed = true;
           } else if (qurl.status === 'expired' && current.status === 'pending') {
@@ -308,6 +311,16 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   }, pollInterval);
 
   return control;
+}
+
+// --- Guild member fetch cache (30s TTL) ---
+let memberFetchCacheData = { guildId: null, timestamp: 0 };
+const MEMBER_FETCH_TTL = 30000;
+async function fetchGuildMembers(guild) {
+  const now = Date.now();
+  if (memberFetchCacheData.guildId === guild.id && now - memberFetchCacheData.timestamp < MEMBER_FETCH_TTL) return;
+  await guild.members.fetch();
+  memberFetchCacheData = { guildId: guild.id, timestamp: now };
 }
 
 // --- /qurl send handler ---
@@ -355,9 +368,11 @@ async function handleSend(interaction) {
 
       const selectedUser = selectInteraction.users.first();
       if (selectedUser.bot) {
+        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
       }
       if (selectedUser.id === interaction.user.id) {
+        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to yourself.', components: [] });
       }
       recipients = [selectedUser];
@@ -368,7 +383,7 @@ async function handleSend(interaction) {
   } else if (target === 'channel') {
     await interaction.deferReply({ ephemeral: true });
     try {
-      await interaction.guild.members.fetch();
+      await fetchGuildMembers(interaction.guild);
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
       return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
@@ -587,20 +602,20 @@ async function handleSend(interaction) {
   }
 
   // Persist ALL links to DB BEFORE sending DMs
-  for (const link of qurlLinks) {
-    db.recordQURLSend(
-      sendId, interaction.user.id, link.recipientId, link.resourceId,
-      resourceType, link.qurlLink, expiresIn, interaction.channelId, target,
-    );
-  }
+  db.recordQURLSendBatch(qurlLinks.map(link => ({
+    sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
+    resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
+    expiresIn, channelId: interaction.channelId, targetType: target,
+  })));
 
   // Send DMs
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
+  const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
-    const recipient = recipients.find(r => r.id === link.recipientId);
+    const recipient = recipientMap.get(link.recipientId);
     const embed = buildDeliveryEmbed({
       senderUsername: interaction.user.username,
       resourceType,
@@ -627,10 +642,11 @@ async function handleSend(interaction) {
   }
 
   // Save send config for "Add Recipients" reuse (uses first file resource if present)
-  db.saveSendConfig(
-    sendId, interaction.user.id, resourceType, connectorResourceId,
-    locationUrl || null, expiresIn, personalMessage, locationName, attachment?.name || null,
-  );
+  db.saveSendConfig({
+    sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+    actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+    attachmentName: attachment?.name || null,
+  });
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
   const TRUNC_LIMIT = 5;
@@ -894,15 +910,17 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   }
 
   // Persist to DB before DMs
+  const batchSends = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
     for (const link of links) {
-      db.recordQURLSend(
-        sendId, senderDiscordId, rid, link.resourceId,
-        link.resType, link.qurlLink, sendConfig.expires_in,
-        originalInteraction.channelId, 'user',
-      );
+      batchSends.push({
+        sendId, senderDiscordId, recipientDiscordId: rid, resourceId: link.resourceId,
+        resourceType: link.resType, qurlLink: link.qurlLink, expiresIn: sendConfig.expires_in,
+        channelId: originalInteraction.channelId, targetType: 'user',
+      });
     }
   }
+  db.recordQURLSendBatch(batchSends);
 
   // Send DMs — one message per recipient with all their links
   let delivered = 0;
@@ -1005,62 +1023,13 @@ async function revokeAllLinks(sendId, senderDiscordId) {
   return { success, total: resourceIds.length };
 }
 
-// --- Location autocomplete handler ---
-
-// Per-user autocomplete throttle: max 5 requests per 10 seconds
-const autocompleteLimits = new Map();
-const AUTOCOMPLETE_WINDOW_MS = 10000;
-const AUTOCOMPLETE_MAX_PER_WINDOW = 5;
-
-function isAutocompleteLimited(userId) {
-  const now = Date.now();
-  const entry = autocompleteLimits.get(userId);
-  if (!entry || now - entry.windowStart > AUTOCOMPLETE_WINDOW_MS) {
-    autocompleteLimits.set(userId, { windowStart: now, count: 1 });
-    return false;
-  }
-  entry.count++;
-  return entry.count > AUTOCOMPLETE_MAX_PER_WINDOW;
-}
-
-// Evict stale cooldown/autocomplete entries every 5 minutes to prevent slow memory leak
+// Evict stale cooldown entries every 5 minutes to prevent slow memory leak
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of sendCooldowns) {
     if (now - v > config.QURL_SEND_COOLDOWN_MS * 2) sendCooldowns.delete(k);
   }
-  for (const [k, v] of autocompleteLimits) {
-    if (now - v.windowStart > AUTOCOMPLETE_WINDOW_MS * 2) autocompleteLimits.delete(k);
-  }
 }, 5 * 60 * 1000).unref();
-
-async function handleLocationAutocomplete(interaction, query) {
-  if (!query || query.length < 2) {
-    return interaction.respond([]);
-  }
-
-  if (isAutocompleteLimited(interaction.user.id)) {
-    return interaction.respond([]);
-  }
-
-  if (isGoogleMapsURL(query)) {
-    return interaction.respond([
-      { name: `Maps link: ${query.substring(0, 90)}`, value: query },
-    ]);
-  }
-
-  try {
-    const results = await searchPlaces(query);
-    const choices = results.map(place => ({
-      name: `${place.name} — ${place.address}`.substring(0, 100),
-      value: `place_id:${place.placeId}|${place.name}`,
-    }));
-    await interaction.respond(choices.slice(0, 5));
-  } catch (error) {
-    logger.error('Places autocomplete failed', { error: error.message });
-    await interaction.respond([]);
-  }
-}
 
 // Command definitions
 const commands = [
@@ -1696,16 +1665,7 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  // Autocomplete for /qurl send location
-  if (interaction.isAutocomplete()) {
-    if (interaction.commandName === 'qurl') {
-      const focused = interaction.options.getFocused(true);
-      if (focused.name === 'location') {
-        return handleLocationAutocomplete(interaction, focused.value);
-      }
-    }
-    return;
-  }
+  if (interaction.isAutocomplete()) return;
 
   if (!interaction.isChatInputCommand()) return;
 

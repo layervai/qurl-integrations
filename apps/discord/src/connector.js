@@ -34,6 +34,7 @@ function connectorAuthHeaders() {
  * Note: file is fully buffered in memory (up to 25MB max).
  */
 async function uploadToConnector(sourceUrl, filename, contentType) {
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
@@ -78,6 +79,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
  * Mint one-time links for an uploaded resource via the connector.
  */
 async function mintLinks(resourceId, expiresAt, n) {
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
   }
