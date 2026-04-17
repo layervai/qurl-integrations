@@ -1730,6 +1730,20 @@ const commands = [
         });
       }
 
+      // Gate: require guild API key for send/revoke
+      if (sub === 'send' || sub === 'revoke') {
+        const guildApiKey = interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null;
+        if (!guildApiKey && !config.QURL_API_KEY) {
+          return interaction.reply({
+            content: '❌ **QURL is not configured for this server.**\n\n' +
+              'A server admin needs to run `/qurl setup` first.\n' +
+              'Sign up at **layerv.ai** to get your API key.',
+            ephemeral: true,
+          });
+        }
+        interaction._qurlApiKey = guildApiKey || config.QURL_API_KEY;
+      }
+
       if (sub === 'send') return handleSend(interaction);
       if (sub === 'revoke') return handleRevoke(interaction);
       if (sub === 'help') {
