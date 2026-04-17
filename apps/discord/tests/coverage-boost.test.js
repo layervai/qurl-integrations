@@ -145,6 +145,7 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
+  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),

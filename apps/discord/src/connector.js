@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { validateResourceId } = require('./qurl');
 
 // Allowed Discord CDN domains for attachment URLs (SSRF prevention)
 const ALLOWED_CDN_HOSTS = [
@@ -29,6 +30,28 @@ function connectorAuthHeaders() {
 }
 
 /**
+ * Shared helper: POST a FormData body to the connector upload endpoint,
+ * check the response, and return the parsed JSON result.
+ */
+async function postToConnector(form, timeoutMs = 60000) {
+  const response = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
+    method: 'POST',
+    body: form,
+    headers: { ...connectorAuthHeaders() },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Connector upload failed (${response.status}): ${text}`);
+  }
+  const result = await response.json();
+  if (!result.success) {
+    throw new Error('Connector upload returned success: false');
+  }
+  return result;
+}
+
+/**
  * Upload a file to the qurl-s3-connector.
  * Downloads from Discord CDN, then uploads to connector.
  * Note: file is fully buffered in memory (up to 25MB max).
@@ -49,22 +72,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
   const form = new FormData();
   form.append('file', blob, filename);
 
-  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
-    method: 'POST',
-    body: form,
-    headers: { ...connectorAuthHeaders() },
-    signal: AbortSignal.timeout(60000),
-  });
-
-  if (!uploadResponse.ok) {
-    const text = await uploadResponse.text();
-    throw new Error(`Connector upload failed (${uploadResponse.status}): ${text}`);
-  }
-
-  const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector upload returned success: false');
-  }
+  const result = await postToConnector(form, 60000);
 
   logger.info('Uploaded to connector', {
     hash: result.hash,
@@ -78,9 +86,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
  * Mint one-time links for an uploaded resource via the connector.
  */
 async function mintLinks(resourceId, expiresAt, n) {
-  if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
-    throw new Error(`Invalid resource ID format: ${resourceId}`);
-  }
+  validateResourceId(resourceId);
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders() },
@@ -116,22 +122,7 @@ async function uploadJsonToConnector(jsonData, filename) {
   const form = new FormData();
   form.append('file', blob, filename || 'location.json');
 
-  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
-    method: 'POST',
-    body: form,
-    headers: { ...connectorAuthHeaders() },
-    signal: AbortSignal.timeout(30000),
-  });
-
-  if (!uploadResponse.ok) {
-    const text = await uploadResponse.text();
-    throw new Error(`Connector JSON upload failed (${uploadResponse.status}): ${text}`);
-  }
-
-  const result = await uploadResponse.json();
-  if (!result.success) {
-    throw new Error('Connector JSON upload returned success: false');
-  }
+  const result = await postToConnector(form, 30000);
 
   logger.info('Uploaded JSON to connector', {
     hash: result.hash,

@@ -63,4 +63,4 @@ async function getResourceStatus(resourceId) {
   return qurlFetch('GET', `/qurls/${resourceId}`);
 }
 
-module.exports = { createOneTimeLink, deleteLink, getResourceStatus };
+module.exports = { createOneTimeLink, deleteLink, getResourceStatus, validateResourceId };

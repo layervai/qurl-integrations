@@ -134,6 +134,7 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
+  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
@@ -1212,7 +1213,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockUploadToConnector).toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(2);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
   });
 });

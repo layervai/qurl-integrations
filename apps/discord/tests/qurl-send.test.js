@@ -85,6 +85,7 @@ jest.mock('../src/database', () => {
   // Return a thin stub — the real DB tests below use a fresh in-memory SQLite
   return {
     recordQURLSend: jest.fn(),
+    recordQURLSendBatch: jest.fn(),
     updateSendDMStatus: jest.fn(),
     getRecentSends: jest.fn(() => []),
     getSendResourceIds: jest.fn(() => []),
@@ -1325,6 +1326,7 @@ describe('handleAddRecipients', () => {
       getSendConfig: jest.fn(),
       saveSendConfig: jest.fn(),
       recordQURLSend: jest.fn(),
+      recordQURLSendBatch: jest.fn(),
       updateSendDMStatus: jest.fn(),
       getRecentSends: jest.fn(() => []),
       getSendResourceIds: jest.fn(() => []),
@@ -1501,7 +1503,7 @@ describe('handleAddRecipients', () => {
     // DMs should have been sent
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     // DB should record the new sends
-    expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(2);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
@@ -1528,7 +1530,7 @@ describe('handleAddRecipients', () => {
     expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-1', expect.any(String), 1);
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(1);
-    expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(result.msg).toMatch(/Added 1 recipient/);
   });
 

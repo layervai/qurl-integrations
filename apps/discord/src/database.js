@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
+const { DM_STATUS } = require('./constants');
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.DATABASE_PATH);
@@ -567,12 +568,25 @@ module.exports = {
 
   // --- QURL SENDS ---
 
-  recordQURLSend(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType) {
+  recordQURLSend({ sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType }) {
     const stmt = db.prepare(`
       INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType);
+  },
+
+  recordQURLSendBatch(sends) {
+    const stmt = db.prepare(`
+      INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertMany = db.transaction((items) => {
+      for (const s of items) {
+        stmt.run(s.sendId, s.senderDiscordId, s.recipientDiscordId, s.resourceId, s.resourceType, s.qurlLink, s.expiresIn, s.channelId, s.targetType);
+      }
+    });
+    insertMany(sends);
   },
 
   updateSendDMStatus(sendId, recipientDiscordId, status) {
@@ -584,7 +598,7 @@ module.exports = {
     const stmt = db.prepare(`
       SELECT send_id, resource_type, target_type, channel_id, expires_in, created_at,
              COUNT(*) as recipient_count,
-             SUM(CASE WHEN dm_status = 'sent' THEN 1 ELSE 0 END) as delivered_count
+             SUM(CASE WHEN dm_status = '${DM_STATUS.SENT}' THEN 1 ELSE 0 END) as delivered_count
       FROM qurl_sends
       WHERE sender_discord_id = ?
       GROUP BY send_id
@@ -594,7 +608,7 @@ module.exports = {
     return stmt.all(senderDiscordId, limit);
   },
 
-  saveSendConfig(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName) {
+  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName }) {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

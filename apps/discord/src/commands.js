@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, TARGET_TYPES, DM_STATUS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
 const { uploadToConnector, uploadJsonToConnector, mintLinks } = require('./connector');
@@ -116,9 +116,20 @@ function expiryToISO(expiresIn) {
   return new Date(Date.now() + ms).toISOString();
 }
 
+async function mintLinksForRecipients(resourceId, expiresIn, count) {
+  const expiresAt = expiryToISO(expiresIn);
+  const allLinks = [];
+  for (let i = 0; i < count; i += 10) {
+    const batchSize = Math.min(10, count - i);
+    const minted = await mintLinks(resourceId, expiresAt, batchSize);
+    allLinks.push(...minted);
+  }
+  return allLinks;
+}
+
 // --- Shared DM embed builder ---
 function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
-  const isFile = resourceType === 'file';
+  const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
     .setColor(0x00d4ff)
@@ -326,7 +337,7 @@ async function handleSend(interaction) {
   // --- Step 1: Collect user (if specific user target) ---
   let recipients = [];
 
-  if (target === 'user') {
+  if (target === TARGET_TYPES.USER) {
     const userSelectRow = new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`qurl_user_${sendNonce}`)
@@ -360,7 +371,7 @@ async function handleSend(interaction) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
-  } else if (target === 'channel') {
+  } else if (target === TARGET_TYPES.CHANNEL) {
     await interaction.deferReply({ ephemeral: true });
     try {
       await interaction.guild.members.fetch();
@@ -382,7 +393,7 @@ async function handleSend(interaction) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
     }
-  } else if (target === 'voice') {
+  } else if (target === TARGET_TYPES.VOICE) {
     await interaction.deferReply({ ephemeral: true });
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
@@ -408,7 +419,7 @@ async function handleSend(interaction) {
   let resourceType = null;
   let resourceLabel = null;
 
-  const targetLabel = target === 'user' ? recipients[0].username : target === 'channel' ? 'this channel' : 'voice channel';
+  const targetLabel = target === TARGET_TYPES.USER ? recipients[0].username : target === TARGET_TYPES.CHANNEL ? 'this channel' : 'voice channel';
 
   if (commandAttachment) {
     // File attached — show only Send File button
@@ -453,7 +464,7 @@ async function handleSend(interaction) {
 
   if (resInteraction.customId === `qurl_res_loc_${sendNonce}`) {
     // --- Location: show modal ---
-    resourceType = 'maps';
+    resourceType = RESOURCE_TYPES.MAPS;
 
     const modal = new ModalBuilder()
       .setCustomId(`qurl_loc_modal_${sendNonce}`)
@@ -525,7 +536,7 @@ async function handleSend(interaction) {
 
   } else {
     // --- File: use attachment from slash command ---
-    resourceType = 'file';
+    resourceType = RESOURCE_TYPES.FILE;
     attachment = commandAttachment;
 
     if (!attachment) {
@@ -565,18 +576,12 @@ async function handleSend(interaction) {
   let connectorResourceId = null;
 
   try {
-    if (resourceType === 'file') {
+    if (resourceType === RESOURCE_TYPES.FILE) {
       const filename = sanitizeFilename(attachment.name);
       const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
       connectorResourceId = uploadResult.resource_id;
 
-      const expiresAt = expiryToISO(expiresIn);
-      const allLinks = [];
-      for (let i = 0; i < recipients.length; i += 10) {
-        const batchSize = Math.min(10, recipients.length - i);
-        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
-        allLinks.push(...minted);
-      }
+      const allLinks = await mintLinksForRecipients(connectorResourceId, expiresIn, recipients.length);
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -605,13 +610,7 @@ async function handleSend(interaction) {
       const uploadResult = await uploadJsonToConnector(mapData, 'location.json');
       connectorResourceId = uploadResult.resource_id;
 
-      const expiresAt = expiryToISO(expiresIn);
-      const allLinks = [];
-      for (let i = 0; i < recipients.length; i += 10) {
-        const batchSize = Math.min(10, recipients.length - i);
-        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
-        allLinks.push(...minted);
-      }
+      const allLinks = await mintLinksForRecipients(connectorResourceId, expiresIn, recipients.length);
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -637,20 +636,20 @@ async function handleSend(interaction) {
   }
 
   // Persist ALL links to DB BEFORE sending DMs
-  for (const link of qurlLinks) {
-    db.recordQURLSend(
-      sendId, interaction.user.id, link.recipientId, link.resourceId,
-      resourceType, link.qurlLink, expiresIn, interaction.channelId, target,
-    );
-  }
+  db.recordQURLSendBatch(qurlLinks.map(link => ({
+    sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
+    resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
+    expiresIn, channelId: interaction.channelId, targetType: target,
+  })));
 
   // Send DMs
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
+  const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
-    const recipient = recipients.find(r => r.id === link.recipientId);
+    const recipient = recipientMap.get(link.recipientId);
     const embed = buildDeliveryEmbed({
       senderUsername: interaction.user.username,
       resourceType,
@@ -662,7 +661,7 @@ async function handleSend(interaction) {
     });
 
     const sent = await sendDM(link.recipientId, { embeds: [embed] });
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? 'sent' : 'failed');
+    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -677,10 +676,10 @@ async function handleSend(interaction) {
   }
 
   // Save send config for "Add Recipients" reuse (uses first file resource if present)
-  db.saveSendConfig(
-    sendId, interaction.user.id, resourceType, connectorResourceId,
-    locationUrl || null, expiresIn, personalMessage, locationName, attachment?.name || null,
-  );
+  db.saveSendConfig({
+    sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+    actualUrl: locationUrl || null, expiresIn, personalMessage, locationName, attachmentName: attachment?.name || null,
+  });
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
   const TRUNC_LIMIT = 5;
@@ -733,8 +732,8 @@ async function handleSend(interaction) {
   });
 
   // Notify the channel when sending to "Everyone" or "Voice users" (non-ephemeral so all members see it)
-  if ((target === 'channel' || target === 'voice') && delivered > 0) {
-    const notifyMsg = target === 'voice'
+  if ((target === TARGET_TYPES.CHANNEL || target === TARGET_TYPES.VOICE) && delivered > 0) {
+    const notifyMsg = target === TARGET_TYPES.VOICE
       ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
       : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
     try {
@@ -896,8 +895,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.resource_type === 'file' && sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.resource_type === 'maps' && sendConfig.connector_resource_id;
+  const hasFile = sendConfig.resource_type === RESOURCE_TYPES.FILE && sendConfig.connector_resource_id;
+  const hasLocation = sendConfig.resource_type === RESOURCE_TYPES.MAPS && sendConfig.connector_resource_id;
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [] };
@@ -905,13 +904,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
   try {
     if (hasFile) {
-      const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = [];
-      for (let i = 0; i < newRecipients.length; i += 10) {
-        const batchSize = Math.min(10, newRecipients.length - i);
-        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
-        allLinks.push(...minted);
-      }
+      const allLinks = await mintLinksForRecipients(sendConfig.connector_resource_id, sendConfig.expires_in, newRecipients.length);
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
@@ -921,7 +914,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
           resourceId: sendConfig.connector_resource_id,
-          resType: 'file',
+          resType: RESOURCE_TYPES.FILE,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       });
@@ -932,13 +925,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       if (!locationResourceId) {
         return { msg: 'Location resource not found. Please resend.', newResourceIds: [] };
       }
-      const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = [];
-      for (let i = 0; i < newRecipients.length; i += 10) {
-        const batchSize = Math.min(10, newRecipients.length - i);
-        const minted = await mintLinks(locationResourceId, expiresAt, batchSize);
-        allLinks.push(...minted);
-      }
+      const allLinks = await mintLinksForRecipients(locationResourceId, sendConfig.expires_in, newRecipients.length);
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
@@ -948,7 +935,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
           resourceId: locationResourceId,
-          resType: 'maps',
+          resType: RESOURCE_TYPES.MAPS,
           label: sendConfig.location_name || 'Google Maps',
         });
       });
@@ -964,15 +951,17 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   }
 
   // Persist to DB before DMs
+  const sendRecords = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
     for (const link of links) {
-      db.recordQURLSend(
-        sendId, senderDiscordId, rid, link.resourceId,
-        link.resType, link.qurlLink, sendConfig.expires_in,
-        originalInteraction.channelId, 'user',
-      );
+      sendRecords.push({
+        sendId, senderDiscordId, recipientDiscordId: rid, resourceId: link.resourceId,
+        resourceType: link.resType, qurlLink: link.qurlLink, expiresIn: sendConfig.expires_in,
+        channelId: originalInteraction.channelId, targetType: TARGET_TYPES.USER,
+      });
     }
   }
+  db.recordQURLSendBatch(sendRecords);
 
   // Send DMs — one message per recipient with all their links
   let delivered = 0;
@@ -995,7 +984,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
     for (const l of links) {
-      db.updateSendDMStatus(sendId, recipient.id, sent ? 'sent' : 'failed');
+      db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     }
     return { sent, username: recipient.username };
   }, 5);
