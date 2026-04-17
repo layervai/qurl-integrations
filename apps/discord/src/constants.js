@@ -10,6 +10,20 @@ const COLORS = {
   GOLD: 0xF1C40F,         // Gold - achievements/milestones
   GITHUB_GREEN: 0x238636, // GitHub green - issues/PRs
   GITHUB_PURPLE: 0x6e5494,// GitHub purple - commits
+  QURL_BRAND: 0x00d4ff,   // Cyan - QURL delivery embeds
+};
+
+// QURL resource types
+const RESOURCE_TYPES = {
+  FILE: 'file',
+  MAPS: 'maps',
+};
+
+// DM delivery status values
+const DM_STATUS = {
+  SENT: 'sent',
+  FAILED: 'failed',
+  PENDING: 'pending',
 };
 
 // Role colors (for auto-creation)
@@ -24,7 +38,7 @@ const ROLE_COLORS = {
 const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
-  QURL_REVOKE_WINDOW: 900000, // 15 minutes — button stays active, /qurl revoke works forever
+  QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
 };
 
 // Limits
@@ -57,6 +71,8 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 
 module.exports = {
   COLORS,
+  RESOURCE_TYPES,
+  DM_STATUS,
   ROLE_COLORS,
   TIMEOUTS,
   LIMITS,

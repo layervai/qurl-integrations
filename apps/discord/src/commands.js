@@ -16,7 +16,8 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
+const { COLORS, TIMEOUTS, LIMITS, RESOURCE_TYPES, DM_STATUS } = require('./constants');
+const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector } = require('./connector');
@@ -110,23 +111,12 @@ async function batchSettled(items, fn, batchSize = 5) {
   return results;
 }
 
-function expiryToISO(expiresIn) {
-  const units = { m: 60, h: 3600, d: 86400 };
-  const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) {
-    logger.warn('expiryToISO: invalid expiry format, defaulting to 24h', { expiresIn });
-    return new Date(Date.now() + 86400000).toISOString();
-  }
-  const ms = parseInt(match[1]) * units[match[2]] * 1000;
-  return new Date(Date.now() + ms).toISOString();
-}
-
 // --- Shared DM embed builder ---
 function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
-  const isFile = resourceType === 'file';
+  const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
-    .setColor(0x00d4ff)
+    .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'QURL Secure Delivery' })
     .setDescription(
       `**${senderUsername}** shared a protected resource with you\n${divider}`
@@ -192,9 +182,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       return buildStatusMsg();
     },
   };
-  const expiryUnits = { m: 60000, h: 3600000, d: 86400000 };
-  const match = expiresIn.match(/^(\d+)([mhd])$/);
-  const expiryMs = match ? parseInt(match[1]) * expiryUnits[match[2]] : 86400000;
+  const expiryMs = expiryToMs(expiresIn);
   const maxMonitorMs = expiryMs + 60000;
 
   const resourceIds = [...new Set(qurlLinks.map(l => l.resourceId))];
@@ -337,7 +325,9 @@ async function handleSend(interaction) {
   // Set cooldown immediately to prevent concurrent request bypass
   setCooldown(interaction.user.id);
 
-  if (!config.QURL_API_KEY) {
+  // The gating logic in execute() already ensures apiKey is set, but
+  // guard defensively in case handleSend is called directly.
+  if (!apiKey) {
     clearCooldown(interaction.user.id);
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
@@ -461,7 +451,7 @@ async function handleSend(interaction) {
 
   if (resInteraction.customId === `qurl_res_loc_${sendNonce}`) {
     // --- Location: show modal ---
-    resourceType = 'maps';
+    resourceType = RESOURCE_TYPES.MAPS;
 
     const modal = new ModalBuilder()
       .setCustomId(`qurl_loc_modal_${sendNonce}`)
@@ -520,7 +510,7 @@ async function handleSend(interaction) {
 
   } else {
     // --- File: use attachment from slash command ---
-    resourceType = 'file';
+    resourceType = RESOURCE_TYPES.FILE;
     attachment = commandAttachment;
 
     if (!attachment) {
@@ -557,7 +547,7 @@ async function handleSend(interaction) {
   let connectorResourceId = null;
 
   try {
-    if (resourceType === 'file') {
+    if (resourceType === RESOURCE_TYPES.FILE) {
       const filename = sanitizeFilename(attachment.name);
       const expiresAt = expiryToISO(expiresIn);
 
@@ -656,7 +646,7 @@ async function handleSend(interaction) {
     });
 
     const sent = await sendDM(link.recipientId, { embeds: [embed] });
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? 'sent' : 'failed');
+    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -911,7 +901,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
           resourceId: allLinks[i].resourceId,
-          resType: 'file',
+          resType: RESOURCE_TYPES.FILE,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       });
@@ -931,7 +921,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
           resourceId: uploadResult.resource_id,
-          resType: 'maps', label: sendConfig.location_name || 'Google Maps',
+          resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
       });
     }
@@ -983,7 +973,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
     for (const l of links) {
-      db.updateSendDMStatus(sendId, recipient.id, sent ? 'sent' : 'failed');
+      db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     }
     return { sent, username: recipient.username };
   }, 5);
@@ -1712,7 +1702,8 @@ const commands = [
       if (sub === 'status') {
         const guildConfig = db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
-          const keyPreview = guildConfig.qurl_api_key.slice(0, 12) + '...';
+          const key = guildConfig.qurl_api_key;
+          const keyPreview = key.slice(0, 8) + '...' + key.slice(-4);
           return interaction.reply({
             content: `✅ **QURL is configured**\n` +
               `Key: \`${keyPreview}\`\n` +
