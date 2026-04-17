@@ -131,7 +131,15 @@ db.exec(`
 // CREATE TABLE IF NOT EXISTS does not alter existing schemas; these are
 // idempotent ALTER TABLE ADD COLUMN calls that let handleAddRecipients
 // re-download the file via Discord CDN on follow-up sends.
-for (const col of ['attachment_content_type', 'attachment_url']) {
+//
+// NOTE: the column name is template-interpolated below. This is safe ONLY
+// because the names come from a hardcoded ALLOW_COLUMNS list and are
+// validated against it. Never expand this list with user-supplied input.
+const ALLOW_COLUMNS = ['attachment_content_type', 'attachment_url'];
+for (const col of ALLOW_COLUMNS) {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(col)) {
+    throw new Error(`Refusing ALTER TABLE with unexpected column name: ${col}`);
+  }
   try {
     db.exec(`ALTER TABLE qurl_send_configs ADD COLUMN ${col} TEXT`);
   } catch (err) {

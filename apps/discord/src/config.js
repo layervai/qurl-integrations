@@ -1,3 +1,5 @@
+const path = require('path');
+
 // Safe int parser: handles NaN and falsy-zero correctly
 function intEnv(key, defaultVal) {
   const v = parseInt(process.env[key], 10);
@@ -48,8 +50,11 @@ module.exports = {
   // OAuth link expiry (in minutes)
   PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 30),
 
-  // Database
-  DATABASE_PATH: process.env.DATABASE_PATH || './data/opennhp-bot.db',
+  // Database — absolute path so the DB is anchored to the bot's source tree
+  // regardless of the cwd the process was launched from.
+  DATABASE_PATH: process.env.DATABASE_PATH
+    ? path.resolve(process.env.DATABASE_PATH)
+    : path.resolve(__dirname, '..', 'data', 'opennhp-bot.db'),
 
   // Admin Discord user IDs (comma-separated) - can use /forcelink, /bulklink, /unlinked
   ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean),

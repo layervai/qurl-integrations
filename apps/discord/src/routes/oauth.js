@@ -13,53 +13,57 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
   const contributions = [];
 
   try {
-    // Search for merged PRs by this user in allowed orgs
+    // Search for merged PRs by this user in allowed orgs. GitHub's search API
+    // returns at most 100 per page and caps `total_count` at 1000; paginate up
+    // to 5 pages (500 PRs) per org so prolific contributors don't have
+    // badges/contributions silently truncated.
+    const MAX_PAGES = 5;
     for (const org of config.ALLOWED_GITHUB_ORGS) {
-      const searchQuery = `type:pr author:${githubUsername} org:${org} is:merged`;
-      const searchUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100`;
+      for (let page = 1; page <= MAX_PAGES; page++) {
+        const searchQuery = `type:pr author:${githubUsername} org:${org} is:merged`;
+        const searchUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100&page=${page}`;
 
-      const response = await fetch(searchUrl, {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'OpenNHP-Bot',
-        },
-        signal: AbortSignal.timeout(30000),
-      });
-
-      if (!response.ok) {
-        // Inspect GitHub's rate-limit headers so we don't silently burn through
-        // the remaining org list after a 403/429: stop early and surface that
-        // historical results are incomplete rather than pretending they're empty.
-        const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '-1', 10);
-        const retryAfter = response.headers.get('retry-after');
-        logger.warn(`Failed to search PRs for ${githubUsername} in ${org}`, {
-          status: response.status, remaining, retryAfter,
+        const response = await fetch(searchUrl, {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'OpenNHP-Bot',
+          },
+          signal: AbortSignal.timeout(30000),
         });
-        if (response.status === 403 || response.status === 429 || remaining === 0) {
-          return {
-            count: contributions.length,
-            newBadges: [],
-            error: `GitHub rate limit hit (status ${response.status}); historical results incomplete`,
-          };
+
+        if (!response.ok) {
+          const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '-1', 10);
+          const retryAfter = response.headers.get('retry-after');
+          logger.warn(`Failed to search PRs for ${githubUsername} in ${org} page ${page}`, {
+            status: response.status, remaining, retryAfter,
+          });
+          if (response.status === 403 || response.status === 429 || remaining === 0) {
+            return {
+              count: contributions.length,
+              newBadges: [],
+              error: `GitHub rate limit hit (status ${response.status}); historical results incomplete`,
+            };
+          }
+          break; // stop paginating this org, move on to the next
         }
-        continue;
-      }
 
-      const data = await response.json();
+        const data = await response.json();
+        const items = data.items || [];
 
-      for (const pr of data.items || []) {
-        // Extract repo name from repository_url
-        const repoMatch = pr.repository_url?.match(/repos\/(.+)$/);
-        const repo = repoMatch ? repoMatch[1] : 'unknown';
-
-        contributions.push({
-          prNumber: pr.number,
-          repo: repo,
-          title: pr.title,
-          url: pr.html_url,
-          mergedAt: pr.closed_at,
-        });
+        for (const pr of items) {
+          const repoMatch = pr.repository_url?.match(/repos\/(.+)$/);
+          const repo = repoMatch ? repoMatch[1] : 'unknown';
+          contributions.push({
+            prNumber: pr.number,
+            repo,
+            title: pr.title,
+            url: pr.html_url,
+            mergedAt: pr.closed_at,
+          });
+        }
+        // Stop paginating when the page is partial — nothing more to fetch.
+        if (items.length < 100) break;
       }
     }
 
@@ -367,26 +371,35 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       type: 'error',
     }));
   } finally {
-    // Revoke the GitHub OAuth token — we only needed it for the initial API
-    // calls. Awaited (with a tight 5s timeout) so the request completes before
-    // the response resolves; leaving a read:user token alive on GitHub would
-    // be a real credential leak.
+    // Revoke the GitHub OAuth token. Await the call and retry once with
+    // backoff; leaving a read:user token alive on GitHub would be a real
+    // credential leak.
     if (accessToken) {
-      try {
-        await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'User-Agent': 'OpenNHP-Bot',
-          },
-          body: JSON.stringify({ access_token: accessToken }),
-          signal: AbortSignal.timeout(5000),
-        });
-      } catch (err) {
-        // Page oncall: the user's GitHub token is now orphaned-alive.
-        logger.error('Failed to revoke GitHub OAuth token', { error: err.message });
+      const revokeOnce = () => fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'OpenNHP-Bot',
+        },
+        body: JSON.stringify({ access_token: accessToken }),
+        signal: AbortSignal.timeout(5000),
+      });
+      let lastErr = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const resp = await revokeOnce();
+          if (resp.ok || resp.status === 404) { lastErr = null; break; }
+          lastErr = new Error(`revoke returned ${resp.status}`);
+        } catch (err) {
+          lastErr = err;
+        }
+        if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
+      }
+      if (lastErr) {
+        // Page oncall: the user's GitHub token is orphaned-alive after 2 attempts.
+        logger.error('Failed to revoke GitHub OAuth token after retries', { error: lastErr.message });
       }
     }
   }

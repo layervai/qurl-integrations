@@ -5,7 +5,8 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer } = require('./server');
 const db = require('./database');
 
-// Validate required config
+// Validate required config. Fail fast at boot so misconfigurations are caught
+// during deploy, not when the first request arrives.
 const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID'];
 const missing = required.filter(key => !config[key]);
 
@@ -14,6 +15,17 @@ if (missing.length > 0) {
   missing.forEach(key => logger.error(`  - ${key}`));
   logger.error('See .env.example for required variables.');
   process.exit(1);
+}
+
+// Production-only required secrets. In dev these are optional so localhost
+// workflows stay convenient.
+if (process.env.NODE_ENV === 'production') {
+  const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY'];
+  const prodMissing = prodRequired.filter(k => !process.env[k]);
+  if (prodMissing.length > 0) {
+    logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
+    process.exit(1);
+  }
 }
 
 // Validate numeric config values

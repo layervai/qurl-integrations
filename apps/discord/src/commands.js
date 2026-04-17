@@ -512,6 +512,9 @@ async function handleSend(interaction) {
       locationName = locationValue;
       locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     }
+    // Cap for embed-field safety (Discord 1024-char limit) and to prevent
+    // pathological URL-decoded inputs from tripping downstream rendering.
+    if (locationName) locationName = locationName.slice(0, 256);
     resourceLabel = locationName || 'Location';
 
   } else {
@@ -831,31 +834,40 @@ async function handleSend(interaction) {
         collector.stop('revoked');
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
-        // Mutex: two fast clicks could both pass the `remaining` check before
-        // addRecipientsCount is incremented, causing a double-send.
+        // =====================================================================
+        // CRITICAL SECTION — do NOT add any `await` between the three lines
+        // below and the next `return` path. Node.js is single-threaded: if
+        // check+set+cooldown all happen synchronously, a second button click
+        // dispatched to the same handler cannot observe the unlocked state.
+        // The `await` in the rejection branches is fine because we've already
+        // committed to rejecting at that point.
+        // =====================================================================
         if (addingRecipients) {
           await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(() => {});
           return;
         }
-        addingRecipients = true;
-
-        // Enforce cumulative recipient cap
+        // Enforce cumulative cap INSIDE the mutex so two clicks can't both pass
         const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
         if (remaining <= 0) {
-          addingRecipients = false;
           await btnInteraction.reply({
             content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
             ephemeral: true,
           });
           return;
         }
-
-        // Enforce cooldown on add-recipients too
         if (isOnCooldown(interaction.user.id)) {
-          addingRecipients = false;
-          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true });
+          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(() => {});
           return;
         }
+        // Acquire: flip the flag AND set cooldown AND optimistically reserve
+        // `remaining` slots. All three happen before any `await` so a racing
+        // click cannot observe stale state. The reservation is rolled back on
+        // failure and corrected against the actual delivered count on success.
+        addingRecipients = true;
+        setCooldown(interaction.user.id);
+        const reservedSlots = remaining;
+        addRecipientsCount += reservedSlots;
+        // ===== END CRITICAL SECTION =====
 
         // Show user select menu — collect the response on the REPLY message
         const maxSelect = Math.min(10, remaining);
@@ -885,11 +897,13 @@ async function handleSend(interaction) {
             sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
           );
 
-          // Use the structured delivered count from handleAddRecipients rather
-          // than regex-parsing the display string — the old pattern silently
-          // bypassed addRecipientsCount if the message format ever changed.
+          // We optimistically reserved `reservedSlots` in the critical section.
+          // Correct the count: give back any unused slots (reserved but not
+          // actually delivered).
+          const overReserved = reservedSlots - addResult.delivered;
+          if (overReserved !== 0) addRecipientsCount -= overReserved;
+
           if (addResult.delivered > 0) {
-            addRecipientsCount += addResult.delivered;
             // Tell the monitor to track the new links (including new resource IDs for location sends)
             monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
@@ -899,9 +913,10 @@ async function handleSend(interaction) {
             await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
           }
 
-          setCooldown(interaction.user.id);
           await selectInteraction.editReply({ content: addResult.msg, components: [] });
         } catch (err) {
+          // Roll back the optimistic reservation — no recipients were added
+          addRecipientsCount -= reservedSlots;
           const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
           const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
           logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
