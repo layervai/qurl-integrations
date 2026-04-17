@@ -1657,58 +1657,51 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('handles qurl location autocomplete', async () => {
+  it('handles qurl target autocomplete in text channel', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
+      channel: { type: 0 }, // GuildText
       options: {
         ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'location', value: 'Eif' })),
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
     });
 
     await handleCommand(interaction);
 
-    // Should respond (empty since searchPlaces returns [])
-    expect(interaction.respond).toHaveBeenCalled();
+    expect(interaction.respond).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ value: 'channel' }),
+        expect.objectContaining({ value: 'user' }),
+      ]),
+    );
+    // Voice option should NOT be present in text channels
+    const choices = interaction.respond.mock.calls[0][0];
+    expect(choices.find(c => c.value === 'voice')).toBeUndefined();
   });
 
-  it('responds empty for short query', async () => {
+  it('handles qurl target autocomplete in voice channel', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
+      channel: { type: 2 }, // GuildVoice
       options: {
         ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'location', value: 'E' })),
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
     });
 
     await handleCommand(interaction);
 
-    expect(interaction.respond).toHaveBeenCalledWith([]);
+    const choices = interaction.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(3);
+    expect(choices.find(c => c.value === 'voice')).toBeDefined();
   });
 
-  it('responds with maps link suggestion for Google Maps URL', async () => {
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: {
-        ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'location', value: 'https://maps.app.goo.gl/abc123' })),
-      },
-    });
-
-    await handleCommand(interaction);
-
-    expect(interaction.respond).toHaveBeenCalledWith([
-      expect.objectContaining({ name: expect.stringContaining('Maps link') }),
-    ]);
-  });
-
-  it('ignores non-location focused autocomplete', async () => {
+  it('ignores non-target focused autocomplete', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -2374,17 +2367,17 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
 });
 
 describe('autocomplete rate limiting', () => {
-  it('allows first requests then rate-limits', async () => {
-    // Fire 6 autocomplete requests quickly -- 5th should succeed, 6th should be limited
+  it('target autocomplete responds consistently', async () => {
     const responses = [];
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 3; i++) {
       const interaction = makeInteraction({
         commandName: 'qurl',
         isAutocomplete: jest.fn(() => true),
         isChatInputCommand: jest.fn(() => false),
+        channel: { type: 0 }, // GuildText
         options: {
           ...makeInteraction().options,
-          getFocused: jest.fn(() => ({ name: 'location', value: 'test query' })),
+          getFocused: jest.fn(() => ({ name: 'target', value: '' })),
         },
         user: { id: 'autocomplete-user', username: 'TestUser' },
       });
@@ -2392,9 +2385,15 @@ describe('autocomplete rate limiting', () => {
       responses.push(interaction.respond.mock.calls);
     }
 
-    // All should have called respond (even rate-limited ones respond with [])
+    // All should have called respond with target choices
     for (const calls of responses) {
       expect(calls.length).toBe(1);
+      expect(calls[0][0]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ value: 'channel' }),
+          expect.objectContaining({ value: 'user' }),
+        ]),
+      );
     }
   });
 });

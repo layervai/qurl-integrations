@@ -177,6 +177,7 @@ cleanupExpiredPendingLinks();
 
 // Periodic cleanup every 10 minutes
 const cleanupInterval = setInterval(cleanupExpiredPendingLinks, 10 * 60 * 1000);
+cleanupInterval.unref();
 
 // Clean up old qurl_sends and qurl_send_configs (older than 30 days)
 function cleanupOldSends() {
@@ -198,6 +199,7 @@ function cleanupOldSends() {
 
 cleanupOldSends();
 const sendsCleanupInterval = setInterval(cleanupOldSends, 24 * 60 * 60 * 1000);
+sendsCleanupInterval.unref();
 
 module.exports = {
   BADGE_TYPES,

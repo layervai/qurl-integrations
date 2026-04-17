@@ -906,40 +906,26 @@ describe('/qurl send — voice target with members', () => {
 // =========================================================================
 
 describe('handleCommand — autocomplete edge cases', () => {
-  it('returns empty when rate limited', async () => {
-    for (let i = 0; i < 6; i++) {
-      const interaction = makeInteraction({
-        commandName: 'qurl',
-        isAutocomplete: jest.fn(() => true),
-        isChatInputCommand: jest.fn(() => false),
-        options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: `query${i}long` })) },
-      });
-      await handleCommand(interaction);
-    }
-    // 7th should be rate limited
-    const last = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'rate_limit_test' })) },
-    });
-    await handleCommand(last);
-    expect(last.respond).toHaveBeenCalledWith([]);
-  });
-
-  it('responds empty when searchPlaces throws', async () => {
-    const { searchPlaces } = require('../src/places');
-    searchPlaces.mockRejectedValueOnce(new Error('API fail'));
-
+  it('returns target choices for unknown focused field', async () => {
     const interaction = makeInteraction({
-      user: { id: 'fresh-user-for-rate-limit' },
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'Eiffel Tower' })) },
+      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'unknown_field', value: 'test' })) },
     });
     await handleCommand(interaction);
-    expect(interaction.respond).toHaveBeenCalledWith([]);
+    // Unknown field — handler returns without responding
+    expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('returns target choices for non-qurl autocomplete', async () => {
+    const interaction = makeInteraction({
+      commandName: 'link',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+    });
+    await handleCommand(interaction);
+    expect(interaction.respond).not.toHaveBeenCalled();
   });
 });
 

@@ -38,7 +38,7 @@ module.exports = {
   ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()),
 
   // Server
-  PORT: process.env.PORT || 3000,
+  PORT: intEnv('PORT', 3000),
   BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
 
   // Rate limiting

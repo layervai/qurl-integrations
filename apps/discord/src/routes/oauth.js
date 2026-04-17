@@ -101,7 +101,8 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
   }
 }
 
-// Simple in-memory rate limiter with periodic eviction
+// Simple in-memory rate limiter with periodic eviction.
+// Note: per-process only — if scaling to multiple ECS tasks, move to Redis or ALB rate limiting.
 const rateLimitStore = new Map();
 
 // Evict stale entries every 5 minutes to prevent unbounded growth

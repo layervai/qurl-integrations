@@ -17,11 +17,11 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
+const { COLORS, TIMEOUTS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
 const { uploadToConnector, uploadJsonToConnector, mintLinks } = require('./connector');
-const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
+const { getVoiceChannelMembers, getTextChannelMembers, getVoiceChannelViewers, sendDM } = require('./discord');
 const { searchPlaces } = require('./places');
 
 // Generate secure random state
@@ -362,31 +362,22 @@ async function handleSend(interaction) {
     }
   } else if (target === 'channel') {
     await interaction.deferReply({ ephemeral: true });
+    try {
+      await interaction.guild.members.fetch();
+    } catch (err) {
+      logger.error('Failed to fetch guild members', { error: err.message });
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
+    }
     const isVoiceChannel = interaction.channel && (
       interaction.channel.type === ChannelType.GuildVoice ||
       interaction.channel.type === ChannelType.GuildStageVoice
     );
-    if (isVoiceChannel) {
-      // Voice channel "Everyone" = all members who can see this channel, not just connected
-      try {
-        await interaction.guild.members.fetch();
-      } catch (err) {
-        logger.error('Failed to fetch guild members', { error: err.message });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
-      }
-      recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
-    } else {
-      // Text channel "Everyone" = all members who can see this text channel
-      try {
-        await interaction.guild.members.fetch();
-      } catch (err) {
-        logger.error('Failed to fetch guild members', { error: err.message });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
-      }
-      recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
-    }
+    // Voice: all members with permission to see the channel (not just connected)
+    // Text: all members who can see the text channel
+    recipients = isVoiceChannel
+      ? getVoiceChannelViewers(interaction.channel, interaction.user.id)
+      : getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
@@ -607,9 +598,9 @@ async function handleSend(interaction) {
         mapData.lat = parseFloat(latLngMatch[1]);
         mapData.lng = parseFloat(latLngMatch[2]);
       }
-      if (locationName) mapData.query = locationName;
-      // Fallback: if no lat/lng and no name, use the URL as query
-      if (!mapData.lat && !mapData.query) mapData.query = locationUrl;
+      if (locationName && !isGoogleMapsURL(locationName)) mapData.query = locationName;
+      // If we have a Google Maps URL but no lat/lng, store it as url for the fileviewer to embed directly
+      if (!mapData.lat && !mapData.query) mapData.url = locationUrl;
 
       const uploadResult = await uploadJsonToConnector(mapData, 'location.json');
       connectorResourceId = uploadResult.resource_id;
@@ -741,12 +732,13 @@ async function handleSend(interaction) {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
-  // Notify the channel when sending to "Everyone" (non-ephemeral so all members see it)
+  // Notify the channel when sending to "Everyone" or "Voice users" (non-ephemeral so all members see it)
   if ((target === 'channel' || target === 'voice') && delivered > 0) {
+    const notifyMsg = target === 'voice'
+      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
     try {
-      await interaction.channel.send({
-        content: `📩 **${interaction.user.displayName}** has shared something with everyone via **QURL Bot** — check your DMs from Qurl Bot.`,
-      });
+      await interaction.channel.send({ content: notifyMsg });
     } catch (err) {
       logger.warn('Failed to send channel notification', { error: err.message });
     }
@@ -1797,9 +1789,6 @@ async function handleCommand(interaction) {
       const focused = interaction.options.getFocused(true);
       if (focused.name === 'target') {
         return handleTargetAutocomplete(interaction);
-      }
-      if (focused.name === 'location') {
-        return handleLocationAutocomplete(interaction, focused.value);
       }
     }
     return;
