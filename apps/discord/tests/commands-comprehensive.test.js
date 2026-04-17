@@ -171,9 +171,13 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
+const mockDownloadAndUpload = jest.fn();
+const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
+  downloadAndUpload: mockDownloadAndUpload,
+  reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
 }));
 
@@ -1158,7 +1162,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       { id: 'r2', username: 'Bob' },
     ];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([
       { qurl_link: 'https://q.test/l1' },
       { qurl_link: 'https://q.test/l2' },
@@ -1207,7 +1211,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockUploadToConnector).toHaveBeenCalled();
+    expect(mockDownloadAndUpload).toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
@@ -1411,7 +1415,7 @@ describe('/qurl send — link creation failure', () => {
   it('handles upload failure gracefully', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockRejectedValue(new Error('S3 down'));
+    mockDownloadAndUpload.mockRejectedValue(new Error('S3 down'));
 
     const attachment = {
       name: 'doc.pdf',
@@ -1457,7 +1461,7 @@ describe('/qurl send — DM failures', () => {
       { id: 'r2', username: 'Bob' },
     ];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([
       { qurl_link: 'https://q.test/l1' },
       { qurl_link: 'https://q.test/l2' },
@@ -2073,7 +2077,7 @@ describe('collector button handlers — revoke and expand', () => {
   it('handles revoke button click in collector', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-col' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-col', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/c1' }]);
     mockSendDM.mockResolvedValue(true);
     mockDb.getSendResourceIds.mockReturnValue(['conn-col']);
@@ -2132,7 +2136,7 @@ describe('collector button handlers — revoke and expand', () => {
     // Setup a send with > 5 recipients to get the expand button
     const recipients = Array.from({ length: 7 }, (_, i) => ({ id: `r${i}`, username: `U${i}` }));
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-exp' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-exp', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue(recipients.map((_, i) => ({ qurl_link: `https://q.test/e${i}` })));
     mockSendDM.mockResolvedValue(true);
 
@@ -2185,7 +2189,7 @@ describe('collector button handlers — revoke and expand', () => {
   it('handles collector end with time reason', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-end' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-end', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/end1' }]);
     mockSendDM.mockResolvedValue(true);
 
@@ -2239,7 +2243,7 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
 
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-m1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-m1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/m1' }]);
     mockSendDM.mockResolvedValue(true);
     mockGetResourceStatus.mockResolvedValue({

@@ -137,6 +137,10 @@ function rateLimit(req, res, next) {
 
   requests.push(now);
   rateLimitStore.set(ip, requests);
+  if (rateLimitStore.size >= 10000) {
+    const oldest = rateLimitStore.keys().next().value;
+    rateLimitStore.delete(oldest);
+  }
   next();
 }
 

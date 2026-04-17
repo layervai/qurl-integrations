@@ -19,7 +19,11 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { uploadToConnector, mintLinks } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks } = require('./connector');
+
+// Max tokens the QURL API allows per resource. When exceeded, a new
+// resource must be created (re-upload) to get a fresh token pool.
+const TOKENS_PER_RESOURCE = 10;
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 
 
@@ -309,6 +313,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
   }, pollInterval);
+  if (timer && timer.unref) timer.unref();
 
   return control;
 }
@@ -390,21 +395,25 @@ async function handleSend(interaction) {
     }
     recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
     }
   } else if (target === 'voice') {
     await interaction.deferReply({ ephemeral: true });
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
     }
     if (result.members.length === 0) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other users in your voice channel.' });
     }
     recipients = result.members;
   }
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
   }
 
@@ -557,27 +566,31 @@ async function handleSend(interaction) {
     if (resourceType === 'file') {
       const filename = sanitizeFilename(attachment.name);
       const expiresAt = expiryToISO(expiresIn);
-      const allLinks = [];
 
-      // The QURL API caps tokens at 10 per resource. For >10 recipients,
-      // re-upload the file to create a new resource for each batch.
-      // The file data is the same — only the QURL resource pool is new.
-      const TOKENS_PER_RESOURCE = 10;
-      let currentResourceId = null;
-      let tokensUsedOnCurrent = TOKENS_PER_RESOURCE; // force initial upload
+      // Download once, cache the buffer for re-uploads.
+      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType);
+      connectorResourceId = firstUpload.resource_id;
+      const fileBuffer = firstUpload.fileBuffer;
+
+      // Mint tokens in batches of TOKENS_PER_RESOURCE per QURL resource.
+      // When exhausted, re-upload the cached buffer to create a new resource.
+      const allLinks = []; // { qurl_link, resourceId }
+      let currentResourceId = firstUpload.resource_id;
+      let tokensUsed = 0;
 
       for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
-        if (tokensUsedOnCurrent >= TOKENS_PER_RESOURCE) {
-          const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
-          currentResourceId = uploadResult.resource_id;
-          if (!connectorResourceId) connectorResourceId = currentResourceId;
-          tokensUsedOnCurrent = 0;
+        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+          const reUpload = await reUploadBuffer(fileBuffer, filename, attachment.contentType);
+          currentResourceId = reUpload.resource_id;
+          tokensUsed = 0;
         }
 
         const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
         const minted = await mintLinks(currentResourceId, expiresAt, batchSize);
-        allLinks.push(...minted);
-        tokensUsedOnCurrent += batchSize;
+        for (const link of minted) {
+          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+        }
+        tokensUsed += batchSize;
       }
 
       if (allLinks.length < recipients.length) {
@@ -589,7 +602,7 @@ async function handleSend(interaction) {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
-        resourceId: connectorResourceId,
+        resourceId: allLinks[i].resourceId,
       }));
     } else {
       const description = locationName || locationUrl;
@@ -874,13 +887,18 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
   try {
     if (hasFile) {
+      // Mint tokens in batches of TOKENS_PER_RESOURCE per resource.
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = [];
-      for (let i = 0; i < newRecipients.length; i += 10) {
-        const batchSize = Math.min(10, newRecipients.length - i);
+
+      for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
+        const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
         const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
-        allLinks.push(...minted);
+        for (const link of minted) {
+          allLinks.push({ qurl_link: link.qurl_link, resourceId: sendConfig.connector_resource_id });
+        }
       }
+
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
@@ -889,7 +907,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
-          resourceId: sendConfig.connector_resource_id,
+          resourceId: allLinks[i].resourceId,
           resType: 'file',
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });

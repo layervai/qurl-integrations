@@ -74,12 +74,13 @@ app.use((err, req, res, next) => {
 
 // Start server
 function startServer() {
-  app.listen(config.PORT, () => {
+  const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
     logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
     logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
   });
+  return server;
 }
 
 module.exports = { app, startServer };

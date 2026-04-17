@@ -148,16 +148,24 @@ client.once('ready', async () => {
 
 // Handle role/channel deletion - refresh cache
 client.on('roleDelete', async (role) => {
-  if (Object.values(roles).some(r => r?.id === role.id)) {
-    logger.warn('A tracked role was deleted, refreshing cache');
-    await refreshCache();
+  try {
+    if (Object.values(roles).some(r => r?.id === role.id)) {
+      logger.warn('A tracked role was deleted, refreshing cache');
+      await refreshCache();
+    }
+  } catch (error) {
+    logger.error('Error handling roleDelete event', { error: error.message });
   }
 });
 
 client.on('channelDelete', async (channel) => {
-  if (Object.values(channels).some(c => c?.id === channel.id)) {
-    logger.warn('A tracked channel was deleted, refreshing cache');
-    await refreshCache();
+  try {
+    if (Object.values(channels).some(c => c?.id === channel.id)) {
+      logger.warn('A tracked channel was deleted, refreshing cache');
+      await refreshCache();
+    }
+  } catch (error) {
+    logger.error('Error handling channelDelete event', { error: error.message });
   }
 });
 

@@ -182,9 +182,13 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
+const mockDownloadAndUpload = jest.fn();
+const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
+  downloadAndUpload: mockDownloadAndUpload,
+  reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
 }));
 
@@ -333,7 +337,7 @@ describe('buildConfirmMsg — truncation with > 5 recipients + expand', () => {
     const recipients = [];
     for (let i = 0; i < 7; i++) recipients.push({ id: `r${i}`, username: `User${i}` });
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue(
       recipients.map((_, i) => ({ qurl_link: `https://q.test/l${i}` })),
     );
@@ -391,7 +395,7 @@ describe('collector — revoke button', () => {
   it('calls revokeAllLinks on click', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
     mockSendDM.mockResolvedValue(true);
     mockDb.getSendResourceIds.mockReturnValue(['conn-1']);
@@ -429,7 +433,7 @@ describe('collector — revoke button', () => {
   it('handles revoke failure gracefully', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
     mockSendDM.mockResolvedValue(true);
     mockDb.getSendResourceIds.mockImplementation(() => { throw new Error('DB down'); });
@@ -471,7 +475,7 @@ describe('collector — end timeout', () => {
   it('appends management window closed on time end', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
     mockSendDM.mockResolvedValue(true);
 
@@ -512,7 +516,7 @@ describe('/qurl send — fewer mint links than recipients', () => {
   it('reports partial link creation', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }, { id: 'r3', username: 'Charlie' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }, { qurl_link: 'https://q.test/l2' }]);
 
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 100, url: 'https://cdn.discordapp.com/doc.pdf' };
@@ -720,7 +724,7 @@ describe('collector — add recipients button', () => {
   async function setupSendWithCollector() {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
     mockSendDM.mockResolvedValue(true);
 
@@ -866,7 +870,7 @@ describe('collector — add recipients button', () => {
 describe('/qurl send — voice target with members', () => {
   it('proceeds with voice channel members', async () => {
     mockGetVoice.mockReturnValue({ error: null, members: [{ id: 'r1', username: 'Alice' }] });
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
     mockSendDM.mockResolvedValue(true);
 
@@ -917,7 +921,7 @@ describe('/qurl send — DM batch with rejected promise', () => {
   it('counts rejected DM promises as failed', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }, { id: 'r2', username: 'Bob' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadToConnector.mockResolvedValue({ resource_id: 'conn-1' });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }, { qurl_link: 'https://q.test/l2' }]);
     mockSendDM.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('DM blocked'));
 
