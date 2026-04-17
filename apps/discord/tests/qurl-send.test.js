@@ -1495,6 +1495,13 @@ describe('handleAddRecipients', () => {
       personal_message: 'Here is the file',
       location_name: null,
       attachment_name: 'report.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/report.pdf',
+    });
+
+    mockDownloadAndUpload.mockResolvedValue({
+      resource_id: 'conn-res-43',
+      fileBuffer: new ArrayBuffer(8),
     });
 
     mockMintLinks.mockResolvedValue([
@@ -1511,8 +1518,16 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-file-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
-    // mintLinks should have been called with the connector resource ID
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-42', expect.any(String), 2, 'test-api-key');
+    // Re-uploads a fresh resource from the stored attachment URL rather than
+    // reusing the (possibly-drained) original connector_resource_id
+    expect(mockDownloadAndUpload).toHaveBeenCalledWith(
+      'https://cdn.discordapp.com/attachments/1/2/report.pdf',
+      'report.pdf',
+      'application/pdf',
+      'test-api-key',
+    );
+    // mintLinks is called against the NEW resource (conn-res-43)
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key');
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     // DMs should have been sent
@@ -1690,9 +1705,12 @@ describe('handleAddRecipients', () => {
       expires_in: '6h',
       personal_message: null,
       location_name: null,
-      attachment_name: null,
+      attachment_name: 'file.bin',
+      attachment_content_type: 'application/octet-stream',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/file.bin',
     });
 
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res', fileBuffer: new ArrayBuffer(4) });
     mockMintLinks.mockRejectedValue(new Error('Connector down'));
 
     const users = makeUsersCollection([
@@ -1700,7 +1718,7 @@ describe('handleAddRecipients', () => {
     ]);
 
     const result = await handleAddRecipients('send-fail', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
-    expect(result.msg).toBe('Failed to create links for new recipients.');
+    expect(result.msg).toMatch(/Failed to prepare links/);
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {
@@ -1711,18 +1729,23 @@ describe('handleAddRecipients', () => {
       expires_in: '24h',
       personal_message: null,
       location_name: null,
-      attachment_name: null,
+      attachment_name: 'big.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/big.pdf',
     });
 
-    // 12 recipients = 2 batches (10 + 2)
+    // 12 recipients = 2 batches (10 + 2), each on a fresh resource
     const userList = [];
     for (let i = 0; i < 12; i++) {
       userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
     }
 
+    const fileBuffer = new ArrayBuffer(16);
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-A', fileBuffer });
+    mockReUploadBuffer.mockResolvedValue({ resource_id: 'new-res-B' });
+
     const batch1Links = Array.from({ length: 10 }, (_, i) => ({ qurl_link: `https://q.test/r-${i}` }));
     const batch2Links = Array.from({ length: 2 }, (_, i) => ({ qurl_link: `https://q.test/r2-${i}` }));
-
     mockMintLinks
       .mockResolvedValueOnce(batch1Links)
       .mockResolvedValueOnce(batch2Links);
@@ -1732,9 +1755,11 @@ describe('handleAddRecipients', () => {
     const users = makeUsersCollection(userList);
     const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
+    expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 10, 'test-api-key');
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 2, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-A', expect.any(String), 10, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-B', expect.any(String), 2, 'test-api-key');
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1746,7 +1771,9 @@ describe('handleAddRecipients', () => {
       expires_in: '24h',
       personal_message: null,
       location_name: null,
-      attachment_name: null,
+      attachment_name: 'thing.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/thing.pdf',
     });
 
     const userList = [];
@@ -1754,6 +1781,7 @@ describe('handleAddRecipients', () => {
       userList.push({ id: `rcpt-${i}`, bot: false, username: `User${i}` });
     }
 
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-C', fileBuffer: new ArrayBuffer(8) });
     const links = Array.from({ length: 8 }, (_, i) => ({ qurl_link: `https://q.test/l-${i}` }));
     mockMintLinks.mockResolvedValueOnce(links);
     mockSendDM.mockResolvedValue(true);
@@ -1761,8 +1789,9 @@ describe('handleAddRecipients', () => {
     const users = makeUsersCollection(userList);
     const result = await handleAddRecipients('send-ok', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
+    expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-ok', expect.any(String), 8, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('new-res-C', expect.any(String), 8, 'test-api-key');
     expect(mockSendDM).toHaveBeenCalledTimes(8);
     expect(result.msg).toMatch(/Added 8 recipients/);
   });

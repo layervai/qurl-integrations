@@ -239,39 +239,28 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     try {
       let changed = false;
 
-      // Initialize tracking on first poll — scan all resources
+      // Initialize tracking on first poll. A single send may span multiple
+      // resources (both file sends >TOKENS_PER_RESOURCE, which re-upload in
+      // batches of 10, and location sends which mint one qurl per resource),
+      // so walk every resource and collect all its qurls, then pick the
+      // `expectedCount` most recent across the whole send.
       if (!trackedQurlIds) {
         trackedQurlIds = new Set();
-        let recipientIdx = 0;
-
-        if (resourceIds.length === 1) {
-          // File send: one resource, N qurls — pick the N most recent
-          const data = await getResourceStatus(resourceIds[0], apiKey);
-          if (data && data.qurls) {
-            const sorted = [...data.qurls].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-            const recentN = sorted.slice(-expectedCount);
-            recentN.forEach((q) => {
-              trackedQurlIds.add(q.qurl_id);
-              const username = recipients[recipientIdx] ? recipients[recipientIdx].username : `user-${recipientIdx + 1}`;
-              linkStatus.set(q.qurl_id, { status: 'pending', username });
-              recipientIdx++;
-            });
-          }
-        } else {
-          // Location send: one resource per recipient — pick the most recent qurl from each
-          const statuses = await Promise.all(
-            resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
-          );
-          for (const data of statuses) {
-            if (!data || !data.qurls || data.qurls.length === 0) continue;
-            const sorted = [...data.qurls].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            const q = sorted[0]; // most recent
-            trackedQurlIds.add(q.qurl_id);
-            const username = recipients[recipientIdx] ? recipients[recipientIdx].username : `user-${recipientIdx + 1}`;
-            linkStatus.set(q.qurl_id, { status: 'pending', username });
-            recipientIdx++;
-          }
+        const statuses = await Promise.all(
+          resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
+        );
+        const allQurls = [];
+        for (const data of statuses) {
+          if (!data || !data.qurls) continue;
+          for (const q of data.qurls) allQurls.push(q);
         }
+        allQurls.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        const recentN = allQurls.slice(-expectedCount);
+        recentN.forEach((q, i) => {
+          trackedQurlIds.add(q.qurl_id);
+          const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
+          linkStatus.set(q.qurl_id, { status: 'pending', username });
+        });
         logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
       }
 
@@ -693,11 +682,15 @@ async function handleSend(interaction) {
     }
   }
 
-  // Save send config for "Add Recipients" reuse (uses first file resource if present)
+  // Save send config for "Add Recipients" reuse. For file sends, also stash
+  // the Discord CDN URL + content type so we can re-download + re-upload when
+  // adding recipients (the original resource's 10-token pool may be drained).
   db.saveSendConfig({
     sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
     actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
     attachmentName: attachment?.name || null,
+    attachmentContentType: attachment?.contentType || null,
+    attachmentUrl: attachment?.url || null,
   });
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
@@ -933,21 +926,68 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
   try {
     if (hasFile) {
-      // Mint tokens in batches of TOKENS_PER_RESOURCE per resource.
-      const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = [];
+      // Re-download from the stored Discord CDN URL, then upload a fresh
+      // resource so the 10-token pool is full. Re-upload again every
+      // TOKENS_PER_RESOURCE recipients. The original resource is drained by
+      // the initial send, so we CANNOT reuse sendConfig.connector_resource_id.
+      if (!sendConfig.attachment_url) {
+        return {
+          msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
+          newResourceIds: [],
+        };
+      }
 
-      for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
-        const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
-        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize, apiKey);
-        for (const link of minted) {
-          allLinks.push({ qurl_link: link.qurl_link, resourceId: sendConfig.connector_resource_id });
+      const expiresAt = expiryToISO(sendConfig.expires_in);
+      const allLinks = []; // { qurl_link, resourceId }
+      const newResourceIds = [];
+      let fileBuffer = null;
+      let currentResourceId = null;
+      let tokensUsed = TOKENS_PER_RESOURCE; // force first-iteration upload
+
+      try {
+        for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
+          if (tokensUsed >= TOKENS_PER_RESOURCE) {
+            if (!fileBuffer) {
+              const first = await downloadAndUpload(
+                sendConfig.attachment_url,
+                sendConfig.attachment_name || 'file',
+                sendConfig.attachment_content_type || 'application/octet-stream',
+                apiKey,
+              );
+              fileBuffer = first.fileBuffer;
+              currentResourceId = first.resource_id;
+            } else {
+              const re = await reUploadBuffer(
+                fileBuffer,
+                sendConfig.attachment_name || 'file',
+                sendConfig.attachment_content_type || 'application/octet-stream',
+                apiKey,
+              );
+              currentResourceId = re.resource_id;
+            }
+            newResourceIds.push(currentResourceId);
+            tokensUsed = 0;
+          }
+          const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
+          const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+          for (const link of minted) {
+            allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+          }
+          tokensUsed += batchSize;
         }
+      } catch (err) {
+        // Discord CDN URLs are signed and expire (~24h). If re-download fails,
+        // surface a clear message rather than a generic "try again".
+        const msg = /403|expired|network|CDN/i.test(err.message || '')
+          ? 'Original attachment URL has expired. Please create a new send.'
+          : `Failed to prepare links: ${err.message || 'unknown error'}`;
+        logger.error('addRecipients file re-upload failed', { sendId, error: err.message });
+        return { msg, newResourceIds: [] };
       }
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];

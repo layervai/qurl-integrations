@@ -826,8 +826,11 @@ describe('collector — add recipients button', () => {
       personal_message: null,
       location_name: null,
       attachment_name: 'doc.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/doc.pdf',
     });
 
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'conn-2', fileBuffer: new ArrayBuffer(4) });
     mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/l2' }]);
     mockSendDM.mockResolvedValue(true);
 

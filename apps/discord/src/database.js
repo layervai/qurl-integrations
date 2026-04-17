@@ -113,6 +113,8 @@ db.exec(`
     personal_message TEXT,
     location_name TEXT,
     attachment_name TEXT,
+    attachment_content_type TEXT,
+    attachment_url TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -124,6 +126,19 @@ db.exec(`
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// Add attachment-reupload columns to an existing qurl_send_configs table.
+// CREATE TABLE IF NOT EXISTS does not alter existing schemas; these are
+// idempotent ALTER TABLE ADD COLUMN calls that let handleAddRecipients
+// re-download the file via Discord CDN on follow-up sends.
+for (const col of ['attachment_content_type', 'attachment_url']) {
+  try {
+    db.exec(`ALTER TABLE qurl_send_configs ADD COLUMN ${col} TEXT`);
+  } catch (err) {
+    // "duplicate column name" is expected on second run; everything else bubbles up.
+    if (!String(err.message).includes('duplicate column')) throw err;
+  }
+}
 
 // Badge types (thresholds adjusted for realistic open source contribution cadence)
 const BADGE_TYPES = {
@@ -620,12 +635,12 @@ const dbModule = {
     return stmt.all(senderDiscordId, limit);
   },
 
-  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName }) {
+  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType, attachmentUrl }) {
     const stmt = db.prepare(`
-      INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name, attachment_content_type, attachment_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName);
+    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType ?? null, attachmentUrl ?? null);
   },
 
   getSendConfig(sendId, senderDiscordId) {
