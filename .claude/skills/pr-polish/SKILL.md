@@ -227,11 +227,11 @@ gh pr comment <PR_NUMBER> --repo <OWNER/REPO> --body "$(cat <<'EOF'
 
 The loop is closed — remaining Claude / reviewer findings have been evaluated and left for the reasons below. Revisit any of these if you disagree.
 
-| Severity per reviewer | Finding | Why left | Risk |
-|---|---|---|---|
-| Minor suggestion | <one-line finding, with file:line> | <reason — one sentence> | <low / none / deferred> |
-| Nit | <...> | <...> | <...> |
-| Medium (documented) | <...> | <architectural reason + why a DE would accept> | <...> |
+| Severity per reviewer | Finding | Why accepted | Future plan | Risk |
+|---|---|---|---|---|
+| Minor suggestion | <one-line finding, with file:line> | <reason — one sentence> | <concrete follow-up OR "none — acceptable as-is"> | <low / none / deferred> |
+| Nit | <...> | <...> | <...> | <...> |
+| Medium (documented) | <...> | <architectural reason + why a DE would accept> | <...> | <...> |
 
 <Optional: 1-2 lines on overall confidence — tests status, CI green, diff size, blast radius.>
 
@@ -242,8 +242,12 @@ EOF
 
 **Rules for this comment:**
 - **Include every item** from the latest Claude review that was NOT fixed, plus any Phase 1/2 agent findings you consciously skipped. Don't omit silently.
-- **"Why left"** must be a concrete engineering reason: "below convention threshold", "out of scope — tracked separately", "would require architectural change", "style preference, no runtime impact". Never "not important" or "low priority" without a why.
-- **If a Medium item was skipped,** the reason must justify why a distinguished engineer would accept skipping it (e.g., "Requires changing X's public API — separate PR"). Do not skip Mediums casually.
+- **"Why accepted"** must be a concrete engineering reason: "below convention threshold", "out of scope — tracked separately", "would require architectural change", "style preference, no runtime impact". Never "not important" or "low priority" without a why.
+- **"Future plan"** must be present for every row. Acceptable values:
+  - A concrete follow-up: `"separate PR — tracked in #<issue>"`, `"revisit when <X> lands"`, `"backlog: <short description>"`.
+  - An explicit "no plan": `"none — acceptable as-is"` or `"none — subjective/style"` (only for nits and pure style preferences).
+  - If the item is worth fixing eventually but nobody's committed to it yet, file an issue right now and reference it: `gh issue create --title "..." --body "..." --label pr-polish-followup` — then cite the issue number in this column. Don't let "future plan" become an aspirational memo.
+- **If a Medium item was skipped,** the reason must justify why a distinguished engineer would accept skipping it AND the "Future plan" column must name a concrete follow-up (issue, PR, or sequenced work). Medium + "none — acceptable as-is" is disallowed.
 - **Keep it scannable** — a table with one row per item is easier for the reviewer to diff against the Claude review than prose.
 - If there are **zero** unresolved items, still post a short comment confirming that: "pr-polish: no non-nit items left open. CI green. Ready to merge."
 - Do this BEFORE telling the user "done" — the comment is part of completion, not a nice-to-have.
