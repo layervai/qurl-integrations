@@ -746,19 +746,27 @@ async function handleSend(interaction) {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
-  // Start link status monitor BEFORE collector so `monitor` is available in callbacks
-  const monitor = delivered > 0
-    ? monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey)
-    : null;
-
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
+  let monitor = null;
   if (delivered > 0) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
+    let addingRecipients = false; // Mutex: prevent concurrent add-recipient flows
 
-    const collector = response.createMessageComponentCollector({
-      filter: (i) => i.user.id === interaction.user.id,
-      time: TIMEOUTS.QURL_REVOKE_WINDOW,
-    });
+    // Start link status monitor + collector. If collector setup throws between
+    // these lines, stop the monitor so setInterval does not leak.
+    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
+
+    let collector;
+    try {
+      collector = response.createMessageComponentCollector({
+        filter: (i) => i.user.id === interaction.user.id,
+        time: TIMEOUTS.QURL_REVOKE_WINDOW,
+      });
+    } catch (err) {
+      monitor.stop();
+      logger.error('Failed to create button collector', { sendId, error: err.message });
+      return;
+    }
 
     let showAllRecipients = false;
 
@@ -798,9 +806,18 @@ async function handleSend(interaction) {
         collector.stop('revoked');
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
+        // Mutex: two fast clicks could both pass the `remaining` check before
+        // addRecipientsCount is incremented, causing a double-send.
+        if (addingRecipients) {
+          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(() => {});
+          return;
+        }
+        addingRecipients = true;
+
         // Enforce cumulative recipient cap
         const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
         if (remaining <= 0) {
+          addingRecipients = false;
           await btnInteraction.reply({
             content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
             ephemeral: true,
@@ -810,6 +827,7 @@ async function handleSend(interaction) {
 
         // Enforce cooldown on add-recipients too
         if (isOnCooldown(interaction.user.id)) {
+          addingRecipients = false;
           await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true });
           return;
         }
@@ -863,6 +881,8 @@ async function handleSend(interaction) {
           const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
           logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
           await btnInteraction.editReply({ content: msg, components: [] }).catch(() => {});
+        } finally {
+          addingRecipients = false;
         }
       }
     });
@@ -936,10 +956,27 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       });
     }
     if (hasLocation) {
+      // Batch in TOKENS_PER_RESOURCE chunks with re-upload, matching handleSend.
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
-      const uploadResult = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
       const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = await mintLinks(uploadResult.resource_id, expiresAt, newRecipients.length, apiKey);
+      const allLinks = []; // { qurl_link, resourceId }
+      let currentResourceId = firstUpload.resource_id;
+      let tokensUsed = 0;
+
+      for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
+        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+          const reUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+          currentResourceId = reUpload.resource_id;
+          tokensUsed = 0;
+        }
+        const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
+        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+        for (const link of minted) {
+          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+        }
+        tokensUsed += batchSize;
+      }
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
@@ -949,7 +986,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
-          resourceId: uploadResult.resource_id,
+          resourceId: allLinks[i].resourceId,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
       });

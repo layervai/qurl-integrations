@@ -37,8 +37,13 @@ app.get('/health', (req, res) => {
 
 // Metrics endpoint
 app.get('/metrics', (req, res) => {
-  // Require bearer token if METRICS_TOKEN is configured (production)
-  if (process.env.METRICS_TOKEN) {
+  if (!process.env.METRICS_TOKEN) {
+    // Default-deny: refuse to serve stats without an explicit token configured
+    // in production. Allow only when explicitly in a dev/test environment.
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ error: 'Metrics not configured' });
+    }
+  } else {
     const auth = req.headers.authorization || '';
     const expected = `Bearer ${process.env.METRICS_TOKEN}`;
     // Hash both to fixed-length buffers before constant-time compare so the
