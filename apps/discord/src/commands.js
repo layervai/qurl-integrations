@@ -19,7 +19,7 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { downloadAndUpload, reUploadBuffer, mintLinks } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector } = require('./connector');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -56,13 +56,7 @@ function isGoogleMapsURL(url) {
 
 
 
-function sanitizeFilename(name) {
-  return name
-    .replace(/[/\\:*?"<>|]/g, '_')
-    .replace(/\.\./g, '_')
-    .replace(/[\x00-\x1f\x7f]/g, '')
-    .substring(0, 200);
-}
+const { sanitizeFilename } = require('./utils/sanitize');
 
 function sanitizeMessage(msg) {
   return msg
@@ -86,8 +80,6 @@ function isAllowedFileType(contentType) {
 }
 
 const sendCooldowns = new Map();
-// Single-guild cache — matches GUILD_ID config. If multi-guild, needs per-guild Map.
-const memberFetchCache = new Map();
 
 function isOnCooldown(userId) {
   const last = sendCooldowns.get(userId);
@@ -174,7 +166,7 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
 }
 
 // --- Link status monitor ---
-function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered) {
+function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered, apiKey) {
   // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
   let stopped = false;
@@ -262,7 +254,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 
         if (resourceIds.length === 1) {
           // File send: one resource, N qurls — pick the N most recent
-          const data = await getResourceStatus(resourceIds[0]);
+          const data = await getResourceStatus(resourceIds[0], apiKey);
           if (data && data.qurls) {
             const sorted = [...data.qurls].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
             const recentN = sorted.slice(-expectedCount);
@@ -276,7 +268,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         } else {
           // Location send: one resource per recipient — pick the most recent qurl from each
           for (const resourceId of resourceIds) {
-            const data = await getResourceStatus(resourceId);
+            const data = await getResourceStatus(resourceId, apiKey);
             if (!data || !data.qurls || data.qurls.length === 0) continue;
             const sorted = [...data.qurls].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             const q = sorted[0]; // most recent
@@ -291,7 +283,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 
       // Poll all resources for status changes
       for (const resourceId of resourceIds) {
-        const data = await getResourceStatus(resourceId);
+        const data = await getResourceStatus(resourceId, apiKey);
         if (!data || !data.qurls) continue;
         for (const qurl of data.qurls) {
           if (!trackedQurlIds.has(qurl.qurl_id)) continue;
@@ -332,6 +324,7 @@ async function fetchGuildMembers(guild) {
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 
 async function handleSend(interaction) {
+  const apiKey = interaction._qurlApiKey; // set by the gating logic in execute()
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry') || '24h';
   const rawMessage = interaction.options.getString('message');
@@ -345,6 +338,7 @@ async function handleSend(interaction) {
   setCooldown(interaction.user.id);
 
   if (!config.QURL_API_KEY) {
+    clearCooldown(interaction.user.id);
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
 
@@ -568,7 +562,7 @@ async function handleSend(interaction) {
       const expiresAt = expiryToISO(expiresIn);
 
       // Download once, cache the buffer for re-uploads.
-      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType);
+      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey);
       connectorResourceId = firstUpload.resource_id;
       const fileBuffer = firstUpload.fileBuffer;
 
@@ -580,13 +574,13 @@ async function handleSend(interaction) {
 
       for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
         if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-          const reUpload = await reUploadBuffer(fileBuffer, filename, attachment.contentType);
+          const reUpload = await reUploadBuffer(fileBuffer, filename, attachment.contentType, apiKey);
           currentResourceId = reUpload.resource_id;
           tokensUsed = 0;
         }
 
         const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
-        const minted = await mintLinks(currentResourceId, expiresAt, batchSize);
+        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
         for (const link of minted) {
           allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
         }
@@ -605,16 +599,25 @@ async function handleSend(interaction) {
         resourceId: allLinks[i].resourceId,
       }));
     } else {
-      const description = locationName || locationUrl;
-      const results = await batchSettled(recipients, async (recipient) => {
-        const result = await createOneTimeLink(locationUrl, expiresIn, description);
-        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
-      }, 5);
+      // Location send — upload JSON payload to connector, then mint links
+      const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
+      const uploadResult = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      connectorResourceId = uploadResult.resource_id;
 
-      for (const r of results) {
-        if (r.status === 'fulfilled') qurlLinks.push(r.value);
-        else logger.error('Failed to create QURL link', { error: r.reason?.message });
+      const expiresAt = expiryToISO(expiresIn);
+      const allLinks = await mintLinks(uploadResult.resource_id, expiresAt, recipients.length, apiKey);
+
+      if (allLinks.length < recipients.length) {
+        logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
+
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: uploadResult.resource_id,
+      }));
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
@@ -726,7 +729,7 @@ async function handleSend(interaction) {
 
   // Start link status monitor BEFORE collector so `monitor` is available in callbacks
   const monitor = delivered > 0
-    ? monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered)
+    ? monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey)
     : null;
 
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
@@ -760,7 +763,7 @@ async function handleSend(interaction) {
         await btnInteraction.deferUpdate().catch(() => {});
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(() => {});
         try {
-          const revoked = await revokeAllLinks(sendId, interaction.user.id);
+          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
           await interaction.editReply({
             content: `Revoked ${revoked.success}/${revoked.total} links.`,
             components: [],
@@ -817,7 +820,7 @@ async function handleSend(interaction) {
 
           await selectInteraction.deferUpdate();
           const addResult = await handleAddRecipients(
-            sendId, interaction.user.id, selectInteraction.users, interaction,
+            sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
           );
 
           // Count how many were added
@@ -860,7 +863,7 @@ async function handleSend(interaction) {
 }
 
 // Handle adding new recipients to an existing send
-async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction) {
+async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction, apiKey) {
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [] };
@@ -893,7 +896,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
       for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
         const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
-        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
+        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize, apiKey);
         for (const link of minted) {
           allLinks.push({ qurl_link: link.qurl_link, resourceId: sendConfig.connector_resource_id });
         }
@@ -914,25 +917,31 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       });
     }
     if (hasLocation) {
-      const description = sendConfig.location_name || 'Google Maps Location';
-      const results = await batchSettled(newRecipients, async (recipient) => {
-        const result = await createOneTimeLink(sendConfig.actual_url, sendConfig.expires_in, description);
-        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
-      }, 5);
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          const v = r.value;
-          if (!recipientLinks[v.recipientId]) recipientLinks[v.recipientId] = [];
-          recipientLinks[v.recipientId].push({
-            qurlLink: v.qurlLink, resourceId: v.resourceId,
-            resType: 'maps', label: sendConfig.location_name || 'Google Maps',
-          });
-        }
+      const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
+      const uploadResult = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      const expiresAt = expiryToISO(sendConfig.expires_in);
+      const allLinks = await mintLinks(uploadResult.resource_id, expiresAt, newRecipients.length, apiKey);
+
+      if (allLinks.length < newRecipients.length) {
+        logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [] };
       }
+      newRecipients.forEach((r, i) => {
+        if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
+        recipientLinks[r.id].push({
+          qurlLink: allLinks[i].qurl_link,
+          resourceId: uploadResult.resource_id,
+          resType: 'maps', label: sendConfig.location_name || 'Google Maps',
+        });
+      });
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    return { msg: 'Failed to create links for new recipients.', newResourceIds: [] };
+    const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
+    const msg = isPoolExhausted
+      ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
+      : 'Failed to create links for new recipients.';
+    return { msg, newResourceIds: [] };
   }
 
   const recipientIds = Object.keys(recipientLinks);
@@ -995,6 +1004,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 // --- /qurl revoke handler ---
 
 async function handleRevoke(interaction) {
+  const apiKey = interaction._qurlApiKey;
   await interaction.deferReply({ ephemeral: true });
 
   const recentSends = db.getRecentSends(interaction.user.id, 5);
@@ -1025,7 +1035,7 @@ async function handleRevoke(interaction) {
     });
 
     const sendId = selectInteraction.values[0];
-    const revoked = await revokeAllLinks(sendId, interaction.user.id);
+    const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
     await selectInteraction.update({
       content: `Revoked ${revoked.success}/${revoked.total} links.`,
@@ -1036,12 +1046,12 @@ async function handleRevoke(interaction) {
   }
 }
 
-async function revokeAllLinks(sendId, senderDiscordId) {
+async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   const resourceIds = db.getSendResourceIds(sendId, senderDiscordId);
   let success = 0;
 
   const results = await batchSettled(resourceIds, async (resourceId) => {
-    await deleteLink(resourceId);
+    await deleteLink(resourceId, apiKey);
     return resourceId;
   }, 5);
 
@@ -1656,14 +1666,78 @@ const commands = [
       .addSubcommand(sub =>
         sub.setName('help')
           .setDescription('Show QURL bot help')
+      )
+      .addSubcommand(sub =>
+        sub.setName('setup')
+          .setDescription('Configure your QURL API key for this server (admin only)')
+          .addStringOption(opt =>
+            opt.setName('api_key')
+              .setDescription('Your QURL API key (starts with lv_live_ or lv_test_)')
+              .setRequired(true))
+      )
+      .addSubcommand(sub =>
+        sub.setName('status')
+          .setDescription('Check if QURL is configured for this server')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
+
+      // /qurl setup — admin-only, configure API key for this server
+      if (sub === 'setup') {
+        if (!interaction.guildId) {
+          return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
+        }
+        if (!interaction.memberPermissions?.has('ManageGuild')) {
+          return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
+        }
+        const apiKey = interaction.options.getString('api_key');
+        if (!/^lv_(live|test)_[A-Za-z0-9_-]{20,}$/.test(apiKey)) {
+          return interaction.reply({
+            content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
+            ephemeral: true,
+          });
+        }
+        const guildId = interaction.guildId;
+        db.setGuildApiKey(guildId, apiKey, interaction.user.id);
+        logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
+        return interaction.reply({
+          content: '✅ **QURL is now configured for this server!**\n\n' +
+            'Your team can use `/qurl send` to share files and locations securely.\n' +
+            'All QURL usage will be billed to your API key.',
+          ephemeral: true,
+        });
+      }
+
+      // /qurl status — check if configured
+      if (sub === 'status') {
+        const guildConfig = db.getGuildConfig(interaction.guildId);
+        if (guildConfig) {
+          const keyPreview = guildConfig.qurl_api_key.slice(0, 12) + '...';
+          return interaction.reply({
+            content: `✅ **QURL is configured**\n` +
+              `Key: \`${keyPreview}\`\n` +
+              `Configured by: <@${guildConfig.configured_by}>\n` +
+              `Last updated: ${guildConfig.updated_at}`,
+            ephemeral: true,
+          });
+        }
+        return interaction.reply({
+          content: '❌ **QURL is not configured for this server.**\n\n' +
+            '1. Sign up at **layerv.ai** to get your API key\n' +
+            '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
+            'Only server administrators can run setup.',
+          ephemeral: true,
+        });
+      }
+
       if (sub === 'send') return handleSend(interaction);
       if (sub === 'revoke') return handleRevoke(interaction);
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
+            '**Getting started:**\n' +
+            '  `/qurl setup` — configure your API key (admin only)\n' +
+            '  `/qurl status` — check if QURL is configured\n\n' +
             '**Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
@@ -1673,7 +1747,7 @@ const commands = [
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on access\n\n' +
-            'Use **Add Recipients** to forward to more users after sending.',
+            'Sign up at **layerv.ai** to get your API key.',
           ephemeral: true,
         });
       }

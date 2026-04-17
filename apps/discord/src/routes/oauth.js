@@ -218,6 +218,10 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
+  // Delete immediately to prevent TOCTOU race — a second request with the same
+  // state cannot pass the getPendingLink check while this request is in-flight.
+  db.deletePendingLink(state);
+
   let accessToken = null;
   try {
     // Exchange code for access token
@@ -273,7 +277,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }
 
     db.createLink(pending.discord_id, userData.login);
-    db.deletePendingLink(state);
+    // deletePendingLink already called above (TOCTOU prevention)
 
     logger.info(`Linked Discord ${pending.discord_id} to GitHub @${userData.login}`);
 

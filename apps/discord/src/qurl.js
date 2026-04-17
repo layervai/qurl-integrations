@@ -6,8 +6,9 @@ const logger = require('./logger');
  * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
  */
 
-async function qurlFetch(method, path, body) {
-  if (!config.QURL_API_KEY) {
+async function qurlFetch(method, path, body, apiKey) {
+  const key = apiKey || config.QURL_API_KEY;
+  if (!key) {
     throw new Error('QURL_API_KEY is not configured');
   }
   const url = `${config.QURL_ENDPOINT}/v1${path}`;
@@ -15,7 +16,7 @@ async function qurlFetch(method, path, body) {
     method,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.QURL_API_KEY}`,
+      'Authorization': `Bearer ${key}`,
       'User-Agent': 'qurl-discord-bot/1.0',
     },
   };
@@ -34,7 +35,7 @@ async function qurlFetch(method, path, body) {
   return envelope.data || envelope;
 }
 
-async function createOneTimeLink(targetUrl, expiresIn, description) {
+async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
   try {
     const parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) {
@@ -50,7 +51,7 @@ async function createOneTimeLink(targetUrl, expiresIn, description) {
     one_time_use: true,
     expires_in: expiresIn,
     description,
-  });
+  }, apiKey);
 
   logger.info('Created one-time QURL', { resource_id: result.resource_id, expires_in: expiresIn });
   return result;
@@ -62,15 +63,15 @@ function validateResourceId(resourceId) {
   }
 }
 
-async function deleteLink(resourceId) {
+async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
-  await qurlFetch('DELETE', `/qurls/${resourceId}`);
+  await qurlFetch('DELETE', `/qurls/${resourceId}`, null, apiKey);
   logger.info('Revoked QURL', { resource_id: resourceId });
 }
 
-async function getResourceStatus(resourceId) {
+async function getResourceStatus(resourceId, apiKey) {
   validateResourceId(resourceId);
-  return qurlFetch('GET', `/qurls/${resourceId}`);
+  return qurlFetch('GET', `/qurls/${resourceId}`, null, apiKey);
 }
 
 module.exports = { createOneTimeLink, deleteLink, getResourceStatus };

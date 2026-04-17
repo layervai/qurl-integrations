@@ -1,13 +1,7 @@
 const config = require('./config');
 const logger = require('./logger');
 
-function sanitizeFilename(name) {
-  return name
-    .replace(/[/\\:*?"<>|]/g, '_')
-    .replace(/\.\./g, '_')
-    .replace(/[\x00-\x1f\x7f]/g, '')
-    .substring(0, 200);
-}
+const { sanitizeFilename } = require('./utils/sanitize');
 
 // Allowed Discord CDN domains for attachment URLs (SSRF prevention)
 const ALLOWED_CDN_HOSTS = [
@@ -26,12 +20,13 @@ function isAllowedSourceUrl(sourceUrl) {
 
 /**
  * Build auth headers for connector requests.
- * Uses QURL_API_KEY as a shared bearer token.
+ * Uses the provided API key, or falls back to the global config key.
  */
-function connectorAuthHeaders() {
+function connectorAuthHeaders(apiKey) {
+  const key = apiKey || config.QURL_API_KEY;
   const headers = {};
-  if (config.QURL_API_KEY) {
-    headers['Authorization'] = `Bearer ${config.QURL_API_KEY}`;
+  if (key) {
+    headers['Authorization'] = `Bearer ${key}`;
   }
   return headers;
 }
@@ -41,9 +36,9 @@ function connectorAuthHeaders() {
  * Downloads from Discord CDN, then uploads to connector.
  * Note: file is fully buffered in memory (up to 25MB max).
  */
-async function uploadToConnector(sourceUrl, filename, contentType) {
+async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   filename = sanitizeFilename(filename);
-  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
@@ -59,6 +54,10 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
   }
 
   const fileBuffer = await downloadResponse.arrayBuffer();
+  // Defense-in-depth: check actual size after download (Content-Length may be absent/wrong)
+  if (fileBuffer.byteLength > 25 * 1024 * 1024) {
+    throw new Error(`File too large: ${Math.round(fileBuffer.byteLength / 1024 / 1024)}MB, max 25MB`);
+  }
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
 
   const form = new FormData();
@@ -67,7 +66,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
   const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
     body: form,
-    headers: { ...connectorAuthHeaders() },
+    headers: { ...connectorAuthHeaders(apiKey) },
     signal: AbortSignal.timeout(60000),
   });
 
@@ -95,9 +94,9 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
  * re-downloading from Discord CDN. Used when the per-resource token
  * quota (10) is exhausted and more recipients need links.
  */
-async function reUploadBuffer(fileBuffer, filename, contentType) {
+async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   filename = sanitizeFilename(filename);
-  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
   const form = new FormData();
@@ -106,7 +105,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType) {
   const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
     body: form,
-    headers: { ...connectorAuthHeaders() },
+    headers: { ...connectorAuthHeaders(apiKey) },
     signal: AbortSignal.timeout(60000),
   });
 
@@ -132,7 +131,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType) {
  * Download a file from Discord CDN and return the buffer + upload result.
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
-async function downloadAndUpload(sourceUrl, filename, contentType) {
+async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -149,21 +148,21 @@ async function downloadAndUpload(sourceUrl, filename, contentType) {
   }
 
   const fileBuffer = await downloadResponse.arrayBuffer();
-  const result = await reUploadBuffer(fileBuffer, filename, contentType);
+  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey);
   return { ...result, fileBuffer };
 }
 
 /**
  * Mint one-time links for an uploaded resource via the connector.
  */
-async function mintLinks(resourceId, expiresAt, n) {
-  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+async function mintLinks(resourceId, expiresAt, n, apiKey) {
+  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
   }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders() },
+    headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
     body: JSON.stringify({ expires_at: expiresAt, n }),
     signal: AbortSignal.timeout(30000),
   });
@@ -185,4 +184,41 @@ async function mintLinks(resourceId, expiresAt, n) {
   return result.links;
 }
 
-module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, isAllowedSourceUrl };
+/**
+ * Upload a JSON object to the connector as a file.
+ * Used for structured payloads like location data.
+ */
+async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
+  filename = sanitizeFilename(filename);
+  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+
+  const blob = new Blob([JSON.stringify(jsonPayload)], { type: 'application/json' });
+  const form = new FormData();
+  form.append('file', blob, filename);
+
+  const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
+    method: 'POST',
+    body: form,
+    headers: { ...connectorAuthHeaders(apiKey) },
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text();
+    throw new Error(`Connector JSON upload failed (${uploadResponse.status}): ${text}`);
+  }
+
+  const result = await uploadResponse.json();
+  if (!result.success) {
+    throw new Error('Connector JSON upload returned success: false');
+  }
+
+  logger.info('Uploaded JSON to connector', {
+    hash: result.hash,
+    resource_id: result.resource_id,
+  });
+
+  return result;
+}
+
+module.exports = { uploadToConnector, downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl };

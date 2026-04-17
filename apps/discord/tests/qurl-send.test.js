@@ -1237,6 +1237,7 @@ describe('handleAddRecipients', () => {
   let mockMintLinks;
   let mockDownloadAndUpload;
   let mockReUploadBuffer;
+  let mockUploadJsonToConnector;
   let mockCreateOneTimeLink;
   let mockSendDM;
 
@@ -1373,11 +1374,13 @@ describe('handleAddRecipients', () => {
     mockMintLinks = jest.fn();
     mockDownloadAndUpload = jest.fn();
     mockReUploadBuffer = jest.fn();
+    mockUploadJsonToConnector = jest.fn();
     jest.mock('../src/connector', () => ({
       uploadToConnector: jest.fn(),
       downloadAndUpload: mockDownloadAndUpload,
       reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
+      uploadJsonToConnector: mockUploadJsonToConnector,
     }));
 
     // Mock places
@@ -1431,7 +1434,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'user1' },
     ]);
 
-    const result = await handleAddRecipients('nonexistent-send', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('nonexistent-send', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Send configuration not found.');
   });
 
@@ -1447,7 +1450,7 @@ describe('handleAddRecipients', () => {
       { id: 'bot-2', bot: true, username: 'AnotherBot' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1462,7 +1465,7 @@ describe('handleAddRecipients', () => {
       { id: 'sender-1', bot: false, username: 'SenderSelf' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1478,7 +1481,7 @@ describe('handleAddRecipients', () => {
       { id: 'bot-1', bot: true, username: 'BotUser' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1505,10 +1508,10 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-file-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-file-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
     // mintLinks should have been called with the connector resource ID
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-42', expect.any(String), 2);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-42', expect.any(String), 2, 'test-api-key');
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     // DMs should have been sent
@@ -1519,7 +1522,7 @@ describe('handleAddRecipients', () => {
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
-  it('URL send: creates one-time links for actual_url', async () => {
+  it('URL send: uploads location JSON and mints links', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'url',
       connector_resource_id: null,
@@ -1530,28 +1533,31 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/otl-1',
-      resource_id: 'res-otl-1',
+    mockUploadJsonToConnector.mockResolvedValue({
+      resource_id: 'res-loc-1',
+      hash: 'loc-hash',
     });
-
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/otl-1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Charlie' },
     ]);
 
-    const result = await handleAddRecipients('send-url-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-url-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith('https://example.com/doc', '24h', 'Google Maps Location');
-    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
+      'location.json', 'test-api-key',
+    );
+    expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', expect.any(String), 1, 'test-api-key');
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(1);
     expect(result.msg).toMatch(/Added 1 recipient/);
   });
 
-  it('maps send: uses location_name as description for createOneTimeLink', async () => {
+  it('maps send: uploads location JSON with location_name and mints links', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'maps',
       connector_resource_id: null,
@@ -1562,25 +1568,27 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/maps-1',
-      resource_id: 'res-maps-1',
+    mockUploadJsonToConnector.mockResolvedValue({
+      resource_id: 'conn-loc-maps',
+      hash: 'h-maps',
+      success: true,
     });
-
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/maps-1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Dana' },
     ]);
 
-    const result = await handleAddRecipients('send-maps-1', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-maps-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
-    // Description should be the location_name, not the URL
-    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
-      'https://www.google.com/maps/place/Eiffel+Tower',
-      '1h',
-      'Eiffel Tower',
+    // Should use uploadJsonToConnector with the location name
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', url: 'https://www.google.com/maps/place/Eiffel+Tower', name: 'Eiffel Tower' }),
+      'location.json', 'test-api-key',
     );
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', expect.any(String), 1, 'test-api-key');
+    expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
     expect(result.msg).toMatch(/Added 1 recipient/);
   });
 
@@ -1595,10 +1603,11 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/link',
-      resource_id: 'res-1',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-partial', hash: 'hp', success: true });
+    mockMintLinks.mockResolvedValue([
+      { qurl_link: 'https://q.test/link1' },
+      { qurl_link: 'https://q.test/link2' },
+    ]);
 
     // First DM succeeds, second fails
     mockSendDM
@@ -1610,7 +1619,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-partial', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-partial', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
     expect(result.msg).toMatch(/Added 1 recipient/);
     expect(result.msg).toMatch(/1 could not be reached/);
@@ -1633,7 +1642,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Eve' },
     ]);
 
-    const result = await handleAddRecipients('send-broken', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-broken', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Cannot add recipients \u2014 send configuration is incomplete.');
   });
 
@@ -1648,10 +1657,11 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/link',
-      resource_id: 'res-1',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mixed', hash: 'hm', success: true });
+    mockMintLinks.mockResolvedValue([
+      { qurl_link: 'https://q.test/link1' },
+      { qurl_link: 'https://q.test/link2' },
+    ]);
 
     mockSendDM.mockResolvedValue(true);
 
@@ -1662,11 +1672,12 @@ describe('handleAddRecipients', () => {
       { id: 'sender-1', bot: false, username: 'SenderSelf' },
     ]);
 
-    const result = await handleAddRecipients('send-mixed', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-mixed', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    expect(mockCreateOneTimeLink).toHaveBeenCalledTimes(2);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-mixed', expect.any(String), 2, 'test-api-key');
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
@@ -1687,7 +1698,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Alice' },
     ]);
 
-    const result = await handleAddRecipients('send-fail', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-fail', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Failed to create links for new recipients.');
   });
 
@@ -1718,11 +1729,11 @@ describe('handleAddRecipients', () => {
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection(userList);
-    const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockMintLinks).toHaveBeenCalledTimes(2);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 10);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 2);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 10, 'test-api-key');
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-50', expect.any(String), 2, 'test-api-key');
     expect(result.msg).toMatch(/Added 12 recipients/);
   });
 
@@ -1747,15 +1758,15 @@ describe('handleAddRecipients', () => {
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection(userList);
-    const result = await handleAddRecipients('send-ok', 'sender-1', users, mockOriginalInteraction);
+    const result = await handleAddRecipients('send-ok', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-ok', expect.any(String), 8);
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-ok', expect.any(String), 8, 'test-api-key');
     expect(mockSendDM).toHaveBeenCalledTimes(8);
     expect(result.msg).toMatch(/Added 8 recipients/);
   });
 
-  it('URL send: returns failure when all createOneTimeLink calls reject', async () => {
+  it('URL send: returns failure when uploadJsonToConnector rejects', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'url',
       connector_resource_id: null,
@@ -1766,15 +1777,15 @@ describe('handleAddRecipients', () => {
       attachment_name: null,
     });
 
-    mockCreateOneTimeLink.mockRejectedValue(new Error('API limit exceeded'));
+    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector upload failed'));
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-allfail', 'sender-1', users, mockOriginalInteraction);
-    expect(result.msg).toBe('Failed to create any links.');
+    const result = await handleAddRecipients('send-allfail', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    expect(result.msg).toBe('Failed to create links for new recipients.');
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 });

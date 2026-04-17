@@ -185,11 +185,13 @@ const mockUploadToConnector = jest.fn();
 const mockDownloadAndUpload = jest.fn();
 const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
+const mockUploadJsonToConnector = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
+  uploadJsonToConnector: mockUploadJsonToConnector,
 }));
 
 const mockCreateOneTimeLink = jest.fn();
@@ -281,10 +283,8 @@ describe('buildDeliveryEmbed — location resource type', () => {
   it('adds Location field (no filename) for maps resource with personalMessage', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({
-      qurl_link: 'https://q.test/loc',
-      resource_id: 'res-loc',
-    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -588,7 +588,8 @@ describe('/qurl send — location URL param extraction', () => {
   it('extracts from ?q= parameter', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/q1', resource_id: 'res-q1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/q1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/search/?q=Eiffel+Tower') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -608,13 +609,14 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockCreateOneTimeLink).toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', undefined);
   });
 
   it('extracts from /place/ path', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/p1', resource_id: 'res-p1' });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/p1' }]);
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/place/Eiffel+Tower/@48.8,2.29,15z') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -634,7 +636,7 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockCreateOneTimeLink).toHaveBeenCalled();
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', undefined);
   });
 });
 
@@ -694,7 +696,7 @@ describe('/qurl send — all location link creation fails', () => {
   it('returns failed message', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockCreateOneTimeLink.mockRejectedValue(new Error('API error'));
+    mockUploadJsonToConnector.mockRejectedValue(new Error('API error'));
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'Some Place') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
     const resInteraction = { customId: `qurl_res_loc_${MOCK_NONCE}`, showModal: jest.fn().mockResolvedValue(undefined), awaitModalSubmit: jest.fn().mockResolvedValue(modalSubmit) };
@@ -711,7 +713,7 @@ describe('/qurl send — all location link creation fails', () => {
     });
 
     await cmd.execute(interaction);
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create any links') }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create links') }));
   });
 });
 

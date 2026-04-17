@@ -115,6 +115,14 @@ db.exec(`
     attachment_name TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS guild_configs (
+    guild_id TEXT PRIMARY KEY,
+    qurl_api_key TEXT NOT NULL,
+    configured_by TEXT NOT NULL,
+    configured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Badge types (thresholds adjusted for realistic open source contribution cadence)
@@ -614,6 +622,36 @@ const dbModule = {
   getSendResourceIds(sendId, senderDiscordId) {
     const stmt = db.prepare('SELECT DISTINCT resource_id FROM qurl_sends WHERE send_id = ? AND sender_discord_id = ?');
     return stmt.all(sendId, senderDiscordId).map(r => r.resource_id);
+  },
+
+  // ── Guild config (BYOK API keys) ──
+
+  getGuildApiKey(guildId) {
+    const stmt = db.prepare('SELECT qurl_api_key FROM guild_configs WHERE guild_id = ?');
+    const row = stmt.get(guildId);
+    return row ? row.qurl_api_key : null;
+  },
+
+  setGuildApiKey(guildId, apiKey, configuredBy) {
+    const stmt = db.prepare(`
+      INSERT INTO guild_configs (guild_id, qurl_api_key, configured_by, updated_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        qurl_api_key = excluded.qurl_api_key,
+        configured_by = excluded.configured_by,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+    stmt.run(guildId, apiKey, configuredBy);
+  },
+
+  removeGuildApiKey(guildId) {
+    const stmt = db.prepare('DELETE FROM guild_configs WHERE guild_id = ?');
+    return stmt.run(guildId).changes > 0;
+  },
+
+  getGuildConfig(guildId) {
+    const stmt = db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?');
+    return stmt.get(guildId);
   },
 
   // Close database (for graceful shutdown)
