@@ -517,6 +517,7 @@ async function handleSend(interaction) {
     attachment = commandAttachment;
 
     if (!attachment) {
+      clearCooldown(interaction.user.id);
       await resInteraction.update({
         content: 'No file attached. Please rerun `/qurl send` with a file in the `file` option.',
         components: [],
@@ -527,6 +528,7 @@ async function handleSend(interaction) {
     await resInteraction.deferUpdate();
 
     if (!isAllowedFileType(attachment.contentType)) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
         components: [],
@@ -534,6 +536,7 @@ async function handleSend(interaction) {
     }
     const MAX_FILE_SIZE = 25 * 1024 * 1024;
     if (attachment.size > MAX_FILE_SIZE) {
+      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
         components: [],
@@ -857,13 +860,13 @@ async function handleSend(interaction) {
             sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
           );
 
-          // Count how many were added
-          const addedMatch = addResult.msg.match(/^Added (\d+)/);
-          if (addedMatch) {
-            const addedCount = parseInt(addedMatch[1]);
-            addRecipientsCount += addedCount;
+          // Use the structured delivered count from handleAddRecipients rather
+          // than regex-parsing the display string — the old pattern silently
+          // bypassed addRecipientsCount if the message format ever changed.
+          if (addResult.delivered > 0) {
+            addRecipientsCount += addResult.delivered;
             // Tell the monitor to track the new links (including new resource IDs for location sends)
-            monitor.addRecipients(addedCount, addResult.newResourceIds);
+            monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
             confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
             if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
@@ -1098,7 +1101,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newResourceIds };
+  // Return delivered/failed explicitly so callers don't have to regex-parse msg.
+  return { msg, newResourceIds, delivered, failed };
 }
 
 // --- /qurl revoke handler ---
@@ -1131,6 +1135,7 @@ async function handleRevoke(interaction) {
   try {
     const selectInteraction = await response.awaitMessageComponent({
       componentType: ComponentType.StringSelect,
+      filter: (i) => i.user.id === interaction.user.id,
       time: 60000,
     });
 
