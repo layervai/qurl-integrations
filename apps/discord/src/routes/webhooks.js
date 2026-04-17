@@ -56,10 +56,45 @@ function isAutomatedBot(prUser) {
   return prUser.type === 'Bot' || botNames.some(bot => username.includes(bot));
 }
 
+// Per-IP counter of failed-signature attempts so an attacker can't burn CPU
+// by firing unlimited invalid webhooks. Legitimate GitHub traffic (valid
+// HMAC) is never throttled. Swept every 5 minutes.
+const BAD_SIG_WINDOW_MS = 60_000;
+const BAD_SIG_MAX = 30;
+const badSigAttempts = new Map(); // ip -> number[]  (timestamps)
+setInterval(() => {
+  const cutoff = Date.now() - BAD_SIG_WINDOW_MS * 2;
+  for (const [ip, times] of badSigAttempts) {
+    const recent = times.filter(t => t > cutoff);
+    if (recent.length === 0) badSigAttempts.delete(ip);
+    else badSigAttempts.set(ip, recent);
+  }
+}, 5 * 60 * 1000).unref();
+
+function recordBadSig(ip) {
+  const now = Date.now();
+  const list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
+  list.push(now);
+  if (badSigAttempts.size > 10_000) {
+    const oldest = badSigAttempts.keys().next().value;
+    badSigAttempts.delete(oldest);
+  }
+  badSigAttempts.set(ip, list);
+  return list.length;
+}
+
 // Main webhook handler
 router.post('/github', async (req, res) => {
+  const ip = req.ip || 'unknown';
+  const existing = (badSigAttempts.get(ip) || []).filter(t => t > Date.now() - BAD_SIG_WINDOW_MS);
+  if (existing.length >= BAD_SIG_MAX) {
+    logger.warn('Webhook rate limit exceeded (bad signatures)', { ip, recentFailures: existing.length });
+    return res.status(429).json({ error: 'Too many invalid webhook attempts' });
+  }
+
   if (!verifySignature(req)) {
-    logger.warn('Invalid webhook signature');
+    const n = recordBadSig(ip);
+    logger.warn('Invalid webhook signature', { ip, totalInWindow: n });
     return res.status(401).json({ error: 'Invalid signature' });
   }
 

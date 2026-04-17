@@ -193,6 +193,7 @@ jest.mock('../src/connector', () => ({
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
   uploadJsonToConnector: mockUploadJsonToConnector,
+  isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
 }));
 
 const mockCreateOneTimeLink = jest.fn();

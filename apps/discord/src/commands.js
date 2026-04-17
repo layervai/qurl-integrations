@@ -20,7 +20,7 @@ const { COLORS, TIMEOUTS, LIMITS, RESOURCE_TYPES, DM_STATUS } = require('./const
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector } = require('./connector');
+const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -233,7 +233,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
       clearInterval(timer);
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
-      await interaction.editReply({ content: finalMsg, components: [] }).catch(() => {});
+      await interaction.editReply({ content: finalMsg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
       return;
     }
     try {
@@ -286,7 +286,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       }
       if (changed) {
         const pending = [...linkStatus.values()].filter(s => s.status === 'pending').length;
-        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(() => {});
+        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         if (pending === 0) { allDone = true; clearInterval(timer); }
       }
     } catch (err) {
@@ -815,7 +815,7 @@ async function handleSend(interaction) {
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
-        await btnInteraction.deferUpdate().catch(() => {});
+        await btnInteraction.deferUpdate().catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         showAllRecipients = !showAllRecipients;
         confirmMsg = buildConfirmMsg(showAllRecipients);
         monitor.updateBaseMsg(confirmMsg);
@@ -825,25 +825,25 @@ async function handleSend(interaction) {
           new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All Links').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
         );
-        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(() => {});
+        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         return;
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
-        await btnInteraction.deferUpdate().catch(() => {});
-        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(() => {});
+        await btnInteraction.deferUpdate().catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
           await interaction.editReply({
             content: `Revoked ${revoked.success}/${revoked.total} links.`,
             components: [],
-          }).catch(() => {});
+          }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
           await interaction.editReply({
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
-          }).catch(() => {});
+          }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         }
         if (monitor) monitor.stop();
         collector.stop('revoked');
@@ -858,7 +858,7 @@ async function handleSend(interaction) {
         // committed to rejecting at that point.
         // =====================================================================
         if (addingRecipients) {
-          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(() => {});
+          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
         // Enforce cumulative cap INSIDE the mutex so two clicks can't both pass
@@ -871,17 +871,13 @@ async function handleSend(interaction) {
           return;
         }
         if (isOnCooldown(interaction.user.id)) {
-          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(() => {});
+          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
-        // Acquire: flip the flag AND set cooldown AND optimistically reserve
-        // `remaining` slots. All three happen before any `await` so a racing
-        // click cannot observe stale state. The reservation is rolled back on
-        // failure and corrected against the actual delivered count on success.
+        // Acquire: flip the flag AND set cooldown synchronously before any
+        // `await`. A racing click cannot observe the unlocked flag.
         addingRecipients = true;
         setCooldown(interaction.user.id);
-        const reservedSlots = remaining;
-        addRecipientsCount += reservedSlots;
         // ===== END CRITICAL SECTION =====
 
         // Show user select menu — collect the response on the REPLY message
@@ -912,13 +908,8 @@ async function handleSend(interaction) {
             sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
           );
 
-          // We optimistically reserved `reservedSlots` in the critical section.
-          // Correct the count: give back any unused slots (reserved but not
-          // actually delivered).
-          const overReserved = reservedSlots - addResult.delivered;
-          if (overReserved !== 0) addRecipientsCount -= overReserved;
-
           if (addResult.delivered > 0) {
+            addRecipientsCount += addResult.delivered;
             // Tell the monitor to track the new links (including new resource IDs for location sends)
             monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
@@ -930,12 +921,10 @@ async function handleSend(interaction) {
 
           await selectInteraction.editReply({ content: addResult.msg, components: [] });
         } catch (err) {
-          // Roll back the optimistic reservation — no recipients were added
-          addRecipientsCount -= reservedSlots;
           const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
           const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
           logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
-          await btnInteraction.editReply({ content: msg, components: [] }).catch(() => {});
+          await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         } finally {
           addingRecipients = false;
         }
@@ -949,15 +938,19 @@ async function handleSend(interaction) {
         interaction.editReply({
           content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
-        }).catch(() => {});
+        }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
       }
     });
   }
 
 }
 
-// Handle adding new recipients to an existing send
-async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction, apiKey) {
+// Handle adding new recipients to an existing send. senderDiscordId is no
+// longer accepted from the caller — we derive it from originalInteraction
+// directly so a refactor can't accidentally let one user add recipients to
+// another user's send.
+async function handleAddRecipients(sendId, _unusedSenderDiscordId, usersCollection, originalInteraction, apiKey) {
+  const senderDiscordId = originalInteraction.user.id;
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0 };
@@ -991,6 +984,19 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       if (!sendConfig.attachment_url) {
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
+          newResourceIds: [],
+          delivered: 0,
+          failed: 0,
+        };
+      }
+      // Defense-in-depth: re-validate the stored URL is a real Discord CDN URL
+      // before we re-download. If the DB row was ever tampered with (SQLi,
+      // EFS access) this closes the SSRF that would otherwise point fetch
+      // somewhere else.
+      if (!isAllowedSourceUrl(sendConfig.attachment_url)) {
+        logger.error('addRecipients refused non-Discord attachment_url', { sendId });
+        return {
+          msg: 'Cannot add file recipients — original attachment URL is no longer valid. Please create a new send.',
           newResourceIds: [],
           delivered: 0,
           failed: 0,
@@ -1173,7 +1179,7 @@ async function handleRevoke(interaction) {
       components: [],
     });
   } catch {
-    await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(() => {});
+    await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
   }
 }
 

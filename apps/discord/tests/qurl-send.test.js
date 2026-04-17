@@ -1382,6 +1382,7 @@ describe('handleAddRecipients', () => {
       reUploadBuffer: mockReUploadBuffer,
       mintLinks: mockMintLinks,
       uploadJsonToConnector: mockUploadJsonToConnector,
+      isAllowedSourceUrl: (url) => typeof url === 'string' && url.startsWith('https://cdn.discordapp.com'),
     }));
 
     // Mock places
@@ -1424,7 +1425,7 @@ describe('handleAddRecipients', () => {
   }
 
   const mockOriginalInteraction = {
-    user: { username: 'TestSender' },
+    user: { id: 'sender-1', username: 'TestSender' },
     channelId: 'ch-99',
   };
 
