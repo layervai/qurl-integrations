@@ -350,7 +350,9 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         body: JSON.stringify({ access_token: accessToken }),
         signal: AbortSignal.timeout(10000),
       }).catch(err => {
-        logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
+        // error (not warn): a leaked user token left active is a real security
+        // concern — surface it in the oncall dashboard.
+        logger.error('Failed to revoke GitHub OAuth token', { error: err.message });
       });
     }
   }

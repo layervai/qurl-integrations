@@ -41,9 +41,11 @@ app.get('/metrics', (req, res) => {
   if (process.env.METRICS_TOKEN) {
     const auth = req.headers.authorization || '';
     const expected = `Bearer ${process.env.METRICS_TOKEN}`;
-    const authBuf = Buffer.from(auth);
-    const expectedBuf = Buffer.from(expected);
-    if (authBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(authBuf, expectedBuf)) {
+    // Hash both to fixed-length buffers before constant-time compare so the
+    // length check itself does not leak the expected token's length.
+    const authHash = crypto.createHash('sha256').update(auth).digest();
+    const expectedHash = crypto.createHash('sha256').update(expected).digest();
+    if (!crypto.timingSafeEqual(authHash, expectedHash)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }

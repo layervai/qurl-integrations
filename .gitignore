@@ -30,3 +30,7 @@ release/
 *.pem
 *.key
 e2e/node_modules/
+apps/discord/.claude/
+apps/discord/scripts/
+apps/discord/.github/
+apps/discord/railway.json

@@ -600,12 +600,31 @@ async function handleSend(interaction) {
       }));
     } else {
       // Location send — upload JSON payload to connector, then mint links
+      // in batches of TOKENS_PER_RESOURCE, re-uploading when a resource is
+      // exhausted (same pattern as file sends). Previously minted all tokens
+      // from a single resource, which broke for >TOKENS_PER_RESOURCE recipients.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
-      const uploadResult = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
-      connectorResourceId = uploadResult.resource_id;
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      connectorResourceId = firstUpload.resource_id;
 
       const expiresAt = expiryToISO(expiresIn);
-      const allLinks = await mintLinks(uploadResult.resource_id, expiresAt, recipients.length, apiKey);
+      const allLinks = []; // { qurl_link, resourceId }
+      let currentResourceId = firstUpload.resource_id;
+      let tokensUsed = 0;
+
+      for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
+        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+          const reUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+          currentResourceId = reUpload.resource_id;
+          tokensUsed = 0;
+        }
+        const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
+        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+        for (const link of minted) {
+          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+        }
+        tokensUsed += batchSize;
+      }
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
@@ -616,7 +635,7 @@ async function handleSend(interaction) {
       qurlLinks = recipients.map((r, i) => ({
         recipientId: r.id,
         qurlLink: allLinks[i].qurl_link,
-        resourceId: uploadResult.resource_id,
+        resourceId: allLinks[i].resourceId,
       }));
     }
   } catch (error) {
