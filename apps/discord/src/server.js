@@ -1,4 +1,5 @@
 // Express server for OAuth and webhooks
+const crypto = require('crypto');
 const express = require('express');
 const config = require('./config');
 const db = require('./database');
@@ -39,7 +40,10 @@ app.get('/metrics', (req, res) => {
   // Require bearer token if METRICS_TOKEN is configured (production)
   if (process.env.METRICS_TOKEN) {
     const auth = req.headers.authorization || '';
-    if (auth !== `Bearer ${process.env.METRICS_TOKEN}`) {
+    const expected = `Bearer ${process.env.METRICS_TOKEN}`;
+    const authBuf = Buffer.from(auth);
+    const expectedBuf = Buffer.from(expected);
+    if (authBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(authBuf, expectedBuf)) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
   }

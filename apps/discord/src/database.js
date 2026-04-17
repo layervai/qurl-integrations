@@ -11,6 +11,7 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const db = new Database(config.DATABASE_PATH);
+db.pragma('journal_mode = WAL');
 
 // Initialize tables
 db.exec(`
@@ -99,6 +100,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_sender ON qurl_sends(sender_discord_id);
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_send_id ON qurl_sends(send_id);
+  CREATE INDEX IF NOT EXISTS idx_qurl_sends_created ON qurl_sends(created_at);
 
   -- QURL send configuration (one row per send, used for "Add Recipients")
   CREATE TABLE IF NOT EXISTS qurl_send_configs (
@@ -135,16 +137,6 @@ const BADGE_INFO = {
   [BADGE_TYPES.STREAK_MASTER]: { emoji: '🎯', name: 'Streak Master', description: '3 consecutive months of contributions' },
   [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
 };
-
-// Get ISO week string (YYYY-WW format) - kept for legacy
-function getWeekString(date = new Date()) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() + 4 - (d.getDay() || 7));
-  const yearStart = new Date(d.getFullYear(), 0, 1);
-  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-  return `${d.getFullYear()}-W${String(weekNo).padStart(2, '0')}`;
-}
 
 // Get month string (YYYY-MM format) - used for monthly streak tracking
 function getMonthString(date = new Date()) {
@@ -564,12 +556,25 @@ module.exports = {
 
   // --- QURL SENDS ---
 
-  recordQURLSend(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType) {
+  recordQURLSend({ sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType }) {
     const stmt = db.prepare(`
       INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType);
+  },
+
+  recordQURLSendBatch(sends) {
+    const stmt = db.prepare(`
+      INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertMany = db.transaction((items) => {
+      for (const s of items) {
+        stmt.run(s.sendId, s.senderDiscordId, s.recipientDiscordId, s.resourceId, s.resourceType, s.qurlLink, s.expiresIn, s.channelId, s.targetType);
+      }
+    });
+    insertMany(sends);
   },
 
   updateSendDMStatus(sendId, recipientDiscordId, status) {
@@ -591,7 +596,7 @@ module.exports = {
     return stmt.all(senderDiscordId, limit);
   },
 
-  saveSendConfig(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName) {
+  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName }) {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

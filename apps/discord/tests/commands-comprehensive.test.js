@@ -133,6 +133,7 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
+  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
@@ -1209,7 +1210,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockUploadToConnector).toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(2);
+    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
   });
 });
@@ -1654,7 +1655,7 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('handles qurl location autocomplete', async () => {
+  it('returns early for autocomplete interactions', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1667,70 +1668,7 @@ describe('handleCommand — autocomplete', () => {
 
     await handleCommand(interaction);
 
-    // Should respond (empty since searchPlaces returns [])
-    expect(interaction.respond).toHaveBeenCalled();
-  });
-
-  it('responds empty for short query', async () => {
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: {
-        ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'location', value: 'E' })),
-      },
-    });
-
-    await handleCommand(interaction);
-
-    expect(interaction.respond).toHaveBeenCalledWith([]);
-  });
-
-  it('responds with maps link suggestion for Google Maps URL', async () => {
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: {
-        ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'location', value: 'https://maps.app.goo.gl/abc123' })),
-      },
-    });
-
-    await handleCommand(interaction);
-
-    expect(interaction.respond).toHaveBeenCalledWith([
-      expect.objectContaining({ name: expect.stringContaining('Maps link') }),
-    ]);
-  });
-
-  it('ignores non-location focused autocomplete', async () => {
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: {
-        ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'other_field', value: 'test' })),
-      },
-    });
-
-    await handleCommand(interaction);
-
-    // Should not respond for non-location fields
-    expect(interaction.respond).not.toHaveBeenCalled();
-  });
-
-  it('ignores autocomplete for non-qurl commands', async () => {
-    const interaction = makeInteraction({
-      commandName: 'link',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-    });
-
-    await handleCommand(interaction);
-
+    // Autocomplete now returns early without dispatching
     expect(interaction.respond).not.toHaveBeenCalled();
   });
 });
@@ -2365,28 +2303,21 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
   });
 });
 
-describe('autocomplete rate limiting', () => {
-  it('allows first requests then rate-limits', async () => {
-    // Fire 6 autocomplete requests quickly -- 5th should succeed, 6th should be limited
-    const responses = [];
-    for (let i = 0; i < 7; i++) {
-      const interaction = makeInteraction({
-        commandName: 'qurl',
-        isAutocomplete: jest.fn(() => true),
-        isChatInputCommand: jest.fn(() => false),
-        options: {
-          ...makeInteraction().options,
-          getFocused: jest.fn(() => ({ name: 'location', value: 'test query' })),
-        },
-        user: { id: 'autocomplete-user', username: 'TestUser' },
-      });
-      await handleCommand(interaction);
-      responses.push(interaction.respond.mock.calls);
-    }
+describe('autocomplete handling', () => {
+  it('returns early for all autocomplete interactions', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'location', value: 'test query' })),
+      },
+      user: { id: 'autocomplete-user', username: 'TestUser' },
+    });
+    await handleCommand(interaction);
 
-    // All should have called respond (even rate-limited ones respond with [])
-    for (const calls of responses) {
-      expect(calls.length).toBe(1);
-    }
+    // Autocomplete handler was removed; handleCommand returns early
+    expect(interaction.respond).not.toHaveBeenCalled();
   });
 });

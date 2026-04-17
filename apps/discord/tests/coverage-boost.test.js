@@ -144,6 +144,7 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
+  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
@@ -895,40 +896,16 @@ describe('/qurl send — voice target with members', () => {
 // =========================================================================
 
 describe('handleCommand — autocomplete edge cases', () => {
-  it('returns empty when rate limited', async () => {
-    for (let i = 0; i < 6; i++) {
-      const interaction = makeInteraction({
-        commandName: 'qurl',
-        isAutocomplete: jest.fn(() => true),
-        isChatInputCommand: jest.fn(() => false),
-        options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: `query${i}long` })) },
-      });
-      await handleCommand(interaction);
-    }
-    // 7th should be rate limited
-    const last = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'rate_limit_test' })) },
-    });
-    await handleCommand(last);
-    expect(last.respond).toHaveBeenCalledWith([]);
-  });
-
-  it('responds empty when searchPlaces throws', async () => {
-    const { searchPlaces } = require('../src/places');
-    searchPlaces.mockRejectedValueOnce(new Error('API fail'));
-
+  it('returns early for all autocomplete interactions without responding', async () => {
     const interaction = makeInteraction({
-      user: { id: 'fresh-user-for-rate-limit' },
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'Eiffel Tower' })) },
+      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'query' })) },
     });
     await handleCommand(interaction);
-    expect(interaction.respond).toHaveBeenCalledWith([]);
+    // Autocomplete handler was removed; returns early
+    expect(interaction.respond).not.toHaveBeenCalled();
   });
 });
 

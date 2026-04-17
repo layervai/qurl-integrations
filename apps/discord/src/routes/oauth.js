@@ -214,6 +214,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
+  let accessToken = null;
   try {
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -231,6 +232,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
+    accessToken = tokenData.access_token || null;
 
     if (tokenData.error) {
       logger.error('GitHub OAuth error', { error: tokenData.error_description });
@@ -326,6 +328,23 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       subtext: 'Please try again with /link in Discord. If the problem persists, contact a moderator.',
       type: 'error',
     }));
+  } finally {
+    // Revoke the GitHub OAuth token — we only needed it for the initial API calls
+    if (accessToken) {
+      fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'OpenNHP-Bot',
+        },
+        body: JSON.stringify({ access_token: accessToken }),
+        signal: AbortSignal.timeout(10000),
+      }).catch(err => {
+        logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
+      });
+    }
   }
 });
 

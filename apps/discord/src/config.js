@@ -35,10 +35,10 @@ module.exports = {
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
 
   // Allowed GitHub organizations (comma-separated)
-  ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()),
+  ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
 
   // Server
-  PORT: process.env.PORT || 3000,
+  PORT: intEnv('PORT', 3000),
   BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
 
   // Rate limiting

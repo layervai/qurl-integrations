@@ -129,14 +129,14 @@ describe('Connector client — coverage boost', () => {
   });
 });
 
-describe('Connector client — no API key (empty connectorAuthHeaders)', () => {
+describe('Connector client — no API key (requireApiKey guard)', () => {
   let connector;
 
   beforeEach(() => {
     jest.resetModules();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
-      QURL_API_KEY: '', // empty — should not include Authorization
+      QURL_API_KEY: '', // empty — should throw
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),
@@ -151,22 +151,14 @@ describe('Connector client — no API key (empty connectorAuthHeaders)', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('does not include Authorization header when QURL_API_KEY is empty', async () => {
-    globalThis.fetch = jest.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        arrayBuffer: async () => new ArrayBuffer(5),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, hash: 'h2', resource_id: 'r2' }),
-      });
-
-    await connector.uploadToConnector(
+  it('throws when QURL_API_KEY is empty on uploadToConnector', async () => {
+    await expect(connector.uploadToConnector(
       'https://cdn.discordapp.com/file.pdf', 'file.pdf', 'application/pdf',
-    );
+    )).rejects.toThrow('QURL_API_KEY is not configured');
+  });
 
-    const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
-    expect(uploadHeaders['Authorization']).toBeUndefined();
+  it('throws when QURL_API_KEY is empty on mintLinks', async () => {
+    await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      .rejects.toThrow('QURL_API_KEY is not configured');
   });
 });
