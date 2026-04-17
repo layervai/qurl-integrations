@@ -54,11 +54,18 @@ client.on('error', error => {
   logger.error('Discord client error', { error: error.message });
 });
 
-process.on('unhandledRejection', error => {
-  logger.error('Unhandled promise rejection', { error: error?.message || error });
-  gracefulShutdown(1);
+// Log and continue on unhandled rejections. The old behavior killed the
+// entire process on any stray rejection (transient Discord timeouts, network
+// blips) which made the bot fragile. Truly fatal errors surface via
+// uncaughtException below.
+process.on('unhandledRejection', (error, promise) => {
+  logger.error('Unhandled promise rejection (logged, not fatal)', {
+    error: error?.message || error,
+    stack: error?.stack,
+  });
 });
 
+// Uncaught exceptions indicate corrupted process state — no safe recovery.
 process.on('uncaughtException', error => {
   logger.error('Uncaught exception', { error: error.message, stack: error.stack });
   gracefulShutdown(1);
@@ -78,7 +85,18 @@ async function gracefulShutdown(code = 0) {
   logger.info('Graceful shutdown initiated...');
 
   try {
-    if (httpServer) httpServer.close();
+    // Wait for in-flight HTTP requests to drain — server.close() is async,
+    // process.exit() called immediately after would truncate OAuth callbacks
+    // mid-flight and leave users with a consumed pending_link but no GitHub
+    // link created.
+    if (httpServer) {
+      await new Promise(resolve => {
+        httpServer.close(err => {
+          if (err) logger.warn('HTTP server close reported error', { error: err.message });
+          resolve();
+        });
+      });
+    }
     discordShutdown();
     db.close();
     logger.info('Shutdown complete');

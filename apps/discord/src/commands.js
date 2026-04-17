@@ -1870,12 +1870,22 @@ const commands = [
         });
       }
 
-      // /qurl status — check if configured
+      // /qurl status — check if configured. Gate behind ManageGuild: the
+      // response echoes the last 4 chars of the API key (billing-sensitive)
+      // and any guild member could previously run this and snoop them.
       if (sub === 'status') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+          return interaction.reply({
+            content: '❌ Only server administrators can view QURL configuration status.',
+            ephemeral: true,
+          });
+        }
         const guildConfig = db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
           const key = guildConfig.qurl_api_key;
-          const keyPreview = key.slice(0, 8) + '...' + key.slice(-4);
+          // Redact: show only the last 4 chars. The old `lv_live_…abcd` preview
+          // leaked the full 8-char prefix which narrows brute-force space.
+          const keyPreview = '••••' + key.slice(-4);
           return interaction.reply({
             content: `✅ **QURL is configured**\n` +
               `Key: \`${keyPreview}\`\n` +

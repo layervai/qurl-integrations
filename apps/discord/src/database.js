@@ -175,9 +175,12 @@ function getMonthString(date = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// Get previous month string
+// Get previous month string. Anchor the date to day 1 before decrementing so
+// March 31 rolls back to Feb 1 (the month we want) rather than Mar 3 (which
+// is what setMonth does when the target month has fewer days).
 function getPreviousMonthString(date = new Date()) {
   const d = new Date(date);
+  d.setDate(1);
   d.setMonth(d.getMonth() - 1);
   return getMonthString(d);
 }

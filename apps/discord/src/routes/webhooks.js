@@ -151,8 +151,11 @@ async function handlePullRequest(payload) {
   const link = db.getLinkByGithub(githubUsername);
 
   if (link) {
-    const result = await assignContributorRole(link.discord_id, prNumber, repo, githubUsername);
+    // Record the contribution BEFORE assignContributorRole — the role-assign
+    // path reads getContributionCount, so if we called it first a first-time
+    // contributor would still read a count of 0 and never get the role.
     db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+    const result = await assignContributorRole(link.discord_id, prNumber, repo, githubUsername);
 
     const newBadges = db.checkAndAwardBadges(link.discord_id, prTitle, repo);
     if (newBadges.length > 0) {
