@@ -613,8 +613,6 @@ async def qurl_send(
 ) -> None:
     """Dispatch per-recipient QURL links."""
     cmd_t0 = time.monotonic()
-    def _elapsed() -> int:
-        return round((time.monotonic() - cmd_t0) * 1000)
     user_id = str(interaction.user.id)
 
     if not rate_limiter.check(user_id):
@@ -683,7 +681,7 @@ async def qurl_send(
         )
         return
 
-    logger.debug("qurl_send: ownership+guild", extra={"elapsed_ms": _elapsed()})
+    logger.debug("qurl_send: ownership+guild", extra={"elapsed_ms": int((time.monotonic() - cmd_t0) * 1000)})
 
     # Parse mentioned users — handle commas, mentions, and raw IDs
     tokens = [t.strip() for t in users.replace(" ", ",").split(",") if t.strip()]
@@ -727,9 +725,9 @@ async def qurl_send(
 
     # Verify guild membership (parallel, shared helper)
     if interaction.guild:
-        logger.debug("qurl_send: pre-guild-check", extra={"elapsed_ms": _elapsed()})
+        logger.debug("qurl_send: pre-guild-check", extra={"elapsed_ms": int((time.monotonic() - cmd_t0) * 1000)})
         mentioned_ids = await check_guild_members(interaction.guild, mentioned_ids)
-        logger.debug("qurl_send: post-guild-check", extra={"elapsed_ms": _elapsed()})
+        logger.debug("qurl_send: post-guild-check", extra={"elapsed_ms": int((time.monotonic() - cmd_t0) * 1000)})
 
     if not mentioned_ids:
         await interaction.followup.send(
@@ -746,12 +744,30 @@ async def qurl_send(
         _dispatch_to_recipient(rid, user_id, uid, guild_id, expires_in=expires_value)
         for uid in mentioned_ids
     ]
-    logger.debug("qurl_send: pre-dispatch", extra={"elapsed_ms": _elapsed(), "recipients": len(mentioned_ids)})
-    results = await asyncio.gather(*tasks)
-    total_ms = _elapsed()
-    succeeded = sum(1 for _, status, _, _ in results if status == DispatchStatus.SENT)
-    logger.info("qurl_send: complete", extra={"elapsed_ms": total_ms, "dispatched_to": len(mentioned_ids), "succeeded": succeeded, "resource_id": rid, "guild_id": guild_id})
-    metrics.timing("QUrlSendLatency", total_ms)
+    dispatched_to = len(mentioned_ids)
+    succeeded = 0
+    results: list = []
+    # try/finally so timing emits even if gather raises — failures are exactly
+    # the tail-latency cases this metric exists to surface.
+    try:
+        logger.debug("qurl_send: pre-dispatch", extra={"elapsed_ms": int((time.monotonic() - cmd_t0) * 1000), "recipients": dispatched_to})
+        results = await asyncio.gather(*tasks)
+        # Positional access instead of 4-tuple unpacking so a future return-shape
+        # change in _dispatch_to_recipient fails at the declaration, not here.
+        succeeded = sum(1 for r in results if r[1] == DispatchStatus.SENT)
+    finally:
+        total_ms = int((time.monotonic() - cmd_t0) * 1000)
+        logger.info(
+            "qurl_send: complete",
+            extra={
+                "elapsed_ms": total_ms,
+                "dispatched_to": dispatched_to,
+                "succeeded": succeeded,
+                "resource_id": rid,
+                "guild_id": guild_id,
+            },
+        )
+        metrics.timing("QurlSendCommandLatency", total_ms)
 
     filename = owner_info.get("filename", rid)
     summary = format_dispatch_summary(filename, results)
