@@ -1325,6 +1325,7 @@ describe('handleAddRecipients', () => {
         setLabel: jest.fn().mockReturnThis(),
         setPlaceholder: jest.fn().mockReturnThis(),
         setStyle: jest.fn().mockReturnThis(),
+        setMaxLength: jest.fn().mockReturnThis(),
         setRequired: jest.fn().mockReturnThis(),
       })),
       TextInputStyle: { Short: 1, Paragraph: 2 },

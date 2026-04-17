@@ -466,6 +466,7 @@ async function handleSend(interaction) {
       .setLabel('Google Maps link or place name')
       .setPlaceholder('https://maps.app.goo.gl/... or Eiffel Tower, Paris')
       .setStyle(TextInputStyle.Short)
+      .setMaxLength(500)
       .setRequired(true);
 
     modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
