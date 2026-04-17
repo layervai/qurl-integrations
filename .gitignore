@@ -29,3 +29,4 @@ release/
 .env.*
 *.pem
 *.key
+e2e/node_modules/
