@@ -316,6 +316,11 @@ async function fetchGuildMembers(guild) {
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 
 async function handleSend(interaction) {
+  // awaitMessageComponent below requires a channel handle
+  if (!interaction.channel) {
+    return interaction.reply({ content: 'Cannot use this command in this context.', ephemeral: true });
+  }
+
   const apiKey = interaction._qurlApiKey; // set by the gating logic in execute()
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry') || '24h';
