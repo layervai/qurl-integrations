@@ -106,7 +106,9 @@ export async function revokeLink(
   resourceId: string,
 ): Promise<boolean> {
   // API: DELETE /v1/resources/{resource_id}
-  const url = baseUrl.replace('/v1/qurls', '/v1/resources') + '/' + resourceId;
+  const parsed = new URL(baseUrl);
+  parsed.pathname = `/v1/resources/${encodeURIComponent(resourceId)}`;
+  const url = parsed.toString();
   const res = await fetch(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${apiKey}` },

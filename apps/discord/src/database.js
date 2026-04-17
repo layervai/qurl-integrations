@@ -193,7 +193,7 @@ cleanupOldSends();
 const sendsCleanupInterval = setInterval(cleanupOldSends, 24 * 60 * 60 * 1000);
 sendsCleanupInterval.unref();
 
-module.exports = {
+const dbModule = {
   BADGE_TYPES,
   BADGE_INFO,
 
@@ -246,7 +246,7 @@ module.exports = {
 
   // Admin: force link a user
   forceLink(discordId, githubUsername) {
-    return this.createLink(discordId, githubUsername);
+    return dbModule.createLink(discordId, githubUsername);
   },
 
   // Contributions
@@ -260,7 +260,7 @@ module.exports = {
       if (result.changes > 0) {
         logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
         // Update streak only for new contributions
-        this.updateStreak(discordId);
+        dbModule.updateStreak(discordId);
         return true;
       } else {
         logger.debug('Contribution already exists', { pr: prNumber, repo });
@@ -404,11 +404,11 @@ module.exports = {
   // Check and award badges based on contribution
   checkAndAwardBadges(discordId, prTitle, repo) {
     const awarded = [];
-    const count = this.getContributionCount(discordId);
+    const count = dbModule.getContributionCount(discordId);
 
     // First PR badge
     if (count === 1) {
-      if (this.awardBadge(discordId, BADGE_TYPES.FIRST_PR)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.FIRST_PR)) {
         awarded.push(BADGE_TYPES.FIRST_PR);
       }
     }
@@ -416,40 +416,40 @@ module.exports = {
     // Docs Hero - check if PR title or repo suggests docs
     const isDocsPR = /doc|readme|guide|tutorial|example/i.test(prTitle) ||
                      /doc|example|demo/i.test(repo);
-    if (isDocsPR && !this.hasBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
+    if (isDocsPR && !dbModule.hasBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
         awarded.push(BADGE_TYPES.DOCS_HERO);
       }
     }
 
     // Bug Hunter - check if PR title suggests bug fix
     const isBugFix = /fix|bug|issue|patch|resolve/i.test(prTitle);
-    if (isBugFix && !this.hasBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
+    if (isBugFix && !dbModule.hasBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
         awarded.push(BADGE_TYPES.BUG_HUNTER);
       }
     }
 
     // On Fire - 2+ PRs this month (adjusted for realistic contribution cadence)
-    const monthlyPRs = this.getMonthlyContributions(discordId);
-    if (monthlyPRs.length >= 2 && !this.hasBadge(discordId, BADGE_TYPES.ON_FIRE)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.ON_FIRE)) {
+    const monthlyPRs = dbModule.getMonthlyContributions(discordId);
+    if (monthlyPRs.length >= 2 && !dbModule.hasBadge(discordId, BADGE_TYPES.ON_FIRE)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.ON_FIRE)) {
         awarded.push(BADGE_TYPES.ON_FIRE);
       }
     }
 
     // Streak Master - 3 consecutive months (adjusted from 4 weeks)
-    const streak = this.getStreak(discordId);
-    if (streak && streak.current_streak >= 3 && !this.hasBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
+    const streak = dbModule.getStreak(discordId);
+    if (streak && streak.current_streak >= 3 && !dbModule.hasBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
         awarded.push(BADGE_TYPES.STREAK_MASTER);
       }
     }
 
     // Multi-Repo - contributed to 2+ different repos
-    const uniqueRepos = this.getUniqueRepos(discordId);
-    if (uniqueRepos.length >= 2 && !this.hasBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
+    const uniqueRepos = dbModule.getUniqueRepos(discordId);
+    if (uniqueRepos.length >= 2 && !dbModule.hasBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
         awarded.push(BADGE_TYPES.MULTI_REPO);
       }
     }
@@ -459,8 +459,8 @@ module.exports = {
 
   // Award badge for opening an issue (called from webhook handler)
   awardFirstIssueBadge(discordId) {
-    if (!this.hasBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
-      if (this.awardBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
+    if (!dbModule.hasBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
+      if (dbModule.awardBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
         return [BADGE_TYPES.FIRST_ISSUE];
       }
     }
@@ -477,7 +477,7 @@ module.exports = {
   updateStreak(discordId) {
     // Using monthly streaks for realistic open source contribution cadence
     const currentMonth = getMonthString();
-    const existing = this.getStreak(discordId);
+    const existing = dbModule.getStreak(discordId);
 
     if (!existing) {
       // First contribution ever
@@ -535,8 +535,8 @@ module.exports = {
   // === WEEKLY DIGEST ===
 
   getWeeklyDigestData() {
-    const lastWeekPRs = this.getLastWeekContributions();
-    const newContributors = this.getNewContributorsThisWeek();
+    const lastWeekPRs = dbModule.getLastWeekContributions();
+    const newContributors = dbModule.getNewContributorsThisWeek();
 
     // Group PRs by repo
     const byRepo = {};
@@ -625,3 +625,5 @@ module.exports = {
     logger.info('Database closed');
   },
 };
+
+module.exports = dbModule;

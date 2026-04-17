@@ -116,7 +116,10 @@ async function batchSettled(items, fn, batchSize = 5) {
 function expiryToISO(expiresIn) {
   const units = { m: 60, h: 3600, d: 86400 };
   const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) return new Date(Date.now() + 86400000).toISOString();
+  if (!match) {
+    logger.warn('expiryToISO: invalid expiry format, defaulting to 24h', { expiresIn });
+    return new Date(Date.now() + 86400000).toISOString();
+  }
   const ms = parseInt(match[1]) * units[match[2]] * 1000;
   return new Date(Date.now() + ms).toISOString();
 }
@@ -327,6 +330,19 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   return control;
 }
 
+// --- Guild member fetch cache (avoids re-fetching every /qurl send) ---
+let memberFetchCache = { guildId: null, timestamp: 0 };
+const MEMBER_FETCH_TTL = 30000; // 30 seconds
+
+async function fetchGuildMembers(guild) {
+  const now = Date.now();
+  if (memberFetchCache.guildId === guild.id && now - memberFetchCache.timestamp < MEMBER_FETCH_TTL) {
+    return; // Cache is fresh
+  }
+  await guild.members.fetch();
+  memberFetchCache = { guildId: guild.id, timestamp: now };
+}
+
 // --- /qurl send handler ---
 // TODO: Split into sub-functions (target selection, resource detection, delivery, monitoring)
 
@@ -396,8 +412,8 @@ async function handleSend(interaction) {
     await interaction.deferReply({ ephemeral: true });
     try {
       // Full fetch required for permissionsFor() check on voice channels.
-      // For very large guilds (100K+), consider caching or using channel.members for text channels.
-      await interaction.guild.members.fetch();
+      // Uses TTL cache to avoid re-fetching for every send in quick succession.
+      await fetchGuildMembers(interaction.guild);
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
       clearCooldown(interaction.user.id);
