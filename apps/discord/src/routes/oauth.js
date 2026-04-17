@@ -197,7 +197,9 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       title: 'Authorization Denied',
       icon: '🚫',
       heading: 'Authorization Denied',
-      message: error_description || 'You denied the authorization request.',
+      // Cap to 200 chars: escapeHtml already prevents XSS, but an attacker
+      // could craft a very long error_description to push phishing text.
+      message: (error_description || 'You denied the authorization request.').slice(0, 200),
       subtext: 'You can try again anytime with /link in Discord.',
       type: 'error',
     }));

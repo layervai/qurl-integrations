@@ -905,7 +905,7 @@ async function handleSend(interaction) {
 async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction, apiKey) {
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
-    return { msg: 'Send configuration not found.', newResourceIds: [] };
+    return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
   // Filter out bots and the sender
@@ -914,7 +914,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     .map(u => u);
 
   if (newRecipients.length === 0) {
-    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [] };
+    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
   // Create new QURL links for each resource type in the send config
@@ -924,7 +924,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   const hasLocation = sendConfig.actual_url;
 
   if (!hasFile && !hasLocation) {
-    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [] };
+    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
   try {
@@ -937,6 +937,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
           newResourceIds: [],
+          delivered: 0,
+          failed: 0,
         };
       }
 
@@ -985,7 +987,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
           ? 'Original attachment URL has expired. Please create a new send.'
           : `Failed to prepare links: ${err.message || 'unknown error'}`;
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message });
-        return { msg, newResourceIds: [] };
+        return { msg, newResourceIds: [], delivered: 0, failed: 0 };
       }
 
       if (allLinks.length < newRecipients.length) {
@@ -1027,7 +1029,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [] };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [], delivered: 0, failed: 0 };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
@@ -1044,12 +1046,12 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    return { msg, newResourceIds: [] };
+    return { msg, newResourceIds: [], delivered: 0, failed: 0 };
   }
 
   const recipientIds = Object.keys(recipientLinks);
   if (recipientIds.length === 0) {
-    return { msg: 'Failed to create any links.', newResourceIds: [] };
+    return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
   // Persist to DB before DMs
