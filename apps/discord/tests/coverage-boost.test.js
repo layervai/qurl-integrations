@@ -187,7 +187,6 @@ const mockReUploadBuffer = jest.fn();
 const mockMintLinks = jest.fn();
 const mockUploadJsonToConnector = jest.fn();
 jest.mock('../src/connector', () => ({
-  uploadToConnector: mockUploadToConnector,
   downloadAndUpload: mockDownloadAndUpload,
   reUploadBuffer: mockReUploadBuffer,
   mintLinks: mockMintLinks,
@@ -609,7 +608,7 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', undefined);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', expect.anything());
   });
 
   it('extracts from /place/ path', async () => {
@@ -636,7 +635,7 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', undefined);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', expect.anything());
   });
 });
 

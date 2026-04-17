@@ -1270,7 +1270,7 @@ describe('/qurl send — location flow (channel target)', () => {
     await cmd.execute(interaction);
 
     expect(resInteraction.showModal).toHaveBeenCalled();
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', undefined);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(expect.objectContaining({ type: 'google-map' }), 'location.json', 'test-api-key');
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(1);
   });
@@ -1323,7 +1323,7 @@ describe('/qurl send — location flow (channel target)', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: expect.stringContaining('google.com/maps/search/') }),
       'location.json',
-      undefined,
+      expect.anything(),
     );
   });
 });
@@ -1922,7 +1922,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: expect.stringContaining('google.com/maps/place/Eiffel') }),
       'location.json',
-      undefined,
+      expect.anything(),
     );
   });
 
@@ -1971,7 +1971,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: expect.stringContaining('goo.gl/maps/abc123') }),
       'location.json',
-      undefined,
+      expect.anything(),
     );
   });
 
@@ -2020,7 +2020,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: expect.stringContaining('maps.app.goo.gl') }),
       'location.json',
-      undefined,
+      expect.anything(),
     );
   });
 
@@ -2069,7 +2069,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: expect.stringContaining('google.com/maps/embed') }),
       'location.json',
-      undefined,
+      expect.anything(),
     );
   });
 });
