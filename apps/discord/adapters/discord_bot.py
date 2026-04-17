@@ -749,7 +749,8 @@ async def qurl_send(
     logger.debug("qurl_send: pre-dispatch", extra={"elapsed_ms": _elapsed(), "recipients": len(mentioned_ids)})
     results = await asyncio.gather(*tasks)
     total_ms = _elapsed()
-    logger.info("qurl_send: complete", extra={"elapsed_ms": total_ms, "dispatched_to": len(mentioned_ids), "resource_id": rid, "guild_id": guild_id})
+    succeeded = sum(1 for _, status, _, _ in results if status == DispatchStatus.SENT)
+    logger.info("qurl_send: complete", extra={"elapsed_ms": total_ms, "dispatched_to": len(mentioned_ids), "succeeded": succeeded, "resource_id": rid, "guild_id": guild_id})
     metrics.timing("QUrlSendLatency", total_ms)
 
     filename = owner_info.get("filename", rid)
