@@ -5,7 +5,11 @@ data
 coverage
 .git
 .DS_Store
+.claude
+.github
 tests
+scripts
+railway.json
 src/loadtest-standalone.js
 jest.config.js
 README.md
