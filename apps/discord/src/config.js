@@ -65,7 +65,7 @@ module.exports = {
 
   // QURL
   QURL_API_KEY: process.env.QURL_API_KEY,
-  QURL_ENDPOINT: process.env.QURL_ENDPOINT || 'https://api.layerv.ai',
+  QURL_ENDPOINT: process.env.QURL_ENDPOINT || 'https://api.layerv.ai', // Override in .env for non-prod
 
   // qurl-s3-connector
   CONNECTOR_URL: process.env.CONNECTOR_URL || 'https://get.qurl.link:9808',

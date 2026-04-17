@@ -12,6 +12,7 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const db = new Database(config.DATABASE_PATH);
+db.pragma('journal_mode = WAL');
 
 // Initialize tables
 db.exec(`
@@ -137,16 +138,6 @@ const BADGE_INFO = {
   [BADGE_TYPES.STREAK_MASTER]: { emoji: '🎯', name: 'Streak Master', description: '3 consecutive months of contributions' },
   [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
 };
-
-// Get ISO week string (YYYY-WW format) - kept for legacy
-function getWeekString(date = new Date()) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() + 4 - (d.getDay() || 7));
-  const yearStart = new Date(d.getFullYear(), 0, 1);
-  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-  return `${d.getFullYear()}-W${String(weekNo).padStart(2, '0')}`;
-}
 
 // Get month string (YYYY-MM format) - used for monthly streak tracking
 function getMonthString(date = new Date()) {
@@ -598,6 +589,7 @@ module.exports = {
     const stmt = db.prepare(`
       SELECT send_id, resource_type, target_type, channel_id, expires_in, created_at,
              COUNT(*) as recipient_count,
+             -- DM_STATUS.SENT is a compile-time constant ('sent'), safe for SQL interpolation
              SUM(CASE WHEN dm_status = '${DM_STATUS.SENT}' THEN 1 ELSE 0 END) as delivered_count
       FROM qurl_sends
       WHERE sender_discord_id = ?

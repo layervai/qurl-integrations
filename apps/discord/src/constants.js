@@ -86,4 +86,3 @@ module.exports = {
   TARGET_TYPES,
   DM_STATUS,
 };
-// v2.2.0

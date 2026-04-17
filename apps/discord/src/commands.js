@@ -127,6 +127,14 @@ async function mintLinksForRecipients(resourceId, expiresIn, count) {
   return allLinks;
 }
 
+function mapLinksToRecipients(recipients, allLinks, resourceId) {
+  return recipients.map((r, i) => ({
+    recipientId: r.id,
+    qurlLink: allLinks[i].qurl_link,
+    resourceId,
+  }));
+}
+
 // --- Shared DM embed builder ---
 function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
@@ -210,14 +218,14 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   let trackedQurlIds = null;
   let allDone = false;
 
+  // TODO: Consider exponential backoff after initial burst of polls
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
   const startTime = Date.now();
 
   const MAX_NAMES_SHOWN = 5;
-  let expanded = false;
 
   function truncateNames(names) {
-    if (names.length <= MAX_NAMES_SHOWN || expanded) return names.join(', ');
+    if (names.length <= MAX_NAMES_SHOWN) return names.join(', ');
     return names.slice(0, MAX_NAMES_SHOWN).join(', ') + ` +${names.length - MAX_NAMES_SHOWN} more`;
   }
 
@@ -292,6 +300,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         for (const qurl of data.qurls) {
           if (!trackedQurlIds.has(qurl.qurl_id)) continue;
           const current = linkStatus.get(qurl.qurl_id);
+          if (!current) continue;
           if (qurl.use_count > 0 && current.status !== 'opened') {
             linkStatus.set(qurl.qurl_id, { ...current, status: 'opened' }); changed = true;
           } else if (qurl.status === 'expired' && current.status === 'pending') {
@@ -313,6 +322,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 }
 
 // --- /qurl send handler ---
+// TODO: Split into sub-functions (target selection, resource detection, delivery, monitoring)
 
 async function handleSend(interaction) {
   const target = interaction.options.getString('target');
@@ -374,6 +384,7 @@ async function handleSend(interaction) {
   } else if (target === TARGET_TYPES.CHANNEL) {
     await interaction.deferReply({ ephemeral: true });
     try {
+      // Full fetch needed for getVoiceChannelViewers which checks permissionsFor() on all members
       await interaction.guild.members.fetch();
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
@@ -589,11 +600,7 @@ async function handleSend(interaction) {
         return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
-      qurlLinks = recipients.map((r, i) => ({
-        recipientId: r.id,
-        qurlLink: allLinks[i].qurl_link,
-        resourceId: connectorResourceId,
-      }));
+      qurlLinks = mapLinksToRecipients(recipients, allLinks, connectorResourceId);
     } else {
       // Upload location as google-map JSON to connector — fileviewer renders it in an iframe
       const mapData = { type: 'google-map' };
@@ -618,11 +625,7 @@ async function handleSend(interaction) {
         return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
-      qurlLinks = recipients.map((r, i) => ({
-        recipientId: r.id,
-        qurlLink: allLinks[i].qurl_link,
-        resourceId: connectorResourceId,
-      }));
+      qurlLinks = mapLinksToRecipients(recipients, allLinks, connectorResourceId);
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
@@ -835,9 +838,17 @@ async function handleSend(interaction) {
           });
 
           await selectInteraction.deferUpdate();
-          const addResult = await handleAddRecipients(
-            sendId, interaction.user.id, selectInteraction.users, interaction,
-          );
+          // Set cooldown immediately to prevent concurrent add-recipients bypass
+          setCooldown(interaction.user.id);
+          let addResult;
+          try {
+            addResult = await handleAddRecipients(
+              sendId, interaction.user.id, selectInteraction.users, interaction,
+            );
+          } catch (addErr) {
+            clearCooldown(interaction.user.id);
+            throw addErr;
+          }
 
           // Count how many were added — update monitor if new recipients were delivered
           const addedCount = addResult.delivered || 0;
@@ -851,7 +862,6 @@ async function handleSend(interaction) {
             await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
           }
 
-          setCooldown(interaction.user.id);
           await btnInteraction.editReply({ content: addResult.msg, components: [] });
         } catch (err) {
           const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');

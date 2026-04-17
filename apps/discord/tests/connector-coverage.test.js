@@ -151,22 +151,14 @@ describe('Connector client — no API key (empty connectorAuthHeaders)', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('does not include Authorization header when QURL_API_KEY is empty', async () => {
-    globalThis.fetch = jest.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        arrayBuffer: async () => new ArrayBuffer(5),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, hash: 'h2', resource_id: 'r2' }),
-      });
+  it('throws when QURL_API_KEY is empty', async () => {
+    globalThis.fetch = jest.fn();
 
-    await connector.uploadToConnector(
+    await expect(connector.uploadToConnector(
       'https://cdn.discordapp.com/file.pdf', 'file.pdf', 'application/pdf',
-    );
+    )).rejects.toThrow('QURL_API_KEY is not configured');
 
-    const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
-    expect(uploadHeaders['Authorization']).toBeUndefined();
+    // No fetch calls should have been made
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

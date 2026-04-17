@@ -33,6 +33,10 @@ function connectorAuthHeaders() {
  * Shared helper: POST a FormData body to the connector upload endpoint,
  * check the response, and return the parsed JSON result.
  */
+function requireApiKey() {
+  if (!config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+}
+
 async function postToConnector(form, timeoutMs = 60000) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
@@ -57,10 +61,12 @@ async function postToConnector(form, timeoutMs = 60000) {
  * Note: file is fully buffered in memory (up to 25MB max).
  */
 async function uploadToConnector(sourceUrl, filename, contentType) {
+  requireApiKey();
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
+  // redirect: 'error' prevents SSRF via open redirects. Discord CDN rarely redirects for direct attachment URLs.
   const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
@@ -86,6 +92,7 @@ async function uploadToConnector(sourceUrl, filename, contentType) {
  * Mint one-time links for an uploaded resource via the connector.
  */
 async function mintLinks(resourceId, expiresAt, n) {
+  requireApiKey();
   validateResourceId(resourceId);
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
@@ -116,6 +123,7 @@ async function mintLinks(resourceId, expiresAt, n) {
  * The fileviewer renders these based on their type field.
  */
 async function uploadJsonToConnector(jsonData, filename) {
+  requireApiKey();
   const jsonStr = JSON.stringify(jsonData);
   const blob = new Blob([jsonStr], { type: 'application/json' });
 

@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -30,8 +30,6 @@ let channels = {
 // Auto-create missing roles and channels
 async function ensureRolesAndChannels() {
   if (!guild) return;
-
-  const { ChannelType, PermissionFlagsBits } = require('discord.js');
 
   // Define required roles with colors
   const requiredRoles = [

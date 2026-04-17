@@ -594,6 +594,7 @@ describe('Connector client', () => {
     jest.resetModules();
     jest.mock('../src/config', () => ({
       CONNECTOR_URL: 'https://connector.test.local',
+      QURL_API_KEY: 'test-api-key',
     }));
     jest.mock('../src/logger', () => ({
       info: jest.fn(),

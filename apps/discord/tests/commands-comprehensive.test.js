@@ -1732,6 +1732,7 @@ describe('handleCommand — autocomplete', () => {
   });
 });
 
+// TODO: Add test for revokeAllLinks with partial API failures (some deleteLink calls fail)
 describe('revokeAllLinks', () => {
   it('revokes multiple resource IDs', async () => {
     mockDb.getSendResourceIds.mockReturnValue(['res-1', 'res-2', 'res-3']);
@@ -2297,6 +2298,7 @@ describe('collector button handlers — revoke and expand', () => {
   });
 });
 
+// TODO: Add dedicated tests for monitorLinkStatus polling, state tracking, and addRecipients integration
 describe('monitorLinkStatus — via full send flow with fake timers', () => {
   it('monitors link status after send, polls for status changes', async () => {
     jest.useFakeTimers();
