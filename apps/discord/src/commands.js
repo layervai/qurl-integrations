@@ -1687,10 +1687,6 @@ const commands = [
       .addSubcommand(sub =>
         sub.setName('setup')
           .setDescription('Configure your QURL API key for this server (admin only)')
-          .addStringOption(opt =>
-            opt.setName('api_key')
-              .setDescription('Your QURL API key (starts with lv_live_ or lv_test_)')
-              .setRequired(true))
       )
       .addSubcommand(sub =>
         sub.setName('status')
@@ -1707,17 +1703,54 @@ const commands = [
         if (!interaction.memberPermissions?.has('ManageGuild')) {
           return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
         }
-        const apiKey = interaction.options.getString('api_key');
+        // Use a modal to collect the API key — modal inputs are NOT recorded in Discord audit logs
+        const modal = new ModalBuilder()
+          .setCustomId('qurl_setup_modal')
+          .setTitle('Configure QURL');
+        const keyInput = new TextInputBuilder()
+          .setCustomId('api_key')
+          .setLabel('QURL API Key')
+          .setPlaceholder('lv_live_your_key_here')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setMinLength(28);
+        modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
+        await interaction.showModal(modal);
+
+        let modalSubmit;
+        try {
+          modalSubmit = await interaction.awaitModalSubmit({ filter: (i) => i.customId === 'qurl_setup_modal' && i.user.id === interaction.user.id, time: 120000 });
+        } catch {
+          return; // Modal dismissed or timed out
+        }
+        const apiKey = modalSubmit.fields.getTextInputValue('api_key').trim();
         if (!/^lv_(live|test)_[A-Za-z0-9_-]{20,}$/.test(apiKey)) {
-          return interaction.reply({
+          return modalSubmit.reply({
             content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
             ephemeral: true,
           });
         }
+        // Validate key by making a lightweight GET — no resource creation
+        await modalSubmit.deferReply({ ephemeral: true });
+        try {
+          const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (resp.status === 401 || resp.status === 403) {
+            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **layerv.ai**.' });
+          }
+          if (!resp.ok) {
+            return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
+          }
+        } catch (err) {
+          return modalSubmit.editReply({ content: `❌ **Could not validate key.** ${err.message}` });
+        }
+
         const guildId = interaction.guildId;
         db.setGuildApiKey(guildId, apiKey, interaction.user.id);
         logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
-        return interaction.reply({
+        return modalSubmit.editReply({
           content: '✅ **QURL is now configured for this server!**\n\n' +
             'Your team can use `/qurl send` to share files and locations securely.\n' +
             'All QURL usage will be billed to your API key.',
