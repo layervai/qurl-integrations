@@ -183,7 +183,11 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     },
   };
   const expiryMs = expiryToMs(expiresIn);
-  const maxMonitorMs = expiryMs + 60000;
+  // Cap monitor lifetime at 1h regardless of link expiry. Links still expire
+  // normally at the API level; we just stop updating the Discord message
+  // after an hour to avoid multi-day setIntervals for 7d expiries.
+  const MAX_MONITOR_DURATION_MS = 60 * 60 * 1000;
+  const maxMonitorMs = Math.min(expiryMs + 60000, MAX_MONITOR_DURATION_MS);
 
   const resourceIds = [...new Set(qurlLinks.map(l => l.resourceId))];
   let expectedCount = delivered;

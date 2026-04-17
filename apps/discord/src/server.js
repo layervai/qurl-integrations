@@ -37,22 +37,19 @@ app.get('/health', (req, res) => {
 
 // Metrics endpoint
 app.get('/metrics', (req, res) => {
+  // Default-deny: require METRICS_TOKEN in every environment. An accidentally
+  // unset NODE_ENV in staging/preview should never expose stats.
   if (!process.env.METRICS_TOKEN) {
-    // Default-deny: refuse to serve stats without an explicit token configured
-    // in production. Allow only when explicitly in a dev/test environment.
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(503).json({ error: 'Metrics not configured' });
-    }
-  } else {
-    const auth = req.headers.authorization || '';
-    const expected = `Bearer ${process.env.METRICS_TOKEN}`;
-    // Hash both to fixed-length buffers before constant-time compare so the
-    // length check itself does not leak the expected token's length.
-    const authHash = crypto.createHash('sha256').update(auth).digest();
-    const expectedHash = crypto.createHash('sha256').update(expected).digest();
-    if (!crypto.timingSafeEqual(authHash, expectedHash)) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    return res.status(503).json({ error: 'Metrics not configured' });
+  }
+  const auth = req.headers.authorization || '';
+  const expected = `Bearer ${process.env.METRICS_TOKEN}`;
+  // Hash both to fixed-length buffers before constant-time compare so the
+  // length check itself does not leak the expected token's length.
+  const authHash = crypto.createHash('sha256').update(auth).digest();
+  const expectedHash = crypto.createHash('sha256').update(expected).digest();
+  if (!crypto.timingSafeEqual(authHash, expectedHash)) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
   const stats = db.getStats();
   res.json({

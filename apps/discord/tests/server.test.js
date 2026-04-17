@@ -56,8 +56,23 @@ describe('Server', () => {
   });
 
   describe('GET /metrics', () => {
-    it('returns metrics', async () => {
+    afterEach(() => { delete process.env.METRICS_TOKEN; });
+
+    it('returns 503 when METRICS_TOKEN unset (default-deny)', async () => {
       const res = await request(app).get('/metrics');
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe('Metrics not configured');
+    });
+
+    it('returns 401 when token configured but wrong/missing auth', async () => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      const res = await request(app).get('/metrics');
+      expect(res.status).toBe(401);
+    });
+
+    it('returns metrics when auth matches configured token', async () => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      const res = await request(app).get('/metrics').set('Authorization', 'Bearer secret-token');
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
       expect(res.body.stats).toBeDefined();

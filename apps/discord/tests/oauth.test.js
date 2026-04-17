@@ -13,6 +13,7 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/database', () => ({
   getPendingLink: jest.fn(),
   deletePendingLink: jest.fn(),
+  consumePendingLink: jest.fn(),
   createLink: jest.fn(),
   getLinkByGithub: jest.fn(),
   recordContribution: jest.fn(() => true),
@@ -74,14 +75,14 @@ describe('OAuth routes', () => {
     });
 
     it('rejects expired state in callback', async () => {
-      db.getPendingLink.mockReturnValue(null);
+      db.consumePendingLink.mockReturnValue(null);
       const res = await request(app).get('/auth/github/callback?code=test-code&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Session Expired');
     });
 
     it('handles GitHub token exchange error', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '123' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '123' });
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ error: 'bad_verification_code', error_description: 'Code expired' }),
@@ -93,7 +94,7 @@ describe('OAuth routes', () => {
     });
 
     it('handles missing user login', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '123' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '123' });
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'token123' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1 }) }); // no login field
@@ -104,7 +105,7 @@ describe('OAuth routes', () => {
     });
 
     it('completes OAuth flow with no historical contributions', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '123' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '123' });
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'token123' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ login: 'ghuser' }) })
@@ -115,12 +116,12 @@ describe('OAuth routes', () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain('Linked Successfully');
       expect(db.createLink).toHaveBeenCalledWith('123', 'ghuser');
-      expect(db.deletePendingLink).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      expect(db.consumePendingLink).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
       expect(discord.sendDM).toHaveBeenCalled();
     });
 
     it('completes OAuth flow with historical contributions', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '456' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '456' });
       db.recordContribution.mockReturnValue(true);
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'token456' }) })
@@ -144,7 +145,7 @@ describe('OAuth routes', () => {
     });
 
     it('handles fetch exception during token exchange', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '789' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '789' });
       globalThis.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
 
       const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3');
@@ -153,7 +154,7 @@ describe('OAuth routes', () => {
     });
 
     it('handles historical check failure gracefully', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '101' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '101' });
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'tok' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ login: 'user2' }) })
@@ -166,7 +167,7 @@ describe('OAuth routes', () => {
     });
 
     it('awards badges during historical check', async () => {
-      db.getPendingLink.mockReturnValue({ discord_id: '202' });
+      db.consumePendingLink.mockReturnValue({ discord_id: '202' });
       db.checkAndAwardBadges.mockReturnValue(['first_pr']);
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'tok2' }) })
@@ -186,7 +187,7 @@ describe('OAuth routes', () => {
 
   describe('rate limiting', () => {
     it('allows requests within limit', async () => {
-      db.getPendingLink.mockReturnValue(null);
+      db.consumePendingLink.mockReturnValue(null);
       // Send several requests within the rate limit window
       for (let i = 0; i < 5; i++) {
         const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6');

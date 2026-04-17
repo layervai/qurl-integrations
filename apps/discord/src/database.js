@@ -221,6 +221,15 @@ const dbModule = {
     stmt.run(state);
   },
 
+  // Atomic consume: returns the pending_links row and deletes it in one SQL
+  // statement. Closes the TOCTOU window in the OAuth callback where a
+  // concurrent request with the same state could pass a separate check-then-
+  // delete pair.
+  consumePendingLink(state) {
+    const stmt = db.prepare('DELETE FROM pending_links WHERE state = ? RETURNING discord_id');
+    return stmt.get(state);
+  },
+
   // GitHub links
   createLink(discordId, githubUsername) {
     const stmt = db.prepare(`

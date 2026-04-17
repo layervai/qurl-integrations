@@ -206,7 +206,9 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
-  const pending = db.getPendingLink(state);
+  // Atomic DELETE ... RETURNING closes the TOCTOU window: a second concurrent
+  // request with the same state gets no row back and is rejected.
+  const pending = db.consumePendingLink(state);
   if (!pending) {
     return res.status(400).send(renderPage({
       title: 'Link Expired',
@@ -217,10 +219,6 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       type: 'warning',
     }));
   }
-
-  // Delete immediately to prevent TOCTOU race — a second request with the same
-  // state cannot pass the getPendingLink check while this request is in-flight.
-  db.deletePendingLink(state);
 
   let accessToken = null;
   try {
