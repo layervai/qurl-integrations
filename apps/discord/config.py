@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     # GOOGLE_MAPS_ENABLED=true in ECS task definition env vars to enable.
     # TODO: read from SSM Parameter Store at runtime for no-redeploy toggle.
     google_maps_enabled: bool = False
+    log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"LOG_LEVEL must be one of DEBUG/INFO/WARNING/ERROR/CRITICAL, got: {v!r}")
+        return v
 
     @field_validator("qurl_link_hostname")
     @classmethod

@@ -39,7 +39,7 @@ class AuditJsonFormatter(logging.Formatter):
 
 handler = logging.StreamHandler()
 handler.setFormatter(AuditJsonFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[handler])
+logging.basicConfig(level=settings.log_level, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 
