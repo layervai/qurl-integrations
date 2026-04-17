@@ -556,15 +556,28 @@ async function handleSend(interaction) {
   try {
     if (resourceType === 'file') {
       const filename = sanitizeFilename(attachment.name);
-      const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
-      connectorResourceId = uploadResult.resource_id;
-
       const expiresAt = expiryToISO(expiresIn);
       const allLinks = [];
-      for (let i = 0; i < recipients.length; i += 10) {
-        const batchSize = Math.min(10, recipients.length - i);
-        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
+
+      // The QURL API caps tokens at 10 per resource. For >10 recipients,
+      // re-upload the file to create a new resource for each batch.
+      // The file data is the same — only the QURL resource pool is new.
+      const TOKENS_PER_RESOURCE = 10;
+      let currentResourceId = null;
+      let tokensUsedOnCurrent = TOKENS_PER_RESOURCE; // force initial upload
+
+      for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
+        if (tokensUsedOnCurrent >= TOKENS_PER_RESOURCE) {
+          const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
+          currentResourceId = uploadResult.resource_id;
+          if (!connectorResourceId) connectorResourceId = currentResourceId;
+          tokensUsedOnCurrent = 0;
+        }
+
+        const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
+        const minted = await mintLinks(currentResourceId, expiresAt, batchSize);
         allLinks.push(...minted);
+        tokensUsedOnCurrent += batchSize;
       }
 
       if (allLinks.length < recipients.length) {
