@@ -14,4 +14,14 @@ function sanitizeFilename(name) {
   return cleaned || 'unnamed_file';
 }
 
-module.exports = { sanitizeFilename };
+/**
+ * Escape the Discord markdown characters that render as rich text in message
+ * content and embed fields. Use for any user-controlled string that lands in
+ * an embed where we want it rendered literally (e.g. locationName from a
+ * modal, which would otherwise let attackers inject `**PHISHING**` banners).
+ */
+function escapeDiscordMarkdown(s) {
+  return String(s ?? '').replace(/[\\*_~`>|]/g, '\\$&');
+}
+
+module.exports = { sanitizeFilename, escapeDiscordMarkdown };

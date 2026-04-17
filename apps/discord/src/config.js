@@ -68,12 +68,16 @@ module.exports = {
   // Welcome message (for new member DM)
   WELCOME_DM_ENABLED: process.env.WELCOME_DM_ENABLED !== 'false',
 
-  // QURL
+  // QURL. In production we fall back to the real endpoints; in dev we fall
+  // back to localhost so a missing .env file doesn't silently hit prod APIs.
+  // index.js enforces that both env vars are set when NODE_ENV=production.
   QURL_API_KEY: process.env.QURL_API_KEY,
-  QURL_ENDPOINT: process.env.QURL_ENDPOINT || 'https://api.layerv.ai',
+  QURL_ENDPOINT: process.env.QURL_ENDPOINT
+    || (process.env.NODE_ENV === 'production' ? 'https://api.layerv.ai' : 'http://localhost:8080'),
 
   // qurl-s3-connector
-  CONNECTOR_URL: process.env.CONNECTOR_URL || 'https://get.qurl.link:9808',
+  CONNECTOR_URL: process.env.CONNECTOR_URL
+    || (process.env.NODE_ENV === 'production' ? 'https://get.qurl.link:9808' : 'http://localhost:9808'),
 
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,

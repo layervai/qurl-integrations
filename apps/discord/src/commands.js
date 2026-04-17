@@ -57,7 +57,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown } = require('./utils/sanitize');
 
 function sanitizeMessage(msg) {
   return msg
@@ -311,6 +311,45 @@ async function fetchGuildMembers(guild) {
 // --- /qurl send handler ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 
+/**
+ * Mint one-time links across a stream of connector resources, each capped at
+ * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
+ * `reuploadFn` is invoked to produce a new one.
+ *
+ * Extracted from four near-identical copies across handleSend (file/location)
+ * and handleAddRecipients (file/location). Centralizing this means a fix to
+ * the re-upload / batching / quota logic lands in one place.
+ *
+ * @param {object} opts
+ * @param {string} opts.initialResourceId — resource_id from the first upload
+ * @param {() => Promise<{resource_id: string}>} opts.reuploadFn — called when
+ *   the current resource's token pool is drained. Must return a fresh resource.
+ * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
+ * @param {number} opts.recipientCount — number of tokens to mint in total.
+ * @param {string} opts.apiKey — QURL API key.
+ * @returns {Array<{qurl_link: string, resourceId: string}>}
+ */
+async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey }) {
+  const allLinks = [];
+  let currentResourceId = initialResourceId;
+  let tokensUsed = 0;
+
+  for (let i = 0; i < recipientCount; i += TOKENS_PER_RESOURCE) {
+    if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
+      const re = await reuploadFn();
+      currentResourceId = re.resource_id;
+      tokensUsed = 0;
+    }
+    const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
+    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+    for (const link of minted) {
+      allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+    }
+    tokensUsed += batchSize;
+  }
+  return allLinks;
+}
+
 async function handleSend(interaction) {
   // awaitMessageComponent below requires a channel handle
   if (!interaction.channel) {
@@ -512,9 +551,10 @@ async function handleSend(interaction) {
       locationName = locationValue;
       locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     }
-    // Cap for embed-field safety (Discord 1024-char limit) and to prevent
-    // pathological URL-decoded inputs from tripping downstream rendering.
-    if (locationName) locationName = locationName.slice(0, 256);
+    // Cap for embed-field safety (Discord 1024-char limit) and escape markdown
+    // so a crafted place name can't inject **bold** / links / code blocks /
+    // spoilers into the embed and phish recipients.
+    if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
     resourceLabel = locationName || 'Location';
 
   } else {
@@ -568,26 +608,13 @@ async function handleSend(interaction) {
       connectorResourceId = firstUpload.resource_id;
       const fileBuffer = firstUpload.fileBuffer;
 
-      // Mint tokens in batches of TOKENS_PER_RESOURCE per QURL resource.
-      // When exhausted, re-upload the cached buffer to create a new resource.
-      const allLinks = []; // { qurl_link, resourceId }
-      let currentResourceId = firstUpload.resource_id;
-      let tokensUsed = 0;
-
-      for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
-        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-          const reUpload = await reUploadBuffer(fileBuffer, filename, attachment.contentType, apiKey);
-          currentResourceId = reUpload.resource_id;
-          tokensUsed = 0;
-        }
-
-        const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
-        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
-        for (const link of minted) {
-          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
-        }
-        tokensUsed += batchSize;
-      }
+      const allLinks = await mintLinksInBatches({
+        initialResourceId: firstUpload.resource_id,
+        reuploadFn: () => reUploadBuffer(fileBuffer, filename, attachment.contentType, apiKey),
+        expiresAt,
+        recipientCount: recipients.length,
+        apiKey,
+      });
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -601,32 +628,20 @@ async function handleSend(interaction) {
         resourceId: allLinks[i].resourceId,
       }));
     } else {
-      // Location send — upload JSON payload to connector, then mint links
-      // in batches of TOKENS_PER_RESOURCE, re-uploading when a resource is
-      // exhausted (same pattern as file sends). Previously minted all tokens
-      // from a single resource, which broke for >TOKENS_PER_RESOURCE recipients.
+      // Location send — upload JSON payload to connector, then mint in batches
+      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
       connectorResourceId = firstUpload.resource_id;
 
       const expiresAt = expiryToISO(expiresIn);
-      const allLinks = []; // { qurl_link, resourceId }
-      let currentResourceId = firstUpload.resource_id;
-      let tokensUsed = 0;
-
-      for (let i = 0; i < recipients.length; i += TOKENS_PER_RESOURCE) {
-        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-          const reUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
-          currentResourceId = reUpload.resource_id;
-          tokensUsed = 0;
-        }
-        const batchSize = Math.min(TOKENS_PER_RESOURCE, recipients.length - i);
-        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
-        for (const link of minted) {
-          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
-        }
-        tokensUsed += batchSize;
-      }
+      const allLinks = await mintLinksInBatches({
+        initialResourceId: firstUpload.resource_id,
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey),
+        expiresAt,
+        recipientCount: recipients.length,
+        apiKey,
+      });
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
@@ -983,43 +998,22 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       }
 
       const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = []; // { qurl_link, resourceId }
-      const newResourceIds = [];
+      let allLinks = [];
       let fileBuffer = null;
-      let currentResourceId = null;
-      let tokensUsed = TOKENS_PER_RESOURCE; // force first-iteration upload
+      const filename = sendConfig.attachment_name || 'file';
+      const contentType = sendConfig.attachment_content_type || 'application/octet-stream';
 
       try {
-        for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
-          if (tokensUsed >= TOKENS_PER_RESOURCE) {
-            if (!fileBuffer) {
-              const first = await downloadAndUpload(
-                sendConfig.attachment_url,
-                sendConfig.attachment_name || 'file',
-                sendConfig.attachment_content_type || 'application/octet-stream',
-                apiKey,
-              );
-              fileBuffer = first.fileBuffer;
-              currentResourceId = first.resource_id;
-            } else {
-              const re = await reUploadBuffer(
-                fileBuffer,
-                sendConfig.attachment_name || 'file',
-                sendConfig.attachment_content_type || 'application/octet-stream',
-                apiKey,
-              );
-              currentResourceId = re.resource_id;
-            }
-            newResourceIds.push(currentResourceId);
-            tokensUsed = 0;
-          }
-          const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
-          const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
-          for (const link of minted) {
-            allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
-          }
-          tokensUsed += batchSize;
-        }
+        // Initial download+upload gives us the buffer for subsequent re-uploads.
+        const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey);
+        fileBuffer = first.fileBuffer;
+        allLinks = await mintLinksInBatches({
+          initialResourceId: first.resource_id,
+          reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey),
+          expiresAt,
+          recipientCount: newRecipients.length,
+          apiKey,
+        });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If re-download fails,
         // surface a clear message rather than a generic "try again".
@@ -1032,7 +1026,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds };
+        const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds, delivered: 0, failed: 0 };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
@@ -1045,27 +1040,16 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
       });
     }
     if (hasLocation) {
-      // Batch in TOKENS_PER_RESOURCE chunks with re-upload, matching handleSend.
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
       const expiresAt = expiryToISO(sendConfig.expires_in);
-      const allLinks = []; // { qurl_link, resourceId }
-      let currentResourceId = firstUpload.resource_id;
-      let tokensUsed = 0;
-
-      for (let i = 0; i < newRecipients.length; i += TOKENS_PER_RESOURCE) {
-        if (tokensUsed >= TOKENS_PER_RESOURCE && i > 0) {
-          const reUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
-          currentResourceId = reUpload.resource_id;
-          tokensUsed = 0;
-        }
-        const batchSize = Math.min(TOKENS_PER_RESOURCE, newRecipients.length - i);
-        const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
-        for (const link of minted) {
-          allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
-        }
-        tokensUsed += batchSize;
-      }
+      const allLinks = await mintLinksInBatches({
+        initialResourceId: firstUpload.resource_id,
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey),
+        expiresAt,
+        recipientCount: newRecipients.length,
+        apiKey,
+      });
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });

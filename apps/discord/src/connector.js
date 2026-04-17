@@ -124,6 +124,11 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   if (!result.success) {
     throw new Error('Connector upload returned success: false');
   }
+  if (!result.resource_id) {
+    // Guard against a malformed connector response silently propagating
+    // `undefined` as the resource ID into downstream mintLinks/saveSendConfig.
+    throw new Error('Connector upload returned no resource_id');
+  }
 
   logger.info('Uploaded to connector', {
     hash: result.hash,
@@ -162,6 +167,9 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   const result = await uploadResponse.json();
   if (!result.success) {
     throw new Error('Connector re-upload returned success: false');
+  }
+  if (!result.resource_id) {
+    throw new Error('Connector re-upload returned no resource_id');
   }
 
   logger.info('Re-uploaded to connector (new resource)', {
@@ -256,6 +264,9 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
   const result = await uploadResponse.json();
   if (!result.success) {
     throw new Error('Connector JSON upload returned success: false');
+  }
+  if (!result.resource_id) {
+    throw new Error('Connector JSON upload returned no resource_id');
   }
 
   logger.info('Uploaded JSON to connector', {
