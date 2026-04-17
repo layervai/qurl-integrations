@@ -7,6 +7,5 @@ coverage
 .DS_Store
 tests
 src/loadtest-standalone.js
-.env.loadtest
 jest.config.js
 README.md

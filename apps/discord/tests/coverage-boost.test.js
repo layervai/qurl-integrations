@@ -74,7 +74,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -83,7 +83,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -94,7 +94,6 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ActionRowBuilder: jest.fn().mockImplementation(() => ({
     addComponents: jest.fn().mockReturnThis(),
   })),
@@ -145,7 +144,6 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
-  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
@@ -183,11 +181,9 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
-const mockUploadJsonToConnector = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
-  uploadJsonToConnector: mockUploadJsonToConnector,
   mintLinks: mockMintLinks,
 }));
 
@@ -280,8 +276,10 @@ describe('buildDeliveryEmbed — location resource type', () => {
   it('adds Location field (no filename) for maps resource with personalMessage', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-embed', hash: 'he', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc' }]);
+    mockCreateOneTimeLink.mockResolvedValue({
+      qurl_link: 'https://q.test/loc',
+      resource_id: 'res-loc',
+    });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -585,8 +583,7 @@ describe('/qurl send — location URL param extraction', () => {
   it('extracts from ?q= parameter', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-q1', hash: 'hq1', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/q1' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/q1', resource_id: 'res-q1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/search/?q=Eiffel+Tower') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -606,18 +603,13 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower' }),
-      'location.json',
-    );
-    expect(mockMintLinks).toHaveBeenCalled();
+    expect(mockCreateOneTimeLink).toHaveBeenCalled();
   });
 
   it('extracts from /place/ path', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-p1', hash: 'hp1', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/p1' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/p1', resource_id: 'res-p1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'https://www.google.com/maps/place/Eiffel+Tower/@48.8,2.29,15z') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -637,11 +629,7 @@ describe('/qurl send — location URL param extraction', () => {
     });
 
     await cmd.execute(interaction);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower', lat: 48.8, lng: 2.29 }),
-      'location.json',
-    );
-    expect(mockMintLinks).toHaveBeenCalled();
+    expect(mockCreateOneTimeLink).toHaveBeenCalled();
   });
 });
 
@@ -701,7 +689,7 @@ describe('/qurl send — all location link creation fails', () => {
   it('returns failed message', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector error'));
+    mockCreateOneTimeLink.mockRejectedValue(new Error('API error'));
 
     const modalSubmit = { fields: { getTextInputValue: jest.fn(() => 'Some Place') }, deferUpdate: jest.fn().mockResolvedValue(undefined) };
     const resInteraction = { customId: `qurl_res_loc_${MOCK_NONCE}`, showModal: jest.fn().mockResolvedValue(undefined), awaitModalSubmit: jest.fn().mockResolvedValue(modalSubmit) };
@@ -718,7 +706,7 @@ describe('/qurl send — all location link creation fails', () => {
     });
 
     await cmd.execute(interaction);
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create links') }));
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Failed to create any links') }));
   });
 });
 
@@ -907,26 +895,40 @@ describe('/qurl send — voice target with members', () => {
 // =========================================================================
 
 describe('handleCommand — autocomplete edge cases', () => {
-  it('returns target choices for unknown focused field', async () => {
-    const interaction = makeInteraction({
+  it('returns empty when rate limited', async () => {
+    for (let i = 0; i < 6; i++) {
+      const interaction = makeInteraction({
+        commandName: 'qurl',
+        isAutocomplete: jest.fn(() => true),
+        isChatInputCommand: jest.fn(() => false),
+        options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: `query${i}long` })) },
+      });
+      await handleCommand(interaction);
+    }
+    // 7th should be rate limited
+    const last = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'unknown_field', value: 'test' })) },
+      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'rate_limit_test' })) },
     });
-    await handleCommand(interaction);
-    // Unknown field — handler returns without responding
-    expect(interaction.respond).not.toHaveBeenCalled();
+    await handleCommand(last);
+    expect(last.respond).toHaveBeenCalledWith([]);
   });
 
-  it('returns target choices for non-qurl autocomplete', async () => {
+  it('responds empty when searchPlaces throws', async () => {
+    const { searchPlaces } = require('../src/places');
+    searchPlaces.mockRejectedValueOnce(new Error('API fail'));
+
     const interaction = makeInteraction({
-      commandName: 'link',
+      user: { id: 'fresh-user-for-rate-limit' },
+      commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
+      options: { ...makeInteraction().options, getFocused: jest.fn(() => ({ name: 'location', value: 'Eiffel Tower' })) },
     });
     await handleCommand(interaction);
-    expect(interaction.respond).not.toHaveBeenCalled();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
   });
 });
 

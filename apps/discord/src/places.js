@@ -15,7 +15,7 @@ async function searchPlaces(query) {
     types: 'establishment|geocode',
   });
 
-  const response = await fetch(`${PLACES_AUTOCOMPLETE_URL}?${params}`, { signal: AbortSignal.timeout(5000) });
+  const response = await fetch(`${PLACES_AUTOCOMPLETE_URL}?${params}`);
   if (!response.ok) {
     throw new Error(`Places API error: ${response.status}`);
   }

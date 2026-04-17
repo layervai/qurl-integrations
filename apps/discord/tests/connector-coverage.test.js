@@ -73,27 +73,11 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
-  describe('uploadToConnector — redirect:error SSRF protection', () => {
-    it('rejects when Discord CDN responds with a redirect', async () => {
-      globalThis.fetch = jest.fn().mockResolvedValueOnce({
-        ok: false,
-        status: 301,
-        type: 'error',
-        text: async () => 'Redirected',
-      });
-
-      await expect(
-        connector.uploadToConnector('https://cdn.discordapp.com/redirect-test.png', 'test.png', 'image/png'),
-      ).rejects.toThrow(/Failed to download from Discord CDN: 301/);
-    });
-  });
-
   describe('uploadToConnector — auth headers and arrayBuffer (line 26)', () => {
     it('includes Authorization header in upload when QURL_API_KEY is set', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true,
-          headers: { get: () => '0' },
           arrayBuffer: async () => new ArrayBuffer(10),
         })
         .mockResolvedValueOnce({
@@ -167,14 +151,22 @@ describe('Connector client — no API key (empty connectorAuthHeaders)', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('throws when QURL_API_KEY is empty', async () => {
-    globalThis.fetch = jest.fn();
+  it('does not include Authorization header when QURL_API_KEY is empty', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(5),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: 'h2', resource_id: 'r2' }),
+      });
 
-    await expect(connector.uploadToConnector(
+    await connector.uploadToConnector(
       'https://cdn.discordapp.com/file.pdf', 'file.pdf', 'application/pdf',
-    )).rejects.toThrow('QURL_API_KEY is not configured');
+    );
 
-    // No fetch calls should have been made
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    const uploadHeaders = globalThis.fetch.mock.calls[1][1].headers;
+    expect(uploadHeaders['Authorization']).toBeUndefined();
   });
 });

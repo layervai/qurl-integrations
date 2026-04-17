@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
-// DM_STATUS constants inlined directly in SQL below to avoid template literal interpolation
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.DATABASE_PATH);
@@ -12,7 +11,6 @@ if (!fs.existsSync(dbDir)) {
 }
 
 const db = new Database(config.DATABASE_PATH);
-db.pragma('journal_mode = WAL');
 
 // Initialize tables
 db.exec(`
@@ -101,7 +99,6 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_sender ON qurl_sends(sender_discord_id);
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_send_id ON qurl_sends(send_id);
-  CREATE INDEX IF NOT EXISTS idx_qurl_sends_created ON qurl_sends(created_at);
 
   -- QURL send configuration (one row per send, used for "Add Recipients")
   CREATE TABLE IF NOT EXISTS qurl_send_configs (
@@ -139,6 +136,16 @@ const BADGE_INFO = {
   [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
 };
 
+// Get ISO week string (YYYY-WW format) - kept for legacy
+function getWeekString(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 4 - (d.getDay() || 7));
+  const yearStart = new Date(d.getFullYear(), 0, 1);
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
 // Get month string (YYYY-MM format) - used for monthly streak tracking
 function getMonthString(date = new Date()) {
   const d = new Date(date);
@@ -169,7 +176,6 @@ cleanupExpiredPendingLinks();
 
 // Periodic cleanup every 10 minutes
 const cleanupInterval = setInterval(cleanupExpiredPendingLinks, 10 * 60 * 1000);
-cleanupInterval.unref();
 
 // Clean up old qurl_sends and qurl_send_configs (older than 30 days)
 function cleanupOldSends() {
@@ -191,9 +197,8 @@ function cleanupOldSends() {
 
 cleanupOldSends();
 const sendsCleanupInterval = setInterval(cleanupOldSends, 24 * 60 * 60 * 1000);
-sendsCleanupInterval.unref();
 
-const dbModule = {
+module.exports = {
   BADGE_TYPES,
   BADGE_INFO,
 
@@ -246,7 +251,7 @@ const dbModule = {
 
   // Admin: force link a user
   forceLink(discordId, githubUsername) {
-    return dbModule.createLink(discordId, githubUsername);
+    return this.createLink(discordId, githubUsername);
   },
 
   // Contributions
@@ -260,7 +265,7 @@ const dbModule = {
       if (result.changes > 0) {
         logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
         // Update streak only for new contributions
-        dbModule.updateStreak(discordId);
+        this.updateStreak(discordId);
         return true;
       } else {
         logger.debug('Contribution already exists', { pr: prNumber, repo });
@@ -404,11 +409,11 @@ const dbModule = {
   // Check and award badges based on contribution
   checkAndAwardBadges(discordId, prTitle, repo) {
     const awarded = [];
-    const count = dbModule.getContributionCount(discordId);
+    const count = this.getContributionCount(discordId);
 
     // First PR badge
     if (count === 1) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.FIRST_PR)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.FIRST_PR)) {
         awarded.push(BADGE_TYPES.FIRST_PR);
       }
     }
@@ -416,40 +421,40 @@ const dbModule = {
     // Docs Hero - check if PR title or repo suggests docs
     const isDocsPR = /doc|readme|guide|tutorial|example/i.test(prTitle) ||
                      /doc|example|demo/i.test(repo);
-    if (isDocsPR && !dbModule.hasBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
+    if (isDocsPR && !this.hasBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.DOCS_HERO)) {
         awarded.push(BADGE_TYPES.DOCS_HERO);
       }
     }
 
     // Bug Hunter - check if PR title suggests bug fix
     const isBugFix = /fix|bug|issue|patch|resolve/i.test(prTitle);
-    if (isBugFix && !dbModule.hasBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
+    if (isBugFix && !this.hasBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.BUG_HUNTER)) {
         awarded.push(BADGE_TYPES.BUG_HUNTER);
       }
     }
 
     // On Fire - 2+ PRs this month (adjusted for realistic contribution cadence)
-    const monthlyPRs = dbModule.getMonthlyContributions(discordId);
-    if (monthlyPRs.length >= 2 && !dbModule.hasBadge(discordId, BADGE_TYPES.ON_FIRE)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.ON_FIRE)) {
+    const monthlyPRs = this.getMonthlyContributions(discordId);
+    if (monthlyPRs.length >= 2 && !this.hasBadge(discordId, BADGE_TYPES.ON_FIRE)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.ON_FIRE)) {
         awarded.push(BADGE_TYPES.ON_FIRE);
       }
     }
 
     // Streak Master - 3 consecutive months (adjusted from 4 weeks)
-    const streak = dbModule.getStreak(discordId);
-    if (streak && streak.current_streak >= 3 && !dbModule.hasBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
+    const streak = this.getStreak(discordId);
+    if (streak && streak.current_streak >= 3 && !this.hasBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.STREAK_MASTER)) {
         awarded.push(BADGE_TYPES.STREAK_MASTER);
       }
     }
 
     // Multi-Repo - contributed to 2+ different repos
-    const uniqueRepos = dbModule.getUniqueRepos(discordId);
-    if (uniqueRepos.length >= 2 && !dbModule.hasBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
+    const uniqueRepos = this.getUniqueRepos(discordId);
+    if (uniqueRepos.length >= 2 && !this.hasBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.MULTI_REPO)) {
         awarded.push(BADGE_TYPES.MULTI_REPO);
       }
     }
@@ -459,8 +464,8 @@ const dbModule = {
 
   // Award badge for opening an issue (called from webhook handler)
   awardFirstIssueBadge(discordId) {
-    if (!dbModule.hasBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
-      if (dbModule.awardBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
+    if (!this.hasBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
+      if (this.awardBadge(discordId, BADGE_TYPES.FIRST_ISSUE)) {
         return [BADGE_TYPES.FIRST_ISSUE];
       }
     }
@@ -477,7 +482,7 @@ const dbModule = {
   updateStreak(discordId) {
     // Using monthly streaks for realistic open source contribution cadence
     const currentMonth = getMonthString();
-    const existing = dbModule.getStreak(discordId);
+    const existing = this.getStreak(discordId);
 
     if (!existing) {
       // First contribution ever
@@ -535,8 +540,8 @@ const dbModule = {
   // === WEEKLY DIGEST ===
 
   getWeeklyDigestData() {
-    const lastWeekPRs = dbModule.getLastWeekContributions();
-    const newContributors = dbModule.getNewContributorsThisWeek();
+    const lastWeekPRs = this.getLastWeekContributions();
+    const newContributors = this.getNewContributorsThisWeek();
 
     // Group PRs by repo
     const byRepo = {};
@@ -559,25 +564,12 @@ const dbModule = {
 
   // --- QURL SENDS ---
 
-  recordQURLSend({ sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType }) {
+  recordQURLSend(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType) {
     const stmt = db.prepare(`
       INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType);
-  },
-
-  recordQURLSendBatch(sends) {
-    const stmt = db.prepare(`
-      INSERT INTO qurl_sends (send_id, sender_discord_id, recipient_discord_id, resource_id, resource_type, qurl_link, expires_in, channel_id, target_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const insertMany = db.transaction((items) => {
-      for (const s of items) {
-        stmt.run(s.sendId, s.senderDiscordId, s.recipientDiscordId, s.resourceId, s.resourceType, s.qurlLink, s.expiresIn, s.channelId, s.targetType);
-      }
-    });
-    insertMany(sends);
   },
 
   updateSendDMStatus(sendId, recipientDiscordId, status) {
@@ -599,7 +591,7 @@ const dbModule = {
     return stmt.all(senderDiscordId, limit);
   },
 
-  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName }) {
+  saveSendConfig(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName) {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -625,5 +617,3 @@ const dbModule = {
     logger.info('Database closed');
   },
 };
-
-module.exports = dbModule;

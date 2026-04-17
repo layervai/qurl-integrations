@@ -254,7 +254,7 @@ describe('database module', () => {
 
   describe('qurl sends', () => {
     it('records and retrieves qurl send', () => {
-      db.recordQURLSend({ sendId: 'qs1', senderDiscordId: 'sender1', recipientDiscordId: 'rcpt1', resourceId: 'res1', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', channelId: 'ch1', targetType: 'user' });
+      db.recordQURLSend('qs1', 'sender1', 'rcpt1', 'res1', 'file', 'https://q.test/1', '24h', 'ch1', 'user');
       const sends = db.getRecentSends('sender1');
       expect(sends.length).toBeGreaterThanOrEqual(1);
     });
@@ -273,7 +273,7 @@ describe('database module', () => {
 
   describe('send configs', () => {
     it('saves and retrieves send config', () => {
-      db.saveSendConfig({ sendId: 'sc1', senderDiscordId: 'sender1', resourceType: 'file', connectorResourceId: 'conn1', actualUrl: null, expiresIn: '6h', personalMessage: 'msg', locationName: null, attachmentName: 'file.pdf' });
+      db.saveSendConfig('sc1', 'sender1', 'file', 'conn1', null, '6h', 'msg', null, 'file.pdf');
       const config = db.getSendConfig('sc1', 'sender1');
       expect(config).toBeDefined();
       expect(config.resource_type).toBe('file');

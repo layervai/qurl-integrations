@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -30,6 +30,8 @@ let channels = {
 // Auto-create missing roles and channels
 async function ensureRolesAndChannels() {
   if (!guild) return;
+
+  const { ChannelType, PermissionFlagsBits } = require('discord.js');
 
   // Define required roles with colors
   const requiredRoles = [
@@ -96,8 +98,7 @@ async function refreshCache() {
     const allRoles = await guild.roles.fetch();
     const allChannels = await guild.channels.fetch();
 
-    // Roles are tracked by name (from config) — if an admin renames a role in Discord,
-    // the bot's refreshCache() will fail to find it and log a warning.
+    // Cache roles
     roles.contributor = allRoles.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
     roles.activeContributor = allRoles.find(r => r.name === config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
     roles.coreContributor = allRoles.find(r => r.name === config.CORE_CONTRIBUTOR_ROLE_NAME);
@@ -147,84 +148,73 @@ client.once('ready', async () => {
 
 // Handle role/channel deletion - refresh cache
 client.on('roleDelete', async (role) => {
-  try {
-    if (Object.values(roles).some(r => r?.id === role.id)) {
-      logger.warn('A tracked role was deleted, refreshing cache');
-      await refreshCache();
-    }
-  } catch (error) {
-    logger.error('Error handling roleDelete', { error: error.message });
+  if (Object.values(roles).some(r => r?.id === role.id)) {
+    logger.warn('A tracked role was deleted, refreshing cache');
+    await refreshCache();
   }
 });
 
 client.on('channelDelete', async (channel) => {
-  try {
-    if (Object.values(channels).some(c => c?.id === channel.id)) {
-      logger.warn('A tracked channel was deleted, refreshing cache');
-      await refreshCache();
-    }
-  } catch (error) {
-    logger.error('Error handling channelDelete', { error: error.message });
+  if (Object.values(channels).some(c => c?.id === channel.id)) {
+    logger.warn('A tracked channel was deleted, refreshing cache');
+    await refreshCache();
   }
 });
 
 // Welcome new members
 client.on('guildMemberAdd', async (member) => {
-  try {
-    if (member.guild.id !== config.GUILD_ID) return;
+  if (member.guild.id !== config.GUILD_ID) return;
 
-    logger.info(`New member joined: ${member.user.tag}`);
+  logger.info(`New member joined: ${member.user.tag}`);
 
-    // Check if returning contributor
-    const contributions = db.getContributions(member.id);
+  // Check if returning contributor
+  const contributions = db.getContributions(member.id);
 
-    if (contributions.length > 0) {
-      logger.info(`Returning contributor ${member.user.tag} with ${contributions.length} PRs`);
-      await updateMemberRoles(member, contributions.length);
+  if (contributions.length > 0) {
+    // Returning contributor - assign appropriate role
+    logger.info(`Returning contributor ${member.user.tag} with ${contributions.length} PRs`);
+    await updateMemberRoles(member, contributions.length);
 
-      if (channels.general) {
-        const embed = new EmbedBuilder()
-          .setColor(0x3498DB)
-          .setTitle('🎉 Welcome Back, Contributor!')
-          .setDescription(
-            `<@${member.id}> has rejoined with **${contributions.length}** merged PR(s)!`
-          )
-          .setTimestamp();
+    if (channels.general) {
+      const embed = new EmbedBuilder()
+        .setColor(0x3498DB)
+        .setTitle('🎉 Welcome Back, Contributor!')
+        .setDescription(
+          `<@${member.id}> has rejoined with **${contributions.length}** merged PR(s)!`
+        )
+        .setTimestamp();
 
-        await channels.general.send({ embeds: [embed] });
-      }
-      return;
+      await channels.general.send({ embeds: [embed] });
     }
+    return;
+  }
 
-    // New member - send welcome DM
-    if (config.WELCOME_DM_ENABLED) {
-      try {
-        const embed = new EmbedBuilder()
-          .setColor(0x3498DB)
-          .setTitle('👋 Welcome to OpenNHP!')
-          .setDescription(
-            'Thanks for joining the OpenNHP community! We\'re building the future of Zero Trust networking.\n\n' +
-            '**Get Started:**\n' +
-            '• Check out our repos at [github.com/OpenNHP](https://github.com/OpenNHP)\n' +
-            '• Look for issues labeled `good first issue`\n' +
-            '• Link your GitHub with `/link` to earn contributor badges!\n\n' +
-            '**When you contribute:**\n' +
-            `• 1 PR → **@${config.CONTRIBUTOR_ROLE_NAME}** role\n` +
-            `• ${config.ACTIVE_CONTRIBUTOR_THRESHOLD} PRs → **@${config.ACTIVE_CONTRIBUTOR_ROLE_NAME}**\n` +
-            `• ${config.CORE_CONTRIBUTOR_THRESHOLD} PRs → **@${config.CORE_CONTRIBUTOR_ROLE_NAME}**\n` +
-            `• ${config.CHAMPION_THRESHOLD} PRs → **@${config.CHAMPION_ROLE_NAME}** 🏆\n\n` +
-            'Happy contributing! 🚀'
-          )
-          .setFooter({ text: 'OpenNHP - Network-resource Hiding Protocol' });
+  // New member - send welcome DM
+  if (config.WELCOME_DM_ENABLED) {
+    try {
+      const embed = new EmbedBuilder()
+        .setColor(0x3498DB)
+        .setTitle('👋 Welcome to OpenNHP!')
+        .setDescription(
+          'Thanks for joining the OpenNHP community! We\'re building the future of Zero Trust networking.\n\n' +
+          '**Get Started:**\n' +
+          '• Check out our repos at [github.com/OpenNHP](https://github.com/OpenNHP)\n' +
+          '• Look for issues labeled `good first issue`\n' +
+          '• Link your GitHub with `/link` to earn contributor badges!\n\n' +
+          '**When you contribute:**\n' +
+          `• 1 PR → **@${config.CONTRIBUTOR_ROLE_NAME}** role\n` +
+          `• ${config.ACTIVE_CONTRIBUTOR_THRESHOLD} PRs → **@${config.ACTIVE_CONTRIBUTOR_ROLE_NAME}**\n` +
+          `• ${config.CORE_CONTRIBUTOR_THRESHOLD} PRs → **@${config.CORE_CONTRIBUTOR_ROLE_NAME}**\n` +
+          `• ${config.CHAMPION_THRESHOLD} PRs → **@${config.CHAMPION_ROLE_NAME}** 🏆\n\n` +
+          'Happy contributing! 🚀'
+        )
+        .setFooter({ text: 'OpenNHP - Network-resource Hiding Protocol' });
 
-        await member.send({ embeds: [embed] });
-        logger.debug('Sent welcome DM', { userId: member.id });
-      } catch (error) {
-        logger.warn(`Failed to send welcome DM to ${member.user.tag}`, { error: error.message });
-      }
+      await member.send({ embeds: [embed] });
+      logger.debug('Sent welcome DM', { userId: member.id });
+    } catch (error) {
+      logger.warn(`Failed to send welcome DM to ${member.user.tag}`, { error: error.message });
     }
-  } catch (error) {
-    logger.error('Error handling guildMemberAdd', { error: error.message });
   }
 });
 
@@ -555,6 +545,10 @@ async function sendDM(discordId, message) {
   }
 }
 
+// Depends on guild.members.cache being populated (caller must fetch first).
+// Discord limits fetch to ~1000 members without GUILD_PRESENCES intent.
+// For guilds >1000 members, some viewers may be missed.
+
 // Get members in the sender's voice channel (excludes bots and the sender)
 function getVoiceChannelMembers(guildObj, senderUserId) {
   const senderState = guildObj.voiceStates.cache.get(senderUserId);
@@ -582,16 +576,6 @@ function getTextChannelMembers(channel, senderUserId) {
   return members;
 }
 
-// Get all non-bot members who have permission to view a voice channel
-// (not just those currently connected to voice)
-function getVoiceChannelViewers(channel, senderUserId) {
-  const members = channel.guild.members.cache
-    .filter(m => m.id !== senderUserId && !m.user.bot && channel.permissionsFor(m).has('ViewChannel'))
-    .map(m => m.user);
-
-  return [...members.values()];
-}
-
 // Graceful shutdown
 function shutdown() {
   logger.info('Discord client shutting down');
@@ -616,7 +600,6 @@ module.exports = {
   shutdown,
   getVoiceChannelMembers,
   getTextChannelMembers,
-  getVoiceChannelViewers,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,

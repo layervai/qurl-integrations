@@ -63,7 +63,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -72,7 +72,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -83,7 +83,6 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ActionRowBuilder: jest.fn().mockImplementation(() => ({
     addComponents: jest.fn().mockReturnThis(),
   })),
@@ -134,7 +133,6 @@ const mockDb = {
   })),
   getTopContributors: jest.fn(() => []),
   recordQURLSend: jest.fn(),
-  recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
@@ -172,11 +170,9 @@ jest.mock('../src/utils/admin', () => ({
 }));
 
 const mockUploadToConnector = jest.fn();
-const mockUploadJsonToConnector = jest.fn();
 const mockMintLinks = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadToConnector: mockUploadToConnector,
-  uploadJsonToConnector: mockUploadJsonToConnector,
   mintLinks: mockMintLinks,
 }));
 
@@ -1213,7 +1209,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockUploadToConnector).toHaveBeenCalled();
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(2);
-    expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
+    expect(mockDb.recordQURLSend).toHaveBeenCalledTimes(2);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
   });
 });
@@ -1222,8 +1218,10 @@ describe('/qurl send — location flow (channel target)', () => {
   it('creates one-time links for location URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
+    mockCreateOneTimeLink.mockResolvedValue({
+      qurl_link: 'https://q.test/loc1',
+      resource_id: 'res-loc-1',
+    });
     mockSendDM.mockResolvedValue(true);
 
     // The flow: channel target -> no file -> location button -> modal -> submit
@@ -1267,19 +1265,17 @@ describe('/qurl send — location flow (channel target)', () => {
     await cmd.execute(interaction);
 
     expect(resInteraction.showModal).toHaveBeenCalled();
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map' }),
-      'location.json',
-    );
-    expect(mockMintLinks).toHaveBeenCalled();
+    expect(mockCreateOneTimeLink).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalledTimes(1);
   });
 
   it('creates search URL for plain text location', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-2', hash: 'h2', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc2' }]);
+    mockCreateOneTimeLink.mockResolvedValue({
+      qurl_link: 'https://q.test/loc2',
+      resource_id: 'res-loc-2',
+    });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -1319,12 +1315,12 @@ describe('/qurl send — location flow (channel target)', () => {
 
     await cmd.execute(interaction);
 
-    // Should upload a google-map JSON with the location name as query
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower, Paris' }),
-      'location.json',
+    // Should create a search URL, not a direct maps link
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
+      expect.stringContaining('google.com/maps/search/'),
+      expect.any(String),
+      expect.any(String),
     );
-    expect(mockMintLinks).toHaveBeenCalled();
   });
 });
 
@@ -1658,51 +1654,58 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('handles qurl target autocomplete in text channel', async () => {
+  it('handles qurl location autocomplete', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      channel: { type: 0 }, // GuildText
       options: {
         ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+        getFocused: jest.fn(() => ({ name: 'location', value: 'Eif' })),
       },
     });
 
     await handleCommand(interaction);
 
-    expect(interaction.respond).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({ value: 'channel' }),
-        expect.objectContaining({ value: 'user' }),
-      ]),
-    );
-    // Voice option should NOT be present in text channels
-    const choices = interaction.respond.mock.calls[0][0];
-    expect(choices.find(c => c.value === 'voice')).toBeUndefined();
+    // Should respond (empty since searchPlaces returns [])
+    expect(interaction.respond).toHaveBeenCalled();
   });
 
-  it('handles qurl target autocomplete in voice channel', async () => {
+  it('responds empty for short query', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
-      channel: { type: 2 }, // GuildVoice
       options: {
         ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+        getFocused: jest.fn(() => ({ name: 'location', value: 'E' })),
       },
     });
 
     await handleCommand(interaction);
 
-    const choices = interaction.respond.mock.calls[0][0];
-    expect(choices).toHaveLength(3);
-    expect(choices.find(c => c.value === 'voice')).toBeDefined();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
   });
 
-  it('ignores non-target focused autocomplete', async () => {
+  it('responds with maps link suggestion for Google Maps URL', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'location', value: 'https://maps.app.goo.gl/abc123' })),
+      },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      expect.objectContaining({ name: expect.stringContaining('Maps link') }),
+    ]);
+  });
+
+  it('ignores non-location focused autocomplete', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1732,7 +1735,6 @@ describe('handleCommand — autocomplete', () => {
   });
 });
 
-// TODO: Add test for revokeAllLinks with partial API failures (some deleteLink calls fail)
 describe('revokeAllLinks', () => {
   it('revokes multiple resource IDs', async () => {
     mockDb.getSendResourceIds.mockReturnValue(['res-1', 'res-2', 'res-3']);
@@ -1859,7 +1861,7 @@ describe('/qurl send — zero created links', () => {
   it('shows failure message when all link creations fail', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockRejectedValue(new Error('Connector down'));
+    mockCreateOneTimeLink.mockRejectedValue(new Error('API down'));
 
     const modalSubmit = {
       fields: { getTextInputValue: jest.fn(() => 'Eiffel Tower') },
@@ -1891,7 +1893,7 @@ describe('/qurl send — zero created links', () => {
     await cmd.execute(interaction);
 
     expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Failed to create links') }),
+      expect.objectContaining({ content: expect.stringContaining('Failed to create any links') }),
     );
   });
 });
@@ -1936,8 +1938,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
   it('detects standard google.com/maps/place URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-place', hash: 'hp', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -1975,19 +1976,18 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    // Should upload a google-map JSON with extracted place name and lat/lng
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map', query: 'Eiffel Tower', lat: 48.8, lng: 2.29 }),
-      'location.json',
+    // Should use the detected URL directly
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
+      expect.stringContaining('google.com/maps/place/Eiffel'),
+      expect.any(String),
+      expect.any(String),
     );
-    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects goo.gl short link', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-goo', hash: 'hg', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2025,19 +2025,17 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    // Should upload a google-map JSON — the URL was detected as Google Maps
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map' }),
-      'location.json',
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
+      expect.stringContaining('goo.gl/maps/abc123'),
+      expect.any(String),
+      expect.any(String),
     );
-    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects maps.app.goo.gl short link', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-mapp', hash: 'hm', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2075,18 +2073,17 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map' }),
-      'location.json',
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
+      expect.stringContaining('maps.app.goo.gl'),
+      expect.any(String),
+      expect.any(String),
     );
-    expect(mockMintLinks).toHaveBeenCalled();
   });
 
   it('detects embed URL', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-embed', hash: 'he', success: true });
-    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/x' }]);
+    mockCreateOneTimeLink.mockResolvedValue({ qurl_link: 'https://q.test/x', resource_id: 'r-1' });
     mockSendDM.mockResolvedValue(true);
 
     const modalSubmit = {
@@ -2124,11 +2121,11 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map' }),
-      'location.json',
+    expect(mockCreateOneTimeLink).toHaveBeenCalledWith(
+      expect.stringContaining('google.com/maps/embed'),
+      expect.any(String),
+      expect.any(String),
     );
-    expect(mockMintLinks).toHaveBeenCalled();
   });
 });
 
@@ -2298,7 +2295,6 @@ describe('collector button handlers — revoke and expand', () => {
   });
 });
 
-// TODO: Add dedicated tests for monitorLinkStatus polling, state tracking, and addRecipients integration
 describe('monitorLinkStatus — via full send flow with fake timers', () => {
   it('monitors link status after send, polls for status changes', async () => {
     jest.useFakeTimers();
@@ -2370,17 +2366,17 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
 });
 
 describe('autocomplete rate limiting', () => {
-  it('target autocomplete responds consistently', async () => {
+  it('allows first requests then rate-limits', async () => {
+    // Fire 6 autocomplete requests quickly -- 5th should succeed, 6th should be limited
     const responses = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 7; i++) {
       const interaction = makeInteraction({
         commandName: 'qurl',
         isAutocomplete: jest.fn(() => true),
         isChatInputCommand: jest.fn(() => false),
-        channel: { type: 0 }, // GuildText
         options: {
           ...makeInteraction().options,
-          getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+          getFocused: jest.fn(() => ({ name: 'location', value: 'test query' })),
         },
         user: { id: 'autocomplete-user', username: 'TestUser' },
       });
@@ -2388,15 +2384,9 @@ describe('autocomplete rate limiting', () => {
       responses.push(interaction.respond.mock.calls);
     }
 
-    // All should have called respond with target choices
+    // All should have called respond (even rate-limited ones respond with [])
     for (const calls of responses) {
       expect(calls.length).toBe(1);
-      expect(calls[0][0]).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ value: 'channel' }),
-          expect.objectContaining({ value: 'user' }),
-        ]),
-      );
     }
   });
 });

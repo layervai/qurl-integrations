@@ -22,13 +22,16 @@ if (isNaN(config.PENDING_LINK_EXPIRY_MINUTES) || config.PENDING_LINK_EXPIRY_MINU
   process.exit(1);
 }
 
+if (config.QURL_ENDPOINT === 'https://api.layerv.ai') {
+  logger.warn('QURL_ENDPOINT is using production default — set via env var for non-prod');
+}
+if (config.CONNECTOR_URL === 'https://get.qurl.link:9808') {
+  logger.warn('CONNECTOR_URL is using production default — set via env var for non-prod');
+}
+
 // Register commands when ready
 client.once('ready', async () => {
-  try {
-    await registerCommands(client);
-  } catch (error) {
-    logger.error('Failed to register commands', { error: error.message });
-  }
+  await registerCommands(client);
 });
 
 // Handle interactions
@@ -41,7 +44,6 @@ client.on('error', error => {
 
 process.on('unhandledRejection', error => {
   logger.error('Unhandled promise rejection', { error: error?.message || error });
-  gracefulShutdown(1);
 });
 
 process.on('uncaughtException', error => {
@@ -50,7 +52,6 @@ process.on('uncaughtException', error => {
 });
 
 // Graceful shutdown
-let httpServer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -63,7 +64,6 @@ async function gracefulShutdown(code = 0) {
   logger.info('Graceful shutdown initiated...');
 
   try {
-    if (httpServer) httpServer.close();
     discordShutdown();
     db.close();
     logger.info('Shutdown complete');
@@ -92,7 +92,7 @@ async function start() {
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
   // Start web server
-  httpServer = startServer();
+  startServer();
 
   // Login to Discord
   await client.login(config.DISCORD_TOKEN);

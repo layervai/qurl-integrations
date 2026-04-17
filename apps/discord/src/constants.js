@@ -55,26 +55,6 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
-// QURL resource types
-const RESOURCE_TYPES = {
-  FILE: 'file',
-  MAPS: 'maps',
-};
-
-// QURL send target types
-const TARGET_TYPES = {
-  USER: 'user',
-  CHANNEL: 'channel',
-  VOICE: 'voice',
-};
-
-// DM delivery statuses
-const DM_STATUS = {
-  PENDING: 'pending',
-  SENT: 'sent',
-  FAILED: 'failed',
-};
-
 module.exports = {
   COLORS,
   ROLE_COLORS,
@@ -82,7 +62,4 @@ module.exports = {
   LIMITS,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
-  RESOURCE_TYPES,
-  TARGET_TYPES,
-  DM_STATUS,
 };

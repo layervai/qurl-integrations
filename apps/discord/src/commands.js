@@ -5,7 +5,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -17,11 +16,11 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, TARGET_TYPES, DM_STATUS } = require('./constants');
+const { COLORS, TIMEOUTS, LIMITS } = require('./constants');
 const { requireAdmin } = require('./utils/admin');
 const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
-const { uploadToConnector, uploadJsonToConnector, mintLinks } = require('./connector');
-const { getVoiceChannelMembers, getTextChannelMembers, getVoiceChannelViewers, sendDM } = require('./discord');
+const { uploadToConnector, mintLinks } = require('./connector');
+const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 const { searchPlaces } = require('./places');
 
 // Generate secure random state
@@ -83,6 +82,8 @@ function isAllowedFileType(contentType) {
 }
 
 const sendCooldowns = new Map();
+// Single-guild cache — matches GUILD_ID config. If multi-guild, needs per-guild Map.
+const memberFetchCache = new Map();
 
 function isOnCooldown(userId) {
   const last = sendCooldowns.get(userId);
@@ -91,12 +92,12 @@ function isOnCooldown(userId) {
 }
 
 function setCooldown(userId) {
-  if (sendCooldowns.size >= 10000) {
-    // Evict oldest entry to prevent DoS via store filling
+  sendCooldowns.set(userId, Date.now());
+  if (sendCooldowns.size > 10000) {
+    // FIFO eviction (insertion order, not access order) — acceptable approximation at 10K cap
     const oldest = sendCooldowns.keys().next().value;
     sendCooldowns.delete(oldest);
   }
-  sendCooldowns.set(userId, Date.now());
 }
 
 function clearCooldown(userId) {
@@ -116,36 +117,14 @@ async function batchSettled(items, fn, batchSize = 5) {
 function expiryToISO(expiresIn) {
   const units = { m: 60, h: 3600, d: 86400 };
   const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) {
-    logger.warn('expiryToISO: invalid expiry format, defaulting to 24h', { expiresIn });
-    return new Date(Date.now() + 86400000).toISOString();
-  }
+  if (!match) return new Date(Date.now() + 86400000).toISOString();
   const ms = parseInt(match[1]) * units[match[2]] * 1000;
   return new Date(Date.now() + ms).toISOString();
 }
 
-async function mintLinksForRecipients(resourceId, expiresIn, count) {
-  const expiresAt = expiryToISO(expiresIn);
-  const allLinks = [];
-  for (let i = 0; i < count; i += 10) {
-    const batchSize = Math.min(10, count - i);
-    const minted = await mintLinks(resourceId, expiresAt, batchSize);
-    allLinks.push(...minted);
-  }
-  return allLinks;
-}
-
-function mapLinksToRecipients(recipients, allLinks, resourceId) {
-  return recipients.map((r, i) => ({
-    recipientId: r.id,
-    qurlLink: allLinks[i].qurl_link,
-    resourceId,
-  }));
-}
-
 // --- Shared DM embed builder ---
 function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
-  const isFile = resourceType === RESOURCE_TYPES.FILE;
+  const isFile = resourceType === 'file';
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
     .setColor(0x00d4ff)
@@ -166,7 +145,8 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
   }
 
   if (personalMessage) {
-    embed.addFields({ name: 'Message', value: `> ${personalMessage}` });
+    const capped = personalMessage.substring(0, 450);
+    embed.addFields({ name: 'Message', value: `> ${capped}` });
   }
 
   embed.addFields(
@@ -226,14 +206,14 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   let trackedQurlIds = null;
   let allDone = false;
 
-  // TODO: Consider exponential backoff after initial burst of polls
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
   const startTime = Date.now();
 
   const MAX_NAMES_SHOWN = 5;
+  let expanded = false;
 
   function truncateNames(names) {
-    if (names.length <= MAX_NAMES_SHOWN) return names.join(', ');
+    if (names.length <= MAX_NAMES_SHOWN || expanded) return names.join(', ');
     return names.slice(0, MAX_NAMES_SHOWN).join(', ') + ` +${names.length - MAX_NAMES_SHOWN} more`;
   }
 
@@ -250,14 +230,16 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       if (opened > 0) msg += `\n\u2705 ${opened} of ${linkStatus.size} opened`;
       if (expired > 0) msg += `\n\u23f0 ${expired} expired`;
       if (pending > 0) msg += `\n\u23f3 ${pending} pending`;
-      if (pending === 0) msg += linkStatus.size === 1
-        ? `\n\n\u2714\ufe0f **Link resolved**`
-        : `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
+      if (pending === 0) msg += `\n\n\u2714\ufe0f **All ${linkStatus.size} links resolved**`;
     }
     return msg;
   }
 
+  let pollCount = 0;
   timer = setInterval(async () => {
+    pollCount++;
+    if (pollCount > 20 && pollCount % 4 !== 0) return;
+    else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
       clearInterval(timer);
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
@@ -302,14 +284,12 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       }
 
       // Poll all resources for status changes
-      if (!trackedQurlIds) return; // addRecipients() may have reset tracking mid-poll
       for (const resourceId of resourceIds) {
         const data = await getResourceStatus(resourceId);
         if (!data || !data.qurls) continue;
         for (const qurl of data.qurls) {
-          if (!trackedQurlIds || !trackedQurlIds.has(qurl.qurl_id)) continue;
+          if (!trackedQurlIds.has(qurl.qurl_id)) continue;
           const current = linkStatus.get(qurl.qurl_id);
-          if (!current) continue;
           if (qurl.use_count > 0 && current.status !== 'opened') {
             linkStatus.set(qurl.qurl_id, { ...current, status: 'opened' }); changed = true;
           } else if (qurl.status === 'expired' && current.status === 'pending') {
@@ -325,32 +305,14 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     } catch (err) {
       logger.error('Link monitor poll failed', { sendId, error: err.message });
     }
-  }, pollInterval).unref();
+  }, pollInterval);
 
   return control;
 }
 
-// --- Guild member fetch cache (avoids re-fetching every /qurl send) ---
-let memberFetchCache = { guildId: null, timestamp: 0 };
-const MEMBER_FETCH_TTL = 30000; // 30 seconds
-
-async function fetchGuildMembers(guild) {
-  const now = Date.now();
-  if (memberFetchCache.guildId === guild.id && now - memberFetchCache.timestamp < MEMBER_FETCH_TTL) {
-    return; // Cache is fresh
-  }
-  await guild.members.fetch();
-  memberFetchCache = { guildId: guild.id, timestamp: now };
-}
-
 // --- /qurl send handler ---
-// TODO: Split into sub-functions (target selection, resource detection, delivery, monitoring)
 
 async function handleSend(interaction) {
-  if (!interaction.channel) {
-    return interaction.reply({ content: 'This command must be used in a server channel.', ephemeral: true });
-  }
-
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry') || '24h';
   const rawMessage = interaction.options.getString('message');
@@ -360,12 +322,10 @@ async function handleSend(interaction) {
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
   }
-  // Set cooldown immediately (before any async work) to prevent concurrent request bypass.
-  // This is intentionally before deferReply — cleared on error paths that allow retry.
+  // Set cooldown immediately to prevent concurrent request bypass
   setCooldown(interaction.user.id);
 
   if (!config.QURL_API_KEY) {
-    clearCooldown(interaction.user.id);
     return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
   }
 
@@ -374,7 +334,7 @@ async function handleSend(interaction) {
   // --- Step 1: Collect user (if specific user target) ---
   let recipients = [];
 
-  if (target === TARGET_TYPES.USER) {
+  if (target === 'user') {
     const userSelectRow = new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
         .setCustomId(`qurl_user_${sendNonce}`)
@@ -394,60 +354,41 @@ async function handleSend(interaction) {
 
       const selectedUser = selectInteraction.users.first();
       if (selectedUser.bot) {
-        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
       }
       if (selectedUser.id === interaction.user.id) {
-        clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to yourself.', components: [] });
       }
       recipients = [selectedUser];
       await selectInteraction.deferUpdate();
-    } catch (err) {
-      logger.debug('User select timed out or dismissed', { error: err?.message });
-      clearCooldown(interaction.user.id);
+    } catch {
       return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
-  } else if (target === TARGET_TYPES.CHANNEL) {
+  } else if (target === 'channel') {
     await interaction.deferReply({ ephemeral: true });
     try {
-      // Full fetch required for permissionsFor() check on voice channels.
-      // Uses TTL cache to avoid re-fetching for every send in quick succession.
-      await fetchGuildMembers(interaction.guild);
+      await interaction.guild.members.fetch();
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
-      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
     }
-    const isVoiceChannel = interaction.channel && (
-      interaction.channel.type === ChannelType.GuildVoice ||
-      interaction.channel.type === ChannelType.GuildStageVoice
-    );
-    // Voice: all members with permission to see the channel (not just connected)
-    // Text: all members who can see the text channel
-    recipients = isVoiceChannel
-      ? getVoiceChannelViewers(interaction.channel, interaction.user.id)
-      : getTextChannelMembers(interaction.channel, interaction.user.id);
+    recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
     if (recipients.length === 0) {
-      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No other members in this channel.' });
     }
-  } else if (target === TARGET_TYPES.VOICE) {
+  } else if (target === 'voice') {
     await interaction.deferReply({ ephemeral: true });
     const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
     if (result.error === 'not_in_voice') {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'You must be in a voice channel to use this target. Select "Everyone in this channel" to include all channel members.' });
+      return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
     }
     if (result.members.length === 0) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No other users currently on voice in this channel.' });
+      return interaction.editReply({ content: 'No other users in your voice channel.' });
     }
     recipients = result.members;
   }
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
   }
 
@@ -458,7 +399,7 @@ async function handleSend(interaction) {
   let resourceType = null;
   let resourceLabel = null;
 
-  const targetLabel = target === TARGET_TYPES.USER ? recipients[0].username : target === TARGET_TYPES.CHANNEL ? 'this channel' : 'voice channel';
+  const targetLabel = target === 'user' ? recipients[0].username : target === 'channel' ? 'this channel' : 'voice channel';
 
   if (commandAttachment) {
     // File attached — show only Send File button
@@ -495,15 +436,13 @@ async function handleSend(interaction) {
         (i.customId === `qurl_res_file_${sendNonce}` || i.customId === `qurl_res_loc_${sendNonce}`),
       time: 60000,
     });
-  } catch (err) {
-    logger.debug('Resource selection timed out or dismissed', { error: err?.message });
-    clearCooldown(interaction.user.id);
+  } catch {
     return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
   }
 
   if (resInteraction.customId === `qurl_res_loc_${sendNonce}`) {
     // --- Location: show modal ---
-    resourceType = RESOURCE_TYPES.MAPS;
+    resourceType = 'maps';
 
     const modal = new ModalBuilder()
       .setCustomId(`qurl_loc_modal_${sendNonce}`)
@@ -525,65 +464,47 @@ async function handleSend(interaction) {
         filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
         time: 120000,
       });
-    } catch (err) {
-      logger.debug('Location modal timed out or dismissed', { error: err?.message });
-      clearCooldown(interaction.user.id);
+    } catch {
       return interaction.editReply({ content: 'Location input timed out. Send cancelled.', components: [] });
     }
 
-    const rawLocationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
-    if (!rawLocationValue) {
-      clearCooldown(interaction.user.id);
-      return modalSubmit.reply({ content: 'Location cannot be empty.', ephemeral: true });
-    }
+    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
     await modalSubmit.deferUpdate();
 
-    // Handle place_id: prefix from autocomplete selections
-    const placeIdMatch = rawLocationValue.match(/^place_id:([^|]+)\|(.+)$/);
-    if (placeIdMatch) {
-      locationUrl = `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeIdMatch[1])}`;
-      locationName = placeIdMatch[2];
+    const mapsPatterns = [
+      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
+      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
+      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
+    ];
+
+    let detectedUrl = null;
+    for (const pattern of mapsPatterns) {
+      const match = locationValue.match(pattern);
+      if (match) { detectedUrl = match[0]; break; }
     }
 
-    const locationValue = placeIdMatch ? null : rawLocationValue; // skip pattern matching if place_id handled
-
-    if (locationValue) {
-      const mapsPatterns = [
-        /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
-        /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
-        /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
-      ];
-
-      let detectedUrl = null;
-      for (const pattern of mapsPatterns) {
-        const match = locationValue.match(pattern);
-        if (match) { detectedUrl = match[0]; break; }
-      }
-
-      if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
-        locationUrl = detectedUrl;
-        const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
-        const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-        if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
-        else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
-      } else if (detectedUrl) {
-        // Regex matched but isGoogleMapsURL() rejected — treat as text search
-        locationName = locationValue;
-        locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-      } else {
-        locationName = locationValue;
-        locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-      }
+    if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
+      locationUrl = detectedUrl;
+      const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+      const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
+      if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+      else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+    } else if (detectedUrl) {
+      // Regex matched but isGoogleMapsURL() rejected — treat as text search
+      locationName = locationValue;
+      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
+    } else {
+      locationName = locationValue;
+      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     }
     resourceLabel = locationName || 'Location';
 
   } else {
     // --- File: use attachment from slash command ---
-    resourceType = RESOURCE_TYPES.FILE;
+    resourceType = 'file';
     attachment = commandAttachment;
 
     if (!attachment) {
-      clearCooldown(interaction.user.id);
       await resInteraction.update({
         content: 'No file attached. Please rerun `/qurl send` with a file in the `file` option.',
         components: [],
@@ -594,7 +515,6 @@ async function handleSend(interaction) {
     await resInteraction.deferUpdate();
 
     if (!isAllowedFileType(attachment.contentType)) {
-      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
         components: [],
@@ -602,7 +522,6 @@ async function handleSend(interaction) {
     }
     const MAX_FILE_SIZE = 25 * 1024 * 1024;
     if (attachment.size > MAX_FILE_SIZE) {
-      clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
         components: [],
@@ -619,12 +538,18 @@ async function handleSend(interaction) {
   let connectorResourceId = null;
 
   try {
-    if (resourceType === RESOURCE_TYPES.FILE) {
+    if (resourceType === 'file') {
       const filename = sanitizeFilename(attachment.name);
       const uploadResult = await uploadToConnector(attachment.url, filename, attachment.contentType);
       connectorResourceId = uploadResult.resource_id;
 
-      const allLinks = await mintLinksForRecipients(connectorResourceId, expiresIn, recipients.length);
+      const expiresAt = expiryToISO(expiresIn);
+      const allLinks = [];
+      for (let i = 0; i < recipients.length; i += 10) {
+        const batchSize = Math.min(10, recipients.length - i);
+        const minted = await mintLinks(connectorResourceId, expiresAt, batchSize);
+        allLinks.push(...minted);
+      }
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -632,32 +557,22 @@ async function handleSend(interaction) {
         return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
       }
 
-      qurlLinks = mapLinksToRecipients(recipients, allLinks, connectorResourceId);
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: connectorResourceId,
+      }));
     } else {
-      // Upload location as google-map JSON to connector — fileviewer renders it in an iframe
-      const mapData = { type: 'google-map' };
-      // Extract lat/lng from Google Maps URL if present
-      const latLngMatch = locationUrl.match(/@(-?\d+\.?\d*),(-?\d+\.?\d*)/);
-      if (latLngMatch) {
-        mapData.lat = parseFloat(latLngMatch[1]);
-        mapData.lng = parseFloat(latLngMatch[2]);
+      const description = locationName || locationUrl;
+      const results = await batchSettled(recipients, async (recipient) => {
+        const result = await createOneTimeLink(locationUrl, expiresIn, description);
+        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
+      }, 5);
+
+      for (const r of results) {
+        if (r.status === 'fulfilled') qurlLinks.push(r.value);
+        else logger.error('Failed to create QURL link', { error: r.reason?.message });
       }
-      if (locationName && !isGoogleMapsURL(locationName)) mapData.query = locationName;
-      // If we have a Google Maps URL but no lat/lng, store it as url for the fileviewer to embed directly
-      if (!mapData.lat && !mapData.query) mapData.url = locationUrl;
-
-      const uploadResult = await uploadJsonToConnector(mapData, 'location.json');
-      connectorResourceId = uploadResult.resource_id;
-
-      const allLinks = await mintLinksForRecipients(connectorResourceId, expiresIn, recipients.length);
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
-      }
-
-      qurlLinks = mapLinksToRecipients(recipients, allLinks, connectorResourceId);
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
@@ -671,20 +586,20 @@ async function handleSend(interaction) {
   }
 
   // Persist ALL links to DB BEFORE sending DMs
-  db.recordQURLSendBatch(qurlLinks.map(link => ({
-    sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
-    resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
-    expiresIn, channelId: interaction.channelId, targetType: target,
-  })));
+  for (const link of qurlLinks) {
+    db.recordQURLSend(
+      sendId, interaction.user.id, link.recipientId, link.resourceId,
+      resourceType, link.qurlLink, expiresIn, interaction.channelId, target,
+    );
+  }
 
   // Send DMs
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
-  const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
-    const recipient = recipientMap.get(link.recipientId);
+    const recipient = recipients.find(r => r.id === link.recipientId);
     const embed = buildDeliveryEmbed({
       senderUsername: interaction.user.username,
       resourceType,
@@ -696,7 +611,7 @@ async function handleSend(interaction) {
     });
 
     const sent = await sendDM(link.recipientId, { embeds: [embed] });
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    db.updateSendDMStatus(sendId, link.recipientId, sent ? 'sent' : 'failed');
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -711,10 +626,10 @@ async function handleSend(interaction) {
   }
 
   // Save send config for "Add Recipients" reuse (uses first file resource if present)
-  db.saveSendConfig({
-    sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-    actualUrl: locationUrl || null, expiresIn, personalMessage, locationName, attachmentName: attachment?.name || null,
-  });
+  db.saveSendConfig(
+    sendId, interaction.user.id, resourceType, connectorResourceId,
+    locationUrl || null, expiresIn, personalMessage, locationName, attachment?.name || null,
+  );
 
   // Ephemeral confirmation with Add Recipients + Revoke buttons
   const TRUNC_LIMIT = 5;
@@ -765,18 +680,6 @@ async function handleSend(interaction) {
   logger.info('/qurl send completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
-
-  // Notify the channel when sending to "Everyone" or "Voice users" (non-ephemeral so all members see it)
-  if ((target === TARGET_TYPES.CHANNEL || target === TARGET_TYPES.VOICE) && delivered > 0) {
-    const notifyMsg = target === TARGET_TYPES.VOICE
-      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
-    try {
-      await interaction.channel.send({ content: notifyMsg });
-    } catch (err) {
-      logger.warn('Failed to send channel notification', { error: err.message });
-    }
-  }
 
   // Start link status monitor BEFORE collector so `monitor` is available in callbacks
   const monitor = delivered > 0
@@ -870,22 +773,16 @@ async function handleSend(interaction) {
           });
 
           await selectInteraction.deferUpdate();
-          // Set cooldown immediately to prevent concurrent add-recipients bypass
-          setCooldown(interaction.user.id);
-          let addResult;
-          try {
-            addResult = await handleAddRecipients(
-              sendId, interaction.user.id, selectInteraction.users, interaction,
-            );
-          } catch (addErr) {
-            clearCooldown(interaction.user.id);
-            throw addErr;
-          }
+          const addResult = await handleAddRecipients(
+            sendId, interaction.user.id, selectInteraction.users, interaction,
+          );
 
-          // Count how many were added — update monitor if new recipients were delivered
-          const addedCount = addResult.delivered || 0;
-          if (addedCount > 0) {
+          // Count how many were added
+          const addedMatch = addResult.msg.match(/^Added (\d+)/);
+          if (addedMatch) {
+            const addedCount = parseInt(addedMatch[1]);
             addRecipientsCount += addedCount;
+            // Tell the monitor to track the new links (including new resource IDs for location sends)
             monitor.addRecipients(addedCount, addResult.newResourceIds);
             const totalSent = delivered + addRecipientsCount;
             confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
@@ -894,7 +791,8 @@ async function handleSend(interaction) {
             await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
           }
 
-          await btnInteraction.editReply({ content: addResult.msg, components: [] });
+          setCooldown(interaction.user.id);
+          await selectInteraction.editReply({ content: addResult.msg, components: [] });
         } catch (err) {
           const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
           const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
@@ -920,8 +818,6 @@ async function handleSend(interaction) {
 
 // Handle adding new recipients to an existing send
 async function handleAddRecipients(sendId, senderDiscordId, usersCollection, originalInteraction) {
-  // Note: no transaction guard between read and write — acceptable risk since config
-  // deletion during add-recipients is not a realistic concurrent operation.
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [] };
@@ -939,8 +835,8 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   // Create new QURL links for each resource type in the send config
   // recipientLinks[recipientId] = [{ qurlLink, resourceId, resType, label }]
   const recipientLinks = {};
-  const hasFile = sendConfig.resource_type === RESOURCE_TYPES.FILE && sendConfig.connector_resource_id;
-  const hasLocation = sendConfig.resource_type === RESOURCE_TYPES.MAPS && sendConfig.connector_resource_id;
+  const hasFile = sendConfig.connector_resource_id;
+  const hasLocation = sendConfig.actual_url;
 
   if (!hasFile && !hasLocation) {
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [] };
@@ -948,7 +844,13 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
   try {
     if (hasFile) {
-      const allLinks = await mintLinksForRecipients(sendConfig.connector_resource_id, sendConfig.expires_in, newRecipients.length);
+      const expiresAt = expiryToISO(sendConfig.expires_in);
+      const allLinks = [];
+      for (let i = 0; i < newRecipients.length; i += 10) {
+        const batchSize = Math.min(10, newRecipients.length - i);
+        const minted = await mintLinks(sendConfig.connector_resource_id, expiresAt, batchSize);
+        allLinks.push(...minted);
+      }
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
@@ -958,31 +860,27 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
           resourceId: sendConfig.connector_resource_id,
-          resType: RESOURCE_TYPES.FILE,
+          resType: 'file',
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       });
     }
     if (hasLocation) {
-      // Location was uploaded as google-map JSON to connector — mint links from the same resource
-      const locationResourceId = sendConfig.connector_resource_id;
-      if (!locationResourceId) {
-        return { msg: 'Location resource not found. Please resend.', newResourceIds: [] };
+      const description = sendConfig.location_name || 'Google Maps Location';
+      const results = await batchSettled(newRecipients, async (recipient) => {
+        const result = await createOneTimeLink(sendConfig.actual_url, sendConfig.expires_in, description);
+        return { recipientId: recipient.id, qurlLink: result.qurl_link, resourceId: result.resource_id };
+      }, 5);
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const v = r.value;
+          if (!recipientLinks[v.recipientId]) recipientLinks[v.recipientId] = [];
+          recipientLinks[v.recipientId].push({
+            qurlLink: v.qurlLink, resourceId: v.resourceId,
+            resType: 'maps', label: sendConfig.location_name || 'Google Maps',
+          });
+        }
       }
-      const allLinks = await mintLinksForRecipients(locationResourceId, sendConfig.expires_in, newRecipients.length);
-      if (allLinks.length < newRecipients.length) {
-        logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds: [] };
-      }
-      newRecipients.forEach((r, i) => {
-        if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
-        recipientLinks[r.id].push({
-          qurlLink: allLinks[i].qurl_link,
-          resourceId: locationResourceId,
-          resType: RESOURCE_TYPES.MAPS,
-          label: sendConfig.location_name || 'Google Maps',
-        });
-      });
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
@@ -995,17 +893,15 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   }
 
   // Persist to DB before DMs
-  const sendRecords = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
     for (const link of links) {
-      sendRecords.push({
-        sendId, senderDiscordId, recipientDiscordId: rid, resourceId: link.resourceId,
-        resourceType: link.resType, qurlLink: link.qurlLink, expiresIn: sendConfig.expires_in,
-        channelId: originalInteraction.channelId, targetType: TARGET_TYPES.USER,
-      });
+      db.recordQURLSend(
+        sendId, senderDiscordId, rid, link.resourceId,
+        link.resType, link.qurlLink, sendConfig.expires_in,
+        originalInteraction.channelId, 'user',
+      );
     }
   }
-  db.recordQURLSendBatch(sendRecords);
 
   // Send DMs — one message per recipient with all their links
   let delivered = 0;
@@ -1028,7 +924,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
     for (const l of links) {
-      db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+      db.updateSendDMStatus(sendId, recipient.id, sent ? 'sent' : 'failed');
     }
     return { sent, username: recipient.username };
   }, 5);
@@ -1043,7 +939,7 @@ async function handleAddRecipients(sendId, senderDiscordId, usersCollection, ori
   let msg = `Added ${delivered} recipient${delivered !== 1 ? 's' : ''}`;
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
-  return { msg, newResourceIds, delivered };
+  return { msg, newResourceIds };
 }
 
 // --- /qurl revoke handler ---
@@ -1074,7 +970,6 @@ async function handleRevoke(interaction) {
 
   try {
     const selectInteraction = await response.awaitMessageComponent({
-      filter: (i) => i.user.id === interaction.user.id,
       componentType: ComponentType.StringSelect,
       time: 60000,
     });
@@ -1120,11 +1015,6 @@ function isAutocompleteLimited(userId) {
   const now = Date.now();
   const entry = autocompleteLimits.get(userId);
   if (!entry || now - entry.windowStart > AUTOCOMPLETE_WINDOW_MS) {
-    if (autocompleteLimits.size >= 10000) {
-      // Evict oldest entry to prevent DoS via store filling
-      const oldest = autocompleteLimits.keys().next().value;
-      autocompleteLimits.delete(oldest);
-    }
     autocompleteLimits.set(userId, { windowStart: now, count: 1 });
     return false;
   }
@@ -1142,24 +1032,6 @@ setInterval(() => {
     if (now - v.windowStart > AUTOCOMPLETE_WINDOW_MS * 2) autocompleteLimits.delete(k);
   }
 }, 5 * 60 * 1000).unref();
-
-// Return target choices based on channel type
-function handleTargetAutocomplete(interaction) {
-  const channel = interaction.channel;
-  const isVoice = channel && (
-    channel.type === ChannelType.GuildVoice ||
-    channel.type === ChannelType.GuildStageVoice
-  );
-
-  const choices = [
-    { name: 'Everyone in this channel', value: 'channel' },
-    { name: 'A specific user', value: 'user' },
-  ];
-  if (isVoice) {
-    choices.push({ name: 'Only voice users', value: 'voice' });
-  }
-  return interaction.respond(choices);
-}
 
 async function handleLocationAutocomplete(interaction, query) {
   if (!query || query.length < 2) {
@@ -1751,7 +1623,11 @@ const commands = [
             opt.setName('target')
               .setDescription('Who receives this')
               .setRequired(true)
-              .setAutocomplete(true))
+              .addChoices(
+                { name: 'Everyone in this channel', value: 'channel' },
+                { name: 'Users in my voice channel', value: 'voice' },
+                { name: 'A specific user', value: 'user' },
+              ))
           .addStringOption(opt =>
             opt.setName('expiry')
               .setDescription('Link expiry (default: 24h)')
@@ -1792,10 +1668,7 @@ const commands = [
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
-            '  1. Use `/qurl send` and choose a target\n' +
-            '     • **Everyone in this channel** — sends to all members\n' +
-            '     • **A specific user** — pick one recipient\n' +
-            '     • **Only voice users** — appears in voice channels only\n' +
+            '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on access\n\n' +
@@ -1822,12 +1695,12 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  // Autocomplete for /qurl send
+  // Autocomplete for /qurl send location
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'qurl') {
       const focused = interaction.options.getFocused(true);
-      if (focused.name === 'target') {
-        return handleTargetAutocomplete(interaction);
+      if (focused.name === 'location') {
+        return handleLocationAutocomplete(interaction, focused.value);
       }
     }
     return;

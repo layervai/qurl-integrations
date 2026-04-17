@@ -35,10 +35,10 @@ module.exports = {
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
 
   // Allowed GitHub organizations (comma-separated)
-  ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+  ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()),
 
   // Server
-  PORT: intEnv('PORT', 3000),
+  PORT: process.env.PORT || 3000,
   BASE_URL: process.env.BASE_URL || 'http://localhost:3000',
 
   // Rate limiting
@@ -65,8 +65,10 @@ module.exports = {
 
   // QURL
   QURL_API_KEY: process.env.QURL_API_KEY,
-  QURL_ENDPOINT: process.env.QURL_ENDPOINT || 'https://api.layerv.ai', // Set via ECS env var; default is prod
-  CONNECTOR_URL: process.env.CONNECTOR_URL || 'https://get.qurl.link:9808', // Set via ECS env var; default is prod
+  QURL_ENDPOINT: process.env.QURL_ENDPOINT || 'https://api.layerv.ai',
+
+  // qurl-s3-connector
+  CONNECTOR_URL: process.env.CONNECTOR_URL || 'https://get.qurl.link:9808',
 
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,

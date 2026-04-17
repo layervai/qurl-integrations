@@ -101,9 +101,11 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
   }
 }
 
-// Simple in-memory rate limiter with periodic eviction.
-// Note: per-process only — if scaling to multiple ECS tasks, move to Redis or ALB rate limiting.
+// Simple in-memory rate limiter with periodic eviction
 const rateLimitStore = new Map();
+
+// Node.js single-threaded: no true data race, but eviction could theoretically
+// interleave with a request's filter→set. Acceptable for in-memory rate limiting.
 
 // Evict stale entries every 5 minutes to prevent unbounded growth
 setInterval(() => {
@@ -134,11 +136,6 @@ function rateLimit(req, res, next) {
   }
 
   requests.push(now);
-  if (rateLimitStore.size >= 10000 && !rateLimitStore.has(ip)) {
-    // Evict oldest entry to prevent DoS via store filling
-    const oldest = rateLimitStore.keys().next().value;
-    rateLimitStore.delete(oldest);
-  }
   rateLimitStore.set(ip, requests);
   next();
 }
@@ -217,7 +214,6 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
-  let accessToken = null;
   try {
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -235,7 +231,6 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
-    accessToken = tokenData.access_token || null;
 
     if (tokenData.error) {
       logger.error('GitHub OAuth error', { error: tokenData.error_description });
@@ -252,7 +247,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     // Get user info
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
-        'Authorization': `Bearer ${accessToken}`,
+        'Authorization': `Bearer ${tokenData.access_token}`,
         'Accept': 'application/json',
         'User-Agent': 'OpenNHP-Bot',
       },
@@ -280,7 +275,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     const historicalCheck = checkHistoricalContributions(
       pending.discord_id,
       userData.login,
-      accessToken
+      tokenData.access_token
     );
 
     // Send initial DM
@@ -331,26 +326,6 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       subtext: 'Please try again with /link in Discord. If the problem persists, contact a moderator.',
       type: 'error',
     }));
-  } finally {
-    // Revoke the OAuth token — we only needed it for the historical check.
-    // In finally so it fires even if an exception occurs after token exchange.
-    if (accessToken) {
-      try {
-        await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Basic ${Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64')}`,
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'OpenNHP-Bot',
-          },
-          body: JSON.stringify({ access_token: accessToken }),
-          signal: AbortSignal.timeout(10000),
-        });
-        logger.debug('Revoked GitHub OAuth token', { discordId: pending.discord_id });
-      } catch (err) {
-        logger.warn('Failed to revoke GitHub OAuth token', { error: err.message });
-      }
-    }
   }
 });
 
