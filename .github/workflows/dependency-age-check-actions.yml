@@ -9,8 +9,10 @@ on:
       - ".github/actions/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   age-check:
-    uses: layervai/ops-routines/.github/workflows/age-check-actions.yml@main
-    permissions:
-      contents: read
+    timeout-minutes: 10
+    uses: layervai/ops-routines/.github/workflows/age-check-actions.yml@61d51059f8a3b2654694bada12a542b2be8ae17c # v0.1.0
