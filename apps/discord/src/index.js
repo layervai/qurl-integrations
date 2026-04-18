@@ -36,12 +36,13 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // Warn if the OAuth state HMAC is falling back to GITHUB_CLIENT_SECRET.
-  // This works, but couples the two secrets: rotating one would invalidate
-  // in-flight OAuth states (and vice versa). Set OAUTH_STATE_SECRET to
-  // isolate blast radius.
+  // OAUTH_STATE_SECRET is required in production. Falling back to
+  // GITHUB_CLIENT_SECRET couples the two secrets — rotating GitHub's
+  // client secret would invalidate all in-flight OAuth states and vice
+  // versa. A prod deploy must set this explicitly.
   if (!process.env.OAUTH_STATE_SECRET) {
-    logger.warn('OAUTH_STATE_SECRET not set; falling back to GITHUB_CLIENT_SECRET for state HMAC. Set OAUTH_STATE_SECRET to decouple rotation.');
+    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+    process.exit(1);
   }
 
   // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot

@@ -7,13 +7,18 @@ const dns = require('dns').promises;
  * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
  */
 
+// Retryable statuses: 408 (request timeout), 429 (rate limit), 500/502/503/504
+// (transient server-side). 401/403/404/409 are NOT retried — those are
+// auth/validation failures and retrying won't help.
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
 async function qurlFetch(method, path, body, apiKey) {
   const key = apiKey || config.QURL_API_KEY;
   if (!key) {
     throw new Error('QURL_API_KEY is not configured');
   }
   const url = `${config.QURL_ENDPOINT}/v1${path}`;
-  const opts = {
+  const baseOpts = {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -21,25 +26,55 @@ async function qurlFetch(method, path, body, apiKey) {
       'User-Agent': 'qurl-discord-bot/1.0',
     },
   };
-  if (body) opts.body = JSON.stringify(body);
-  opts.signal = AbortSignal.timeout(30000);
+  if (body) baseOpts.body = JSON.stringify(body);
 
-  const resp = await fetch(url, opts);
-  if (!resp.ok) {
-    // Log only status + body length. Including the raw body would be
-    // dangerous: the QURL API error response may echo request headers or
-    // tokens, and anyone flipping LOG_LEVEL=debug during an incident would
-    // then tail those into logs.
-    let bodyLen = 0;
-    try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
-    logger.debug('QURL API error', { method, path, status: resp.status, bodyLen });
-    throw new Error(`QURL API ${method} ${path} failed (${resp.status})`);
+  // Up to 3 attempts total (initial + 2 retries) with exponential backoff
+  // plus jitter. A single transient 503 or network blip from QURL's infra
+  // no longer fails a whole /qurl send. Non-retryable statuses + non-network
+  // errors throw immediately.
+  const maxAttempts = 3;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const opts = { ...baseOpts, signal: AbortSignal.timeout(30000) };
+    let resp;
+    try {
+      resp = await fetch(url, opts);
+    } catch (err) {
+      // Network/timeout error: retry if we have attempts left.
+      lastErr = err;
+      if (attempt < maxAttempts - 1) {
+        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+        logger.warn('QURL API network error, retrying', { method, path, attempt, delay, error: err.message });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+
+    if (!resp.ok) {
+      // Log only status + body length. Including the raw body would be
+      // dangerous: the QURL API error response may echo request headers or
+      // tokens, and anyone flipping LOG_LEVEL=debug during an incident would
+      // then tail those into logs.
+      let bodyLen = 0;
+      try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
+      logger.debug('QURL API error', { method, path, status: resp.status, bodyLen, attempt });
+      if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
+        const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
+        logger.warn('QURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw new Error(`QURL API ${method} ${path} failed (${resp.status})`);
+    }
+
+    if (resp.status === 204) return null;
+    const envelope = await resp.json();
+    return envelope.data || envelope;
   }
-
-  if (resp.status === 204) return null;
-
-  const envelope = await resp.json();
-  return envelope.data || envelope;
+  // Unreachable in practice — the loop either returns or throws — but keeps
+  // the control flow explicit for reviewers.
+  throw lastErr || new Error(`QURL API ${method} ${path} exhausted retries`);
 }
 
 // Reject hostnames that resolve (by syntax) to loopback, link-local, or

@@ -91,8 +91,39 @@ app.get('/health', (req, res) => {
   }
 });
 
+// Per-IP rate limit on /metrics. Even a token holder shouldn't be able to
+// hammer the endpoint — getStats() does several SQL reads + memoryUsage() +
+// uptime() every hit. Simple in-memory window; single-instance only
+// (matches the SCALING comments on the OAuth/webhooks rate limiters).
+const metricsRateStore = new Map(); // ip -> number[] (request timestamps)
+const METRICS_WINDOW_MS = 60_000;
+const METRICS_MAX_PER_WINDOW = 30;
+// Evict stale entries periodically so the Map can't grow unboundedly
+// under scans from many unique IPs.
+setInterval(() => {
+  const cutoff = Date.now() - METRICS_WINDOW_MS * 2;
+  for (const [ip, times] of metricsRateStore) {
+    const recent = times.filter(t => t > cutoff);
+    if (recent.length === 0) metricsRateStore.delete(ip);
+    else metricsRateStore.set(ip, recent);
+  }
+}, 30_000).unref();
+
+function metricsRateLimit(req, res, next) {
+  const ip = req.ip || 'unknown';
+  const now = Date.now();
+  const windowStart = now - METRICS_WINDOW_MS;
+  const recent = (metricsRateStore.get(ip) || []).filter(t => t > windowStart);
+  if (recent.length >= METRICS_MAX_PER_WINDOW) {
+    return res.status(429).json({ error: 'Rate limit exceeded' });
+  }
+  recent.push(now);
+  metricsRateStore.set(ip, recent);
+  next();
+}
+
 // Metrics endpoint
-app.get('/metrics', (req, res) => {
+app.get('/metrics', metricsRateLimit, (req, res) => {
   // Default-deny: require METRICS_TOKEN in every environment. An accidentally
   // unset NODE_ENV in staging/preview should never expose stats.
   if (!process.env.METRICS_TOKEN) {

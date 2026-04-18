@@ -78,6 +78,17 @@ describe('Server', () => {
       expect(res.body.stats).toBeDefined();
       expect(res.body.uptime).toBeDefined();
     });
+
+    it('returns 429 after exceeding the per-IP rate limit', async () => {
+      process.env.METRICS_TOKEN = 'secret-token';
+      // 30/min/IP is the limit — fire 31 and expect the last to 429
+      let last;
+      for (let i = 0; i < 31; i++) {
+        last = await request(app).get('/metrics').set('Authorization', 'Bearer secret-token');
+      }
+      expect(last.status).toBe(429);
+      expect(last.body.error).toBe('Rate limit exceeded');
+    });
   });
 
   describe('GET /auth/github', () => {

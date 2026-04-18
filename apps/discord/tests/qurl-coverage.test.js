@@ -90,3 +90,103 @@ describe('QURL client — getResourceStatus (line 51)', () => {
     expect(result.qurls).toEqual([]);
   });
 });
+
+describe('QURL client — retry logic on transient failures', () => {
+  let qurl;
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      QURL_API_KEY: 'test-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    }));
+    qurl = require('../src/qurl');
+  });
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('retries on 503 and succeeds on the next attempt', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => '' })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: { ok: true } }) });
+    const r = await qurl.getResourceStatus('res-retry');
+    expect(r.ok).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT retry on 401', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-auth')).rejects.toThrow(/401/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after 3 attempts on persistent 503', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-down')).rejects.toThrow(/503/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries on network error then succeeds', async () => {
+    globalThis.fetch = jest.fn()
+      .mockRejectedValueOnce(new Error('ECONNRESET'))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: { ok: true } }) });
+    const r = await qurl.getResourceStatus('res-net');
+    expect(r.ok).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws after persistent network errors', async () => {
+    globalThis.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET'));
+    await expect(qurl.getResourceStatus('res-netdown')).rejects.toThrow(/ECONNRESET/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries on 429', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => '' })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: {} }) });
+    await qurl.getResourceStatus('res-429');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('QURL client — createOneTimeLink happy path', () => {
+  let qurl;
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      QURL_API_KEY: 'test-api-key',
+      QURL_ENDPOINT: 'https://api.test.local',
+    }));
+    jest.doMock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    }));
+    jest.doMock('dns', () => ({
+      promises: { lookup: jest.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]) },
+    }));
+    qurl = require('../src/qurl');
+  });
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it('creates a link for a public URL that passes DNS resolution', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ data: { resource_id: 'r1', qurl_link: 'https://q.link/abc' } }),
+    });
+    const result = await qurl.createOneTimeLink('https://example.com/file', '1h', 'desc');
+    expect(result.resource_id).toBe('r1');
+  });
+
+  it('rejects when DNS lookup fails', async () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({ QURL_API_KEY: 'k', QURL_ENDPOINT: 'https://api.test.local' }));
+    jest.doMock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+    jest.doMock('dns', () => ({
+      promises: { lookup: jest.fn().mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })) },
+    }));
+    const q = require('../src/qurl');
+    await expect(q.createOneTimeLink('https://nowhere.example/file', '1h', 'd'))
+      .rejects.toThrow(/resolved/);
+  });
+});

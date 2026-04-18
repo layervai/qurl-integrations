@@ -513,12 +513,14 @@ const MEMBER_FETCH_TTL = 60000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();
   const entry = memberFetchCache.get(guild.id);
-  // Coalesce BEFORE the TTL check: two concurrent callers after TTL expiry
-  // can otherwise both fall through the TTL gate before either stamps
-  // inFlight, defeating the dedup. An in-flight fetch is always fresher
-  // than a stale entry by definition, so joining it is always correct.
-  if (entry?.inFlight) return entry.inFlight;
-  if (entry && now - entry.timestamp < MEMBER_FETCH_TTL) return;
+  // Decide both checks inside a single `if (entry)` branch so a concurrent
+  // caller can't observe the entry AFTER inFlight cleared but BEFORE a new
+  // one was set, slipping through both gates and firing a duplicate fetch.
+  // Order: inFlight (join it) → TTL (cache hit, skip) → fall through (refresh).
+  if (entry) {
+    if (entry.inFlight) return entry.inFlight;
+    if (now - entry.timestamp < MEMBER_FETCH_TTL) return;
+  }
   const promise = guild.members.fetch();
   memberFetchCache.set(guild.id, { timestamp: now, inFlight: promise });
   try {
@@ -1095,12 +1097,17 @@ async function handleSend(interaction, apiKey) {
   let monitor = null;
   if (delivered > 0) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
-    let addingRecipients = false; // Mutex: prevent concurrent add-recipient flows (paired with global addRecipientsLocks Set on sendId)
+    // Single source of truth for the "adding recipients" lock: the global
+    // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
+    // collect handler, release in a single outer finally{} so any throw
+    // between acquire and the previous dual-flag release paths can't
+    // permanently block subsequent button clicks.
 
-    // Start link status monitor + collector. If collector setup throws between
-    // these lines, stop the monitor so setInterval does not leak.
-    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
-
+    // Create the collector FIRST — if collector setup throws, we return
+    // without ever having started the monitor, so no setInterval leaks
+    // interaction/recipients/buttonRow/file data in a closure for up to
+    // an hour. Only after the collector is established do we kick the
+    // monitor setInterval.
     let collector;
     try {
       collector = response.createMessageComponentCollector({
@@ -1108,10 +1115,10 @@ async function handleSend(interaction, apiKey) {
         time: TIMEOUTS.QURL_REVOKE_WINDOW,
       });
     } catch (err) {
-      monitor.stop();
       logger.error('Failed to create button collector', { sendId, error: err.message });
       return;
     }
+    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
 
     let showAllRecipients = false;
 
@@ -1163,31 +1170,30 @@ async function handleSend(interaction, apiKey) {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (addingRecipients || addRecipientsLocks.has(sendId)) {
+        if (addRecipientsLocks.has(sendId)) {
           await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
-        addingRecipients = true;
         addRecipientsLocks.add(sendId);
-        // ===== END CRITICAL SECTION (flag is claimed) =====
-
-        const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
-        if (remaining <= 0) {
-          addingRecipients = false; addRecipientsLocks.delete(sendId);
-          await btnInteraction.reply({
-            content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
-            ephemeral: true,
-          });
-          return;
-        }
-        if (isOnCooldown(interaction.user.id)) {
-          addingRecipients = false; addRecipientsLocks.delete(sendId);
-          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
-          return;
-        }
-        setCooldown(interaction.user.id);
-
+        // Single outer try/finally guarantees the lock is released on every
+        // exit path — even if a synchronous throw happens between acquire
+        // and any early return. The old dual-flag pattern had multiple
+        // release sites and risked permanent lock-out on a missed release.
         try {
+          const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
+          if (remaining <= 0) {
+            await btnInteraction.reply({
+              content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
+              ephemeral: true,
+            });
+            return;
+          }
+          if (isOnCooldown(interaction.user.id)) {
+            await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          setCooldown(interaction.user.id);
+
           // Show user select menu — collect the response on the REPLY message
           const maxSelect = Math.min(10, remaining);
           const userSelectRow = new ActionRowBuilder().addComponents(
@@ -1237,7 +1243,7 @@ async function handleSend(interaction, apiKey) {
             await btnInteraction.editReply({ content: msg, components: [] }).catch(logIgnoredDiscordErr);
           }
         } finally {
-          addingRecipients = false; addRecipientsLocks.delete(sendId);
+          addRecipientsLocks.delete(sendId);
         }
       }
     });
