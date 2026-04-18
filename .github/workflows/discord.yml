@@ -21,8 +21,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-env:
-  NODE_VERSION: '22'
+# Node version is read from apps/discord/.nvmrc below so CI, local dev
+# (nvm), and the Dockerfile all stay in lock-step. Avoid adding a
+# NODE_VERSION env var back — it would drift.
 
 jobs:
   build-and-test:
@@ -37,7 +38,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: apps/discord/.nvmrc
           cache: 'npm'
           cache-dependency-path: apps/discord/package-lock.json
 

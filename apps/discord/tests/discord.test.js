@@ -126,10 +126,9 @@ describe('discord module', () => {
       expect(mockGuild.channels.fetch).toHaveBeenCalled();
     });
 
-    it('handles fetch failure gracefully', async () => {
+    it('re-throws on fetch failure so callers know the cache is stale', async () => {
       mockClient.guilds.fetch.mockRejectedValueOnce(new Error('no guild'));
-      await discord.refreshCache();
-      // Should not throw
+      await expect(discord.refreshCache()).rejects.toThrow('no guild');
     });
   });
 

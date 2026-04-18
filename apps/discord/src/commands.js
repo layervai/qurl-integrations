@@ -56,11 +56,13 @@ function stateSecret() {
   const dedicated = process.env.OAUTH_STATE_SECRET;
   if (dedicated) return dedicated;
   if (!config.GITHUB_CLIENT_SECRET) {
-    // Throw anywhere outside of the Jest test harness. A static dev fallback
-    // would let any attacker who reads this file mint valid HMAC states
-    // against a misconfigured staging/prod deploy — index.js's boot check
-    // is the primary defense, this is belt-and-suspenders.
-    if (process.env.NODE_ENV !== 'test') {
+    // Only use the static fallback inside Jest (NODE_ENV=test AND either
+    // JEST_WORKER_ID set by Jest, or CI=true). This raises the bar: merely
+    // setting NODE_ENV=test by accident in a deployed env doesn't enable
+    // the forgeable key. Everywhere else throws hard so a misconfig is loud.
+    const inTestHarness = process.env.NODE_ENV === 'test'
+      && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
+    if (!inTestHarness) {
       throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
     }
     if (!_warnedStateSecretFallback) {
@@ -1890,6 +1892,16 @@ const commands = [
 
       const targetUser = interaction.options.getUser('user');
       const githubUsername = interaction.options.getString('github').replace(/^@+/, '');
+
+      // Same validation /bulklink uses — reject anything that isn't a valid
+      // GitHub login. A malformed string in guild_links would later be
+      // reflected into embeds and interpolated into search queries.
+      if (!/^[a-zA-Z0-9-]{1,39}$/.test(githubUsername)) {
+        return interaction.reply({
+          content: `❌ Invalid GitHub username format: \`${githubUsername}\`. Must be 1-39 chars, alphanumerics + hyphen only.`,
+          ephemeral: true,
+        });
+      }
 
       const existingLink = db.getLinkByGithub(githubUsername);
       if (existingLink && existingLink.discord_id !== targetUser.id) {

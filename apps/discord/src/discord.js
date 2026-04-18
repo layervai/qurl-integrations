@@ -141,6 +141,11 @@ async function refreshCache() {
       });
     } catch (error) {
       logger.error('Failed to refresh cache', { error: error.message });
+      // Re-throw so callers that `await refreshCache()` can't then assume
+      // `guild`/`roles`/`channels` are populated. Previously the error was
+      // swallowed here and a downstream `guild.members.fetch()` would crash
+      // with an opaque TypeError.
+      throw error;
     } finally {
       refreshCacheInFlight = null;
     }
