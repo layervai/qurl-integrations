@@ -48,5 +48,7 @@ jobs:
       # reusable's default; set explicitly here so the policy is
       # visible per-repo.
       min_age_days: 14
+    # See dependency-age-check-actions.yml for rationale on secrets: inherit.
+    secrets: inherit
     permissions:
       contents: read
