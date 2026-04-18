@@ -24,10 +24,17 @@ function getKey() {
     return false;
   }
   const buf = Buffer.from(raw, 'base64');
-  if (buf.length !== 32) {
-    logger.error('KEY_ENCRYPTION_KEY must be 32 bytes (base64-encoded)');
-    cachedKey = false;
-    return false;
+  // Buffer.from silently discards non-base64 chars and accepts wrong-length
+  // input, so verify both the decoded length AND that re-encoding round-trips.
+  // If the env var was mis-pasted we want a loud boot-time failure, not a
+  // silent misconfiguration that only surfaces under load.
+  if (buf.length !== 32 || buf.toString('base64') !== raw.trim()) {
+    const err = new Error(
+      'KEY_ENCRYPTION_KEY is malformed. Expected base64-encoded 32 bytes. ' +
+      'Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"'
+    );
+    logger.error(err.message);
+    throw err;
   }
   cachedKey = buf;
   return buf;

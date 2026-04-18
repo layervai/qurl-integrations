@@ -52,11 +52,15 @@ db.exec(`
   );
 
   -- Contribution streaks
+  -- NOTE: last_contribution_week despite the name stores a MONTH string
+  -- in YYYY-MM format (see getMonthString). The column was carried over
+  -- from an earlier weekly-streak design; renaming requires a data-rewrite
+  -- migration. Treat it as "last_contribution_month" in code.
   CREATE TABLE IF NOT EXISTS streaks (
     discord_id TEXT PRIMARY KEY,
     current_streak INTEGER DEFAULT 0,
     longest_streak INTEGER DEFAULT 0,
-    last_contribution_week TEXT,
+    last_contribution_week TEXT,  -- actually YYYY-MM
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 

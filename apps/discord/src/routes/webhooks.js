@@ -33,9 +33,11 @@ function verifySignature(req) {
   }
   // Defensive: if middleware ordering ever changes or a request arrives with
   // a non-JSON content type, rawBody may be absent. hmac.update(undefined)
-  // throws TypeError, which is outside the try/catch below.
+  // throws TypeError, which is outside the try/catch below. Logged at error
+  // level so oncall catches a silent misconfiguration quickly — legit GitHub
+  // traffic always has a JSON body and hits the /webhook express.json parser.
   if (!req.rawBody) {
-    logger.warn('Webhook request missing rawBody (middleware ordering?)');
+    logger.error('Webhook middleware did not populate rawBody — check server.js middleware ordering. Signature verification is BLOCKED until fixed.');
     return false;
   }
 
@@ -90,8 +92,15 @@ function recordBadSig(ip) {
     list = list.slice(-BAD_SIG_PER_IP_CAP);
   }
   if (badSigAttempts.size > 10_000) {
-    const oldest = badSigAttempts.keys().next().value;
-    badSigAttempts.delete(oldest);
+    // Same 10%-drop strategy as oauth.js rateLimitStore — single-entry
+    // eviction can't keep up with a distributed flood of unique IPs.
+    const dropCount = Math.max(1, Math.floor(badSigAttempts.size / 10));
+    const it = badSigAttempts.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      badSigAttempts.delete(k);
+    }
   }
   badSigAttempts.set(ip, list);
   return list.length;

@@ -1,6 +1,7 @@
 // Express server for OAuth and webhooks
 const crypto = require('crypto');
 const express = require('express');
+const helmet = require('helmet');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
@@ -13,21 +14,24 @@ const app = express();
 // Trust proxy headers (ECS behind ALB/CloudFront) for correct req.ip in rate limiting
 app.set('trust proxy', 1);
 
-// Global security headers on every response. The OAuth template already sets
-// its own inline CSP for the HTML pages; these harden the JSON endpoints
-// (health, metrics, webhooks) against common browser-level attacks.
-app.use((req, res, next) => {
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  next();
-});
+// helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
+// Policy, X-DNS-Prefetch-Control, etc. The HTML templates also set inline
+// CSP for the specific pages they render; disable helmet's default CSP so
+// the template's stricter per-page policy wins (else they'd compose and
+// the inline policy wouldn't apply).
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));
 
 // Parse JSON for webhooks with raw body for signature verification. MUST be
 // registered BEFORE the general app.use(express.json()) below so /webhook
 // requests hit this parser first and get req.rawBody populated. Do not
 // reorder without also updating routes/webhooks.js verifySignature().
+//
+// Startup contract: routes/webhooks.js verifySignature() asserts req.rawBody
+// exists at request time and refuses the request with an error log if the
+// middleware chain drops it. See that file's guard comment for details.
 app.use('/webhook', express.json({
   verify: (req, _res, buf) => {
     req.rawBody = buf;

@@ -101,11 +101,19 @@ function isOnCooldown(userId) {
 }
 
 function setCooldown(userId) {
+  // LRU-ish behavior: delete first so set() re-inserts at the end of the
+  // Map's insertion order. Combined with the bulk 10%-drop eviction below,
+  // active users stay resident while stale entries roll out.
+  sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
   if (sendCooldowns.size > 10000) {
-    // FIFO eviction (insertion order, not access order) — acceptable approximation at 10K cap
-    const oldest = sendCooldowns.keys().next().value;
-    sendCooldowns.delete(oldest);
+    const dropCount = Math.max(1, Math.floor(sendCooldowns.size / 10));
+    const it = sendCooldowns.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      sendCooldowns.delete(k);
+    }
   }
 }
 

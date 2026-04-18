@@ -171,9 +171,17 @@ function rateLimit(req, res, next) {
     requests.splice(0, requests.length - MAX_REQUESTS_PER_IP);
   }
   rateLimitStore.set(ip, requests);
+  // Under a distributed attack from many unique IPs, evicting only one
+  // entry at a time can't keep up. When we cross 10k, drop the oldest 10%
+  // (Map iteration is insertion order) so the store reclaims meaningfully.
   if (rateLimitStore.size >= 10000) {
-    const oldest = rateLimitStore.keys().next().value;
-    rateLimitStore.delete(oldest);
+    const dropCount = Math.max(1, Math.floor(rateLimitStore.size / 10));
+    const it = rateLimitStore.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      rateLimitStore.delete(k);
+    }
   }
   next();
 }
