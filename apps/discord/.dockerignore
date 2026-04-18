@@ -1,16 +1,21 @@
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
+node_modules
 .env
 .env.*
-data/
-*.db
-.venv/
-tests/
-docs/
-.git/
-.gitignore
-.dockerignore
-requirements-dev.txt
+data
+coverage
+.git
+.DS_Store
+.claude
+.github
+tests
+scripts
+railway.json
+scripts/loadtest-standalone.js
+jest.config.js
 README.md
+# Defense-in-depth: never ship a local private key or npm auth token.
+*.pem
+*.key
+.npmrc
+# A local dev SQLite file should never make it into the image.
+*.db

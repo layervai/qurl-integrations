@@ -45,5 +45,7 @@ jobs:
       # monorepo today. Add a second shim (different working_directory)
       # if more Python apps land.
       working_directory: apps/discord
+    # See dependency-age-check-actions.yml for rationale on secrets: inherit.
+    secrets: inherit
     permissions:
       contents: read

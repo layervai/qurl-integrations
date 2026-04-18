@@ -1,0 +1,42 @@
+{
+  "name": "qurl-discord-bot",
+  "version": "2.1.0",
+  "description": "QURL Discord bot — /qurl send for secure one-time resource sharing, GitHub OAuth linking, auto Contributor role",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "register": "node src/register-commands.js",
+    "lint": "eslint src tests --max-warnings 0",
+    "test": "jest --coverage"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "qurl",
+    "layerv",
+    "github",
+    "oauth"
+  ],
+  "author": "LayerV",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "better-sqlite3": "~12.8.0",
+    "discord.js": "~14.25.1",
+    "express": "~5.2.1",
+    "helmet": "~7.2.0",
+    "node-cron": "~4.2.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "jest": "~30.3.0",
+    "supertest": "^7.2.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "undici": "^6.24.1",
+    "lodash": "^4.17.21"
+  }
+}

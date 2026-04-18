@@ -16,7 +16,7 @@
       "bump-patch-for-minor-pre-major": true
     },
     "apps/discord": {
-      "release-type": "python",
+      "release-type": "node",
       "component": "discord",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,

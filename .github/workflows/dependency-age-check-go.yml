@@ -44,5 +44,7 @@ jobs:
     uses: layervai/ops-routines-workflows/.github/workflows/age-check-go.yml@3f4ce1fdeb5d2f6f66b0b2c7d0ba42efce7212bc # v0.2.0
     with:
       min_age_days: 7
+    # See dependency-age-check-actions.yml for rationale on secrets: inherit.
+    secrets: inherit
     permissions:
       contents: read

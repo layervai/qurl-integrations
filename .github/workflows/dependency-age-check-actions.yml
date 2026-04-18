@@ -42,5 +42,11 @@ jobs:
     uses: layervai/ops-routines-workflows/.github/workflows/age-check-actions.yml@3f4ce1fdeb5d2f6f66b0b2c7d0ba42efce7212bc # v0.2.0
     with:
       min_age_days: 7
+    # Forwards OPS_ROUTINES_APP_ID / OPS_ROUTINES_APP_PRIVATE_KEY (org-
+    # level secrets) to the reusable workflow, which declares them
+    # required. Without this line GH rejects the reusable call at
+    # parse time and no jobs schedule -- the check then reports
+    # "workflow file issue" against branch protection.
+    secrets: inherit
     permissions:
       contents: read
