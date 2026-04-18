@@ -72,6 +72,13 @@ function decrypt(value) {
   const parts = value.slice(PREFIX.length).split(':');
   if (parts.length !== 3) throw new Error('Malformed encrypted value');
   const [ivHex, tagHex, ctHex] = parts;
+  // AES-256-GCM: iv MUST be 12 bytes (24 hex) and auth tag MUST be 16 bytes
+  // (32 hex). Validate before Buffer.from — that call silently discards
+  // non-hex chars, which would let tampered input through the setAuthTag
+  // API with a wrong-length buffer and surface a confusing error elsewhere.
+  if (!/^[0-9a-f]{24}$/.test(ivHex)) throw new Error('Malformed encrypted value: bad iv');
+  if (!/^[0-9a-f]{32}$/.test(tagHex)) throw new Error('Malformed encrypted value: bad tag');
+  if (!/^[0-9a-f]*$/.test(ctHex)) throw new Error('Malformed encrypted value: bad ciphertext');
   const decipher = crypto.createDecipheriv(ALGO, key, Buffer.from(ivHex, 'hex'));
   decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
   const pt = Buffer.concat([decipher.update(Buffer.from(ctHex, 'hex')), decipher.final()]);

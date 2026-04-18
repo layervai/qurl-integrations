@@ -12,6 +12,14 @@ const router = express.Router();
 async function checkHistoricalContributions(discordId, githubUsername, accessToken) {
   const contributions = [];
 
+  // GitHub usernames are alphanumerics + hyphen (1-39 chars). Validate here
+  // so a crafted value can't smuggle search qualifiers like ` org:evil-org`
+  // into the search query even after encodeURIComponent.
+  if (!/^[a-zA-Z0-9-]{1,39}$/.test(githubUsername)) {
+    logger.warn('checkHistoricalContributions refused malformed username', { githubUsername });
+    return { count: 0, newBadges: [], error: 'invalid username' };
+  }
+
   try {
     // Search for merged PRs by this user in allowed orgs. GitHub's search API
     // returns at most 100 per page and caps `total_count` at 1000; paginate up
@@ -38,7 +46,9 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
           logger.warn(`Failed to search PRs for ${githubUsername} in ${org} page ${page}`, {
             status: response.status, remaining, retryAfter,
           });
-          if (response.status === 403 || response.status === 429 || remaining === 0) {
+          // GitHub returns 422 (not just 403/429) for some rate-limit
+          // scenarios on the search endpoint — treat it the same way.
+          if (response.status === 403 || response.status === 422 || response.status === 429 || remaining === 0) {
             return {
               count: contributions.length,
               newBadges: [],
@@ -333,12 +343,22 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     // Send initial DM
     let dmMessage = `✅ **GitHub account linked!**\n\nYou're now linked to GitHub **@${userData.login}**.`;
 
-    // Wait for historical check to complete for better UX
+    // Wait for historical check to complete — but cap the wait at 10s so a
+    // slow GitHub (5 pages × 5 orgs × 30s = 12+ min worst case) can't hold
+    // this HTTP response open and exhaust server connections. The backfill
+    // keeps running in the background after the response returns.
     let historical = { count: 0, newBadges: [] };
     try {
-      historical = await historicalCheck;
+      historical = await Promise.race([
+        historicalCheck,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('historical-check-timeout')), 10_000).unref()
+        ),
+      ]);
     } catch (err) {
-      logger.error('Historical contributions check failed', { error: err.message, discordId: pending.discord_id });
+      logger.error('Historical contributions check failed or timed out', {
+        error: err.message, discordId: pending.discord_id,
+      });
     }
 
     if (historical.count > 0) {

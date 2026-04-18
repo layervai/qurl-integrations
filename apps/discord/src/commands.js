@@ -903,13 +903,20 @@ async function handleSend(interaction, apiKey) {
         // The `await` in the rejection branches is fine because we've already
         // committed to rejecting at that point.
         // =====================================================================
+        // Check-and-claim are now adjacent: if the flag is unset, grab it
+        // FIRST (before any cap check), then verify remaining capacity and
+        // release on rejection. That way a future refactor that adds an
+        // `await` in the remaining check can't reopen a racy window.
         if (addingRecipients) {
           await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
-        // Enforce cumulative cap INSIDE the mutex so two clicks can't both pass
+        addingRecipients = true;
+        // ===== END CRITICAL SECTION (flag is claimed) =====
+
         const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
         if (remaining <= 0) {
+          addingRecipients = false;
           await btnInteraction.reply({
             content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
             ephemeral: true,
@@ -917,17 +924,11 @@ async function handleSend(interaction, apiKey) {
           return;
         }
         if (isOnCooldown(interaction.user.id)) {
+          addingRecipients = false;
           await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
-        // Acquire: flip the flag AND set cooldown synchronously before any
-        // `await`. A racing click cannot observe the unlocked flag. The
-        // outer try/finally guarantees the flag is released on every error
-        // path — a sync throw before the first await would otherwise leave
-        // the button permanently locked.
-        addingRecipients = true;
         setCooldown(interaction.user.id);
-        // ===== END CRITICAL SECTION =====
 
         try {
           // Show user select menu — collect the response on the REPLY message

@@ -37,6 +37,14 @@ function verifySignature(req) {
     logger.warn('Webhook request missing signature');
     return false;
   }
+  // Validate the header is exactly `sha256=<64 lowercase hex>` before it
+  // reaches timingSafeEqual. An attacker can't pick the digest, but a
+  // malformed header (wrong length, non-hex) should be rejected early
+  // rather than producing unequal-length buffers inside the try/catch.
+  if (typeof signature !== 'string' || !/^sha256=[0-9a-f]{64}$/.test(signature)) {
+    logger.warn('Webhook signature has unexpected format', { sample: signature.slice(0, 16) });
+    return false;
+  }
   // Defensive: if middleware ordering ever changes or a request arrives with
   // a non-JSON content type, rawBody may be absent. hmac.update(undefined)
   // throws TypeError, which is outside the try/catch below. Logged at error

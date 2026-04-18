@@ -18,7 +18,8 @@ if (missing.length > 0) {
 }
 
 // Production-only required secrets. In dev these are optional so localhost
-// workflows stay convenient.
+// workflows stay convenient. Keep this list in sync with the production
+// comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
   const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
   const prodMissing = prodRequired.filter(k => !process.env[k]);
