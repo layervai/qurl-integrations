@@ -1,7 +1,6 @@
 # Dependency Age Check (pip / Python)
 # Thin shim calling shared reusable workflow.
-# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-pip.yml
-# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-pip.sh
+# Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-pip.yml
 name: Dependency Age Check (pip)
 
 # Fires on every PR (no path filter) so the status check always reports.

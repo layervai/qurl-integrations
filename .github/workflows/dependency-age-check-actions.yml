@@ -1,7 +1,6 @@
 # Dependency Age Check (GitHub Actions pins)
 # Thin shim calling shared reusable workflow.
-# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-actions.yml
-# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-actions.sh
+# Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-actions.yml
 name: Dependency Age Check (Actions)
 
 # Fires on every PR (no path filter) so the status check always reports.

@@ -1,7 +1,6 @@
 # Dependency Age Check (Go modules)
 # Thin shim calling shared reusable workflow.
-# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-go.yml
-# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-go.sh
+# Source: https://github.com/layervai/ops-routines-workflows/blob/main/.github/workflows/age-check-go.yml
 name: Dependency Age Check (Go)
 
 # Fires on every PR (no path filter) so the status check always reports.
