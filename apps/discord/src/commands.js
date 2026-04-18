@@ -652,15 +652,20 @@ async function handleSend(interaction, apiKey) {
       // Download once, cache the buffer for re-uploads.
       const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey);
       connectorResourceId = firstUpload.resource_id;
-      const fileBuffer = firstUpload.fileBuffer;
+      // Use a holder so we can null out the reference after all re-uploads
+      // finish — the subsequent link-monitor closure would otherwise pin up
+      // to 25MB in memory for up to an hour per concurrent send.
+      const bufHolder = { buf: firstUpload.fileBuffer };
 
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => reUploadBuffer(fileBuffer, filename, attachment.contentType, apiKey),
+        reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey),
         expiresAt,
         recipientCount: recipients.length,
         apiKey,
       });
+      // Release the buffer; nothing past this point needs it.
+      bufHolder.buf = null;
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });

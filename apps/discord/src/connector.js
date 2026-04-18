@@ -4,6 +4,32 @@ const logger = require('./logger');
 const { sanitizeFilename } = require('./utils/sanitize');
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const MAX_CDN_REDIRECTS = 3;
+
+// Fetch from a Discord CDN URL with manual redirect handling. `redirect:
+// 'error'` would refuse legitimate Discord redirects (cdn.discordapp.com
+// sometimes 302s to media.discordapp.net). This walks the redirect chain
+// ourselves, re-validating each Location header against ALLOWED_CDN_HOSTS
+// (via isAllowedSourceUrl) so an attacker-controlled redirect target is
+// still rejected.
+async function cdnFetchFollowSafe(sourceUrl) {
+  let url = sourceUrl;
+  for (let hop = 0; hop <= MAX_CDN_REDIRECTS; hop++) {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(30000), redirect: 'manual' });
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers.get('location');
+      if (!loc) throw new Error(`CDN redirect without Location header (status ${resp.status})`);
+      const next = new URL(loc, url).toString();
+      if (!isAllowedSourceUrl(next)) {
+        throw new Error('CDN redirect points outside the allowed host list');
+      }
+      url = next;
+      continue;
+    }
+    return resp;
+  }
+  throw new Error('Too many CDN redirects');
+}
 
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
@@ -107,7 +133,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
-  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
+  const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }
@@ -203,7 +229,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
 
-  const downloadResponse = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000), redirect: 'error' });
+  const downloadResponse = await cdnFetchFollowSafe(sourceUrl);
   if (!downloadResponse.ok) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }

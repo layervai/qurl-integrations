@@ -4,6 +4,7 @@ const { client, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer } = require('./server');
 const db = require('./database');
+const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives.
@@ -142,6 +143,10 @@ async function start() {
 
   // Start web server
   httpServer = startServer();
+
+  // Background retry-revoke for any OAuth tokens whose initial revoke
+  // failed. Runs hourly on top of the 7-day purge in database.js.
+  startOrphanTokenSweeper();
 
   // Login to Discord
   await client.login(config.DISCORD_TOKEN);

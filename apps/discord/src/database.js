@@ -742,6 +742,17 @@ const dbModule = {
     return row ? row.c : 0;
   },
 
+  // Return up to `limit` orphaned rows (oldest first) with decrypted tokens
+  // so a background job can retry revocation. Encryption is transparent here.
+  listOrphanedTokens(limit = 50) {
+    const stmt = db.prepare('SELECT id, access_token FROM orphaned_oauth_tokens ORDER BY recorded_at ASC LIMIT ?');
+    return stmt.all(limit).map(r => ({ id: r.id, accessToken: decrypt(r.access_token) }));
+  },
+
+  deleteOrphanedToken(id) {
+    db.prepare('DELETE FROM orphaned_oauth_tokens WHERE id = ?').run(id);
+  },
+
   removeGuildApiKey(guildId) {
     const stmt = db.prepare('DELETE FROM guild_configs WHERE guild_id = ?');
     return stmt.run(guildId).changes > 0;

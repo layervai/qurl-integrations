@@ -242,9 +242,11 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       title: 'Authorization Denied',
       icon: '🚫',
       heading: 'Authorization Denied',
-      // Cap to 200 chars: escapeHtml already prevents XSS, but an attacker
-      // could craft a very long error_description to push phishing text.
-      message: (error_description || 'You denied the authorization request.').slice(0, 200),
+      // Don't reflect error_description (user-controllable from GitHub's
+      // redirect URL). renderPage's escapeHtml prevents XSS today, but a
+      // static message means we don't depend on the template layer's escape
+      // to stay safe if a future refactor changes it.
+      message: 'You denied the authorization request, or GitHub returned an error.',
       subtext: 'You can try again anytime with /link in Discord.',
       type: 'error',
     }));
@@ -300,7 +302,8 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         title: 'GitHub Error',
         icon: '❌',
         heading: 'GitHub Error',
-        message: (tokenData.error_description || 'An error occurred with GitHub authentication.').slice(0, 200),
+        // Generic message; real detail already logged above.
+        message: 'An error occurred with GitHub authentication. Please try again.',
         subtext: 'Please try again with /link in Discord.',
         type: 'error',
       }));

@@ -122,11 +122,18 @@ async function runRound(roundNum) {
 async function main() {
   // Preflight checks
   if (!config.QURL_API_KEY) { console.error('FATAL: QURL_API_KEY not set'); process.exit(1); }
-  if (!config.QURL_ENDPOINT || config.QURL_ENDPOINT === 'https://api.layerv.ai') {
-    console.warn('WARNING: Using default QURL_ENDPOINT. Set QURL_ENDPOINT for sandbox.');
-  }
-  if (!config.CONNECTOR_URL || config.CONNECTOR_URL === 'https://get.qurl.link:9808') {
-    console.warn('WARNING: Using default CONNECTOR_URL. Set CONNECTOR_URL for sandbox.');
+  // Hard-block loadtest runs against production URLs unless the caller
+  // explicitly opts in. Accidentally firing 12,000 mint operations at prod
+  // from a dev laptop is not a great outcome.
+  const allowProd = process.argv.includes('--allow-production') || process.env.LOADTEST_ALLOW_PRODUCTION === '1';
+  const hittingProdQurl = config.QURL_ENDPOINT === 'https://api.layerv.ai';
+  const hittingProdConnector = config.CONNECTOR_URL === 'https://get.qurl.link:9808';
+  if ((hittingProdQurl || hittingProdConnector) && !allowProd) {
+    console.error('FATAL: loadtest is pointed at production endpoints.');
+    console.error('  QURL_ENDPOINT  =', config.QURL_ENDPOINT);
+    console.error('  CONNECTOR_URL  =', config.CONNECTOR_URL);
+    console.error('Set QURL_ENDPOINT/CONNECTOR_URL to a sandbox, or pass --allow-production.');
+    process.exit(1);
   }
 
   // Quick smoke test

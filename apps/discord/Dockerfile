@@ -5,6 +5,11 @@ RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 COPY package*.json ./
+# NOTE: --ignore-scripts would block supply-chain attacks via postinstall
+# hooks, but better-sqlite3 needs its build script to fall back to
+# compile-from-source when no prebuilt binary matches this arch. Kept
+# scripts enabled for now; the build stage isolates them from the
+# production image (see the FROM below).
 RUN npm ci --omit=dev
 
 # Production stage — minimal image without build tools

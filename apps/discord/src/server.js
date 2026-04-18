@@ -33,6 +33,9 @@ app.use(helmet({
 // exists at request time and refuses the request with an error log if the
 // middleware chain drops it. See that file's guard comment for details.
 app.use('/webhook', express.json({
+  // GitHub push-event payloads can exceed Express's 100KB default. Cap at
+  // 1MB so we accept legitimate payloads but still bound request memory.
+  limit: '1mb',
   verify: (req, _res, buf) => {
     req.rawBody = buf;
   }

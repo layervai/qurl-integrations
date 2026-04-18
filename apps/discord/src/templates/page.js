@@ -132,4 +132,4 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
   `;
 }
 
-module.exports = { renderPage };
+module.exports = { renderPage, escapeHtml };
