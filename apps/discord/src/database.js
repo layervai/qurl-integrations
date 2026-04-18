@@ -149,19 +149,23 @@ db.exec(`
 // idempotent ALTER TABLE ADD COLUMN calls that let handleAddRecipients
 // re-download the file via Discord CDN on follow-up sends.
 //
-// NOTE: the column name is template-interpolated below. This is safe ONLY
-// because the names come from a hardcoded ALLOW_COLUMNS list and are
-// validated against it. Never expand this list with user-supplied input.
-const ALLOW_COLUMNS = ['attachment_content_type', 'attachment_url'];
-for (const col of ALLOW_COLUMNS) {
-  if (!/^[a-z_][a-z0-9_]*$/.test(col)) {
-    throw new Error(`Refusing ALTER TABLE with unexpected column name: ${col}`);
-  }
+// SAFE_ALTERS is a static map from column name → complete ALTER TABLE
+// statement. No template interpolation, no regex validation — a future
+// contributor who needs to add a column writes the full statement literally,
+// so SQL-injection risk from this block is structurally zero.
+const SAFE_ALTERS = {
+  attachment_content_type: 'ALTER TABLE qurl_send_configs ADD COLUMN attachment_content_type TEXT',
+  attachment_url: 'ALTER TABLE qurl_send_configs ADD COLUMN attachment_url TEXT',
+};
+for (const [col, sql] of Object.entries(SAFE_ALTERS)) {
   try {
-    db.exec(`ALTER TABLE qurl_send_configs ADD COLUMN ${col} TEXT`);
+    db.exec(sql);
   } catch (err) {
     // "duplicate column name" is expected on second run; everything else bubbles up.
-    if (!String(err.message).includes('duplicate column')) throw err;
+    if (!String(err.message).includes('duplicate column')) {
+      logger.error('SAFE_ALTERS exec failed', { column: col, error: err.message });
+      throw err;
+    }
   }
 }
 

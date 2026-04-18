@@ -11,8 +11,11 @@ async function searchPlaces(query) {
 
   // Cap user-supplied input before it reaches Google's URL. Google's own
   // limit is generous but a defensive 500-char guard bounds our request
-  // size and log line length regardless.
-  const safeQuery = String(query || '').slice(0, 500);
+  // size and log line length regardless. Also strip ASCII control chars
+  // so header-injection-style payloads can't smuggle newlines or NULs
+  // into the outgoing request URL.
+  // eslint-disable-next-line no-control-regex
+  const safeQuery = String(query || '').replace(/[\x00-\x1f\x7f]/g, '').slice(0, 500);
   const params = new URLSearchParams({
     input: safeQuery,
     key: config.GOOGLE_MAPS_API_KEY,

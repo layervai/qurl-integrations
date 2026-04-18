@@ -12,7 +12,7 @@
   "extends": ["eslint:recommended"],
   "rules": {
     "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
-    "no-console": "off",
+    "no-console": ["error", { "allow": ["warn", "error"] }],
     "no-empty": ["error", { "allowEmptyCatch": true }],
     "no-prototype-builtins": "error",
     "no-case-declarations": "error",
@@ -24,6 +24,12 @@
       "files": ["tests/**/*.js"],
       "rules": {
         "no-unused-vars": "off"
+      }
+    },
+    {
+      "files": ["src/logger.js"],
+      "rules": {
+        "no-console": "off"
       }
     }
   ]
