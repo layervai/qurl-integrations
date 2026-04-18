@@ -4,6 +4,9 @@ name: Dependency Age Check (pip)
 
 on:
   pull_request:
+    # Scoped to apps/discord — the only Python app in this Go monorepo
+    # today. Add a second pip shim (or broaden these paths + drop
+    # working_directory) if more Python apps land.
     paths:
       - "apps/discord/requirements*.txt"
       - "apps/discord/requirements/*.txt"
