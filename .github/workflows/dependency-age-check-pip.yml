@@ -1,17 +1,15 @@
 # Dependency Age Check (pip / Python)
 # Thin shim calling shared reusable workflow.
+# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-pip.yml
+# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-pip.sh
 name: Dependency Age Check (pip)
 
+# Fires on every PR (no path filter) so the status check always reports.
+# This lets branch protection require it without the path-filtered-
+# required-check footgun. The reusable's script exits 0 quickly when
+# no requirements/poetry.lock/pyproject.toml changes are in the diff.
 on:
   pull_request:
-    # Scoped to apps/discord — the only Python app in this Go monorepo
-    # today. Add a second pip shim (or broaden these paths + drop
-    # working_directory) if more Python apps land.
-    paths:
-      - "apps/discord/requirements*.txt"
-      - "apps/discord/requirements/*.txt"
-      - "apps/discord/poetry.lock"
-      - "apps/discord/pyproject.toml"
   workflow_dispatch:
 
 # Cancel superseded runs on the same PR branch — pypi.org calls are
@@ -38,6 +36,10 @@ jobs:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'age-check-bypass') }}
     uses: layervai/ops-routines/.github/workflows/age-check-pip.yml@2b9cb3575a74394cf56092d33ee4fdbab30afc9e # v0.1.4
     with:
+      min_age_days: 7
+      # Scoped to apps/discord — the only Python app in this Go
+      # monorepo today. Add a second shim (different working_directory)
+      # if more Python apps land.
       working_directory: apps/discord
     permissions:
       contents: read

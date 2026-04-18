@@ -1,11 +1,17 @@
 # Dependency Age Check (Go modules)
 # Thin shim calling shared reusable workflow.
+# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-go.yml
+# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-go.sh
 name: Dependency Age Check (Go)
 
+# Fires on every PR (no path filter) so the status check always reports.
+# This lets branch protection require it without the path-filtered-
+# required-check footgun (a required check that never fires blocks
+# merge with "Expected — Waiting for status to be reported").
+# The reusable's script exits 0 quickly when no go.sum changes are
+# in the diff — see "No go.sum changes detected" in age-check-go.sh.
 on:
   pull_request:
-    paths:
-      - "**/go.sum"
   workflow_dispatch:
 
 # Cancel superseded runs on the same PR branch — the reusable workflow
@@ -32,5 +38,7 @@ jobs:
     # shouldn't be bypassable via PR labels.
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'age-check-bypass') }}
     uses: layervai/ops-routines/.github/workflows/age-check-go.yml@2b9cb3575a74394cf56092d33ee4fdbab30afc9e # v0.1.4
+    with:
+      min_age_days: 7
     permissions:
       contents: read

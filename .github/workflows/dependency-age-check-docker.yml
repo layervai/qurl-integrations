@@ -1,22 +1,15 @@
 # Dependency Age Check (Docker)
 # Thin shim calling shared reusable workflow.
+# Source: https://github.com/layervai/ops-routines/blob/main/.github/workflows/age-check-docker.yml
+# Implementation: https://github.com/layervai/ops-routines/blob/main/lib/age-check-docker.sh
 name: Dependency Age Check (Docker)
 
+# Fires on every PR (no path filter) so the status check always reports.
+# This lets branch protection require it without the path-filtered-
+# required-check footgun. The reusable's script exits 0 quickly when
+# no Dockerfile/compose changes are in the diff.
 on:
   pull_request:
-    # Cover anywhere a Docker image reference can land:
-    # - Dockerfile / Dockerfile.<variant> at any depth (FROM lines)
-    # - The docker/ directory (Dockerfiles + docker-compose.yaml)
-    # - Any docker-compose/compose YAML anywhere in the tree — `image:`
-    #   fields in compose files are a common base-image drift vector
-    #   that the Dockerfile-only filter would miss.
-    paths:
-      - "**/Dockerfile*"
-      - "docker/**"
-      - "**/docker-compose*.yml"
-      - "**/docker-compose*.yaml"
-      - "**/compose*.yml"
-      - "**/compose*.yaml"
   workflow_dispatch:
 
 # Cancel superseded runs on the same PR branch.
@@ -41,5 +34,12 @@ jobs:
     # shouldn't be bypassable via PR labels.
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'age-check-bypass') }}
     uses: layervai/ops-routines/.github/workflows/age-check-docker.yml@2b9cb3575a74394cf56092d33ee4fdbab30afc9e # v0.1.4
+    with:
+      # Container images get 14 days (vs 7 for source-package
+      # ecosystems) — base-image vendors typically take longer to
+      # surface and patch supply-chain compromise. Matches the
+      # reusable's default; set explicitly here so the policy is
+      # visible per-repo.
+      min_age_days: 14
     permissions:
       contents: read
