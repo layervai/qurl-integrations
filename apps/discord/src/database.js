@@ -122,6 +122,15 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
+  -- Tokens that failed the OAuth revoke step; background sweep attempts to
+  -- retire these. Store the token + timestamp so oncall can alert on a
+  -- rising count (= GitHub revoke API is unhappy or we have a real leak).
+  CREATE TABLE IF NOT EXISTS orphaned_oauth_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    access_token TEXT NOT NULL,
+    recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS guild_configs (
     guild_id TEXT PRIMARY KEY,
     qurl_api_key TEXT NOT NULL,
@@ -689,6 +698,16 @@ const dbModule = {
         updated_at = CURRENT_TIMESTAMP
     `);
     stmt.run(guildId, encrypt(apiKey), configuredBy);
+  },
+
+  recordOrphanedToken(accessToken) {
+    const stmt = db.prepare('INSERT INTO orphaned_oauth_tokens (access_token) VALUES (?)');
+    stmt.run(encrypt(accessToken));
+  },
+
+  countOrphanedTokens() {
+    const row = db.prepare('SELECT COUNT(*) AS c FROM orphaned_oauth_tokens').get();
+    return row ? row.c : 0;
   },
 
   removeGuildApiKey(guildId) {

@@ -186,6 +186,12 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     stop() {
       stopped = true;
       clearInterval(timer);
+      // Release references on the closures; over many sends these would
+      // otherwise accumulate. trackedQurlIds may already be null (see
+      // addRecipients — null forces a re-init next tick).
+      linkStatus.clear();
+      if (trackedQurlIds) trackedQurlIds.clear();
+      trackedQurlIds = null;
     },
     updateBaseMsg(msg) {
       currentBaseMsg = msg;
@@ -537,8 +543,18 @@ async function handleSend(interaction) {
         filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
         time: 120000,
       });
-    } catch {
-      return interaction.editReply({ content: 'Location input timed out. Send cancelled.', components: [] });
+    } catch (err) {
+      // Distinguish timeout from other errors (permissions, API failures);
+      // non-timeout errors land in logs with their real detail.
+      const isTimeout = err?.code === 'InteractionCollectorError' || /time/.test(err?.message || '');
+      if (!isTimeout) {
+        logger.error('Modal submit failed unexpectedly', { sendId, error: err?.message });
+      }
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({
+        content: isTimeout ? 'Location input timed out. Send cancelled.' : 'Could not collect location input. Send cancelled.',
+        components: [],
+      });
     }
 
     const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
@@ -894,56 +910,61 @@ async function handleSend(interaction) {
           return;
         }
         // Acquire: flip the flag AND set cooldown synchronously before any
-        // `await`. A racing click cannot observe the unlocked flag.
+        // `await`. A racing click cannot observe the unlocked flag. The
+        // outer try/finally guarantees the flag is released on every error
+        // path — a sync throw before the first await would otherwise leave
+        // the button permanently locked.
         addingRecipients = true;
         setCooldown(interaction.user.id);
         // ===== END CRITICAL SECTION =====
 
-        // Show user select menu — collect the response on the REPLY message
-        const maxSelect = Math.min(10, remaining);
-        const userSelectRow = new ActionRowBuilder().addComponents(
-          new UserSelectMenuBuilder()
-            .setCustomId(`qurl_addusers_${sendId}`)
-            .setPlaceholder('Select users to send to')
-            .setMinValues(1)
-            .setMaxValues(maxSelect)
-        );
-        const selectReply = await btnInteraction.reply({
-          content: 'Select additional recipients:',
-          components: [userSelectRow],
-          ephemeral: true,
-          fetchReply: true,
-        });
-
-        // Await the user-select interaction on the REPLY message (not the parent)
         try {
-          const selectInteraction = await selectReply.awaitMessageComponent({
-            componentType: ComponentType.UserSelect,
-            time: 60000,
+          // Show user select menu — collect the response on the REPLY message
+          const maxSelect = Math.min(10, remaining);
+          const userSelectRow = new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder()
+              .setCustomId(`qurl_addusers_${sendId}`)
+              .setPlaceholder('Select users to send to')
+              .setMinValues(1)
+              .setMaxValues(maxSelect)
+          );
+          const selectReply = await btnInteraction.reply({
+            content: 'Select additional recipients:',
+            components: [userSelectRow],
+            ephemeral: true,
+            fetchReply: true,
           });
 
-          await selectInteraction.deferUpdate();
-          const addResult = await handleAddRecipients(
-            sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
-          );
+          try {
+            const selectInteraction = await selectReply.awaitMessageComponent({
+              componentType: ComponentType.UserSelect,
+              time: 60000,
+            });
 
-          if (addResult.delivered > 0) {
-            addRecipientsCount += addResult.delivered;
-            // Tell the monitor to track the new links (including new resource IDs for location sends)
-            monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
-            const totalSent = delivered + addRecipientsCount;
-            confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
-            if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
-            monitor.updateBaseMsg(confirmMsg);
-            await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
+            await selectInteraction.deferUpdate();
+            const addResult = await handleAddRecipients(
+              sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
+            );
+
+            if (addResult.delivered > 0) {
+              addRecipientsCount += addResult.delivered;
+              // Tell the monitor to track the new links (including new resource IDs for location sends)
+              monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
+              const totalSent = delivered + addRecipientsCount;
+              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+              if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
+              monitor.updateBaseMsg(confirmMsg);
+              await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
+            }
+
+            await selectInteraction.editReply({ content: addResult.msg, components: [] });
+          } catch (err) {
+            const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
+            // Generic user-facing message; real details only land in logs.
+            const msg = isTimeout ? 'Selection timed out.' : 'Failed to add recipients. Please try again.';
+            logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
+            await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           }
-
-          await selectInteraction.editReply({ content: addResult.msg, components: [] });
-        } catch (err) {
-          const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
-          const msg = isTimeout ? 'Selection timed out.' : `Failed to add recipients: ${err.message || 'unknown error'}`;
-          logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
-          await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
         } finally {
           addingRecipients = false;
         }
@@ -1041,11 +1062,14 @@ async function handleAddRecipients(sendId, _unusedSenderDiscordId, usersCollecti
         });
       } catch (err) {
         // Discord CDN URLs are signed and expire (~24h). If re-download fails,
-        // surface a clear message rather than a generic "try again".
-        const msg = /403|expired|network|CDN/i.test(err.message || '')
+        // surface a clear user-facing message; log the real error server-side
+        // so err.message (which may echo upstream response detail) never
+        // reaches a Discord reply.
+        const isExpired = /403|expired|network|CDN/i.test(err.message || '');
+        const msg = isExpired
           ? 'Original attachment URL has expired. Please create a new send.'
-          : `Failed to prepare links: ${err.message || 'unknown error'}`;
-        logger.error('addRecipients file re-upload failed', { sendId, error: err.message });
+          : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
+        logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
         return { msg, newResourceIds: [], delivered: 0, failed: 0 };
       }
 
@@ -1627,6 +1651,13 @@ const commands = [
         if (!/^\d{17,20}$/.test(discordId)) {
           failed++;
           errors.push(`Invalid Discord ID: "${discordId}"`);
+          continue;
+        }
+        // GitHub username format: letters/digits/hyphens, can't start/end with
+        // hyphen, no consecutive hyphens, 1-39 chars.
+        if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/.test(github)) {
+          failed++;
+          errors.push(`Invalid GitHub username: "${github}"`);
           continue;
         }
 

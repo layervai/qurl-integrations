@@ -398,8 +398,19 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
       }
       if (lastErr) {
-        // Page oncall: the user's GitHub token is orphaned-alive after 2 attempts.
-        logger.error('Failed to revoke GitHub OAuth token after retries', { error: lastErr.message });
+        // Record in the DB for a future background sweep + alert on count.
+        // The user's GitHub token (read:user scope) is orphaned-alive until
+        // cleanup runs, so a rising rate should page oncall.
+        logger.error('Failed to revoke GitHub OAuth token after retries', {
+          error: lastErr.message,
+          orphanedTokenPrefix: accessToken.slice(0, 8),
+        });
+        try {
+          db.recordOrphanedToken(accessToken);
+        } catch (dbErr) {
+          // Don't fail the response; the error is logged above.
+          logger.error('Failed to record orphaned token for later sweep', { error: dbErr.message });
+        }
       }
     }
   }

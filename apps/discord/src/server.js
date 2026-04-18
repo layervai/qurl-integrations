@@ -24,9 +24,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Parse JSON for webhooks with raw body for signature verification
+// Parse JSON for webhooks with raw body for signature verification. MUST be
+// registered BEFORE the general app.use(express.json()) below so /webhook
+// requests hit this parser first and get req.rawBody populated. Do not
+// reorder without also updating routes/webhooks.js verifySignature().
 app.use('/webhook', express.json({
-  verify: (req, res, buf) => {
+  verify: (req, _res, buf) => {
     req.rawBody = buf;
   }
 }));

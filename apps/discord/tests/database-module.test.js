@@ -368,4 +368,13 @@ describe('database module', () => {
       expect(db.BADGE_INFO.first_pr.emoji).toBeDefined();
     });
   });
+
+  describe('orphaned OAuth tokens', () => {
+    it('starts empty, records, and counts', () => {
+      expect(db.countOrphanedTokens()).toBe(0);
+      db.recordOrphanedToken('gho_fakefake1');
+      db.recordOrphanedToken('gho_fakefake2');
+      expect(db.countOrphanedTokens()).toBe(2);
+    });
+  });
 });
