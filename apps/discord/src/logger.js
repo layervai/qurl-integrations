@@ -16,15 +16,17 @@ function formatTimestamp() {
 // Redact common secret-ish field names anywhere in a meta object before
 // stringifying. Defense-in-depth against a caller accidentally logging
 // `{ apiKey, token, password, ... }`.
-const REDACT_KEYS = new Set([
-  'apikey', 'api_key', 'apiKey',
-  'token', 'accesstoken', 'access_token', 'accessToken',
-  'authorization', 'auth',
-  'password', 'secret',
-  'qurl_api_key', 'qurlApiKey',
-  'githubClientSecret', 'github_client_secret',
-  'webhookSecret', 'webhook_secret',
-]);
+// Substrings that should never appear unredacted in logs. Matched case-
+// insensitively against the key name via includes(), so a future field
+// named refreshToken / bearerToken / apiSecret / myPassword is auto-caught.
+const REDACT_SUBSTRINGS = [
+  'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
+];
+
+function shouldRedact(key) {
+  const k = String(key).toLowerCase();
+  return REDACT_SUBSTRINGS.some(s => k.includes(s));
+}
 
 function redact(value, depth = 0) {
   if (depth > 5 || value == null) return value;
@@ -32,7 +34,7 @@ function redact(value, depth = 0) {
   if (typeof value !== 'object') return value;
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (REDACT_KEYS.has(k) || REDACT_KEYS.has(k.toLowerCase())) {
+    if (shouldRedact(k)) {
       out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
     } else {
       out[k] = redact(v, depth + 1);

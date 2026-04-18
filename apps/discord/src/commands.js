@@ -1150,7 +1150,21 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  db.recordQURLSendBatch(batchSends);
+  // Same guarantee as handleSend: if the DB write fails, abort BEFORE any
+  // DMs go out so we don't leave live QURL links with no local record.
+  try {
+    db.recordQURLSendBatch(batchSends);
+  } catch (err) {
+    logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
+      sendId, error: err.message, linkCount: batchSends.length,
+    });
+    return {
+      msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
+      newResourceIds: [],
+      delivered: 0,
+      failed: 0,
+    };
+  }
 
   // Send DMs — one message per recipient with all their links
   let delivered = 0;
@@ -1895,8 +1909,11 @@ const commands = [
           return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
         }
         // Use a modal to collect the API key — modal inputs are NOT recorded in Discord audit logs
+        // Nonce the customId so two concurrent /qurl setup flows don't consume each other's submissions.
+        const setupNonce = crypto.randomBytes(8).toString('hex');
+        const setupModalId = `qurl_setup_modal_${setupNonce}`;
         const modal = new ModalBuilder()
-          .setCustomId('qurl_setup_modal')
+          .setCustomId(setupModalId)
           .setTitle('Configure QURL');
         const keyInput = new TextInputBuilder()
           .setCustomId('api_key')
@@ -1910,7 +1927,7 @@ const commands = [
 
         let modalSubmit;
         try {
-          modalSubmit = await interaction.awaitModalSubmit({ filter: (i) => i.customId === 'qurl_setup_modal' && i.user.id === interaction.user.id, time: 120000 });
+          modalSubmit = await interaction.awaitModalSubmit({ filter: (i) => i.customId === setupModalId && i.user.id === interaction.user.id, time: 120000 });
         } catch {
           return; // Modal dismissed or timed out
         }

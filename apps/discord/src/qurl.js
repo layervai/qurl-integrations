@@ -56,7 +56,33 @@ function isPrivateHost(host) {
   }
   // IPv6 common locals
   if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
-  // IPv4 literal
+  // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
+  // prefix (URL parsing already stripped the brackets) and re-check.
+  const mapped = h.match(/^::ffff:([0-9.]+)$/);
+  if (mapped) return isPrivateHost(mapped[1]);
+  // Decimal IPv4 literal (e.g. `2130706433` = 127.0.0.1) — browsers accept,
+  // Node's URL does too. Convert to dotted-quad.
+  if (/^\d+$/.test(h)) {
+    const n = Number(h);
+    if (n >= 0 && n <= 0xFFFFFFFF) {
+      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
+      return isPrivateHost(dotted);
+    }
+    return true; // out-of-range numeric host: reject outright
+  }
+  // Hex IPv4 literal (e.g. `0x7f000001` = 127.0.0.1)
+  if (/^0x[0-9a-f]+$/.test(h)) {
+    const n = Number(h);
+    if (Number.isFinite(n) && n >= 0 && n <= 0xFFFFFFFF) {
+      const dotted = [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
+      return isPrivateHost(dotted);
+    }
+    return true;
+  }
+  // Octal-prefixed IPv4 (e.g. `0177.0.0.1`) — treat any leading-zero component
+  // as suspicious and reject conservatively.
+  if (/^0\d/.test(h) && /^[0-9.]+$/.test(h)) return true;
+  // Standard IPv4 dotted-quad
   const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const [a, b] = v4.slice(1).map(Number);

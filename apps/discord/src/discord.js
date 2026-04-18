@@ -88,40 +88,52 @@ async function ensureRolesAndChannels() {
   }
 }
 
-// Refresh cache - call this to update stale references
+// Refresh cache - call this to update stale references. Concurrent callers
+// (roleDelete + channelDelete + guildMemberAdd firing in quick succession)
+// would otherwise interleave the two fetches and cache an inconsistent
+// roles/channels snapshot. Coalesce into a single in-flight refresh.
+let refreshCacheInFlight = null;
 async function refreshCache() {
-  try {
-    guild = await client.guilds.fetch(config.GUILD_ID);
+  if (refreshCacheInFlight) return refreshCacheInFlight;
+  refreshCacheInFlight = (async () => {
+    try {
+      guild = await client.guilds.fetch(config.GUILD_ID);
 
-    // Auto-create missing roles and channels first
-    await ensureRolesAndChannels();
+      // Auto-create missing roles and channels first
+      await ensureRolesAndChannels();
 
-    const allRoles = await guild.roles.fetch();
-    const allChannels = await guild.channels.fetch();
+      const [allRoles, allChannels] = await Promise.all([
+        guild.roles.fetch(),
+        guild.channels.fetch(),
+      ]);
 
-    // Cache roles
-    roles.contributor = allRoles.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
-    roles.activeContributor = allRoles.find(r => r.name === config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
-    roles.coreContributor = allRoles.find(r => r.name === config.CORE_CONTRIBUTOR_ROLE_NAME);
-    roles.champion = allRoles.find(r => r.name === config.CHAMPION_ROLE_NAME);
+      // Cache roles
+      roles.contributor = allRoles.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
+      roles.activeContributor = allRoles.find(r => r.name === config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
+      roles.coreContributor = allRoles.find(r => r.name === config.CORE_CONTRIBUTOR_ROLE_NAME);
+      roles.champion = allRoles.find(r => r.name === config.CHAMPION_ROLE_NAME);
 
-    // Cache channels
-    channels.general = allChannels.find(c => c.name === config.GENERAL_CHANNEL_NAME);
-    channels.announcements = allChannels.find(c => c.name === config.ANNOUNCEMENTS_CHANNEL_NAME);
-    channels.contribute = allChannels.find(c => c.name === config.CONTRIBUTE_CHANNEL_NAME);
-    channels.githubFeed = allChannels.find(c => c.name === config.GITHUB_FEED_CHANNEL_NAME);
+      // Cache channels
+      channels.general = allChannels.find(c => c.name === config.GENERAL_CHANNEL_NAME);
+      channels.announcements = allChannels.find(c => c.name === config.ANNOUNCEMENTS_CHANNEL_NAME);
+      channels.contribute = allChannels.find(c => c.name === config.CONTRIBUTE_CHANNEL_NAME);
+      channels.githubFeed = allChannels.find(c => c.name === config.GITHUB_FEED_CHANNEL_NAME);
 
-    // Log what was found
-    const foundRoles = Object.entries(roles).filter(([, v]) => v).map(([k]) => k);
-    const foundChannels = Object.entries(channels).filter(([, v]) => v).map(([k]) => k);
-    logger.info('Cache refreshed', {
-      guild: guild?.name,
-      roles: foundRoles.join(', '),
-      channels: foundChannels.join(', '),
-    });
-  } catch (error) {
-    logger.error('Failed to refresh cache', { error: error.message });
-  }
+      // Log what was found
+      const foundRoles = Object.entries(roles).filter(([, v]) => v).map(([k]) => k);
+      const foundChannels = Object.entries(channels).filter(([, v]) => v).map(([k]) => k);
+      logger.info('Cache refreshed', {
+        guild: guild?.name,
+        roles: foundRoles.join(', '),
+        channels: foundChannels.join(', '),
+      });
+    } catch (error) {
+      logger.error('Failed to refresh cache', { error: error.message });
+    } finally {
+      refreshCacheInFlight = null;
+    }
+  })();
+  return refreshCacheInFlight;
 }
 
 // Schedule weekly digest
@@ -433,11 +445,11 @@ async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
 
   const embed = new EmbedBuilder()
     .setColor(0x3498DB)
-    .setTitle(`🚀 New Release: ${tagName}`)
-    .setDescription(`**${releaseName || tagName}**\n\n${description}`)
+    .setTitle(`🚀 New Release: ${md(tagName)}`)
+    .setDescription(`**${md(releaseName || tagName)}**\n\n${md(description)}`)
     .addFields(
-      { name: 'Repository', value: repo, inline: true },
-      { name: 'Version', value: `[${tagName}](${url})`, inline: true }
+      { name: 'Repository', value: md(repo), inline: true },
+      { name: 'Version', value: `[${md(tagName)}](${url})`, inline: true }
     )
     .setTimestamp();
 
@@ -462,7 +474,7 @@ async function postStarMilestone(repo, stars, repoUrl) {
   const embed = new EmbedBuilder()
     .setColor(0xF1C40F)
     .setTitle('⭐ Star Milestone!')
-    .setDescription(`**${repo}** just reached **${stars}** stars! 🎉`)
+    .setDescription(`**${md(repo)}** just reached **${stars}** stars! 🎉`)
     .addFields(
       { name: 'Repository', value: `[View on GitHub](${repoUrl})`, inline: true }
     )
