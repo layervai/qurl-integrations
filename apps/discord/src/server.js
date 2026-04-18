@@ -29,12 +29,24 @@ if (process.env.TRUST_PROXY) {
 }
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
-// Policy, X-DNS-Prefetch-Control, etc. The HTML templates also set inline
-// CSP for the specific pages they render; disable helmet's default CSP so
-// the template's stricter per-page policy wins (else they'd compose and
-// the inline policy wouldn't apply).
+// Policy, X-DNS-Prefetch-Control, etc. We set a restrictive DEFAULT CSP
+// here so any future HTML route that forgets its own <meta http-equiv> CSP
+// still gets strong defaults. Templates that need specific policies (e.g.
+// a page that renders an inline style) can override with their own
+// <meta> tag, which takes precedence over the HTTP header.
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'none'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      baseUri: ["'none'"],
+      frameAncestors: ["'none'"],
+      formAction: ["'none'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
 }));
 

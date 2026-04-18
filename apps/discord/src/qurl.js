@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const dns = require('dns').promises;
 
 /**
  * Lightweight QURL API client using fetch.
@@ -99,6 +100,32 @@ function isPrivateHost(host) {
   return false;
 }
 
+// Resolve all A/AAAA records for a hostname and reject if ANY of them point
+// to a private/internal range. Defense against DNS rebinding: a malicious
+// domain could answer `isPrivateHost` (which is syntactic) with a public IP
+// but then resolve to 169.254.169.254 or 127.0.0.1 at fetch time on the
+// QURL backend. We resolve up-front and pass the result to the QURL API so
+// the backend can pin to the same IPs we verified — the API has its own
+// SSRF guard but we also block here.
+async function assertNotPrivateAfterResolve(hostname) {
+  // Numeric hosts already covered by syntactic isPrivateHost; only resolve
+  // actual names. IPv6-in-brackets is stripped in isPrivateHost already.
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.startsWith('[')) return;
+  let addrs;
+  try {
+    addrs = await dns.lookup(hostname, { all: true, verbatim: true });
+  } catch (err) {
+    // Resolution failure is NOT a pass — reject so a typo or non-existent
+    // host fails here rather than leaking to the QURL API as an opaque error.
+    throw new Error(`Target URL hostname could not be resolved: ${err.code || err.message}`);
+  }
+  for (const { address } of addrs) {
+    if (isPrivateHost(address)) {
+      throw new Error('Target URL points to a private/internal address');
+    }
+  }
+}
+
 async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
   try {
     const parsed = new URL(targetUrl);
@@ -108,8 +135,9 @@ async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
     if (isPrivateHost(parsed.hostname)) {
       throw new Error('Target URL points to a private/internal address');
     }
+    await assertNotPrivateAfterResolve(parsed.hostname);
   } catch (err) {
-    if (/(http|private)/i.test(err.message)) throw err;
+    if (/(http|private|resolved)/i.test(err.message)) throw err;
     throw new Error(`Invalid target URL: ${err.message}`);
   }
 

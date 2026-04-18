@@ -48,22 +48,23 @@ const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./dis
 // so a stolen state URL cannot be silently coerced to another user.
 let _warnedStateSecretFallback = false;
 function stateSecret() {
-  // Reuse GITHUB_CLIENT_SECRET as the HMAC key: it's already required in
-  // prod (index.js boot validation), rotated together with OAuth, and never
-  // leaves the server. The fallback literal is only reachable in local
-  // dev/test where GITHUB_CLIENT_SECRET isn't set — warn once loudly so a
-  // misconfigured staging deploy surfaces the issue instead of silently
-  // running with a static attacker-known key.
+  // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
+  // can be rotated without also invalidating in-flight OAuth state tokens —
+  // and vice versa. Blast-radius isolation: leaking one doesn't enable
+  // forgery of the other's use cases. Fall back to GITHUB_CLIENT_SECRET for
+  // backward-compat with existing deployments.
+  const dedicated = process.env.OAUTH_STATE_SECRET;
+  if (dedicated) return dedicated;
   if (!config.GITHUB_CLIENT_SECRET) {
     // Throw anywhere outside of the Jest test harness. A static dev fallback
     // would let any attacker who reads this file mint valid HMAC states
     // against a misconfigured staging/prod deploy — index.js's boot check
     // is the primary defense, this is belt-and-suspenders.
     if (process.env.NODE_ENV !== 'test') {
-      throw new Error('Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is not set.');
+      throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
     }
     if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using test fallback — set GITHUB_CLIENT_SECRET');
+      logger.warn('OAuth state HMAC using test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
       _warnedStateSecretFallback = true;
     }
     return 'dev-oauth-state-secret';
@@ -641,7 +642,12 @@ async function handleSend(interaction, apiKey) {
   let resourceType = null;
   let resourceLabel = null;
 
-  const targetLabel = target === 'user' ? recipients[0].username : target === 'channel' ? 'this channel' : 'voice channel';
+  // Escape the recipient's username — legacy Discord accounts can have
+  // markdown chars in display names, and this label gets interpolated
+  // into the ephemeral "Sending to …" message which does render markdown.
+  const targetLabel = target === 'user'
+    ? escapeDiscordMarkdown(String(recipients[0].username || '').slice(0, 64))
+    : target === 'channel' ? 'this channel' : 'voice channel';
 
   if (commandAttachment) {
     // File attached — show only Send File button

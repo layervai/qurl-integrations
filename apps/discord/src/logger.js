@@ -43,10 +43,20 @@ function redact(value, depth = 0) {
   return out;
 }
 
+// Strip ASCII control chars (incl. \r\n) from the message so a caller that
+// interpolates attacker-controlled data (e.g. an x-github-event header,
+// a webhook payload field) cannot inject fake log lines. Meta is already
+// JSON-encoded so its newlines are escaped; message is raw.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/g;
+function sanitizeMessage(message) {
+  if (typeof message !== 'string') message = String(message);
+  return message.replace(CONTROL_CHARS_RE, ' ');
+}
 function formatMessage(level, message, meta = {}) {
   const safe = redact(meta);
   const metaStr = Object.keys(safe).length > 0 ? ` ${JSON.stringify(safe)}` : '';
-  return `[${formatTimestamp()}] ${level.toUpperCase()}: ${message}${metaStr}`;
+  return `[${formatTimestamp()}] ${level.toUpperCase()}: ${sanitizeMessage(message)}${metaStr}`;
 }
 
 const logger = {

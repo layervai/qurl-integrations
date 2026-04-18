@@ -138,9 +138,16 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }
 
-  const contentLength = parseInt(downloadResponse.headers.get('content-length') || '0', 10);
-  if (contentLength > MAX_FILE_SIZE) {
+  const contentLengthHeader = downloadResponse.headers.get('content-length');
+  const contentLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+  if (contentLength !== null && contentLength > MAX_FILE_SIZE) {
     throw new Error(`File too large: ${Math.round(contentLength / 1024 / 1024)}MB, max 25MB`);
+  }
+  if (contentLength === null) {
+    // Not fatal — readBodyWithCap enforces the real cap by streaming — but
+    // flag it so a CDN change that drops Content-Length doesn't silently
+    // bypass our pre-check.
+    logger.warn('Discord CDN response missing Content-Length, relying on streaming cap', { sourceUrl });
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
@@ -234,9 +241,16 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
     throw new Error(`Failed to download from Discord CDN: ${downloadResponse.status}`);
   }
 
-  const contentLength = parseInt(downloadResponse.headers.get('content-length') || '0', 10);
-  if (contentLength > MAX_FILE_SIZE) {
+  const contentLengthHeader = downloadResponse.headers.get('content-length');
+  const contentLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+  if (contentLength !== null && contentLength > MAX_FILE_SIZE) {
     throw new Error(`File too large: ${Math.round(contentLength / 1024 / 1024)}MB, max 25MB`);
+  }
+  if (contentLength === null) {
+    // Not fatal — readBodyWithCap enforces the real cap by streaming — but
+    // flag it so a CDN change that drops Content-Length doesn't silently
+    // bypass our pre-check.
+    logger.warn('Discord CDN response missing Content-Length, relying on streaming cap', { sourceUrl });
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
@@ -251,6 +265,13 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
+  }
+  // Bound `n` defensively — callers in this codebase already cap at 10
+  // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
+  // so validate at the API boundary. Negative or non-integer values would
+  // make the QURL backend behave unpredictably; 100 is a comfortable ceiling.
+  if (!Number.isInteger(n) || n < 1 || n > 100) {
+    throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',

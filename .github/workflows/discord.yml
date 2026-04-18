@@ -75,6 +75,13 @@ jobs:
     timeout-minutes: 5
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
+      # SECURITY: DEPLOY_PAT must be a *fine-grained* personal access token
+      # scoped to:
+      #   - Repository: layervai/qurl-integrations-infra (ONLY)
+      #   - Permissions: Contents = Read and write (repository_dispatch)
+      # A classic PAT with broad 'repo' scope would let a compromised run of
+      # this workflow trigger deploys or modify content on ANY repo the
+      # token-owner has access to. Rotate on any suspected exposure.
       - name: Trigger deploy in infra repo
         uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:

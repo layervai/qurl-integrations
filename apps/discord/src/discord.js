@@ -156,12 +156,25 @@ function setupWeeklyDigest() {
     digestTask.stop();
   }
 
-  digestTask = cron.schedule(config.WEEKLY_DIGEST_CRON, async () => {
-    logger.info('Running weekly digest...');
-    await postWeeklyDigest();
-  });
+  // Validate BEFORE handing to cron.schedule — node-cron throws a generic
+  // Error on bad expressions which would otherwise surface as an unhandled
+  // rejection from the 'ready' handler and cause a crash-loop.
+  if (typeof cron.validate === 'function' && !cron.validate(config.WEEKLY_DIGEST_CRON)) {
+    logger.error('Invalid WEEKLY_DIGEST_CRON expression, skipping digest schedule', {
+      cron: config.WEEKLY_DIGEST_CRON,
+    });
+    return;
+  }
 
-  logger.info(`Weekly digest scheduled: ${config.WEEKLY_DIGEST_CRON}`);
+  try {
+    digestTask = cron.schedule(config.WEEKLY_DIGEST_CRON, async () => {
+      logger.info('Running weekly digest...');
+      await postWeeklyDigest();
+    });
+    logger.info(`Weekly digest scheduled: ${config.WEEKLY_DIGEST_CRON}`);
+  } catch (err) {
+    logger.error('cron.schedule failed, digest disabled', { error: err.message });
+  }
 }
 
 client.once('ready', async () => {

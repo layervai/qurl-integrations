@@ -30,6 +30,14 @@ jest.mock('../src/logger', () => ({
   debug: jest.fn(),
 }));
 
+// Mock dns.lookup so createOneTimeLink's DNS-rebinding guard doesn't hit
+// the network. Any public-looking hostname resolves to a public IP.
+jest.mock('dns', () => ({
+  promises: {
+    lookup: jest.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
+  },
+}));
+
 // Mock discord.js (commands.js imports it at top-level)
 jest.mock('discord.js', () => ({
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
