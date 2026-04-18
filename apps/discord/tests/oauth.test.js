@@ -58,14 +58,14 @@ describe('OAuth routes', () => {
 
     it('returns 400 for expired state', async () => {
       db.getPendingLink.mockReturnValue(null);
-      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0');
+      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Link Expired');
     });
 
     it('redirects to GitHub for valid state', async () => {
       db.getPendingLink.mockReturnValue({ discord_id: '123' });
-      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(302);
       expect(res.headers.location).toContain('github.com/login/oauth/authorize');
     });
@@ -85,15 +85,15 @@ describe('OAuth routes', () => {
     });
 
     it('rejects callback when session cookie is missing', async () => {
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa9');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa9.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Invalid Session');
     });
 
     it('rejects callback when session cookie does not match state', async () => {
       const res = await request(app)
-        .get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
-        .set('Cookie', 'qurl_oauth_session=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+        .get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+        .set('Cookie', 'qurl_oauth_session=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Invalid Session');
     });
@@ -101,7 +101,7 @@ describe('OAuth routes', () => {
     it('treats a malformed-encoded cookie as no cookie (no URIError crash)', async () => {
       // %ZZ is invalid percent-encoding; decodeURIComponent would throw.
       const res = await request(app)
-        .get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+        .get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
         .set('Cookie', 'qurl_oauth_session=abc%ZZdef');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Invalid Session');
@@ -109,7 +109,7 @@ describe('OAuth routes', () => {
 
     it('rejects expired state in callback', async () => {
       db.consumePendingLink.mockReturnValue(null);
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Session Expired');
     });
@@ -121,7 +121,7 @@ describe('OAuth routes', () => {
         json: async () => ({ error: 'bad_verification_code', error_description: 'Code expired' }),
       });
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('GitHub Error');
     });
@@ -132,7 +132,7 @@ describe('OAuth routes', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'token123' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1 }) }); // no login field
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Failed to Get User Info');
     });
@@ -145,11 +145,11 @@ describe('OAuth routes', () => {
         // Historical PR search returns empty
         .mockResolvedValueOnce({ ok: true, json: async () => ({ items: [] }) });
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(200);
       expect(res.text).toContain('Linked Successfully');
       expect(db.createLink).toHaveBeenCalledWith('123', 'ghuser');
-      expect(db.consumePendingLink).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      expect(db.consumePendingLink).toHaveBeenCalledWith('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(discord.sendDM).toHaveBeenCalled();
     });
 
@@ -170,7 +170,7 @@ describe('OAuth routes', () => {
           }),
         });
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(200);
       expect(res.text).toContain('Linked Successfully');
       expect(res.text).toContain('past contribution');
@@ -181,7 +181,7 @@ describe('OAuth routes', () => {
       db.consumePendingLink.mockReturnValue({ discord_id: '789' });
       globalThis.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(500);
       expect(res.text).toContain('Something Went Wrong');
     });
@@ -194,7 +194,7 @@ describe('OAuth routes', () => {
         // Historical check: HTTP error
         .mockResolvedValueOnce({ ok: false, status: 403 });
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(200);
       expect(res.text).toContain('Linked Successfully');
     });
@@ -212,7 +212,7 @@ describe('OAuth routes', () => {
           }),
         });
 
-      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5');
+      const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(200);
       expect(discord.notifyBadgeEarned).toHaveBeenCalled();
     });
@@ -223,7 +223,7 @@ describe('OAuth routes', () => {
       db.consumePendingLink.mockReturnValue(null);
       // Send several requests within the rate limit window
       for (let i = 0; i < 5; i++) {
-        const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6');
+        const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
         expect(res.status).toBeLessThan(429);
       }
     });

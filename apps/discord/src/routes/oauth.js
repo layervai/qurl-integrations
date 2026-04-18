@@ -172,11 +172,30 @@ setInterval(() => {
 // Absolute cap on how many timestamps we keep per IP so an abusive IP can't
 // grow its array unboundedly between eviction sweeps.
 const MAX_REQUESTS_PER_IP = Math.max(config.RATE_LIMIT_MAX_REQUESTS * 4, 100);
+// Hard ceiling on total Map size. Under a distributed attack from many
+// unique IPs the 10% drop eviction can't keep up if new IPs arrive faster
+// than the sweep runs. Once the Map exceeds this, new-IP requests get 429
+// until the next sweep reclaims space — better to shed load than OOM.
+const MAX_STORE_SIZE = 20000;
 
 function rateLimit(req, res, next) {
   const ip = req.ip || 'unknown'; // req.ip uses x-forwarded-for via 'trust proxy' (server.js)
   const now = Date.now();
   const windowStart = now - config.RATE_LIMIT_WINDOW_MS;
+
+  // Hard memory ceiling: if the store is already at MAX_STORE_SIZE and this
+  // is a new IP, shed the request rather than grow the Map further. Known
+  // IPs still get served because they're not growing the Map.
+  if (rateLimitStore.size >= MAX_STORE_SIZE && !rateLimitStore.has(ip)) {
+    logger.warn('Rate limit store at hard cap, rejecting new IP', { ip, size: rateLimitStore.size });
+    return res.status(429).send(renderPage({
+      title: 'Too Many Requests',
+      icon: '⏳',
+      heading: 'Service Overloaded',
+      message: 'The service is under heavy load. Please try again in a moment.',
+      type: 'warning',
+    }));
+  }
 
   const requests = (rateLimitStore.get(ip) || []).filter(time => time > windowStart);
 
@@ -248,7 +267,7 @@ const COOKIE_TTL_SECONDS = 15 * 60; // 15 minutes
 router.get('/github', rateLimit, (req, res) => {
   const { state } = req.query;
 
-  if (!state || !/^[a-f0-9]{32}$/.test(state)) {
+  if (!state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
     return res.status(400).send(renderPage({
       title: 'Invalid Link',
       icon: '❌',
@@ -309,7 +328,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
     }));
   }
 
-  if (!code || !state || !/^[a-f0-9]{32}$/.test(state)) {
+  if (!code || !state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
     return res.status(400).send(renderPage({
       title: 'Invalid Request',
       icon: '❌',
@@ -545,6 +564,15 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         });
         try {
           db.recordOrphanedToken(accessToken);
+          // Error-level (not warn) so monitoring/alerting catches orphaned
+          // tokens accumulating — an operator needs to notice this trend
+          // before the 7-day sweeper retention window lapses. Includes the
+          // current orphan-queue depth so PagerDuty thresholds can trigger.
+          const orphanCount = db.countOrphanedTokens?.() ?? -1;
+          logger.error('OAuth token orphaned (revocation retries exhausted) — alert oncall', {
+            tokenHash8,
+            orphanQueueDepth: orphanCount,
+          });
         } catch (dbErr) {
           // Don't fail the response; the error is logged above.
           logger.error('Failed to record orphaned token for later sweep', { error: dbErr.message });

@@ -677,10 +677,13 @@ async function handleSend(interaction, apiKey) {
     const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
     await modalSubmit.deferUpdate();
 
+    // Bounded repetitions so even the locationValue.slice(0, 2000) cap above
+    // can't feed a ReDoS-pathological string to an unbounded `+` over
+    // overlapping classes. Real Google Maps URLs peak around ~300 chars.
     const mapsPatterns = [
-      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]+/,
-      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]+/,
-      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w+\?[^\s]+/,
+      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
+      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
+      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s]{1,500}/,
     ];
 
     let detectedUrl = null;

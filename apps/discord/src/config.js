@@ -62,8 +62,22 @@ module.exports = {
     // infra. Set DATABASE_PATH env to override for new deployments.
     : path.resolve(__dirname, '..', 'data', 'opennhp-bot.db'),
 
-  // Admin Discord user IDs (comma-separated) - can use /forcelink, /bulklink, /unlinked
-  ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
+  // Admin Discord user IDs (comma-separated) — can use /forcelink, /bulklink,
+  // /unlinked. Each entry is validated to look like a Discord snowflake
+  // (17–20 digits) so a typo like "1234, 5678 " (stray space or non-numeric)
+  // can't silently create a dead admin ID that never matches an interaction.
+  ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => {
+      if (!s) return false;
+      if (!/^\d{17,20}$/.test(s)) {
+        // Using console.warn directly — logger isn't loaded this early in config import.
+        console.warn(`[config] Dropping malformed ADMIN_USER_IDS entry (not a Discord snowflake): ${JSON.stringify(s)}`);
+        return false;
+      }
+      return true;
+    }),
 
   // Milestones to announce (star counts) - extended for mature repos
   STAR_MILESTONES: [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 15000, 20000, 25000, 50000, 75000, 100000],

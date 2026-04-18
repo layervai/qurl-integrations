@@ -95,14 +95,14 @@ describe('Server', () => {
 
     it('rejects valid-format state not in DB', async () => {
       db.getPendingLink.mockReturnValue(null);
-      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1');
+      const res = await request(app).get('/auth/github?state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(400);
       expect(res.text).toContain('Link Expired');
     });
 
     it('redirects to GitHub with valid state', async () => {
       db.getPendingLink.mockReturnValue({ discord_id: '123' });
-      const res = await request(app).get('/auth/github?state=aabbccddaabbccddaabbccddaabbccdd');
+      const res = await request(app).get('/auth/github?state=aabbccddaabbccddaabbccddaabbccdd.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       expect(res.status).toBe(302);
       expect(res.headers.location).toContain('github.com/login/oauth/authorize');
     });
