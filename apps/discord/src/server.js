@@ -42,8 +42,15 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  const healthy = true; // DB is synchronous (better-sqlite3), always available if process is up
-  res.status(healthy ? 200 : 503).json({ status: healthy ? 'ok' : 'unhealthy' });
+  // Actually probe the DB — if better-sqlite3 is blocked/locked we want the
+  // health check to fail so the orchestrator replaces the container.
+  try {
+    db.getStats();
+    res.status(200).json({ status: 'ok' });
+  } catch (err) {
+    logger.warn('Health check failed', { error: err.message });
+    res.status(503).json({ status: 'unhealthy', error: err.message });
+  }
 });
 
 // Metrics endpoint

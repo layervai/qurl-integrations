@@ -1,4 +1,5 @@
 const Database = require('better-sqlite3');
+const { encrypt, decrypt } = require('./utils/crypto');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
@@ -666,10 +667,13 @@ const dbModule = {
 
   // ── Guild config (BYOK API keys) ──
 
+  // Encrypted at rest via KEY_ENCRYPTION_KEY (AES-256-GCM). Rows written
+  // before encryption was enabled are returned as plaintext and re-encrypted
+  // on next write (utils/crypto.decrypt passes non-prefixed values through).
   getGuildApiKey(guildId) {
     const stmt = db.prepare('SELECT qurl_api_key FROM guild_configs WHERE guild_id = ?');
     const row = stmt.get(guildId);
-    return row ? row.qurl_api_key : null;
+    return row ? decrypt(row.qurl_api_key) : null;
   },
 
   setGuildApiKey(guildId, apiKey, configuredBy) {
@@ -681,7 +685,7 @@ const dbModule = {
         configured_by = excluded.configured_by,
         updated_at = CURRENT_TIMESTAMP
     `);
-    stmt.run(guildId, apiKey, configuredBy);
+    stmt.run(guildId, encrypt(apiKey), configuredBy);
   },
 
   removeGuildApiKey(guildId) {
@@ -691,7 +695,9 @@ const dbModule = {
 
   getGuildConfig(guildId) {
     const stmt = db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?');
-    return stmt.get(guildId);
+    const row = stmt.get(guildId);
+    if (row && row.qurl_api_key) row.qurl_api_key = decrypt(row.qurl_api_key);
+    return row;
   },
 
   // Close database (for graceful shutdown)

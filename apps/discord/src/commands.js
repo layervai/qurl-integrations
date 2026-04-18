@@ -60,10 +60,18 @@ function isGoogleMapsURL(url) {
 const { sanitizeFilename, escapeDiscordMarkdown } = require('./utils/sanitize');
 
 function sanitizeMessage(msg) {
-  return msg
+  // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
+  // would otherwise be escaped and the mention regex wouldn't match). Then
+  // escape Discord markdown so a crafted message like
+  // `[Free Prizes](https://phishing.com)` can't render as a masked link.
+  // The `[mention]` literal we insert below is re-applied post-escape as a
+  // plain substitution so the brackets stay visible to the user.
+  const stripped = msg
     .replace(/@(everyone|here)/gi, '@\u200b$1')
-    .replace(/<@[!&]?\d+>/g, '[mention]')
-    .slice(0, 500); // cap to fit Discord embed field limit (1024) with room for formatting
+    .replace(/<@[!&]?\d+>/g, '\x00MENTION\x00');
+  return escapeDiscordMarkdown(stripped)
+    .replace(/\x00MENTION\x00/g, '[mention]')
+    .slice(0, 500);
 }
 
 const ALLOWED_FILE_TYPES = [
@@ -298,14 +306,23 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   return control;
 }
 
-// --- Guild member fetch cache (30s TTL) ---
-let memberFetchCacheData = { guildId: null, timestamp: 0 };
+// --- Guild member fetch cache (30s TTL, per-guild). Also coalesces concurrent
+// callers for the same guild so two simultaneous /qurl send commands don't
+// each fire a separate fetch.
+const memberFetchCache = new Map(); // guildId -> { timestamp, inFlight }
 const MEMBER_FETCH_TTL = 30000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();
-  if (memberFetchCacheData.guildId === guild.id && now - memberFetchCacheData.timestamp < MEMBER_FETCH_TTL) return;
-  await guild.members.fetch();
-  memberFetchCacheData = { guildId: guild.id, timestamp: now };
+  const entry = memberFetchCache.get(guild.id);
+  if (entry && now - entry.timestamp < MEMBER_FETCH_TTL) return;
+  if (entry && entry.inFlight) return entry.inFlight;
+  const promise = guild.members.fetch();
+  memberFetchCache.set(guild.id, { timestamp: now, inFlight: promise });
+  try {
+    await promise;
+  } finally {
+    memberFetchCache.set(guild.id, { timestamp: Date.now(), inFlight: null });
+  }
 }
 
 // --- /qurl send handler ---
@@ -1149,8 +1166,11 @@ async function handleRevoke(interaction) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
   }
 
+  // Nonce the customId so two concurrent /qurl revoke select menus don't
+  // route each other's events.
+  const revokeNonce = crypto.randomBytes(8).toString('hex');
   const select = new StringSelectMenuBuilder()
-    .setCustomId('qurl_revoke_select')
+    .setCustomId(`qurl_revoke_select_${revokeNonce}`)
     .setPlaceholder('Select a send to revoke')
     .addOptions(recentSends.map(s => ({
       label: `${s.resource_type} to ${s.recipient_count} users (${s.target_type})`,
@@ -1167,7 +1187,7 @@ async function handleRevoke(interaction) {
   try {
     const selectInteraction = await response.awaitMessageComponent({
       componentType: ComponentType.StringSelect,
-      filter: (i) => i.user.id === interaction.user.id,
+      filter: (i) => i.user.id === interaction.user.id && i.customId === `qurl_revoke_select_${revokeNonce}`,
       time: 60000,
     });
 
@@ -1282,13 +1302,16 @@ const commands = [
           'You will no longer automatically receive the @Contributor role for future PRs.'
         );
 
+      // Nonce the customIds so two concurrent /unlink flows can't have
+      // their collectors consume each other's button clicks.
+      const nonce = crypto.randomBytes(8).toString('hex');
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId('unlink_confirm')
+          .setCustomId(`unlink_confirm_${nonce}`)
           .setLabel('Yes, Unlink')
           .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
-          .setCustomId('unlink_cancel')
+          .setCustomId(`unlink_cancel_${nonce}`)
           .setLabel('Cancel')
           .setStyle(ButtonStyle.Secondary)
       );
@@ -1302,10 +1325,11 @@ const commands = [
       try {
         const buttonInteraction = await response.awaitMessageComponent({
           componentType: ComponentType.Button,
+          filter: (i) => i.user.id === interaction.user.id && i.customId.endsWith(`_${nonce}`),
           time: TIMEOUTS.BUTTON_INTERACTION,
         });
 
-        if (buttonInteraction.customId === 'unlink_confirm') {
+        if (buttonInteraction.customId === `unlink_confirm_${nonce}`) {
           db.deleteLink(discordId);
           await buttonInteraction.update({
             content: `✓ Unlinked from GitHub **@${existing.github_username}**.\n\nYou can link a new account anytime with \`/link\`.`,

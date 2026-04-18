@@ -437,7 +437,7 @@ describe('/unlink command', () => {
   it('shows confirmation and unlinks on confirm', async () => {
     mockDb.getLinkByDiscord.mockReturnValue({ github_username: 'testuser' });
     const buttonInteraction = {
-      customId: 'unlink_confirm',
+      customId: `unlink_confirm_${MOCK_NONCE}`,
       update: jest.fn().mockResolvedValue(undefined),
     };
     const response = {

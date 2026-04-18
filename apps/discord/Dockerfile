@@ -12,9 +12,9 @@ FROM node:22.11.0-alpine3.20
 
 WORKDIR /app
 
-COPY --from=build /app/node_modules ./node_modules
-COPY package*.json ./
-COPY . .
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node package*.json ./
+COPY --chown=node:node . .
 
 RUN mkdir -p /app/data && chown -R node:node /app/data
 

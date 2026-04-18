@@ -31,6 +31,13 @@ function verifySignature(req) {
     logger.warn('Webhook request missing signature');
     return false;
   }
+  // Defensive: if middleware ordering ever changes or a request arrives with
+  // a non-JSON content type, rawBody may be absent. hmac.update(undefined)
+  // throws TypeError, which is outside the try/catch below.
+  if (!req.rawBody) {
+    logger.warn('Webhook request missing rawBody (middleware ordering?)');
+    return false;
+  }
 
   const hmac = crypto.createHmac('sha256', config.GITHUB_WEBHOOK_SECRET);
   const digest = 'sha256=' + hmac.update(req.rawBody).digest('hex');
@@ -303,7 +310,7 @@ async function handleActivityFeed(event, payload) {
   let embed;
 
   switch (event) {
-    case 'push':
+    case 'push': {
       const commits = payload.commits || [];
       if (commits.length === 0) return;
 
@@ -323,6 +330,7 @@ async function handleActivityFeed(event, payload) {
         )
         .setTimestamp();
       break;
+    }
 
     case 'create':
       if (payload.ref_type === 'branch') {

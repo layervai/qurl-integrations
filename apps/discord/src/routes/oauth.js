@@ -282,7 +282,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         title: 'GitHub Error',
         icon: '❌',
         heading: 'GitHub Error',
-        message: tokenData.error_description || 'An error occurred with GitHub authentication.',
+        message: (tokenData.error_description || 'An error occurred with GitHub authentication.').slice(0, 200),
         subtext: 'Please try again with /link in Discord.',
         type: 'error',
       }));

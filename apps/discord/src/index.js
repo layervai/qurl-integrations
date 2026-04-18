@@ -7,7 +7,7 @@ const db = require('./database');
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives.
-const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID'];
+const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
 const missing = required.filter(key => !config[key]);
 
 if (missing.length > 0) {

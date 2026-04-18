@@ -21,7 +21,10 @@ function sanitizeFilename(name) {
  * modal, which would otherwise let attackers inject `**PHISHING**` banners).
  */
 function escapeDiscordMarkdown(s) {
-  return String(s ?? '').replace(/[\\*_~`>|]/g, '\\$&');
+  // Covers bold/italic/underline/code/strikethrough/block-quote/spoiler + masked-link
+  // syntax [text](url). Without the bracket/paren escapes an attacker could inject
+  // `[Free Prizes](https://phishing.com)` as a clickable link in any embed field.
+  return String(s ?? '').replace(/[\\*_~`>|[\]()]/g, '\\$&');
 }
 
 module.exports = { sanitizeFilename, escapeDiscordMarkdown };
