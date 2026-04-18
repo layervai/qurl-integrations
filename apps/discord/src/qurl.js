@@ -107,6 +107,13 @@ function isPrivateHost(host) {
 // QURL backend. We resolve up-front and pass the result to the QURL API so
 // the backend can pin to the same IPs we verified — the API has its own
 // SSRF guard but we also block here.
+//
+// DEPENDENCY: This is defense-in-depth ONLY — there is an unavoidable
+// TOCTOU window between our dns.lookup() here and the actual fetch on the
+// QURL API backend (DNS can rebind in that gap). The QURL API MUST have
+// its own DNS-level SSRF guard (resolve + check in the same syscall, or
+// IP-pinned fetch). Do not remove this check assuming the API layer is
+// enough, and do not remove the API-layer check assuming this is enough.
 async function assertNotPrivateAfterResolve(hostname) {
   // Numeric hosts already covered by syntactic isPrivateHost; only resolve
   // actual names. IPv6-in-brackets is stripped in isPrivateHost already.

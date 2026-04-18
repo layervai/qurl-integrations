@@ -628,7 +628,10 @@ const dbModule = {
     try {
       const stmt = db.prepare('INSERT OR IGNORE INTO milestones (milestone_type, milestone_value, repo) VALUES (?, ?, ?)');
       return stmt.run(type, value, repo).changes > 0;
-    } catch {
+    } catch (err) {
+      // Log so a disk-full / corruption failure is distinguishable from the
+      // INSERT-OR-IGNORE duplicate case (which returns false by design).
+      logger.error('recordMilestone failed', { type, value, repo, error: err.message });
       return false;
     }
   },

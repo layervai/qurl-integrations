@@ -487,6 +487,12 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       tokenData.access_token,
       historicalAbort.signal,
     );
+    // Attach a .catch() so if Promise.race's timeout wins and the historical
+    // check later rejects in the background, we handle the rejection here
+    // rather than surface it as an unhandledRejection on the process.
+    historicalCheck.catch(err => {
+      logger.warn('Background historical check rejected after timeout', { error: err?.message });
+    });
 
     // Send initial DM
     let dmMessage = `✅ **GitHub account linked!**\n\nYou're now linked to GitHub **@${userData.login}**.`;

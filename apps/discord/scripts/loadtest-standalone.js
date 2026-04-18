@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Standalone load test script — runs outside Discord, hits APIs directly.
- * Usage: node src/loadtest-standalone.js --count 200 --duration 7200 --interval 30
+ * Usage: node scripts/loadtest-standalone.js --count 200 --duration 7200 --interval 30
  *
  * Options:
  *   --count N      Recipients per round (default: 100)

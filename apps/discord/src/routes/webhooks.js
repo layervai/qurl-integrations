@@ -249,7 +249,17 @@ async function handlePullRequest(payload) {
     // Record the contribution BEFORE assignContributorRole — the role-assign
     // path reads getContributionCount, so if we called it first a first-time
     // contributor would still read a count of 0 and never get the role.
-    db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+    // recordContribution returns false on transient DB error; if the row
+    // didn't land we skip the role-assign + badge flow so the user gets a
+    // consistent state (role assigned ↔ contribution recorded) instead of
+    // a dangling role with no persisted credit.
+    const recorded = db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+    if (!recorded) {
+      logger.error('recordContribution failed — skipping role assign + badges', {
+        discord_id: link.discord_id, githubUsername, prNumber, repo,
+      });
+      return;
+    }
     const result = await assignContributorRole(link.discord_id, prNumber, repo, githubUsername);
 
     const newBadges = db.checkAndAwardBadges(link.discord_id, prTitle, repo);

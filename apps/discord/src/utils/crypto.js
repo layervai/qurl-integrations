@@ -11,6 +11,21 @@ const logger = require('../logger');
 // Key sourced from KEY_ENCRYPTION_KEY (base64-encoded, 32 bytes after decode).
 // Returns the input unchanged when the key is unset so tests + dev installs
 // work without ceremony; production boot validation should require it.
+//
+// KEY ROTATION — IMPORTANT:
+// The decryption key is cached at module load via getKey(). Rotating
+// KEY_ENCRYPTION_KEY requires BOTH:
+//   1) A process restart (rolling deploy), because the cached key is never
+//      invalidated at runtime; and
+//   2) An out-of-band re-encryption migration of existing ciphertext in:
+//        - guild_configs.qurl_api_key
+//        - orphaned_oauth_tokens.access_token
+//        - qurl_send_configs.attachment_url
+//      Read each row with the OLD key, then write back with the NEW key
+//      BEFORE the cutover deploy. There is no in-process dual-key support.
+// Missing step 2 → rows encrypted with the old key become unreadable after
+// deploy. If this ever becomes painful, add a `KEY_ENCRYPTION_KEY_PREV`
+// env var here that decryption falls back to.
 
 const PREFIX = 'enc:v1:';
 const ALGO = 'aes-256-gcm';

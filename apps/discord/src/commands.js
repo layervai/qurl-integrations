@@ -152,6 +152,14 @@ const ALLOWED_FILE_TYPES = [
 // support these, require explicit user confirmation and mark the file
 // as "executable content" in the DM embed.
 const DENY_MIME_SUBSTRINGS = ['macroenabled', 'macro-enabled'];
+
+// Bound concurrent in-flight file sends to prevent N × 25MB = high memory
+// pressure under burst. Each send holds its attachment buffer through the
+// mint-batches re-upload cycle; cap here rather than trust users to
+// self-throttle. Over-cap sends get a user-facing "try again" rather than
+// exhausting the process.
+const MAX_CONCURRENT_FILE_SENDS = 5;
+let activeFileSends = 0;
 function isAllowedFileType(contentType) {
   if (!contentType) return false;
   const ct = contentType.toLowerCase();
@@ -275,7 +283,15 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
 // they just stop seeing live status updates in the original message).
 const activeMonitors = new Set();
 
-function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered, apiKey) {
+function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered, apiKey) {
+  // Rebind params as closure-mutable so stop() can null them out for GC.
+  // Long-running monitors (up to 1h × MAX_CONCURRENT_MONITORS=50) otherwise
+  // pin interaction/recipients/buttonRow in the setInterval closure.
+  let interaction = interactionArg;
+  let qurlLinks = qurlLinksArg;
+  let recipients = recipientsArg;
+  let buttonRow = buttonRowArg;
+  void buttonRow; // buttonRow is used transitively via setComponents inline; keep alias for symmetry
   // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
   let stopped = false;
@@ -301,6 +317,13 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       linkStatus.clear();
       if (trackedQurlIds) trackedQurlIds.clear();
       trackedQurlIds = null;
+      // Drop the big closure-captured objects so GC can reclaim them — an
+      // idle timer that was already cleared above holds the closure frame
+      // alive until the control object itself is GC'd.
+      interaction = null;
+      qurlLinks = null;
+      recipients = null;
+      buttonRow = null;
     },
     updateBaseMsg(msg) {
       currentBaseMsg = msg;
@@ -818,6 +841,17 @@ async function handleSend(interaction, apiKey) {
         components: [],
       });
     }
+    // Cap concurrent in-flight file sends. Each holds its 25 MB buffer
+    // through the mint-batches re-upload cycle; without this cap, N
+    // simultaneous /qurl send calls × 25 MB can exhaust process memory.
+    if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+      clearCooldown(interaction.user.id);
+      logger.warn('File send rejected: concurrency cap reached', { activeFileSends });
+      return interaction.editReply({
+        content: `The bot is processing too many file sends right now. Please try again in a moment.`,
+        components: [],
+      });
+    }
     resourceLabel = `File (${sanitizeFilename(attachment.name)})`;
   }
 
@@ -828,8 +862,13 @@ async function handleSend(interaction, apiKey) {
   let qurlLinks = [];
   let connectorResourceId = null;
 
+  // Track whether this send has claimed the file-concurrency slot so the
+  // outer finally can release it exactly once even if we hit an error path.
+  let fileSendSlotClaimed = false;
   try {
     if (resourceType === RESOURCE_TYPES.FILE) {
+      activeFileSends++;
+      fileSendSlotClaimed = true;
       const filename = sanitizeFilename(attachment.name);
       const expiresAt = expiryToISO(expiresIn);
 
@@ -900,7 +939,12 @@ async function handleSend(interaction, apiKey) {
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
     clearCooldown(interaction.user.id); // allow retry on failure
+    if (fileSendSlotClaimed) { activeFileSends--; fileSendSlotClaimed = false; }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
+  } finally {
+    // Release the file-concurrency slot as soon as the mint+batch phase is
+    // done — we no longer hold the 25 MB buffer past this point.
+    if (fileSendSlotClaimed) { activeFileSends--; fileSendSlotClaimed = false; }
   }
 
   if (qurlLinks.length === 0) {
