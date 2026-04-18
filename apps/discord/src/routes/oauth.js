@@ -182,6 +182,10 @@ function rateLimit(req, res, next) {
 
   if (requests.length >= config.RATE_LIMIT_MAX_REQUESTS) {
     logger.warn('Rate limit exceeded', { ip });
+    // HTML response — the OAuth routes are opened in the user's browser from
+    // a Discord-rendered link, so a rendered page is the right UX. The
+    // webhook rate-limiter returns JSON because its consumer is GitHub's
+    // webhook client, which expects JSON. Don't "normalize" these.
     return res.status(429).send(renderPage({
       title: 'Too Many Requests',
       icon: '⏳',

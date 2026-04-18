@@ -442,11 +442,15 @@ async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
   const description = body
     ? body.substring(0, 500) + (body.length > 500 ? '...' : '')
     : 'No release notes provided.';
+  // Cap each component independently so a very long releaseName can't push
+  // the combined description toward Discord's 4096-char embed limit and
+  // swallow the body.
+  const cappedReleaseName = (releaseName || tagName).slice(0, 256);
 
   const embed = new EmbedBuilder()
     .setColor(0x3498DB)
     .setTitle(`🚀 New Release: ${md(tagName)}`)
-    .setDescription(`**${md(releaseName || tagName)}**\n\n${md(description)}`)
+    .setDescription(`**${md(cappedReleaseName)}**\n\n${md(description)}`)
     .addFields(
       { name: 'Repository', value: md(repo), inline: true },
       { name: 'Version', value: `[${md(tagName)}](${url})`, inline: true }

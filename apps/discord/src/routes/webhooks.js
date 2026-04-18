@@ -42,7 +42,11 @@ function verifySignature(req) {
   // malformed header (wrong length, non-hex) should be rejected early
   // rather than producing unequal-length buffers inside the try/catch.
   if (typeof signature !== 'string' || !/^sha256=[0-9a-f]{64}$/.test(signature)) {
-    logger.warn('Webhook signature has unexpected format', { sample: signature.slice(0, 16) });
+    // Don't log the (attacker-controlled) signature prefix — only shape data.
+    logger.warn('Webhook signature has unexpected format', {
+      length: typeof signature === 'string' ? signature.length : 0,
+      hasPrefix: typeof signature === 'string' && signature.startsWith('sha256='),
+    });
     return false;
   }
   // Defensive: if middleware ordering ever changes or a request arrives with

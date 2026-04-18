@@ -19,6 +19,12 @@ async function searchPlaces(query) {
     types: 'establishment|geocode',
   });
 
+  // SECURITY: The request URL contains GOOGLE_MAPS_API_KEY as a query param
+  // (Google Places doesn't support header auth). DO NOT log the URL, the
+  // params, or the Request object anywhere — the logger's substring redact
+  // list only catches top-level meta keys, not values embedded inside
+  // strings. Any future error handler that touches `response.url` or the
+  // full request needs to strip the `key` param first.
   const response = await fetch(`${PLACES_AUTOCOMPLETE_URL}?${params}`, { signal: AbortSignal.timeout(5000) });
   if (!response.ok) {
     throw new Error(`Places API error: ${response.status}`);

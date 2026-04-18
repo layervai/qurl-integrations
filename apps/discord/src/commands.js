@@ -389,7 +389,11 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
 // callers for the same guild so two simultaneous /qurl send commands don't
 // each fire a separate fetch.
 const memberFetchCache = new Map(); // guildId -> { timestamp, inFlight }
-const MEMBER_FETCH_TTL = 30000;
+// 60s TTL. guild.members.fetch() is slow on large guilds (rate-limited,
+// paginates) so a longer cache reduces latency on repeat /qurl send calls
+// within the same minute. 60s is still short enough that a user who just
+// joined/left won't be missed for long.
+const MEMBER_FETCH_TTL = 60000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();
   const entry = memberFetchCache.get(guild.id);
