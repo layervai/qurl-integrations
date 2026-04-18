@@ -14,7 +14,7 @@
     "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     "no-console": "off",
     "no-empty": ["error", { "allowEmptyCatch": true }],
-    "no-prototype-builtins": "off",
+    "no-prototype-builtins": "error",
     "no-case-declarations": "error",
     "eqeqeq": ["error", "smart"],
     "no-undef": "error"

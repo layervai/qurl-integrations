@@ -11,8 +11,12 @@ const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
 
-// Trust proxy headers (ECS behind ALB/CloudFront) for correct req.ip in rate limiting
-app.set('trust proxy', 1);
+// Trust proxy headers (ECS behind ALB) for correct req.ip in rate limiting.
+// Only enable in production — in dev a direct connection trusts a spoofed
+// X-Forwarded-For and lets any caller bypass IP-based rate limiting.
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
 // helmet covers HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-
 // Policy, X-DNS-Prefetch-Control, etc. The HTML templates also set inline

@@ -54,8 +54,9 @@ function isPrivateHost(host) {
     // Bracketed IPv6 literal — strip and check.
     return isPrivateHost(h.slice(1, -1));
   }
-  // IPv6 common locals
-  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
+  // IPv6 common locals (::1 already handled above for exact-match; this
+  // catches fc00::/7 unique-local and fe80::/10 link-local prefixes).
+  if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true;
   // IPv4-mapped IPv6 literal: ::ffff:127.0.0.1, ::ffff:7f00:1, etc. Strip the
   // prefix (URL parsing already stripped the brackets) and re-check.
   const mapped = h.match(/^::ffff:([0-9.]+)$/);

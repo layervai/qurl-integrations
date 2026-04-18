@@ -274,7 +274,14 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
           if (!data || !data.qurls) continue;
           for (const q of data.qurls) allQurls.push(q);
         }
-        allQurls.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        // Secondary sort on qurl_id makes the order deterministic when two
+        // qurls land in the same created_at millisecond — otherwise the
+        // positional recipient→qurl mapping becomes non-deterministic.
+        allQurls.sort((a, b) => {
+          const d = new Date(a.created_at) - new Date(b.created_at);
+          if (d !== 0) return d;
+          return String(a.qurl_id).localeCompare(String(b.qurl_id));
+        });
         const recentN = allQurls.slice(-expectedCount);
         recentN.forEach((q, i) => {
           trackedQurlIds.add(q.qurl_id);
@@ -401,13 +408,6 @@ async function handleSend(interaction, apiKey) {
   // Set cooldown immediately to prevent concurrent request bypass
   setCooldown(interaction.user.id);
 
-  // The gating logic in execute() already ensures apiKey is set, but
-  // guard defensively in case handleSend is called directly.
-  if (!apiKey) {
-    clearCooldown(interaction.user.id);
-    return interaction.reply({ content: 'QURL is not configured. Contact an admin.', ephemeral: true });
-  }
-
   const sendNonce = crypto.randomBytes(8).toString('hex');
 
   // --- Step 1: Collect user (if specific user target) ---
@@ -432,6 +432,10 @@ async function handleSend(interaction, apiKey) {
       });
 
       const selectedUser = selectInteraction.users.first();
+      if (!selectedUser) {
+        clearCooldown(interaction.user.id);
+        return selectInteraction.update({ content: 'No user selected. Send cancelled.', components: [] });
+      }
       if (selectedUser.bot) {
         clearCooldown(interaction.user.id);
         return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
@@ -764,8 +768,11 @@ async function handleSend(interaction, apiKey) {
       delivered++;
     } else {
       failed++;
-      const username = r.status === 'fulfilled' ? r.value.username : 'unknown';
-      failedUsers.push(username);
+      if (r.status === 'fulfilled') {
+        failedUsers.push({ id: r.value.recipientId, username: r.value.username });
+      } else {
+        failedUsers.push({ id: null, username: 'unknown' });
+      }
     }
   }
 
@@ -790,14 +797,17 @@ async function handleSend(interaction, apiKey) {
     });
   }
 
-  // Ephemeral confirmation with Add Recipients + Revoke buttons
+  // Ephemeral confirmation with Add Recipients + Revoke buttons.
+  // Match on the Discord id (snowflake, globally unique) rather than the
+  // display username — usernames can collide within a guild.
   const TRUNC_LIMIT = 5;
-  const successNames = recipients.filter(r => !failedUsers.includes(r.username)).map(r => r.username);
+  const failedUserIds = new Set(failedUsers.map(u => u.id || u));
+  const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => r.username);
 
   function buildConfirmMsg(showAll) {
     let msg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
     if (failed > 0) {
-      msg += `\n${failed} could not be reached: ${failedUsers.join(', ')}`;
+      msg += `\n${failed} could not be reached: ${failedUsers.map(u => u.username).join(', ')}`;
     }
     if (successNames.length > 0) {
       if (showAll || successNames.length <= TRUNC_LIMIT) {
@@ -979,7 +989,9 @@ async function handleSend(interaction, apiKey) {
             const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
             // Generic user-facing message; real details only land in logs.
             const msg = isTimeout ? 'Selection timed out.' : 'Failed to add recipients. Please try again.';
-            logger.error('Add recipients failed', { sendId, error: err.message, isTimeout });
+            // Drop to warn for routine user-timeouts; keep error for real failures.
+            const log = isTimeout ? logger.warn : logger.error;
+            log('Add recipients failed', { sendId, error: err.message, isTimeout });
             await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           }
         } finally {
@@ -1191,11 +1203,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     });
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
-    // One status row per link. The per-link column has a foreign key back
-    // to qurl_sends so we update once per row, not once per (recipient, link) pair.
-    for (let i = 0; i < links.length; i++) {
-      db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    }
+    // updateSendDMStatus updates every qurl_sends row matching (sendId,
+    // recipient.id), so a single call covers all links for this recipient.
+    // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
+    // same update links.length times.
+    db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { sent, username: recipient.username };
   }, 5);
 

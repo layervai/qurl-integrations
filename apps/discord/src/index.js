@@ -50,6 +50,16 @@ if (!Number.isFinite(config.RATE_LIMIT_MAX_REQUESTS) || config.RATE_LIMIT_MAX_RE
   logger.error('RATE_LIMIT_MAX_REQUESTS must be a positive integer');
   process.exit(1);
 }
+// Each org name is interpolated into GitHub search queries
+// (`type:pr author:X org:<org> is:merged`). Reject anything that doesn't
+// match GitHub's org-name rules so an injected space can't smuggle extra
+// search qualifiers.
+for (const org of config.ALLOWED_GITHUB_ORGS) {
+  if (!/^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/.test(org)) {
+    logger.error(`ALLOWED_GITHUB_ORGS contains invalid org name: "${org}"`);
+    process.exit(1);
+  }
+}
 
 if (config.QURL_ENDPOINT === 'https://api.layerv.ai') {
   logger.warn('QURL_ENDPOINT is using production default — set via env var for non-prod');

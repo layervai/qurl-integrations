@@ -196,6 +196,24 @@ function rateLimit(req, res, next) {
   next();
 }
 
+// Minimal cookie parse — avoids pulling in cookie-parser. Format is
+// `name=value; name=value; ...`; we only need one named cookie so tolerate
+// other pairs without depending on full RFC parsing.
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+const OAUTH_SESSION_COOKIE = 'qurl_oauth_session';
+const COOKIE_TTL_SECONDS = 15 * 60; // 15 minutes
+
 // Start GitHub OAuth flow
 router.get('/github', rateLimit, (req, res) => {
   const { state } = req.query;
@@ -221,6 +239,15 @@ router.get('/github', rateLimit, (req, res) => {
       type: 'warning',
     }));
   }
+
+  // Bind state to this browser session. The callback must present both the
+  // state (from GitHub's redirect) AND this cookie value; without the cookie
+  // a leaked state URL can't be completed in a different browser.
+  res.setHeader('Set-Cookie',
+    `${OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}; ` +
+    'HttpOnly; Secure; SameSite=Lax; Path=/auth/; ' +
+    `Max-Age=${COOKIE_TTL_SECONDS}`
+  );
 
   const params = new URLSearchParams({
     client_id: config.GITHUB_CLIENT_ID,
@@ -261,6 +288,26 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       type: 'error',
     }));
   }
+
+  // Session binding: the cookie was set by /auth/github on the initiating
+  // browser. Must match the state from GitHub's redirect. If a user
+  // forwards the callback URL to someone else, that someone doesn't have
+  // the cookie and can't complete the link.
+  const cookieState = readCookie(req, OAUTH_SESSION_COOKIE);
+  if (!cookieState || cookieState !== state) {
+    logger.warn('OAuth callback rejected: session cookie missing or mismatched', { hasCookie: !!cookieState });
+    // Clear any stale cookie.
+    res.setHeader('Set-Cookie', `${OAUTH_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/auth/; Max-Age=0`);
+    return res.status(400).send(renderPage({
+      title: 'Invalid Session',
+      icon: '🚫',
+      heading: 'Invalid Session',
+      message: 'This authorization link can only be completed in the browser that opened it. Please run /link again in Discord.',
+      type: 'error',
+    }));
+  }
+  // Clear the cookie so it can't be replayed.
+  res.setHeader('Set-Cookie', `${OAUTH_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/auth/; Max-Age=0`);
 
   // Atomic DELETE ... RETURNING closes the TOCTOU window: a second concurrent
   // request with the same state gets no row back and is rejected.
