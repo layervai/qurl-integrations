@@ -243,6 +243,24 @@ cleanupOldSends();
 const sendsCleanupInterval = setInterval(cleanupOldSends, 24 * 60 * 60 * 1000);
 sendsCleanupInterval.unref();
 
+// Purge orphaned OAuth tokens older than 7 days. The tokens have `read:user`
+// scope and GitHub expires them after its own (longer) TTL, so after 7 days
+// they're effectively dead and keeping them only lets the table grow. A
+// future background sweeper can intercept this cleanup to retry revocation
+// first; for now we just drop the row and rely on GitHub's own expiry.
+function cleanupOrphanedTokens() {
+  const result = db.prepare(`
+    DELETE FROM orphaned_oauth_tokens
+    WHERE datetime(recorded_at) < datetime('now', '-7 days')
+  `).run();
+  if (result.changes > 0) {
+    logger.info(`Cleaned up ${result.changes} orphaned oauth tokens (>7d old)`);
+  }
+}
+cleanupOrphanedTokens();
+const orphanedTokenCleanupInterval = setInterval(cleanupOrphanedTokens, 24 * 60 * 60 * 1000);
+orphanedTokenCleanupInterval.unref();
+
 const dbModule = {
   BADGE_TYPES,
   BADGE_INFO,
@@ -668,12 +686,22 @@ const dbModule = {
       INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name, attachment_content_type, attachment_url)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType ?? null, attachmentUrl ?? null);
+    // Encrypt the Discord CDN URL at rest for consistency with the other
+    // secrets in this table. Discord signs these URLs with a short TTL, but
+    // an EFS leak inside the window could still be used to re-fetch the file.
+    const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
+    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType ?? null, encryptedUrl);
   },
 
   getSendConfig(sendId, senderDiscordId) {
     const stmt = db.prepare('SELECT * FROM qurl_send_configs WHERE send_id = ? AND sender_discord_id = ?');
-    return stmt.get(sendId, senderDiscordId);
+    const row = stmt.get(sendId, senderDiscordId);
+    if (!row) return row;
+    // Return a copy with the attachment URL decrypted. Legacy plaintext rows
+    // pass through untouched via utils/crypto.decrypt.
+    return row.attachment_url
+      ? { ...row, attachment_url: decrypt(row.attachment_url) }
+      : row;
   },
 
   getSendResourceIds(sendId, senderDiscordId) {
@@ -732,6 +760,7 @@ const dbModule = {
   close() {
     clearInterval(cleanupInterval);
     clearInterval(sendsCleanupInterval);
+    clearInterval(orphanedTokenCleanupInterval);
     db.close();
     logger.info('Database closed');
   },

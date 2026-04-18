@@ -27,6 +27,12 @@ if (process.env.NODE_ENV === 'production') {
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
+  // OAuth state flows through BASE_URL; plaintext http:// would expose the
+  // state token (and the redirect itself) to any network path observer.
+  if (!config.BASE_URL.startsWith('https://')) {
+    logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
+    process.exit(1);
+  }
 }
 
 // Validate numeric config values

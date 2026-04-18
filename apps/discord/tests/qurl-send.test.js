@@ -1436,7 +1436,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'user1' },
     ]);
 
-    const result = await handleAddRecipients('nonexistent-send', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('nonexistent-send', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Send configuration not found.');
   });
 
@@ -1452,7 +1452,7 @@ describe('handleAddRecipients', () => {
       { id: 'bot-2', bot: true, username: 'AnotherBot' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1467,7 +1467,7 @@ describe('handleAddRecipients', () => {
       { id: 'sender-1', bot: false, username: 'SenderSelf' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1483,7 +1483,7 @@ describe('handleAddRecipients', () => {
       { id: 'bot-1', bot: true, username: 'BotUser' },
     ]);
 
-    const result = await handleAddRecipients('send-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-1', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('No valid recipients selected (bots and yourself are excluded).');
   });
 
@@ -1517,7 +1517,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-file-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-file-1', users, mockOriginalInteraction, 'test-api-key');
 
     // Re-uploads a fresh resource from the stored attachment URL rather than
     // reusing the (possibly-drained) original connector_resource_id
@@ -1561,7 +1561,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Charlie' },
     ]);
 
-    const result = await handleAddRecipients('send-url-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-url-1', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
@@ -1597,7 +1597,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Dana' },
     ]);
 
-    const result = await handleAddRecipients('send-maps-1', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-maps-1', users, mockOriginalInteraction, 'test-api-key');
 
     // Should use uploadJsonToConnector with the location name
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
@@ -1636,7 +1636,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-partial', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-partial', users, mockOriginalInteraction, 'test-api-key');
 
     expect(result.msg).toMatch(/Added 1 recipient/);
     expect(result.msg).toMatch(/1 could not be reached/);
@@ -1659,7 +1659,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Eve' },
     ]);
 
-    const result = await handleAddRecipients('send-broken', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-broken', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Cannot add recipients \u2014 send configuration is incomplete.');
   });
 
@@ -1689,7 +1689,7 @@ describe('handleAddRecipients', () => {
       { id: 'sender-1', bot: false, username: 'SenderSelf' },
     ]);
 
-    const result = await handleAddRecipients('send-mixed', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-mixed', users, mockOriginalInteraction, 'test-api-key');
 
     // Only Alice and Bob should get DMs (bot and sender excluded)
     expect(mockSendDM).toHaveBeenCalledTimes(2);
@@ -1718,7 +1718,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-1', bot: false, username: 'Alice' },
     ]);
 
-    const result = await handleAddRecipients('send-fail', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
   });
 
@@ -1754,7 +1754,7 @@ describe('handleAddRecipients', () => {
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection(userList);
-    const result = await handleAddRecipients('send-batch', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-batch', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
@@ -1788,7 +1788,7 @@ describe('handleAddRecipients', () => {
     mockSendDM.mockResolvedValue(true);
 
     const users = makeUsersCollection(userList);
-    const result = await handleAddRecipients('send-ok', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-ok', users, mockOriginalInteraction, 'test-api-key');
 
     expect(mockDownloadAndUpload).toHaveBeenCalledTimes(1);
     expect(mockMintLinks).toHaveBeenCalledTimes(1);
@@ -1815,7 +1815,7 @@ describe('handleAddRecipients', () => {
       { id: 'rcpt-2', bot: false, username: 'Bob' },
     ]);
 
-    const result = await handleAddRecipients('send-allfail', 'sender-1', users, mockOriginalInteraction, 'test-api-key');
+    const result = await handleAddRecipients('send-allfail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Failed to create links for new recipients.');
     expect(mockSendDM).not.toHaveBeenCalled();
   });

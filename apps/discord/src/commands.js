@@ -556,7 +556,7 @@ async function handleSend(interaction) {
       // non-timeout errors land in logs with their real detail.
       const isTimeout = err?.code === 'InteractionCollectorError' || /time/.test(err?.message || '');
       if (!isTimeout) {
-        logger.error('Modal submit failed unexpectedly', { sendId, error: err?.message });
+        logger.error('Modal submit failed unexpectedly', { sendNonce, error: err?.message });
       }
       clearCooldown(interaction.user.id);
       return interaction.editReply({
@@ -951,7 +951,7 @@ async function handleSend(interaction) {
 
             await selectInteraction.deferUpdate();
             const addResult = await handleAddRecipients(
-              sendId, interaction.user.id, selectInteraction.users, interaction, apiKey,
+              sendId, selectInteraction.users, interaction, apiKey,
             );
 
             if (addResult.delivered > 0) {
@@ -993,11 +993,11 @@ async function handleSend(interaction) {
 
 }
 
-// Handle adding new recipients to an existing send. senderDiscordId is no
-// longer accepted from the caller — we derive it from originalInteraction
-// directly so a refactor can't accidentally let one user add recipients to
-// another user's send.
-async function handleAddRecipients(sendId, _unusedSenderDiscordId, usersCollection, originalInteraction, apiKey) {
+// Handle adding new recipients to an existing send. senderDiscordId is
+// derived from originalInteraction directly so no caller can pass a
+// mismatched value and accidentally let one user add recipients to another
+// user's send.
+async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
