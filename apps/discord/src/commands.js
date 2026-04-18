@@ -428,6 +428,9 @@ async function handleSend(interaction) {
       recipients = [selectedUser];
       await selectInteraction.deferUpdate();
     } catch {
+      // Timeout: release the cooldown so the user isn't blocked for 30s
+      // after simply letting the select menu expire.
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
     }
   } else if (target === 'channel') {
@@ -507,6 +510,7 @@ async function handleSend(interaction) {
       time: 60000,
     });
   } catch {
+    clearCooldown(interaction.user.id);
     return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
   }
 

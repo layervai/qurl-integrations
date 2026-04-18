@@ -48,8 +48,10 @@ app.get('/health', (req, res) => {
     db.getStats();
     res.status(200).json({ status: 'ok' });
   } catch (err) {
+    // Log full detail internally; omit from the response so better-sqlite3
+    // error messages (paths, schema) don't leak to an unauthenticated probe.
     logger.warn('Health check failed', { error: err.message });
-    res.status(503).json({ status: 'unhealthy', error: err.message });
+    res.status(503).json({ status: 'unhealthy' });
   }
 });
 

@@ -1,7 +1,7 @@
 {
-  "name": "opennhp-bot",
+  "name": "qurl-discord-bot",
   "version": "2.1.0",
-  "description": "Discord bot for OpenNHP community - GitHub OAuth linking and auto Contributor role assignment",
+  "description": "QURL Discord bot — /qurl send for secure one-time resource sharing, GitHub OAuth linking, auto Contributor role",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -12,11 +12,12 @@
   "keywords": [
     "discord",
     "bot",
-    "opennhp",
+    "qurl",
+    "layerv",
     "github",
     "oauth"
   ],
-  "author": "OpenNHP",
+  "author": "LayerV",
   "license": "Apache-2.0",
   "dependencies": {
     "better-sqlite3": "^12.8.0",

@@ -20,10 +20,11 @@ if (missing.length > 0) {
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient.
 if (process.env.NODE_ENV === 'production') {
-  const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY'];
+  const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
   const prodMissing = prodRequired.filter(k => !process.env[k]);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
+    logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
 }

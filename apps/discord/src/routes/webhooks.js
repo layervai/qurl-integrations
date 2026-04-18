@@ -78,10 +78,17 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+// Hard cap per-IP array to prevent a single abusive IP from growing its
+// timestamp list unboundedly between sweeps.
+const BAD_SIG_PER_IP_CAP = BAD_SIG_MAX * 4;
+
 function recordBadSig(ip) {
   const now = Date.now();
-  const list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
+  let list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
   list.push(now);
+  if (list.length > BAD_SIG_PER_IP_CAP) {
+    list = list.slice(-BAD_SIG_PER_IP_CAP);
+  }
   if (badSigAttempts.size > 10_000) {
     const oldest = badSigAttempts.keys().next().value;
     badSigAttempts.delete(oldest);

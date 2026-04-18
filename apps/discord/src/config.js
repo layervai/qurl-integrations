@@ -48,12 +48,18 @@ module.exports = {
   RATE_LIMIT_MAX_REQUESTS: intEnv('RATE_LIMIT_MAX_REQUESTS', 30),
 
   // OAuth link expiry (in minutes)
-  PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 30),
+  // Shortened from 30 to 10 minutes: the OAuth state is not bound to the
+  // initiating browser session, so a shorter expiry narrows the window for
+  // a leaked/shoulder-surfed state token to be replayed by an attacker.
+  PENDING_LINK_EXPIRY_MINUTES: intEnv('PENDING_LINK_EXPIRY_MINUTES', 10),
 
   // Database — absolute path so the DB is anchored to the bot's source tree
   // regardless of the cwd the process was launched from.
   DATABASE_PATH: process.env.DATABASE_PATH
     ? path.resolve(process.env.DATABASE_PATH)
+    // Keep the 'opennhp-bot.db' filename: it matches the mounted EFS volume
+    // for existing deployments. Migrating requires a rename operation in
+    // infra. Set DATABASE_PATH env to override for new deployments.
     : path.resolve(__dirname, '..', 'data', 'opennhp-bot.db'),
 
   // Admin Discord user IDs (comma-separated) - can use /forcelink, /bulklink, /unlinked

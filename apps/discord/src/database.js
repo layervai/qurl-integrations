@@ -13,6 +13,9 @@ if (!fs.existsSync(dbDir)) {
 
 const db = new Database(config.DATABASE_PATH);
 db.pragma('journal_mode = WAL');
+// Retry for up to 5s on writer contention (Express + Discord events can
+// race) before surfacing SQLITE_BUSY to the caller.
+db.pragma('busy_timeout = 5000');
 
 // Initialize tables
 db.exec(`
@@ -696,8 +699,10 @@ const dbModule = {
   getGuildConfig(guildId) {
     const stmt = db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?');
     const row = stmt.get(guildId);
-    if (row && row.qurl_api_key) row.qurl_api_key = decrypt(row.qurl_api_key);
-    return row;
+    if (!row) return row;
+    // Return a copy with the decrypted key — don't mutate the SQLite row,
+    // so the plaintext value doesn't linger on an object callers might log.
+    return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
   },
 
   // Close database (for graceful shutdown)
