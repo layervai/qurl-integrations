@@ -1,0 +1,37 @@
+# Dependency Age Check (Go modules)
+# Thin shim calling shared reusable workflow.
+name: Dependency Age Check (Go)
+
+on:
+  pull_request:
+    paths:
+      - "**/go.sum"
+      - "go.sum"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR branch — the reusable workflow
+# makes sequential registry calls; no reason to let two race for an
+# outdated diff.
+concurrency:
+  group: dep-age-go-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  age-check:
+    # Honor `age-check-bypass` at the shim level AS WELL AS inside the
+    # reusable workflow. Defense-in-depth: if the reusable workflow
+    # implementation ever drops the label check (or the reusable ref
+    # is bumped to a version that doesn't respect it), the shim still
+    # skips consistently.
+    #
+    # On `workflow_dispatch`, `github.event.pull_request` is null — the
+    # labels array evaluates empty and `contains(...)` is false, so the
+    # job always runs. That's the desired behavior: manual runs
+    # shouldn't be bypassable via PR labels.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'age-check-bypass') }}
+    uses: layervai/ops-routines/.github/workflows/age-check-go.yml@435d5be4e82fcf749b1689deb85dbcd5d29f9bac # v0.1.3
+    permissions:
+      contents: read
