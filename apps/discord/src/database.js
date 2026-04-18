@@ -85,6 +85,7 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_github_username ON github_links(github_username);
+  CREATE INDEX IF NOT EXISTS idx_pending_links_created ON pending_links(created_at);
   CREATE INDEX IF NOT EXISTS idx_contributions_discord ON contributions(discord_id);
   CREATE INDEX IF NOT EXISTS idx_contributions_merged ON contributions(merged_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_contributions_unique ON contributions(repo, pr_number);

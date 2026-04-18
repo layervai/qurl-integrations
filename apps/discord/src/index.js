@@ -185,7 +185,7 @@ process.on('SIGINT', () => {
 
 // Start everything
 async function start() {
-  logger.info('Starting OpenNHP Bot...');
+  logger.info('Starting QURL Discord Bot...');
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 

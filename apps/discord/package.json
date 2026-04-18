@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "eslint": "^8.57.1",
-    "jest": "^30.3.0",
+    "jest": "~30.3.0",
     "supertest": "^7.2.2"
   },
   "engines": {
