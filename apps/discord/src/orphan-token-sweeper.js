@@ -64,6 +64,7 @@ async function sweepOnce() {
         });
         backoffMs = Math.min(backoffMs * 2, 60_000);
         await new Promise(r => setTimeout(r, backoffMs));
+        accessToken = null;
         break;
       }
     } catch (err) {
@@ -71,6 +72,11 @@ async function sweepOnce() {
       logger.warn('Orphan token retry-revoke failed (will retry next sweep)', {
         id, tokenHash8, error: err.message,
       });
+    } finally {
+      // Shorten the plaintext memory window — the next iteration decrypts
+      // a fresh token, so this one should not linger in scope under a
+      // long sleep or error path.
+      accessToken = null;
     }
     if (i < rows.length - 1) await new Promise(r => setTimeout(r, backoffMs));
   }

@@ -407,11 +407,21 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
           return String(a.qurl_id).localeCompare(String(b.qurl_id));
         });
         const recentN = allQurls.slice(-snapshotExpectedCount);
-        recentN.forEach((q, i) => {
+        if (recentN.length !== recipients.length) {
+          logger.warn('Monitor tracking count mismatch', {
+            sendId, qurls: recentN.length, recipients: recipients.length,
+          });
+        }
+        // Bound the zip to min(qurls, recipients) so we never index recipients
+        // past its end or leave a qurl without a label. Any excess on either
+        // side is logged above for oncall diagnosis.
+        const trackCount = Math.min(recentN.length, recipients.length);
+        for (let i = 0; i < trackCount; i++) {
+          const q = recentN[i];
           localSet.add(q.qurl_id);
           const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
           linkStatus.set(q.qurl_id, { status: 'pending', username });
-        });
+        }
         trackedQurlIds = localSet;
         logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
       }
@@ -473,8 +483,12 @@ const MEMBER_FETCH_TTL = 60000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();
   const entry = memberFetchCache.get(guild.id);
+  // Coalesce BEFORE the TTL check: two concurrent callers after TTL expiry
+  // can otherwise both fall through the TTL gate before either stamps
+  // inFlight, defeating the dedup. An in-flight fetch is always fresher
+  // than a stale entry by definition, so joining it is always correct.
+  if (entry?.inFlight) return entry.inFlight;
   if (entry && now - entry.timestamp < MEMBER_FETCH_TTL) return;
-  if (entry && entry.inFlight) return entry.inFlight;
   const promise = guild.members.fetch();
   memberFetchCache.set(guild.id, { timestamp: now, inFlight: promise });
   try {

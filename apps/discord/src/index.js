@@ -35,6 +35,21 @@ if (process.env.NODE_ENV === 'production') {
     logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
     process.exit(1);
   }
+
+  // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot
+  // instead of on the first encrypt() call (which could be an OAuth token
+  // persist minutes into serving traffic). This validates the key material
+  // can both encrypt AND decrypt, not just decode as base64.
+  try {
+    const { encrypt, decrypt } = require('./utils/crypto');
+    const probe = `boot-smoke-${Date.now()}`;
+    if (decrypt(encrypt(probe)) !== probe) {
+      throw new Error('round-trip mismatch');
+    }
+  } catch (err) {
+    logger.error('KEY_ENCRYPTION_KEY smoke test failed at boot — refusing to start', { error: err.message });
+    process.exit(1);
+  }
 }
 
 // Validate numeric config values
@@ -66,6 +81,20 @@ if (config.QURL_ENDPOINT === 'https://api.layerv.ai') {
 }
 if (config.CONNECTOR_URL === 'https://get.qurl.link:9808') {
   logger.warn('CONNECTOR_URL is using production default — set via env var for non-prod');
+}
+// In production, require explicit endpoint config rather than relying on
+// fallbacks. Sending traffic to the wrong endpoint (e.g. stale fallback
+// after an infra rename) would silently route tenant keys + files to an
+// unintended host.
+if (process.env.NODE_ENV === 'production') {
+  if (!process.env.QURL_ENDPOINT) {
+    logger.error('QURL_ENDPOINT must be explicitly set in production');
+    process.exit(1);
+  }
+  if (!process.env.CONNECTOR_URL) {
+    logger.error('CONNECTOR_URL must be explicitly set in production');
+    process.exit(1);
+  }
 }
 
 // Register commands when ready
