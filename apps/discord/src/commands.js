@@ -882,10 +882,31 @@ async function handleSend(interaction, apiKey) {
   // Track whether this send has claimed the file-concurrency slot so the
   // outer finally can release it exactly once even if we hit an error path.
   let fileSendSlotClaimed = false;
+  // Safety watchdog: if an upload hangs past the deadline (network stuck,
+  // misbehaving upstream AbortSignal), forcibly release the slot so a bad
+  // upload can never permanently consume one of the MAX_CONCURRENT_FILE_SENDS
+  // slots. 5 min is generous — every internal fetch already has its own
+  // shorter AbortSignal timeout, so this fires only on truly stuck flows.
+  let slotWatchdog = null;
+  const releaseSlot = () => {
+    if (fileSendSlotClaimed) {
+      activeFileSends--;
+      fileSendSlotClaimed = false;
+    }
+    if (slotWatchdog) { clearTimeout(slotWatchdog); slotWatchdog = null; }
+  };
   try {
     if (resourceType === RESOURCE_TYPES.FILE) {
       activeFileSends++;
       fileSendSlotClaimed = true;
+      slotWatchdog = setTimeout(() => {
+        if (fileSendSlotClaimed) {
+          logger.error('activeFileSends slot watchdog fired — slot force-released', { sendId });
+          activeFileSends--;
+          fileSendSlotClaimed = false;
+        }
+      }, 5 * 60 * 1000);
+      slotWatchdog.unref();
       const filename = sanitizeFilename(attachment.name);
       const expiresAt = expiryToISO(expiresIn);
 
@@ -956,12 +977,12 @@ async function handleSend(interaction, apiKey) {
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message });
     clearCooldown(interaction.user.id); // allow retry on failure
-    if (fileSendSlotClaimed) { activeFileSends--; fileSendSlotClaimed = false; }
+    releaseSlot();
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
     // done — we no longer hold the 25 MB buffer past this point.
-    if (fileSendSlotClaimed) { activeFileSends--; fileSendSlotClaimed = false; }
+    releaseSlot();
   }
 
   if (qurlLinks.length === 0) {

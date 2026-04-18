@@ -197,8 +197,16 @@ async function start() {
   // failed. Runs hourly on top of the 7-day purge in database.js.
   startOrphanTokenSweeper();
 
-  // Login to Discord
-  await client.login(config.DISCORD_TOKEN);
+  // Login to Discord with a 30s deadline. client.login() doesn't expose a
+  // native timeout; if the Discord API is unreachable the call can hang
+  // indefinitely and block boot without any log line pointing at the cause.
+  await Promise.race([
+    client.login(config.DISCORD_TOKEN),
+    new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error('Discord login timed out after 30s')), 30_000);
+      t.unref();
+    }),
+  ]);
 }
 
 start().catch(error => {
