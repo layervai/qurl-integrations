@@ -2,7 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 const { client, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
-const { startServer } = require('./server');
+const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./database');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 
@@ -162,6 +162,7 @@ async function gracefulShutdown(code = 0) {
         });
       });
     }
+    stopServerIntervals();
     await discordShutdown();
     db.close();
     logger.info('Shutdown complete');

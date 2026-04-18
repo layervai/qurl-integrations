@@ -68,7 +68,12 @@ async function sweepOnce() {
         break;
       }
     } catch (err) {
-      const tokenHash8 = crypto.createHash('sha256').update(accessToken || '').digest('hex').slice(0, 8);
+      // Only log a real token hash. If accessToken was already nulled out
+      // (e.g. rate-limit abort path above set it null before break), emit
+      // a sentinel instead of a misleading "hash of empty string".
+      const tokenHash8 = accessToken
+        ? crypto.createHash('sha256').update(accessToken).digest('hex').slice(0, 8)
+        : '(already-released)';
       logger.warn('Orphan token retry-revoke failed (will retry next sweep)', {
         id, tokenHash8, error: err.message,
       });

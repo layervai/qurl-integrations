@@ -394,6 +394,11 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
     else if (pollCount > 5 && pollCount % 2 !== 0) return;
     if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
       clearInterval(timer);
+      // interaction may have been nulled by stop() if this callback was
+      // already mid-execution when stop fired — clearInterval only prevents
+      // FUTURE ticks, not the one currently running. Skip the final edit
+      // in that case; the closure refs are already being released.
+      if (!interaction) return;
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
       await interaction.editReply({ content: finalMsg, components: [] }).catch(logIgnoredDiscordErr);
       return;
@@ -477,6 +482,9 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
         }
       }
       if (changed) {
+        // Same race as above — stop() may have nulled interaction during the
+        // awaited Promise.all. Skip the edit; next tick's stopped-check exits.
+        if (!interaction) return;
         const pending = [...linkStatus.values()].filter(s => s.status === 'pending').length;
         await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(logIgnoredDiscordErr);
         if (pending === 0) { allDone = true; clearInterval(timer); }

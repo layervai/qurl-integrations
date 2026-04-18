@@ -99,15 +99,18 @@ const metricsRateStore = new Map(); // ip -> number[] (request timestamps)
 const METRICS_WINDOW_MS = 60_000;
 const METRICS_MAX_PER_WINDOW = 30;
 // Evict stale entries periodically so the Map can't grow unboundedly
-// under scans from many unique IPs.
-setInterval(() => {
+// under scans from many unique IPs. Stored so it can be cleared on
+// graceful shutdown — .unref() keeps it from blocking exit, but an
+// explicit clear keeps the shutdown path symmetric with other intervals.
+const metricsSweepInterval = setInterval(() => {
   const cutoff = Date.now() - METRICS_WINDOW_MS * 2;
   for (const [ip, times] of metricsRateStore) {
     const recent = times.filter(t => t > cutoff);
     if (recent.length === 0) metricsRateStore.delete(ip);
     else metricsRateStore.set(ip, recent);
   }
-}, 30_000).unref();
+}, 30_000);
+metricsSweepInterval.unref();
 
 function metricsRateLimit(req, res, next) {
   const ip = req.ip || 'unknown';
@@ -175,4 +178,8 @@ function startServer() {
   return server;
 }
 
-module.exports = { app, startServer };
+function stopIntervals() {
+  clearInterval(metricsSweepInterval);
+}
+
+module.exports = { app, startServer, stopIntervals };
