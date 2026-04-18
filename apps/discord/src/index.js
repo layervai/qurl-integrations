@@ -59,7 +59,7 @@ client.on('error', error => {
 // entire process on any stray rejection (transient Discord timeouts, network
 // blips) which made the bot fragile. Truly fatal errors surface via
 // uncaughtException below.
-process.on('unhandledRejection', (error, promise) => {
+process.on('unhandledRejection', (error, _promise) => {
   logger.error('Unhandled promise rejection (logged, not fatal)', {
     error: error?.message || error,
     stack: error?.stack,

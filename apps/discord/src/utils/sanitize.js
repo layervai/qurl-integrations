@@ -7,6 +7,7 @@ function sanitizeFilename(name) {
   const cleaned = String(name ?? '')
     .replace(/[/\\:*?"<>|]/g, '_')
     .replace(/\.\./g, '_')
+    // eslint-disable-next-line no-control-regex -- intentional: strip control chars
     .replace(/[\x00-\x1f\x7f]/g, '')
     .replace(/^\.+/, '_')
     .substring(0, 200)

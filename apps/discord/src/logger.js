@@ -13,8 +13,37 @@ function formatTimestamp() {
   return new Date().toISOString();
 }
 
+// Redact common secret-ish field names anywhere in a meta object before
+// stringifying. Defense-in-depth against a caller accidentally logging
+// `{ apiKey, token, password, ... }`.
+const REDACT_KEYS = new Set([
+  'apikey', 'api_key', 'apiKey',
+  'token', 'accesstoken', 'access_token', 'accessToken',
+  'authorization', 'auth',
+  'password', 'secret',
+  'qurl_api_key', 'qurlApiKey',
+  'githubClientSecret', 'github_client_secret',
+  'webhookSecret', 'webhook_secret',
+]);
+
+function redact(value, depth = 0) {
+  if (depth > 5 || value == null) return value;
+  if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
+  if (typeof value !== 'object') return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (REDACT_KEYS.has(k) || REDACT_KEYS.has(k.toLowerCase())) {
+      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+    } else {
+      out[k] = redact(v, depth + 1);
+    }
+  }
+  return out;
+}
+
 function formatMessage(level, message, meta = {}) {
-  const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
+  const safe = redact(meta);
+  const metaStr = Object.keys(safe).length > 0 ? ` ${JSON.stringify(safe)}` : '';
   return `[${formatTimestamp()}] ${level.toUpperCase()}: ${message}${metaStr}`;
 }
 

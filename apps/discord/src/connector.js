@@ -5,6 +5,16 @@ const { sanitizeFilename } = require('./utils/sanitize');
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
+// Log the raw connector body at debug level and throw a body-free Error.
+// Mirrors qurl.js — connector responses may echo request headers/tokens, and
+// upstream callers log err.message into application logs.
+async function throwConnectorError(label, response) {
+  let bodyLen = 0;
+  try { bodyLen = (await response.text()).length; } catch { /* ignore */ }
+  logger.debug(`${label} error`, { status: response.status, bodyLen });
+  throw new Error(`${label} failed (${response.status})`);
+}
+
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.
 // Guards against a CDN that returns a missing/incorrect Content-Length — the
 // old code would buffer the whole body into memory before noticing it was
@@ -24,7 +34,7 @@ async function readBodyWithCap(response, capBytes) {
   let received = 0;
   const chunks = [];
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
@@ -116,8 +126,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   });
 
   if (!uploadResponse.ok) {
-    const text = await uploadResponse.text();
-    throw new Error(`Connector upload failed (${uploadResponse.status}): ${text}`);
+    return throwConnectorError('Connector upload', uploadResponse);
   }
 
   const result = await uploadResponse.json();
@@ -160,8 +169,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   });
 
   if (!uploadResponse.ok) {
-    const text = await uploadResponse.text();
-    throw new Error(`Connector re-upload failed (${uploadResponse.status}): ${text}`);
+    return throwConnectorError('Connector re-upload', uploadResponse);
   }
 
   const result = await uploadResponse.json();
@@ -221,8 +229,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   });
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Connector mint_link failed (${response.status}): ${text}`);
+    return throwConnectorError('Connector mint_link', response);
   }
 
   const result = await response.json();
@@ -257,8 +264,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
   });
 
   if (!uploadResponse.ok) {
-    const text = await uploadResponse.text();
-    throw new Error(`Connector JSON upload failed (${uploadResponse.status}): ${text}`);
+    return throwConnectorError('Connector JSON upload', uploadResponse);
   }
 
   const result = await uploadResponse.json();

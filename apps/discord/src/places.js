@@ -20,7 +20,14 @@ async function searchPlaces(query) {
     throw new Error(`Places API error: ${response.status}`);
   }
 
-  const data = await response.json();
+  // The Places API occasionally returns an HTML error page during outages;
+  // `.json()` on that throws a SyntaxError with no context.
+  let data;
+  try {
+    data = await response.json();
+  } catch (err) {
+    throw new Error(`Places API returned non-JSON response (${response.status}): ${err.message}`);
+  }
   if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
     throw new Error(`Places API status: ${data.status}`);
   }

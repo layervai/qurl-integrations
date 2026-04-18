@@ -16,10 +16,10 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, LIMITS, RESOURCE_TYPES, DM_STATUS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
-const { createOneTimeLink, deleteLink, getResourceStatus } = require('./qurl');
+const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
@@ -66,11 +66,15 @@ function sanitizeMessage(msg) {
   // `[Free Prizes](https://phishing.com)` can't render as a masked link.
   // The `[mention]` literal we insert below is re-applied post-escape as a
   // plain substitution so the brackets stay visible to the user.
+  // Sentinel survives the markdown-escape pass unchanged: it contains no
+  // chars in the escape regex ([\*~`>|\[\]()\\_]). Suffix/prefix of random
+  // hex so it can't collide with anything a user would plausibly type.
+  const MENTION_SENTINEL = 'XMENTIONX74caf3b0e79aXMENTIONX';
   const stripped = msg
     .replace(/@(everyone|here)/gi, '@\u200b$1')
-    .replace(/<@[!&]?\d+>/g, '\x00MENTION\x00');
+    .replace(/<@[!&]?\d+>/g, MENTION_SENTINEL);
   return escapeDiscordMarkdown(stripped)
-    .replace(/\x00MENTION\x00/g, '[mention]')
+    .replaceAll(MENTION_SENTINEL, '[mention]')
     .slice(0, 500);
 }
 
@@ -120,7 +124,7 @@ async function batchSettled(items, fn, batchSize = 5) {
 }
 
 // --- Shared DM embed builder ---
-function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel: _resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
@@ -208,12 +212,6 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
   const startTime = Date.now();
 
-  const MAX_NAMES_SHOWN = 5;
-
-  function truncateNames(names) {
-    if (names.length <= MAX_NAMES_SHOWN) return names.join(', ');
-    return names.slice(0, MAX_NAMES_SHOWN).join(', ') + ` +${names.length - MAX_NAMES_SHOWN} more`;
-  }
 
   function buildStatusMsg() {
     let opened = 0, expired = 0, pending = 0;
@@ -1138,7 +1136,9 @@ async function handleAddRecipients(sendId, _unusedSenderDiscordId, usersCollecti
     });
 
     const sent = await sendDM(recipient.id, { embeds: [embed] });
-    for (const l of links) {
+    // One status row per link. The per-link column has a foreign key back
+    // to qurl_sends so we update once per row, not once per (recipient, link) pair.
+    for (let i = 0; i < links.length; i++) {
       db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     }
     return { sent, username: recipient.username };

@@ -31,7 +31,7 @@ let channels = {
 async function ensureRolesAndChannels() {
   if (!guild) return;
 
-  const { ChannelType, PermissionFlagsBits } = require('discord.js');
+  const { ChannelType } = require('discord.js');
 
   // Define required roles with colors
   const requiredRoles = [

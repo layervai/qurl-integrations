@@ -33,10 +33,21 @@ function getKey() {
   return buf;
 }
 
+let plaintextWarned = false;
 function encrypt(plaintext) {
   if (plaintext == null) return plaintext;
   const key = getKey();
-  if (!key) return plaintext; // no key → store plaintext (dev/tests)
+  if (!key) {
+    // Warn once per process so staging/preview environments without
+    // KEY_ENCRYPTION_KEY don't silently store secrets in plaintext.
+    // index.js fails boot in NODE_ENV=production so this branch only
+    // runs in dev/test/staging.
+    if (!plaintextWarned) {
+      plaintextWarned = true;
+      logger.warn('KEY_ENCRYPTION_KEY is not set — secrets are being stored in PLAINTEXT. Generate a key with `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"` and set KEY_ENCRYPTION_KEY in the environment before using in any shared deployment.');
+    }
+    return plaintext;
+  }
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
   const ct = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
@@ -61,6 +72,6 @@ function decrypt(value) {
 }
 
 // Reset cache — test-only; lets jest env var changes take effect.
-function _resetKeyCache() { cachedKey = null; }
+function _resetKeyCache() { cachedKey = null; plaintextWarned = false; }
 
 module.exports = { encrypt, decrypt, _resetKeyCache };

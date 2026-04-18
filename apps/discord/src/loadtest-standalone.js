@@ -26,7 +26,7 @@ if (fs.existsSync(envFile)) {
 }
 
 const config = require('./config');
-const { uploadToConnector, mintLinks } = require('./connector');
+const { mintLinks } = require('./connector');
 const { createOneTimeLink } = require('./qurl');
 
 const args = process.argv.slice(2);

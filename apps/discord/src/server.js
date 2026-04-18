@@ -84,7 +84,8 @@ app.get('/metrics', (req, res) => {
 app.use('/auth', oauthRouter);
 app.use('/webhook', webhooksRouter);
 
-// Error handler
+// Error handler (Express requires the 4-arg signature; `next` unused)
+// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   logger.error('Express error', { error: err.message, stack: err.stack });
   res.status(500).send(renderPage({
