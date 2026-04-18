@@ -39,10 +39,22 @@ const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./dis
 // Defense-in-depth only — the primary binding is the single-use DB row
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
+let _warnedStateSecretFallback = false;
 function stateSecret() {
   // Reuse GITHUB_CLIENT_SECRET as the HMAC key: it's already required in
-  // prod, rotated together with OAuth, and never leaves the server.
-  return config.GITHUB_CLIENT_SECRET || 'dev-oauth-state-secret';
+  // prod (index.js boot validation), rotated together with OAuth, and never
+  // leaves the server. The fallback literal is only reachable in local
+  // dev/test where GITHUB_CLIENT_SECRET isn't set — warn once loudly so a
+  // misconfigured staging deploy surfaces the issue instead of silently
+  // running with a static attacker-known key.
+  if (!config.GITHUB_CLIENT_SECRET) {
+    if (!_warnedStateSecretFallback && process.env.NODE_ENV !== 'test') {
+      logger.warn('OAuth state HMAC using static dev fallback — set GITHUB_CLIENT_SECRET');
+      _warnedStateSecretFallback = true;
+    }
+    return 'dev-oauth-state-secret';
+  }
+  return config.GITHUB_CLIENT_SECRET;
 }
 function generateState(discordId) {
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -314,10 +326,20 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       // so walk every resource and collect all its qurls, then pick the
       // `expectedCount` most recent across the whole send.
       if (!trackedQurlIds) {
-        trackedQurlIds = new Set();
+        // Capture a local reference. control.addRecipients() can null the
+        // outer `trackedQurlIds` during the awaits below; populate the
+        // local Set and only assign it back if it's still current at the
+        // end — otherwise a new init is already in progress and our work
+        // would stomp it.
+        const localSet = new Set();
         const statuses = await Promise.all(
           resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
         );
+        if (trackedQurlIds && trackedQurlIds !== localSet) {
+          // addRecipients fired during the await; let the next tick re-init.
+          trackedQurlIds = null;
+          return;
+        }
         const allQurls = [];
         for (const data of statuses) {
           if (!data || !data.qurls) continue;
@@ -333,10 +355,11 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         });
         const recentN = allQurls.slice(-expectedCount);
         recentN.forEach((q, i) => {
-          trackedQurlIds.add(q.qurl_id);
+          localSet.add(q.qurl_id);
           const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
           linkStatus.set(q.qurl_id, { status: 'pending', username });
         });
+        trackedQurlIds = localSet;
         logger.info('Link monitor tracking', { sendId, tracked: trackedQurlIds.size, resources: resourceIds.length });
       }
 
@@ -2024,7 +2047,7 @@ const commands = [
         if (!interaction.guildId) {
           return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
         }
-        if (!interaction.memberPermissions?.has('ManageGuild')) {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
         }
         // Refuse to accept a guild API key unless encryption-at-rest is
