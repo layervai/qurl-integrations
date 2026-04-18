@@ -85,7 +85,14 @@ function decrypt(value) {
   return pt.toString('utf8');
 }
 
-// Reset cache — test-only; lets jest env var changes take effect.
+// Reset cache — test-only; lets jest env var changes take effect. Exported
+// conditionally so a production caller that accidentally imports it can't
+// null out the encryption key at runtime (which would break the next
+// encrypt call mid-request).
 function _resetKeyCache() { cachedKey = null; plaintextWarned = false; }
 
-module.exports = { encrypt, decrypt, _resetKeyCache };
+const exports_ = { encrypt, decrypt };
+if (process.env.NODE_ENV !== 'production') {
+  exports_._resetKeyCache = _resetKeyCache;
+}
+module.exports = exports_;

@@ -124,7 +124,7 @@ async function gracefulShutdown(code = 0) {
         });
       });
     }
-    discordShutdown();
+    await discordShutdown();
     db.close();
     logger.info('Shutdown complete');
   } catch (error) {
@@ -164,5 +164,10 @@ async function start() {
 
 start().catch(error => {
   logger.error('Failed to start', { error: error.message });
-  process.exit(1);
+  // Route through gracefulShutdown so any partial state (httpServer
+  // listening, Discord partially connected, DB open, sweeper timer armed)
+  // is torn down cleanly before exit. Previously this went straight to
+  // process.exit(1) and risked leaking WAL checkpoints + WebSocket sessions
+  // under ECS rolling deploys.
+  gracefulShutdown(1);
 });

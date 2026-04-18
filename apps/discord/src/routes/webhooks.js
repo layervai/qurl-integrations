@@ -12,6 +12,15 @@ const { escapeDiscordMarkdown } = require('../utils/sanitize');
 // those inside Discord embeds, which render markdown including [text](url)
 // links, so every field below goes through `md()` before interpolation.
 const md = escapeDiscordMarkdown;
+
+// Only https://github.com/ URLs are valid for EmbedBuilder.setURL here. A
+// crafted payload with a non-GitHub or non-https scheme would otherwise
+// produce a clickable link pointing anywhere. Returns null on mismatch so
+// the caller can omit setURL entirely.
+function safeGithubUrl(url) {
+  if (typeof url !== 'string') return null;
+  return url.startsWith('https://github.com/') ? url : null;
+}
 const {
   assignContributorRole,
   notifyPRMerge,
@@ -205,7 +214,7 @@ async function handlePullRequest(payload) {
           { name: 'Author', value: `@${md(pr.user.login)}`, inline: true },
           { name: 'Repo', value: md(payload.repository.full_name), inline: true }
         )
-        .setURL(pr.html_url)
+        .setURL(safeGithubUrl(pr.html_url) || undefined)
         .setTimestamp();
       await postToGitHubFeed(embed);
     }
@@ -230,7 +239,7 @@ async function handlePullRequest(payload) {
       { name: 'Author', value: `@${md(githubUsername)}`, inline: true },
       { name: 'Repo', value: md(repo), inline: true }
     )
-    .setURL(prUrl)
+    .setURL(safeGithubUrl(prUrl) || undefined)
     .setTimestamp();
   await postToGitHubFeed(mergeEmbed);
 
@@ -296,7 +305,7 @@ async function handleIssue(payload) {
         { name: 'Author', value: `@${md(githubUsername || 'unknown')}`, inline: true },
         { name: 'Repo', value: md(repo), inline: true }
       )
-      .setURL(issue.html_url)
+      .setURL(safeGithubUrl(issue.html_url) || undefined)
       .setTimestamp();
 
     if (labels.length > 0) {
@@ -321,7 +330,7 @@ async function handleRelease(payload) {
     .setTitle(`🚀 Release: ${md(release.tag_name)}`)
     .setDescription(`**${md(release.name || release.tag_name)}**`)
     .addFields({ name: 'Repo', value: md(repo), inline: true })
-    .setURL(release.html_url)
+    .setURL(safeGithubUrl(release.html_url) || undefined)
     .setTimestamp();
   await postToGitHubFeed(embed);
 }

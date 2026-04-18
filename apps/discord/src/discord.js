@@ -29,12 +29,16 @@ let channels = {
 };
 
 // Auto-create missing roles and channels
+// Returns { createdRoles: Map<name, Role>, createdChannels: Map<name, Channel> }
+// so refreshCache can seed the cache from the create() return values instead
+// of relying on the subsequent fetch() — Discord's API doesn't guarantee a
+// freshly-created resource shows up in the very next list call, so the cache
+// slot could stay null for an eventual-consistency window otherwise.
 async function ensureRolesAndChannels() {
-  if (!guild) return;
+  if (!guild) return { createdRoles: new Map(), createdChannels: new Map() };
 
   const { ChannelType } = require('discord.js');
 
-  // Define required roles with colors
   const requiredRoles = [
     { name: config.CONTRIBUTOR_ROLE_NAME, color: 0x3498DB, hoist: false },
     { name: config.ACTIVE_CONTRIBUTOR_ROLE_NAME, color: 0x2ECC71, hoist: true },
@@ -42,7 +46,6 @@ async function ensureRolesAndChannels() {
     { name: config.CHAMPION_ROLE_NAME, color: 0xF1C40F, hoist: true },
   ];
 
-  // Define required channels
   const requiredChannels = [
     { name: config.CONTRIBUTE_CHANNEL_NAME, topic: 'Good first issues and contribution opportunities' },
     { name: config.GITHUB_FEED_CHANNEL_NAME, topic: 'GitHub activity feed' },
@@ -50,18 +53,20 @@ async function ensureRolesAndChannels() {
 
   const allRoles = await guild.roles.fetch();
   const allChannels = await guild.channels.fetch();
+  const createdRoles = new Map();
+  const createdChannels = new Map();
 
-  // Create missing roles
   for (const roleConfig of requiredRoles) {
     const exists = allRoles.find(r => r.name === roleConfig.name);
     if (!exists) {
       try {
-        await guild.roles.create({
+        const created = await guild.roles.create({
           name: roleConfig.name,
           color: roleConfig.color,
           hoist: roleConfig.hoist,
           reason: 'Auto-created by OpenNHP bot',
         });
+        createdRoles.set(roleConfig.name, created);
         logger.info(`Created role: ${roleConfig.name}`);
       } catch (error) {
         logger.error(`Failed to create role ${roleConfig.name}`, { error: error.message });
@@ -69,23 +74,25 @@ async function ensureRolesAndChannels() {
     }
   }
 
-  // Create missing channels
   for (const channelConfig of requiredChannels) {
     const exists = allChannels.find(c => c.name === channelConfig.name);
     if (!exists) {
       try {
-        await guild.channels.create({
+        const created = await guild.channels.create({
           name: channelConfig.name,
           type: ChannelType.GuildText,
           topic: channelConfig.topic,
           reason: 'Auto-created by OpenNHP bot',
         });
+        createdChannels.set(channelConfig.name, created);
         logger.info(`Created channel: #${channelConfig.name}`);
       } catch (error) {
         logger.error(`Failed to create channel #${channelConfig.name}`, { error: error.message });
       }
     }
   }
+
+  return { createdRoles, createdChannels };
 }
 
 // Refresh cache - call this to update stale references. Concurrent callers
@@ -99,25 +106,30 @@ async function refreshCache() {
     try {
       guild = await client.guilds.fetch(config.GUILD_ID);
 
-      // Auto-create missing roles and channels first
-      await ensureRolesAndChannels();
+      // Auto-create missing roles and channels first. Keep the returned
+      // objects so we can seed the cache directly — otherwise the immediate
+      // fetch() below may not yet list a freshly-created resource.
+      const { createdRoles, createdChannels } = await ensureRolesAndChannels();
 
       const [allRoles, allChannels] = await Promise.all([
         guild.roles.fetch(),
         guild.channels.fetch(),
       ]);
 
+      const pickRole = (name) => allRoles.find(r => r.name === name) || createdRoles.get(name) || null;
+      const pickChannel = (name) => allChannels.find(c => c.name === name) || createdChannels.get(name) || null;
+
       // Cache roles
-      roles.contributor = allRoles.find(r => r.name === config.CONTRIBUTOR_ROLE_NAME);
-      roles.activeContributor = allRoles.find(r => r.name === config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
-      roles.coreContributor = allRoles.find(r => r.name === config.CORE_CONTRIBUTOR_ROLE_NAME);
-      roles.champion = allRoles.find(r => r.name === config.CHAMPION_ROLE_NAME);
+      roles.contributor = pickRole(config.CONTRIBUTOR_ROLE_NAME);
+      roles.activeContributor = pickRole(config.ACTIVE_CONTRIBUTOR_ROLE_NAME);
+      roles.coreContributor = pickRole(config.CORE_CONTRIBUTOR_ROLE_NAME);
+      roles.champion = pickRole(config.CHAMPION_ROLE_NAME);
 
       // Cache channels
-      channels.general = allChannels.find(c => c.name === config.GENERAL_CHANNEL_NAME);
-      channels.announcements = allChannels.find(c => c.name === config.ANNOUNCEMENTS_CHANNEL_NAME);
-      channels.contribute = allChannels.find(c => c.name === config.CONTRIBUTE_CHANNEL_NAME);
-      channels.githubFeed = allChannels.find(c => c.name === config.GITHUB_FEED_CHANNEL_NAME);
+      channels.general = pickChannel(config.GENERAL_CHANNEL_NAME);
+      channels.announcements = pickChannel(config.ANNOUNCEMENTS_CHANNEL_NAME);
+      channels.contribute = pickChannel(config.CONTRIBUTE_CHANNEL_NAME);
+      channels.githubFeed = pickChannel(config.GITHUB_FEED_CHANNEL_NAME);
 
       // Log what was found
       const foundRoles = Object.entries(roles).filter(([, v]) => v).map(([k]) => k);
@@ -608,13 +620,20 @@ function getTextChannelMembers(channel, senderUserId) {
   return members;
 }
 
-// Graceful shutdown
-function shutdown() {
+// Graceful shutdown — awaits client.destroy() so the caller knows the
+// WebSocket is fully closed and no further events will fire. discord.js
+// v14 returns a Promise from destroy(); swallowing it risked dropped
+// messages during ECS rolling deploys.
+async function shutdown() {
   logger.info('Discord client shutting down');
   if (digestTask) {
     digestTask.stop();
   }
-  client.destroy();
+  try {
+    await client.destroy();
+  } catch (err) {
+    logger.warn('client.destroy() threw during shutdown (continuing)', { error: err?.message });
+  }
 }
 
 module.exports = {

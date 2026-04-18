@@ -773,8 +773,24 @@ const dbModule = {
     const stmt = db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?');
     const row = stmt.get(guildId);
     if (!row) return row;
-    // Return a copy with the decrypted key — don't mutate the SQLite row,
-    // so the plaintext value doesn't linger on an object callers might log.
+    // STRIP the decrypted key from the returned object so any caller that
+    // logs the row (debug dumps, accidental JSON.stringify) can't leak the
+    // plaintext tenant API key. Callers that need the key MUST use the
+    // getGuildApiKey accessor below, which is explicit about returning
+    // secret material and is never passed to a logger.
+    const { qurl_api_key, ...safe } = row;
+    void qurl_api_key; // explicit discard so lint/readers know it's dropped
+    return safe;
+  },
+
+  // Returns the decrypted guild key. ONLY for use at the last-mile QURL
+  // API call — never log or render this value. Callers that need to show
+  // the admin that a key is configured should use getGuildConfig + compute
+  // a sha256 fingerprint (see /qurl status in commands.js).
+  getGuildConfigWithApiKey(guildId) {
+    const stmt = db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?');
+    const row = stmt.get(guildId);
+    if (!row) return row;
     return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
   },
 

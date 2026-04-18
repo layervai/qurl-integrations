@@ -1,9 +1,17 @@
 const path = require('path');
 
-// Safe int parser: handles NaN and falsy-zero correctly
-function intEnv(key, defaultVal) {
+// Safe int parser: handles NaN and falsy-zero correctly. If minPositive
+// is set (the common case for cooldowns + caps), reject non-positive
+// values — an env of "0" would otherwise silently disable a cooldown or
+// block every send.
+function intEnv(key, defaultVal, { minPositive = false } = {}) {
   const v = parseInt(process.env[key], 10);
-  return isNaN(v) ? defaultVal : v;
+  if (isNaN(v)) return defaultVal;
+  if (minPositive && v <= 0) {
+    console.warn(`[config] ${key}=${v} rejected (must be > 0); using default ${defaultVal}`);
+    return defaultVal;
+  }
+  return v;
 }
 
 // Configuration from environment variables
@@ -102,7 +110,8 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
-  // /qurl send limits
-  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50),
-  QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000),
+  // /qurl send limits — both must be > 0. A cooldown of 0 would silently
+  // disable the rate limit; a recipients cap of 0 would reject every send.
+  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
+  QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 };

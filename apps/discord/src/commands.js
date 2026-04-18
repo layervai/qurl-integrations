@@ -25,6 +25,13 @@ const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isA
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
+
+// Shared helper: many Discord API calls (edits, updates, follow-ups) are
+// best-effort — if the interaction token expired or Discord is briefly
+// degraded, we log a warning and continue rather than fail the whole flow.
+// Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
+// one-liners across this file.
+const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 
 
@@ -213,11 +220,15 @@ async function batchSettled(items, fn, batchSize = 5) {
 function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
+  // Escape senderUsername — Discord usernames can contain markdown chars
+  // (legacy pre-unique-username accounts); a name like `[click](https://evil.com)`
+  // would otherwise render as a clickable phishing link inside the embed.
+  const safeSender = escapeDiscordMarkdown(String(senderUsername || 'Someone').slice(0, 64));
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'QURL Secure Delivery' })
     .setDescription(
-      `**${senderUsername}** shared a protected resource with you\n${divider}`
+      `**${safeSender}** shared a protected resource with you\n${divider}`
     )
   // resourceLabel is a caller-friendly description ("File (report.pdf)" or
   // the location name). Prefer it when provided and fall back to a generic
@@ -277,6 +288,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
         }
       }
       trackedQurlIds = null;
+      trackingGeneration++;
     },
     stop() {
       stopped = true;
@@ -309,6 +321,10 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   // Track status per qurl_id: { status, username }
   const linkStatus = new Map();
   let trackedQurlIds = null;
+  // Monotonic counter bumped by addRecipients(). A tick that begins init
+  // while generation=N and finishes after generation advanced to N+1 must
+  // abort — its localSet was built against pre-add resourceIds/expectedCount.
+  let trackingGeneration = 0;
   let allDone = false;
 
   const pollInterval = Math.max(15000, Math.min(60000, expiryMs / 10));
@@ -348,7 +364,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     if (stopped || allDone || Date.now() - startTime > maxMonitorMs) {
       clearInterval(timer);
       const finalMsg = buildStatusMsg() + '\n(Use `/qurl revoke` to revoke later)';
-      await interaction.editReply({ content: finalMsg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+      await interaction.editReply({ content: finalMsg, components: [] }).catch(logIgnoredDiscordErr);
       return;
     }
     try {
@@ -360,18 +376,20 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       // so walk every resource and collect all its qurls, then pick the
       // `expectedCount` most recent across the whole send.
       if (!trackedQurlIds) {
-        // Capture a local reference. control.addRecipients() can null the
-        // outer `trackedQurlIds` during the awaits below; populate the
-        // local Set and only assign it back if it's still current at the
-        // end — otherwise a new init is already in progress and our work
-        // would stomp it.
+        // Snapshot the generation BEFORE the await. If addRecipients fires
+        // during Promise.all it will bump the counter and the post-await
+        // check will abort this init — the new tick must re-read
+        // resourceIds/expectedCount against the updated state.
+        const genAtStart = trackingGeneration;
+        const snapshotResourceIds = resourceIds.slice();
+        const snapshotExpectedCount = expectedCount;
         const localSet = new Set();
         const statuses = await Promise.all(
-          resourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
+          snapshotResourceIds.map(rid => getResourceStatus(rid, apiKey).catch(() => null))
         );
-        if (trackedQurlIds && trackedQurlIds !== localSet) {
-          // addRecipients fired during the await; let the next tick re-init.
-          trackedQurlIds = null;
+        if (trackingGeneration !== genAtStart) {
+          // addRecipients ran during the await; the snapshot is stale.
+          // Leave trackedQurlIds null so the next tick re-inits fresh.
           return;
         }
         const allQurls = [];
@@ -387,7 +405,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
           if (d !== 0) return d;
           return String(a.qurl_id).localeCompare(String(b.qurl_id));
         });
-        const recentN = allQurls.slice(-expectedCount);
+        const recentN = allQurls.slice(-snapshotExpectedCount);
         recentN.forEach((q, i) => {
           localSet.add(q.qurl_id);
           const username = recipients[i] ? recipients[i].username : `user-${i + 1}`;
@@ -419,7 +437,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
       }
       if (changed) {
         const pending = [...linkStatus.values()].filter(s => s.status === 'pending').length;
-        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        await interaction.editReply({ content: buildStatusMsg(), components: pending > 0 ? [buttonRow] : [] }).catch(logIgnoredDiscordErr);
         if (pending === 0) { allDone = true; clearInterval(timer); }
       }
     } catch (err) {
@@ -1028,7 +1046,7 @@ async function handleSend(interaction, apiKey) {
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
-        await btnInteraction.deferUpdate().catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         showAllRecipients = !showAllRecipients;
         confirmMsg = buildConfirmMsg(showAllRecipients);
         monitor.updateBaseMsg(confirmMsg);
@@ -1038,25 +1056,25 @@ async function handleSend(interaction, apiKey) {
           new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All Links').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
         );
-        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(logIgnoredDiscordErr);
         return;
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
-        await btnInteraction.deferUpdate().catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
-        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
           await interaction.editReply({
             content: `Revoked ${revoked.success}/${revoked.total} links.`,
             components: [],
-          }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+          }).catch(logIgnoredDiscordErr);
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
           await interaction.editReply({
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
-          }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+          }).catch(logIgnoredDiscordErr);
         }
         if (monitor) monitor.stop();
         collector.stop('revoked');
@@ -1075,7 +1093,7 @@ async function handleSend(interaction, apiKey) {
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
         if (addingRecipients || addRecipientsLocks.has(sendId)) {
-          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
         addingRecipients = true;
@@ -1093,7 +1111,7 @@ async function handleSend(interaction, apiKey) {
         }
         if (isOnCooldown(interaction.user.id)) {
           addingRecipients = false; addRecipientsLocks.delete(sendId);
-          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+          await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
           return;
         }
         setCooldown(interaction.user.id);
@@ -1145,7 +1163,7 @@ async function handleSend(interaction, apiKey) {
             // Drop to warn for routine user-timeouts; keep error for real failures.
             const log = isTimeout ? logger.warn : logger.error;
             log('Add recipients failed', { sendId, error: err.message, isTimeout });
-            await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+            await btnInteraction.editReply({ content: msg, components: [] }).catch(logIgnoredDiscordErr);
           }
         } finally {
           addingRecipients = false; addRecipientsLocks.delete(sendId);
@@ -1160,7 +1178,7 @@ async function handleSend(interaction, apiKey) {
         interaction.editReply({
           content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
-        }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+        }).catch(logIgnoredDiscordErr);
       }
     });
   }
@@ -1433,7 +1451,7 @@ async function handleRevoke(interaction, apiKey) {
       components: [],
     });
   } catch {
-    await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
+    await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(logIgnoredDiscordErr);
   }
 }
 
@@ -2147,7 +2165,13 @@ const commands = [
             return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
           }
         } catch (err) {
-          return modalSubmit.editReply({ content: `❌ **Could not validate key.** ${err.message}` });
+          // Don't reflect err.message to Discord — network errors can contain
+          // internal hostnames/IPs (e.g. "connect ECONNREFUSED 10.0.0.5:8080")
+          // that should not leak to a guild admin's screen.
+          logger.error('validate-key request failed', { error: err.message });
+          return modalSubmit.editReply({
+            content: '❌ **Could not validate key.** Please try again in a moment.',
+          });
         }
 
         const guildId = interaction.guildId;
@@ -2177,8 +2201,12 @@ const commands = [
           // 4-char suffix narrows brute-force space and a prefix leaks tenant
           // hints. An 8-char hex fingerprint is enough for an admin to confirm
           // they re-ran setup with the same key, without exposing bytes.
+          // getGuildConfig no longer returns the decrypted key (it would
+          // leak via any row dump); go through the explicit accessor and
+          // let the plaintext fall out of scope immediately after hashing.
+          const plaintextKey = db.getGuildApiKey(interaction.guildId) || '';
           const keyFingerprint = crypto.createHash('sha256')
-            .update(guildConfig.qurl_api_key)
+            .update(plaintextKey)
             .digest('hex')
             .slice(0, 8);
           return interaction.reply({
