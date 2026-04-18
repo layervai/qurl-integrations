@@ -132,7 +132,7 @@ async function batchSettled(items, fn, batchSize = 5) {
 }
 
 // --- Shared DM embed builder ---
-function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel: _resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+function buildDeliveryEmbed({ senderUsername, resourceType, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
@@ -379,13 +379,16 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   return allLinks;
 }
 
-async function handleSend(interaction) {
+async function handleSend(interaction, apiKey) {
   // awaitMessageComponent below requires a channel handle
   if (!interaction.channel) {
     return interaction.reply({ content: 'Cannot use this command in this context.', ephemeral: true });
   }
-
-  const apiKey = interaction._qurlApiKey; // set by the gating logic in execute()
+  // Defensive: execute() should always pass an apiKey for `send`, but guard
+  // in case a future code path calls handleSend directly.
+  if (!apiKey) {
+    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+  }
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry') || '24h';
   const rawMessage = interaction.options.getString('message');
@@ -1192,8 +1195,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
 // --- /qurl revoke handler ---
 
-async function handleRevoke(interaction) {
-  const apiKey = interaction._qurlApiKey;
+async function handleRevoke(interaction, apiKey) {
+  if (!apiKey) {
+    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+  }
   await interaction.deferReply({ ephemeral: true });
 
   const recentSends = db.getRecentSends(interaction.user.id, 5);
@@ -1977,6 +1982,7 @@ const commands = [
       }
 
       // Gate: require guild API key for send/revoke
+      let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
@@ -1987,11 +1993,15 @@ const commands = [
             ephemeral: true,
           });
         }
-        interaction._qurlApiKey = guildApiKey || config.QURL_API_KEY;
+        resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
-      if (sub === 'send') return handleSend(interaction);
-      if (sub === 'revoke') return handleRevoke(interaction);
+      // Pass API key as an explicit parameter rather than monkey-patching
+      // the discord.js interaction object — that pattern is fragile (libs
+      // sometimes clone/serialize interactions) and a security smell for
+      // secret-bearing values.
+      if (sub === 'send') return handleSend(interaction, resolvedApiKey);
+      if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
@@ -2062,17 +2072,21 @@ module.exports = {
   commands,
   registerCommands,
   handleCommand,
-  // Exported for testing
-  _test: {
-    isGoogleMapsURL,
-    sanitizeFilename,
-    sanitizeMessage,
-    isAllowedFileType,
-    isOnCooldown,
-    setCooldown,
-    batchSettled,
-    expiryToISO,
-    sendCooldowns,
-    handleAddRecipients,
-  },
+  // _test is only exported in non-production so live state (sendCooldowns)
+  // and internal handlers can't leak into prod consumers. Tests run with
+  // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
+  ...(process.env.NODE_ENV !== 'production' && {
+    _test: {
+      isGoogleMapsURL,
+      sanitizeFilename,
+      sanitizeMessage,
+      isAllowedFileType,
+      isOnCooldown,
+      setCooldown,
+      batchSettled,
+      expiryToISO,
+      sendCooldowns,
+      handleAddRecipients,
+    },
+  }),
 };

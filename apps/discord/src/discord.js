@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
 const db = require('./database');
+const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
 const client = new Client({
   intents: [
@@ -331,13 +332,17 @@ async function notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl) {
     return null;
   }
 
+  // Always escape at embed-construction time — callers reach this from
+  // multiple paths (webhooks, historical contribution backfill) with
+  // inconsistent escaping states. Double-escaping is preferable to a
+  // gap that leaves a masked-link injection reachable.
   const embed = new EmbedBuilder()
     .setColor(0x2ECC71)
     .setTitle('🚀 PR Merged!')
-    .setDescription(`**${prTitle}**`)
+    .setDescription(`**${md(prTitle)}**`)
     .addFields(
-      { name: 'Author', value: `@${githubUsername}`, inline: true },
-      { name: 'Repository', value: repo, inline: true },
+      { name: 'Author', value: `@${md(githubUsername)}`, inline: true },
+      { name: 'Repository', value: md(repo), inline: true },
       { name: 'PR', value: `[#${prNumber}](${prUrl})`, inline: true }
     )
     .setFooter({ text: 'Link your GitHub with /link to auto-receive @Contributor role!' })
@@ -385,9 +390,9 @@ async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
   const embed = new EmbedBuilder()
     .setColor(0x2ECC71)
     .setTitle('🌱 Good First Issue')
-    .setDescription(`**${title}**`)
+    .setDescription(`**${md(title)}**`)
     .addFields(
-      { name: 'Repository', value: repo, inline: true },
+      { name: 'Repository', value: md(repo), inline: true },
       { name: 'Issue', value: `[#${issueNumber}](${url})`, inline: true }
     )
     .setFooter({ text: 'Great for new contributors!' })
@@ -396,7 +401,10 @@ async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
   if (labels && labels.length > 0) {
     embed.addFields({
       name: 'Labels',
-      value: labels.slice(0, 5).map(l => `\`${l}\``).join(' '),
+      // Wrapping in backticks is not enough — a label containing a backtick
+      // would break out of the code span. escapeDiscordMarkdown neutralizes
+      // every markdown metachar defensively.
+      value: labels.slice(0, 5).map(l => `\`${md(l)}\``).join(' '),
       inline: false,
     });
   }
