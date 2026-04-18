@@ -40,7 +40,7 @@ jobs:
     # only if/name/needs/permissions/secrets/strategy/uses/with/concurrency
     # are valid on a job that calls a reusable workflow. The reusable
     # workflow itself sets `timeout-minutes: 5` internally.
-    uses: layervai/ops-routines/.github/workflows/age-check-docker.yml@2b9cb3575a74394cf56092d33ee4fdbab30afc9e # v0.1.4
+    uses: layervai/ops-routines/.github/workflows/age-check-docker.yml@3922bbc6e7ebaef4d8225cfbd9754412137ebf66 # v0.1.8
     with:
       # Container images get 14 days (vs 7 for source-package
       # ecosystems) — base-image vendors typically take longer to
@@ -50,3 +50,4 @@ jobs:
       min_age_days: 14
     permissions:
       contents: read
+    secrets: inherit
