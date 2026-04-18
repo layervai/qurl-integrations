@@ -13,7 +13,9 @@ const logger = require('./logger');
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const BATCH = 20;
 
-async function revokeOne(accessToken) {
+// Returns { ok, status } so the caller can distinguish retryable rate
+// limits (429/403) from permanent failures (401/500) and apply backoff.
+async function revokeOneDetailed(accessToken) {
   const resp = await fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
     method: 'DELETE',
     headers: {
@@ -25,7 +27,7 @@ async function revokeOne(accessToken) {
     body: JSON.stringify({ access_token: accessToken }),
     signal: AbortSignal.timeout(5000),
   });
-  return resp.ok || resp.status === 404;
+  return { ok: resp.ok || resp.status === 404, status: resp.status };
 }
 
 async function sweepOnce() {
@@ -37,6 +39,7 @@ async function sweepOnce() {
   }
   if (rows.length === 0) return;
   let revoked = 0;
+  let backoffMs = 100;
   for (let i = 0; i < rows.length; i++) {
     const { id, encryptedAccessToken } = rows[i];
     // Decrypt inside the loop so only one plaintext token is in memory at
@@ -47,9 +50,21 @@ async function sweepOnce() {
       continue;
     }
     try {
-      if (await revokeOne(accessToken)) {
+      const result = await revokeOneDetailed(accessToken);
+      if (result.ok) {
         db.deleteOrphanedToken(id);
         revoked++;
+        backoffMs = 100; // reset on any success
+      } else if (result.status === 429 || result.status === 403) {
+        // Exponential backoff when GitHub secondary rate-limits us. Cap at
+        // 60s so a single sweep never stalls beyond the interval window.
+        // Abort the rest of the batch — we'll retry on the next hourly sweep.
+        logger.warn('Orphan sweep hit GitHub rate limit, aborting batch', {
+          id, status: result.status, backoffMs,
+        });
+        backoffMs = Math.min(backoffMs * 2, 60_000);
+        await new Promise(r => setTimeout(r, backoffMs));
+        break;
       }
     } catch (err) {
       const tokenHash8 = crypto.createHash('sha256').update(accessToken || '').digest('hex').slice(0, 8);
@@ -57,11 +72,7 @@ async function sweepOnce() {
         id, tokenHash8, error: err.message,
       });
     }
-    // 100ms between calls — GitHub's secondary rate limit kicks in around
-    // 100 requests/minute on the /applications/.../token endpoint, so 20
-    // calls at 10/sec is well below. Also means one rejection doesn't
-    // burn the whole batch in <200ms.
-    if (i < rows.length - 1) await new Promise(r => setTimeout(r, 100));
+    if (i < rows.length - 1) await new Promise(r => setTimeout(r, backoffMs));
   }
   if (revoked > 0) {
     logger.info(`Orphan token sweep: revoked ${revoked}/${rows.length}`);

@@ -17,6 +17,11 @@ FROM node:22.11.0-alpine3.20
 
 WORKDIR /app
 
+# Ensure production-mode enforcement in index.js regardless of orchestrator env.
+# Critical boot checks (HTTPS in BASE_URL, KEY_ENCRYPTION_KEY presence, etc.)
+# key off this value.
+ENV NODE_ENV=production
+
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package*.json ./
 COPY --chown=node:node . .
@@ -26,8 +31,11 @@ RUN mkdir -p /app/data && chown -R node:node /app/data
 EXPOSE 3000
 USER node
 
+# Port is hardcoded at 3000: ${PORT:-3000} inside a Dockerfile CMD's exec
+# form doesn't interpolate at runtime, and EXPOSE is already 3000. If the
+# runtime overrides PORT, update EXPOSE + this line together.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- "http://localhost:${PORT:-3000}/health" || exit 1
+  CMD wget -qO- "http://localhost:3000/health" || exit 1
 
 # Run node directly (not `npm start`) so SIGTERM is delivered to the Node
 # process itself — otherwise npm eats the signal and the container hard-kills

@@ -48,13 +48,15 @@ function stateSecret() {
   // misconfigured staging deploy surfaces the issue instead of silently
   // running with a static attacker-known key.
   if (!config.GITHUB_CLIENT_SECRET) {
-    // Belt-and-suspenders: fail hard in production if boot validation in
-    // index.js was ever bypassed. A static HMAC key is trivially forgeable.
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is not set in production.');
+    // Throw anywhere outside of the Jest test harness. A static dev fallback
+    // would let any attacker who reads this file mint valid HMAC states
+    // against a misconfigured staging/prod deploy — index.js's boot check
+    // is the primary defense, this is belt-and-suspenders.
+    if (process.env.NODE_ENV !== 'test') {
+      throw new Error('Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is not set.');
     }
-    if (!_warnedStateSecretFallback && process.env.NODE_ENV !== 'test') {
-      logger.warn('OAuth state HMAC using static dev fallback — set GITHUB_CLIENT_SECRET');
+    if (!_warnedStateSecretFallback) {
+      logger.warn('OAuth state HMAC using test fallback — set GITHUB_CLIENT_SECRET');
       _warnedStateSecretFallback = true;
     }
     return 'dev-oauth-state-secret';
@@ -136,10 +138,25 @@ const ALLOWED_FILE_TYPES = [
   'application/msword',
 ];
 
+// Macro-enabled Office variants (.docm, .xlsm, .pptm, etc.) are in the
+// openxmlformats family but can execute VBA macros on the recipient's
+// machine. Excluded even though the prefix matches. If you ever need to
+// support these, require explicit user confirmation and mark the file
+// as "executable content" in the DM embed.
+const DENY_MIME_SUBSTRINGS = ['macroenabled', 'macro-enabled'];
 function isAllowedFileType(contentType) {
   if (!contentType) return false;
-  return ALLOWED_FILE_TYPES.some(prefix => contentType.startsWith(prefix));
+  const ct = contentType.toLowerCase();
+  if (DENY_MIME_SUBSTRINGS.some(s => ct.includes(s))) return false;
+  return ALLOWED_FILE_TYPES.some(prefix => ct.startsWith(prefix));
 }
+
+// Global per-sendId mutex for the "Add Recipients" flow. Each /qurl send
+// has a unique sendId, so in today's code paths the per-closure flag below
+// already prevents double-entry. This Map is belt-and-suspenders: if a
+// future refactor ever shares a sendId across contexts (e.g. bot restart
+// loads unfinished sends from DB), the global lock still holds.
+const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
@@ -989,7 +1006,7 @@ async function handleSend(interaction, apiKey) {
   let monitor = null;
   if (delivered > 0) {
     let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
-    let addingRecipients = false; // Mutex: prevent concurrent add-recipient flows
+    let addingRecipients = false; // Mutex: prevent concurrent add-recipient flows (paired with global addRecipientsLocks Set on sendId)
 
     // Start link status monitor + collector. If collector setup throws between
     // these lines, stop the monitor so setInterval does not leak.
@@ -1057,16 +1074,17 @@ async function handleSend(interaction, apiKey) {
         // FIRST (before any cap check), then verify remaining capacity and
         // release on rejection. That way a future refactor that adds an
         // `await` in the remaining check can't reopen a racy window.
-        if (addingRecipients) {
+        if (addingRecipients || addRecipientsLocks.has(sendId)) {
           await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
         addingRecipients = true;
+        addRecipientsLocks.add(sendId);
         // ===== END CRITICAL SECTION (flag is claimed) =====
 
         const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
         if (remaining <= 0) {
-          addingRecipients = false;
+          addingRecipients = false; addRecipientsLocks.delete(sendId);
           await btnInteraction.reply({
             content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
             ephemeral: true,
@@ -1074,7 +1092,7 @@ async function handleSend(interaction, apiKey) {
           return;
         }
         if (isOnCooldown(interaction.user.id)) {
-          addingRecipients = false;
+          addingRecipients = false; addRecipientsLocks.delete(sendId);
           await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           return;
         }
@@ -1130,7 +1148,7 @@ async function handleSend(interaction, apiKey) {
             await btnInteraction.editReply({ content: msg, components: [] }).catch(err => logger.warn("Discord API op failed (ignored)", { error: err.message }));
           }
         } finally {
-          addingRecipients = false;
+          addingRecipients = false; addRecipientsLocks.delete(sendId);
         }
       }
     });
@@ -1437,13 +1455,16 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   return { success, total: resourceIds.length };
 }
 
-// Evict stale cooldown entries every 5 minutes to prevent slow memory leak
+// Time-based sweep every 60s (was 5min). With high user counts the Map can
+// creep between the size-based 10k-threshold eviction, so a more aggressive
+// proactive sweep keeps steady-state memory tight. Entries older than the
+// cooldown window are safe to drop — they'd pass isOnCooldown() anyway.
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of sendCooldowns) {
-    if (now - v > config.QURL_SEND_COOLDOWN_MS * 2) sendCooldowns.delete(k);
+    if (now - v > config.QURL_SEND_COOLDOWN_MS) sendCooldowns.delete(k);
   }
-}, 5 * 60 * 1000).unref();
+}, 60 * 1000).unref();
 
 // Command definitions
 const commands = [

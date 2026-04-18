@@ -298,6 +298,11 @@ router.get('/github', rateLimit, (req, res) => {
   // Bind state to this browser session. The callback must present both the
   // state (from GitHub's redirect) AND this cookie value; without the cookie
   // a leaked state URL can't be completed in a different browser.
+  //
+  // SameSite=Lax (NOT Strict) is deliberate: the GitHub OAuth callback is a
+  // top-level cross-site redirect from github.com, and SameSite=Strict would
+  // suppress the cookie on that navigation — breaking every legitimate OAuth
+  // flow. Lax is the strongest setting that still allows this redirect.
   res.setHeader('Set-Cookie',
     `${OAUTH_SESSION_COOKIE}=${encodeURIComponent(state)}; ` +
     'HttpOnly; Secure; SameSite=Lax; Path=/auth/; ' +
@@ -447,6 +452,21 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         icon: '❌',
         heading: 'Failed to Get User Info',
         message: 'We couldn\'t retrieve your GitHub profile. Please try again.',
+        type: 'error',
+      }));
+    }
+
+    // Defense-in-depth: GitHub's /user endpoint controls `login`, so in
+    // practice this is trusted, but re-validate here so an API hijack or
+    // proxy tampering can't poison the DB with a login that would later
+    // be reflected into embeds / search queries.
+    if (!/^[a-zA-Z0-9-]{1,39}$/.test(userData.login)) {
+      logger.error('Refusing createLink: malformed GitHub login', { discordId: pending.discord_id });
+      return res.status(400).send(renderPage({
+        title: 'Invalid Profile',
+        icon: '❌',
+        heading: 'Invalid GitHub Profile',
+        message: 'Your GitHub username has an unexpected format. Please contact support.',
         type: 'error',
       }));
     }

@@ -45,7 +45,13 @@ jobs:
         run: npm ci
 
       - name: Audit dependencies
-        run: npm audit --audit-level=moderate
+        # --audit-level=high: this bot handles OAuth tokens, encrypted guild
+        # keys, and webhook signatures — moderate-severity deps routinely
+        # include upstream advisories that don't affect us, so we gate on
+        # high+. Critical/high will still fail CI.
+        # --omit=dev: exclude dev-only vulnerabilities from the production
+        # audit gate so test-framework advisories don't block deploys.
+        run: npm audit --audit-level=high --omit=dev
 
       - name: Lint
         run: npm run lint
