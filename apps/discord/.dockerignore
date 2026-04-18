@@ -17,3 +17,5 @@ README.md
 *.pem
 *.key
 .npmrc
+# A local dev SQLite file should never make it into the image.
+*.db

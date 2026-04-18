@@ -1025,10 +1025,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
-  // Filter out bots and the sender
-  const newRecipients = usersCollection
+  // Filter out bots and the sender. Convert the Discord Collection to a
+  // plain array so later callers (map/forEach over newRecipients[i]) work.
+  const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
-    .map(u => u);
+    .values()];
 
   if (newRecipients.length === 0) {
     return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [], delivered: 0, failed: 0 };
@@ -1948,8 +1949,8 @@ const commands = [
         } catch {
           return; // Modal dismissed or timed out
         }
-        const apiKey = modalSubmit.fields.getTextInputValue('api_key').trim();
-        if (!/^lv_(live|test)_[A-Za-z0-9_-]{20,}$/.test(apiKey)) {
+        const submittedKey = modalSubmit.fields.getTextInputValue('api_key').trim();
+        if (!/^lv_(live|test)_[A-Za-z0-9_-]{20,}$/.test(submittedKey)) {
           return modalSubmit.reply({
             content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
             ephemeral: true,
@@ -1959,7 +1960,7 @@ const commands = [
         await modalSubmit.deferReply({ ephemeral: true });
         try {
           const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
-            headers: { 'Authorization': `Bearer ${apiKey}`, 'Accept': 'application/json' },
+            headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
             signal: AbortSignal.timeout(10000),
           });
           if (resp.status === 401 || resp.status === 403) {
@@ -1973,7 +1974,7 @@ const commands = [
         }
 
         const guildId = interaction.guildId;
-        db.setGuildApiKey(guildId, apiKey, interaction.user.id);
+        db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
         logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
         return modalSubmit.editReply({
           content: '✅ **QURL is now configured for this server!**\n\n' +

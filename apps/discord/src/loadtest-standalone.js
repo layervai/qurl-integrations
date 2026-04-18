@@ -51,13 +51,9 @@ async function generateTestFile() {
   return tmpPath;
 }
 
-function expiryToISO(expiresIn) {
-  const units = { m: 60, h: 3600, d: 86400 };
-  const match = expiresIn.match(/^(\d+)([mhd])$/);
-  if (!match) return new Date(Date.now() + 86400000).toISOString();
-  const ms = parseInt(match[1]) * units[match[2]] * 1000;
-  return new Date(Date.now() + ms).toISOString();
-}
+// Reuse the shared parser — it has the overflow protection that this
+// ad-hoc copy used to lack.
+const { expiryToISO } = require('./utils/time');
 
 async function runRound(roundNum) {
   const roundStart = performance.now();

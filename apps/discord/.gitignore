@@ -1,7 +1,13 @@
 node_modules/
 .env
+.env.*
+!.env.example
 data/
 *.db
 *.log
 .DS_Store
 coverage/
+# Private keys + npm auth tokens must never be committed.
+*.pem
+*.key
+.npmrc

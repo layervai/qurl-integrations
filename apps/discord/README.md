@@ -1,224 +1,170 @@
-# OpenNHP Discord Bot
+# QURL Discord Bot
 
-Automatically assigns the **@Contributor** role when community members get PRs merged to OpenNHP repositories.
+Discord bot for QURL-powered secure resource sharing, plus GitHub OAuth
+linking and auto Contributor-role assignment for community members.
 
 ## Features
 
-- **GitHub OAuth Linking**: Users verify their GitHub identity via `/link` command
-- **Auto Role Assignment**: Automatically assigns @Contributor when PRs are merged
-- **PR Notifications**: Announces merged PRs and prompts unlinked users to connect
-- **Contribution Tracking**: Records all contributions per user
+- **`/qurl send`** — share a file or Google Maps location as a one-time QURL
+  link, delivered to each recipient via DM. Targets: a specific user, the
+  visible members of the current text channel, or your voice channel.
+- **`/qurl revoke`** — revoke all links from a previous `/qurl send`.
+- **`/qurl help`** — command reference.
+- **`/qurl setup`** / **`/qurl status`** — admin-only, configure the
+  guild's QURL API key (stored AES-256-GCM encrypted at rest).
+- **GitHub OAuth Linking**: `/link` verifies GitHub identity; the callback
+  is session-cookie-bound to prevent leaked-URL takeover.
+- **Auto Role Assignment**: merged PRs in allowed orgs award the
+  `@Contributor` role automatically.
+- **Contribution Tracking + Badges**: first PR, docs hero, bug hunter,
+  on-fire, streak master, multi-repo — awarded on merged PRs.
+- **Good-first-issue feed + release announcements + star milestones**
+  in configurable channels.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/link` | Link your GitHub account |
+| `/qurl send` | Send a file or location as one-time QURL links to a user / channel / voice-channel |
+| `/qurl revoke` | Revoke links from a previous send |
+| `/qurl help` | Usage reference |
+| `/qurl setup` | *(admin)* Configure the guild's QURL API key |
+| `/qurl status` | *(admin)* Check whether QURL is configured |
+| `/link` | Link your GitHub account to Discord |
 | `/unlink` | Unlink your GitHub account |
-| `/whois [@user]` | Check GitHub link for a user |
-| `/stats` | Show bot statistics |
+| `/whois [@user]` | Look up a member's GitHub handle |
+| `/contributions [@user]` | Show a member's merged-PR count + badges |
+| `/stats` | Bot-wide contribution statistics |
+| `/leaderboard` | Top contributors |
+| `/forcelink` | *(admin)* Manually link a Discord user to a GitHub username |
+| `/bulklink` | *(admin)* Bulk-link from a `discordId:github,...` list |
+| `/unlinked` | *(admin)* List contributors who haven't linked |
+| `/backfill-milestones` | *(admin)* Re-announce star milestones |
 
-## Setup Guide
+## Setup
 
 ### Prerequisites
 
-- Node.js 18+
-- A Discord bot (you already have one: `Config Bot`)
-- A GitHub OAuth App (we'll create this)
-- Somewhere to host the bot (Railway, Fly.io, etc.)
+- **Node.js ≥ 22** (see `package.json` engines)
+- A Discord bot application
+- A GitHub OAuth App
+- A hosting target with a public HTTPS URL (ECS, Railway, Fly, etc.)
+- A QURL API key from https://layerv.ai
 
----
+### 1. Configure Discord
 
-### Step 1: Create GitHub OAuth App
+1. https://discord.com/developers/applications → your bot
+2. Enable **Server Members Intent** under Bot → Privileged Gateway Intents.
+3. Copy the bot token.
 
-1. Go to https://github.com/settings/developers
-2. Click **"New OAuth App"**
-3. Fill in:
-   - **Application name**: `OpenNHP Discord Bot`
-   - **Homepage URL**: `https://github.com/OpenNHP`
-   - **Authorization callback URL**: `https://YOUR_DOMAIN/auth/github/callback`
-     - (Use your Railway/Fly.io URL once deployed)
-4. Click **"Register application"**
-5. Copy the **Client ID**
-6. Generate a **Client Secret** and copy it
+### 2. Configure GitHub OAuth
 
----
+1. https://github.com/settings/developers → New OAuth App
+2. Callback URL: `https://YOUR_DOMAIN/auth/github/callback`
+3. Copy Client ID + generate a Client Secret.
 
-### Step 2: Configure Discord Bot
+### 3. Configure environment
 
-Your existing bot needs a few more permissions.
+Copy `.env.example` to `.env` and fill in. Every variable is documented
+inline; the sections below call out the non-obvious ones.
 
-1. Go to https://discord.com/developers/applications
-2. Select your bot application
-3. Go to **Bot** section
-4. Under **Privileged Gateway Intents**, enable:
-   - **Server Members Intent** ✓
-5. Save changes
+**Always required:**
 
----
+- `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `GUILD_ID`
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET`
+- `BASE_URL` (must be `https://` in production)
+- `ALLOWED_GITHUB_ORGS` (comma-separated GitHub org names)
 
-### Step 3: Deploy to Railway
+**Required when `NODE_ENV=production`** (the process refuses to boot
+without them, see `src/index.js`):
 
-1. Push this `opennhp-bot` folder to a GitHub repo
+- `METRICS_TOKEN` — bearer token for `/metrics`
+- `QURL_API_KEY` — default QURL key (individual guilds can override via
+  `/qurl setup`)
+- `KEY_ENCRYPTION_KEY` — 32 random bytes, base64. Generate with:
+  ```
+  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+  ```
 
-2. Go to https://railway.app and sign in with GitHub
+**Optional operational knobs:**
 
-3. Click **"New Project"** → **"Deploy from GitHub repo"**
+- `PORT` (default 3000)
+- `DATABASE_PATH` (default `./data/opennhp-bot.db`, kept for legacy EFS
+  mounts — override for new deployments)
+- `ADMIN_USER_IDS` — comma-separated Discord IDs with access to
+  `/forcelink`, `/bulklink`, `/backfill-milestones`, `/unlinked`
+- `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX_REQUESTS` — OAuth + webhook
+  per-IP rate limiter
+- `QURL_SEND_MAX_RECIPIENTS`, `QURL_SEND_COOLDOWN_MS`
+- `PENDING_LINK_EXPIRY_MINUTES` — OAuth state TTL (default 10 min)
+- `WEEKLY_DIGEST_CRON`, `WELCOME_DM_ENABLED`, `LOG_LEVEL`
+- `CONTRIBUTOR_ROLE_NAME`, `GENERAL_CHANNEL_NAME`, etc.
 
-4. Select your repository
+### 4. Configure GitHub webhook
 
-5. Once deployed, go to **Settings** → **Networking** → **Generate Domain**
-   - Copy your domain (e.g., `opennhp-bot-production.up.railway.app`)
+On each repo you want to track:
 
-6. Go to **Variables** and add:
+1. Repo → Settings → Webhooks → Add webhook
+2. Payload URL: `https://YOUR_DOMAIN/webhook/github`
+3. Content type: `application/json`
+4. Secret: **required** — same value as `GITHUB_WEBHOOK_SECRET`
+5. Events: Pull requests, Issues, Releases, Stars (use "Let me select").
 
-   ```
-   DISCORD_TOKEN=your_discord_bot_token
-   DISCORD_CLIENT_ID=your_discord_app_client_id
-   GUILD_ID=your_discord_guild_id
-   GITHUB_CLIENT_ID=your_github_oauth_client_id
-   GITHUB_CLIENT_SECRET=your_github_oauth_client_secret
-   BASE_URL=https://your-app.up.railway.app
-   ```
+### 5. Run
 
-7. Railway will auto-redeploy with the new variables
+```bash
+npm ci
+npm start
+```
 
----
+## Architecture
 
-### Step 4: Update GitHub OAuth Callback URL
-
-1. Go back to your GitHub OAuth App settings
-2. Update **Authorization callback URL** to:
-   ```
-   https://your-app.up.railway.app/auth/github/callback
-   ```
-
----
-
-### Step 5: Add GitHub Webhook
-
-For **each** OpenNHP repository you want to track:
-
-1. Go to the repo → **Settings** → **Webhooks** → **Add webhook**
-
-2. Configure:
-   - **Payload URL**: `https://your-app.up.railway.app/webhook/github`
-   - **Content type**: `application/json`
-   - **Secret**: (optional, but recommended - add same value to `GITHUB_WEBHOOK_SECRET` env var)
-   - **Events**: Select **"Let me select individual events"**
-     - Check only: **Pull requests**
-   - Click **"Add webhook"**
-
-3. Repeat for each repo:
-   - `OpenNHP/opennhp`
-   - `OpenNHP/StealthDNS`
-   - `OpenNHP/jsDemo`
-   - `OpenNHP/ietf-rfc-nhp`
-
----
-
-### Step 6: Test It!
-
-1. In Discord, type `/link`
-2. Click the link to authorize with GitHub
-3. You should see a success page and receive a DM
-
-To test the full flow:
-1. Have a linked user create and merge a PR
-2. The bot should auto-assign @Contributor and post in #general
-
----
+- `src/index.js` — boot validation + graceful shutdown
+- `src/commands.js` — all slash-command handlers (split tracked in #55)
+- `src/discord.js` — discord.js client + role/channel cache
+- `src/database.js` — SQLite (better-sqlite3, WAL) + encrypted guild keys
+- `src/connector.js` — qurl-s3-connector client (SSRF-guarded CDN fetch)
+- `src/qurl.js` — QURL API client (private-IP blocklist on target URLs)
+- `src/routes/oauth.js` — GitHub OAuth (atomic state consumption,
+  session-cookie binding, retry + background revoke sweeper)
+- `src/routes/webhooks.js` — GitHub HMAC-verified webhooks, per-IP
+  bad-signature rate limit
+- `src/utils/crypto.js` — AES-256-GCM envelope encryption (versioned)
+- `src/utils/sanitize.js` — filename + Discord-markdown escaping
+- `src/orphan-token-sweeper.js` — hourly retry-revoke for failed OAuth
+  token revocations; purges after 7 days
+- `src/templates/page.js` — HTML templates with strict CSP + escapeHtml
 
 ## Local Development
 
 ```bash
-# Clone and install
-cd opennhp-bot
-npm install
-
-# Copy environment template
 cp .env.example .env
-
-# Edit .env with your values
-# For local dev, use ngrok for BASE_URL:
-# ngrok http 3000
-# Then use the ngrok URL
-
-# Start the bot
-npm run dev
+# For local dev: leave KEY_ENCRYPTION_KEY unset (stores plaintext with a
+# loud warning). QURL_ENDPOINT/CONNECTOR_URL auto-default to localhost
+# when NODE_ENV != production.
+npm ci
+npm run dev   # node --watch
 ```
 
----
+Useful scripts:
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     OpenNHP Discord Bot                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  Discord                    Web Server                       │
-│  ┌──────────────┐          ┌──────────────────────────────┐ │
-│  │ Slash Cmds   │          │ GET  /auth/github           │ │
-│  │ /link        │          │ GET  /auth/github/callback  │ │
-│  │ /unlink      │          │ POST /webhook/github        │ │
-│  │ /whois       │          └──────────────────────────────┘ │
-│  │ /stats       │                      │                    │
-│  └──────────────┘                      │                    │
-│         │                              │                    │
-│         └──────────┬───────────────────┘                    │
-│                    │                                        │
-│                    ▼                                        │
-│           ┌──────────────┐                                  │
-│           │   SQLite DB  │                                  │
-│           │  - links     │                                  │
-│           │  - contribs  │                                  │
-│           └──────────────┘                                  │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DISCORD_CLIENT_ID` | Yes | Discord application client ID |
-| `GUILD_ID` | Yes | Discord server ID |
-| `GITHUB_CLIENT_ID` | Yes | GitHub OAuth app client ID |
-| `GITHUB_CLIENT_SECRET` | Yes | GitHub OAuth app client secret |
-| `BASE_URL` | Yes | Public URL of the bot (e.g., Railway domain) |
-| `PORT` | No | Web server port (default: 3000) |
-| `GITHUB_WEBHOOK_SECRET` | No | Webhook secret for signature verification |
-| `DATABASE_PATH` | No | SQLite database path |
-| `CONTRIBUTOR_ROLE_NAME` | No | Role to assign (default: "Contributor") |
-| `GENERAL_CHANNEL_NAME` | No | Channel for announcements (default: "general") |
-
----
+- `npm test` — jest (80/70/80/80 coverage threshold)
+- `npm run lint` — ESLint with `--max-warnings 0`
+- `npm run register` — register slash commands with Discord
 
 ## Troubleshooting
 
-**Bot not responding to commands**
-- Check that slash commands are registered (check logs on startup)
-- Verify bot has proper permissions in the server
+**OAuth "Invalid Session"** — the callback requires the same browser
+that opened `/auth/github`. Cleared cookies or switched browsers? Run
+`/link` again.
 
-**OAuth "Invalid state" error**
-- Link expired (10 min timeout) - use `/link` again
-- Multiple tabs open - close all and try again
+**Webhook not triggering** — verify the webhook URL, content type, and
+that `GITHUB_WEBHOOK_SECRET` matches GitHub's setting. Failed signatures
+are logged at error level.
 
-**Webhook not triggering**
-- Verify webhook URL is correct
-- Check GitHub webhook delivery logs for errors
-- Ensure "Pull requests" event is selected
-
-**Role not being assigned**
-- Verify bot role is higher than @Contributor role
-- Check bot has "Manage Roles" permission
-
----
+**Role not assigned** — the bot role must sit above `@Contributor` in
+the role hierarchy, and the bot needs `Manage Roles`.
 
 ## License
 
-Apache-2.0 - Same as OpenNHP
+Apache-2.0

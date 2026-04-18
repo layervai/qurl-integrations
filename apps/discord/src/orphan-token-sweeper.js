@@ -37,7 +37,8 @@ async function sweepOnce() {
   }
   if (rows.length === 0) return;
   let revoked = 0;
-  for (const { id, accessToken } of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const { id, accessToken } = rows[i];
     try {
       if (await revokeOne(accessToken)) {
         db.deleteOrphanedToken(id);
@@ -49,6 +50,11 @@ async function sweepOnce() {
         id, tokenHash8, error: err.message,
       });
     }
+    // 100ms between calls — GitHub's secondary rate limit kicks in around
+    // 100 requests/minute on the /applications/.../token endpoint, so 20
+    // calls at 10/sec is well below. Also means one rejection doesn't
+    // burn the whole batch in <200ms.
+    if (i < rows.length - 1) await new Promise(r => setTimeout(r, 100));
   }
   if (revoked > 0) {
     logger.info(`Orphan token sweep: revoked ${revoked}/${rows.length}`);

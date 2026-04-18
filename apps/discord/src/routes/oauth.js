@@ -206,7 +206,16 @@ function readCookie(req, name) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     const k = part.slice(0, eq).trim();
-    if (k === name) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (k === name) {
+      // Attacker-controlled cookies can contain malformed %-encoding
+      // (e.g. `%ZZ`); decodeURIComponent would throw URIError and crash
+      // the request handler. Treat a malformed cookie as "no cookie".
+      try {
+        return decodeURIComponent(part.slice(eq + 1).trim());
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }

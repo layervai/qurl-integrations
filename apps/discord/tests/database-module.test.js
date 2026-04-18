@@ -315,15 +315,18 @@ describe('database module', () => {
   });
 
   describe('streak master badge', () => {
-    it('awards streak_master for 3+ consecutive months', () => {
-      // Create a user and manually set their streak to 3 consecutive months
+    it('returns an array of badge-type strings (may include streak_master)', () => {
       db.createLink('streak-master', 'streakgh');
-      // Record 3 months of contributions to build streak
       db.recordContribution('streak-master', 'streakgh', 3000, 'OpenNHP/opennhp', 'M1');
       db.recordContribution('streak-master', 'streakgh', 3001, 'OpenNHP/opennhp', 'M2');
       db.recordContribution('streak-master', 'streakgh', 3002, 'OpenNHP/opennhp', 'M3');
-      // Check badges - may or may not award streak_master depending on timing
-      db.checkAndAwardBadges('streak-master', 'M3', 'OpenNHP/opennhp');
+      const awarded = db.checkAndAwardBadges('streak-master', 'M3', 'OpenNHP/opennhp');
+      // Whether streak_master drops in this jest run depends on wall-clock
+      // month boundaries; what we can always assert is the shape.
+      expect(Array.isArray(awarded)).toBe(true);
+      for (const b of awarded) {
+        expect(Object.values(db.BADGE_TYPES)).toContain(b);
+      }
     });
   });
 

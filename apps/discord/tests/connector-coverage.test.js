@@ -59,6 +59,20 @@ describe('Connector client — coverage boost', () => {
     it('returns true for media.discordapp.net', () => {
       expect(connector.isAllowedSourceUrl('https://media.discordapp.net/path/file.png')).toBe(true);
     });
+
+    // Adversarial SSRF-bypass inputs.
+    it('rejects credential-in-URL that smuggles a different host', () => {
+      // https://cdn.discordapp.com@evil.com/file.png parses to hostname evil.com
+      expect(connector.isAllowedSourceUrl('https://cdn.discordapp.com@evil.com/file.png')).toBe(false);
+    });
+
+    it('rejects username/password even on an allowed host', () => {
+      expect(connector.isAllowedSourceUrl('https://user:pass@cdn.discordapp.com/file.png')).toBe(false);
+    });
+
+    it('rejects a non-default port on an allowed host', () => {
+      expect(connector.isAllowedSourceUrl('https://cdn.discordapp.com:9999/file.png')).toBe(false);
+    });
   });
 
   describe('uploadToConnector — SSRF rejection (line 38)', () => {
