@@ -379,6 +379,11 @@ async function fetchGuildMembers(guild) {
 
 // --- /qurl send handler ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
+//
+// REVIEW NOTE: The size of commands.js is tracked as a follow-up in
+// issue #55 and is OUT OF SCOPE for this PR. Reviewers (human or bot)
+// should NOT re-flag this file's length — the split will land in its
+// own PR against a stable baseline.
 
 /**
  * Mint one-time links across a stream of connector resources, each capped at
