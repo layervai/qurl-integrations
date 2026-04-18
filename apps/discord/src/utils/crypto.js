@@ -31,28 +31,37 @@ const PREFIX = 'enc:v1:';
 const ALGO = 'aes-256-gcm';
 
 let cachedKey = null;
-function getKey() {
-  if (cachedKey !== null) return cachedKey;
-  const raw = process.env.KEY_ENCRYPTION_KEY;
-  if (!raw) {
-    cachedKey = false;
-    return false;
-  }
+let cachedPrevKey = null;
+function parseKey(raw, label) {
+  if (!raw) return null;
   const buf = Buffer.from(raw, 'base64');
-  // Buffer.from silently discards non-base64 chars and accepts wrong-length
-  // input, so verify both the decoded length AND that re-encoding round-trips.
-  // If the env var was mis-pasted we want a loud boot-time failure, not a
-  // silent misconfiguration that only surfaces under load.
   if (buf.length !== 32 || buf.toString('base64') !== raw.trim()) {
     const err = new Error(
-      'KEY_ENCRYPTION_KEY is malformed. Expected base64-encoded 32 bytes. ' +
+      `${label} is malformed. Expected base64-encoded 32 bytes. ` +
       'Generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"'
     );
     logger.error(err.message);
     throw err;
   }
-  cachedKey = buf;
   return buf;
+}
+function getKey() {
+  if (cachedKey !== null) return cachedKey;
+  const buf = parseKey(process.env.KEY_ENCRYPTION_KEY, 'KEY_ENCRYPTION_KEY');
+  cachedKey = buf === null ? false : buf;
+  return cachedKey;
+}
+// Optional previous key for zero-downtime rotation: decrypt tries the
+// current key first, then falls back to KEY_ENCRYPTION_KEY_PREV if the
+// auth-tag verification fails. Encrypt ALWAYS uses the current key —
+// next write re-encrypts stale rows under the new key. Operators keep
+// PREV set through a rolling deploy, then remove it once DB is fully
+// re-encrypted. See migration notes at the top of this file.
+function getPrevKey() {
+  if (cachedPrevKey !== null) return cachedPrevKey;
+  const buf = parseKey(process.env.KEY_ENCRYPTION_KEY_PREV, 'KEY_ENCRYPTION_KEY_PREV');
+  cachedPrevKey = buf === null ? false : buf;
+  return cachedPrevKey;
 }
 
 let plaintextWarned = false;
@@ -94,17 +103,33 @@ function decrypt(value) {
   if (!/^[0-9a-f]{24}$/.test(ivHex)) throw new Error('Malformed encrypted value: bad iv');
   if (!/^[0-9a-f]{32}$/.test(tagHex)) throw new Error('Malformed encrypted value: bad tag');
   if (!/^[0-9a-f]*$/.test(ctHex)) throw new Error('Malformed encrypted value: bad ciphertext');
-  const decipher = crypto.createDecipheriv(ALGO, key, Buffer.from(ivHex, 'hex'));
-  decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
-  const pt = Buffer.concat([decipher.update(Buffer.from(ctHex, 'hex')), decipher.final()]);
-  return pt.toString('utf8');
+  const ivBuf = Buffer.from(ivHex, 'hex');
+  const tagBuf = Buffer.from(tagHex, 'hex');
+  const ctBuf = Buffer.from(ctHex, 'hex');
+  // Try current key first; on auth-tag mismatch, fall back to KEY_ENCRYPTION_KEY_PREV
+  // if set. Enables zero-downtime rotation — operators deploy with both keys,
+  // re-encrypt rows on next write, then remove PREV.
+  const tryDecipher = (k) => {
+    const d = crypto.createDecipheriv(ALGO, k, ivBuf);
+    d.setAuthTag(tagBuf);
+    return Buffer.concat([d.update(ctBuf), d.final()]).toString('utf8');
+  };
+  try {
+    return tryDecipher(key);
+  } catch (err) {
+    const prev = getPrevKey();
+    if (prev) {
+      try { return tryDecipher(prev); } catch { /* fall through to original err */ }
+    }
+    throw err;
+  }
 }
 
 // Reset cache — test-only; lets jest env var changes take effect. Exported
 // conditionally so a production caller that accidentally imports it can't
 // null out the encryption key at runtime (which would break the next
 // encrypt call mid-request).
-function _resetKeyCache() { cachedKey = null; plaintextWarned = false; }
+function _resetKeyCache() { cachedKey = null; cachedPrevKey = null; plaintextWarned = false; }
 
 const exports_ = { encrypt, decrypt };
 if (process.env.NODE_ENV !== 'production') {

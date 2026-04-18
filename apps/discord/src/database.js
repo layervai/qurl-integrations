@@ -262,18 +262,25 @@ cleanupOldSends();
 const sendsCleanupInterval = setInterval(cleanupOldSends, 24 * 60 * 60 * 1000);
 sendsCleanupInterval.unref();
 
-// Purge orphaned OAuth tokens older than 7 days. The tokens have `read:user`
-// scope and GitHub expires them after its own (longer) TTL, so after 7 days
-// they're effectively dead and keeping them only lets the table grow. A
-// future background sweeper can intercept this cleanup to retry revocation
-// first; for now we just drop the row and rely on GitHub's own expiry.
+// Purge orphaned OAuth tokens older than ORPHAN_TOKEN_RETENTION_DAYS (default
+// 7 in production, 1 in dev/staging to narrow the plaintext exposure window
+// — though they're encrypted at rest, shorter retention is still preferable).
+// The tokens have `read:user` scope and GitHub expires them on its own TTL,
+// so after this window they're effectively dead; the sweeper keeps retrying
+// live revocation up to the cutoff.
+const ORPHAN_RETENTION_DAYS = (() => {
+  const fromEnv = parseInt(process.env.ORPHAN_TOKEN_RETENTION_DAYS, 10);
+  if (Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv <= 30) return fromEnv;
+  return process.env.NODE_ENV === 'production' ? 7 : 1;
+})();
 function cleanupOrphanedTokens() {
+  const modifier = `-${ORPHAN_RETENTION_DAYS} days`;
   const result = db.prepare(`
     DELETE FROM orphaned_oauth_tokens
-    WHERE datetime(recorded_at) < datetime('now', '-7 days')
-  `).run();
+    WHERE datetime(recorded_at) < datetime('now', ?)
+  `).run(modifier);
   if (result.changes > 0) {
-    logger.info(`Cleaned up ${result.changes} orphaned oauth tokens (>7d old)`);
+    logger.info(`Cleaned up ${result.changes} orphaned oauth tokens (>${ORPHAN_RETENTION_DAYS}d old)`);
   }
 }
 cleanupOrphanedTokens();

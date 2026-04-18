@@ -47,6 +47,11 @@ const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./dis
 // plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
 // so a stolen state URL cannot be silently coerced to another user.
 let _warnedStateSecretFallback = false;
+// Random per-process fallback so even inside the Jest harness there's no
+// static key that, if accidentally shipped, would be forgeable. Regenerated
+// on every process start; tests that need a stable secret should set
+// OAUTH_STATE_SECRET explicitly in their own mocks.
+const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 function stateSecret() {
   // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
   // can be rotated without also invalidating in-flight OAuth state tokens —
@@ -66,10 +71,10 @@ function stateSecret() {
       throw new Error('Refusing to mint OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
     }
     if (!_warnedStateSecretFallback) {
-      logger.warn('OAuth state HMAC using test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
+      logger.warn('OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
       _warnedStateSecretFallback = true;
     }
-    return 'dev-oauth-state-secret';
+    return _testFallbackSecret;
   }
   return config.GITHUB_CLIENT_SECRET;
 }
