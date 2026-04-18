@@ -16,7 +16,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -132,7 +132,7 @@ async function batchSettled(items, fn, batchSize = 5) {
 }
 
 // --- Shared DM embed builder ---
-function buildDeliveryEmbed({ senderUsername, resourceType, qurlLink, expiresIn, filename, personalMessage }) {
+function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   const embed = new EmbedBuilder()
@@ -141,15 +141,18 @@ function buildDeliveryEmbed({ senderUsername, resourceType, qurlLink, expiresIn,
     .setDescription(
       `**${senderUsername}** shared a protected resource with you\n${divider}`
     )
+  // resourceLabel is a caller-friendly description ("File (report.pdf)" or
+  // the location name). Prefer it when provided and fall back to a generic
+  // type label otherwise.
   if (isFile) {
     embed.addFields(
-      { name: 'Resource Type', value: 'File', inline: true },
+      { name: 'Resource Type', value: resourceLabel || 'File', inline: true },
       { name: 'Filename', value: filename, inline: true },
       { name: '\u200b', value: '\u200b', inline: true },
     );
   } else {
     embed.addFields(
-      { name: 'Resource Type', value: 'Location', inline: true },
+      { name: 'Resource Type', value: resourceLabel || 'Location', inline: true },
     );
   }
 
@@ -176,6 +179,12 @@ function buildDeliveryEmbed({ senderUsername, resourceType, qurlLink, expiresIn,
 }
 
 // --- Link status monitor ---
+// Track live monitors so a burst of /qurl send commands can't stack more
+// than MAX_CONCURRENT_MONITORS setIntervals. When we cross the cap, the
+// oldest monitor is stopped to make room (the user can still `/qurl revoke`;
+// they just stop seeing live status updates in the original message).
+const activeMonitors = new Set();
+
 function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, baseMsg, buttonRow, delivered, apiKey) {
   // Returns a control object: call monitor.addRecipients(count) when new recipients are added
   let currentBaseMsg = baseMsg;
@@ -194,6 +203,7 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     stop() {
       stopped = true;
       clearInterval(timer);
+      activeMonitors.delete(control);
       // Release references on the closures; over many sends these would
       // otherwise accumulate. trackedQurlIds may already be null (see
       // addRecipients — null forces a re-init next tick).
@@ -321,6 +331,17 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
     }
   }, pollInterval);
   if (timer && timer.unref) timer.unref();
+
+  // Register this monitor in the global set. If we're over the cap, stop
+  // the oldest-inserted monitor first (Set iteration order = insertion
+  // order) so the new one can take its slot. The victim user can still
+  // revoke links manually; they just lose live updates on that embed.
+  while (activeMonitors.size >= MAX_CONCURRENT_MONITORS) {
+    const oldest = activeMonitors.values().next().value;
+    if (!oldest) break;
+    oldest.stop();
+  }
+  activeMonitors.add(control);
 
   return control;
 }
@@ -630,7 +651,6 @@ async function handleSend(interaction, apiKey) {
         components: [],
       });
     }
-    const MAX_FILE_SIZE = 25 * 1024 * 1024;
     if (attachment.size > MAX_FILE_SIZE) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({

@@ -8,8 +8,10 @@ const { sendDM, assignContributorRole, notifyBadgeEarned } = require('../discord
 
 const router = express.Router();
 
-// Check for historical contributions after linking
-async function checkHistoricalContributions(discordId, githubUsername, accessToken) {
+// Check for historical contributions after linking. Accepts an AbortSignal
+// so the caller can interrupt pagination before revoking the access token —
+// otherwise in-flight GitHub calls race with the revoke and fail with 401.
+async function checkHistoricalContributions(discordId, githubUsername, accessToken, abortSignal) {
   const contributions = [];
 
   // GitHub usernames are alphanumerics + hyphen (1-39 chars). Validate here
@@ -28,16 +30,23 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
     const MAX_PAGES = 5;
     for (const org of config.ALLOWED_GITHUB_ORGS) {
       for (let page = 1; page <= MAX_PAGES; page++) {
+        if (abortSignal?.aborted) {
+          return { count: contributions.length, newBadges: [], error: 'aborted' };
+        }
         const searchQuery = `type:pr author:${githubUsername} org:${org} is:merged`;
         const searchUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100&page=${page}`;
 
+        // Combine the 30s per-request timeout with the caller's abort signal.
+        const signals = abortSignal
+          ? AbortSignal.any([AbortSignal.timeout(30000), abortSignal])
+          : AbortSignal.timeout(30000);
         const response = await fetch(searchUrl, {
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'Accept': 'application/vnd.github.v3+json',
             'User-Agent': 'OpenNHP-Bot',
           },
-          signal: AbortSignal.timeout(30000),
+          signal: signals,
         });
 
         if (!response.ok) {
@@ -333,6 +342,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
   }
 
   let accessToken = null;
+  let historicalAbort = null;
   try {
     // Exchange code for access token
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -392,11 +402,16 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
     logger.info(`Linked Discord ${pending.discord_id} to GitHub @${userData.login}`);
 
-    // Check for historical contributions (async, don't block response)
+    // Check for historical contributions (async, don't block response).
+    // The abortController lets us cancel in-flight GitHub calls before the
+    // `finally` revokes the access token — otherwise mid-pagination calls
+    // race with the revoke and 401 silently.
+    historicalAbort = new AbortController();
     const historicalCheck = checkHistoricalContributions(
       pending.discord_id,
       userData.login,
-      tokenData.access_token
+      tokenData.access_token,
+      historicalAbort.signal,
     );
 
     // Send initial DM
@@ -460,7 +475,11 @@ router.get('/github/callback', rateLimit, async (req, res) => {
   } finally {
     // Revoke the GitHub OAuth token. Await the call and retry once with
     // backoff; leaving a read:user token alive on GitHub would be a real
-    // credential leak.
+    // credential leak. First cancel any in-flight historical-contribution
+    // calls so they don't hit 401 after we've invalidated the token.
+    if (historicalAbort) {
+      try { historicalAbort.abort(); } catch { /* nothing to do */ }
+    }
     if (accessToken) {
       const revokeOnce = () => fetch(`https://api.github.com/applications/${config.GITHUB_CLIENT_ID}/token`, {
         method: 'DELETE',

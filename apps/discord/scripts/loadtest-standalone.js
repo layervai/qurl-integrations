@@ -25,9 +25,9 @@ if (fs.existsSync(envFile)) {
   }
 }
 
-const config = require('./config');
-const { mintLinks } = require('./connector');
-const { createOneTimeLink } = require('./qurl');
+const config = require('../src/config');
+const { mintLinks } = require('../src/connector');
+const { createOneTimeLink } = require('../src/qurl');
 
 const args = process.argv.slice(2);
 function getArg(name, defaultVal) {
@@ -53,7 +53,7 @@ async function generateTestFile() {
 
 // Reuse the shared parser — it has the overflow protection that this
 // ad-hoc copy used to lack.
-const { expiryToISO } = require('./utils/time');
+const { expiryToISO } = require('../src/utils/time');
 
 async function runRound(roundNum) {
   const roundStart = performance.now();

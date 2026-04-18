@@ -3,7 +3,7 @@ const logger = require('./logger');
 
 const { sanitizeFilename } = require('./utils/sanitize');
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 
 // Fetch from a Discord CDN URL with manual redirect handling. `redirect:

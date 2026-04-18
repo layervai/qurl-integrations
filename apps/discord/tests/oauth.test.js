@@ -88,6 +88,15 @@ describe('OAuth routes', () => {
       expect(res.text).toContain('Invalid Session');
     });
 
+    it('treats a malformed-encoded cookie as no cookie (no URIError crash)', async () => {
+      // %ZZ is invalid percent-encoding; decodeURIComponent would throw.
+      const res = await request(app)
+        .get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+        .set('Cookie', 'qurl_oauth_session=abc%ZZdef');
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Invalid Session');
+    });
+
     it('rejects expired state in callback', async () => {
       db.consumePendingLink.mockReturnValue(null);
       const res = await request(app).get('/auth/github/callback?code=good&state=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0').set('Cookie', 'qurl_oauth_session=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0');

@@ -52,6 +52,15 @@ const LIMITS = {
   RELEASE_NOTES_TRUNCATE: 500,
 };
 
+// Maximum attachment size the bot will accept. Shared between commands.js
+// (user-facing validation) and connector.js (CDN download + streaming cap).
+// Keep in sync with Discord's own 25MB attachment limit.
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// Cap on concurrent link-status monitors. Each monitor fires setInterval
+// up to 1 hour; a burst of sends could otherwise stack dozens of timers.
+const MAX_CONCURRENT_MONITORS = 50;
+
 // GitHub event actions we care about
 const GITHUB_ACTIONS = {
   PR_MERGED: 'closed',  // with merged=true
@@ -76,6 +85,8 @@ module.exports = {
   ROLE_COLORS,
   TIMEOUTS,
   LIMITS,
+  MAX_FILE_SIZE,
+  MAX_CONCURRENT_MONITORS,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
 };

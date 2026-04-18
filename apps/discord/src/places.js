@@ -9,8 +9,12 @@ async function searchPlaces(query) {
     return [];
   }
 
+  // Cap user-supplied input before it reaches Google's URL. Google's own
+  // limit is generous but a defensive 500-char guard bounds our request
+  // size and log line length regardless.
+  const safeQuery = String(query || '').slice(0, 500);
   const params = new URLSearchParams({
-    input: query,
+    input: safeQuery,
     key: config.GOOGLE_MAPS_API_KEY,
     types: 'establishment|geocode',
   });

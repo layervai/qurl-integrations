@@ -12,9 +12,19 @@ const webhooksRouter = require('./routes/webhooks');
 const app = express();
 
 // Trust proxy headers (ECS behind ALB) for correct req.ip in rate limiting.
-// Only enable in production — in dev a direct connection trusts a spoofed
-// X-Forwarded-For and lets any caller bypass IP-based rate limiting.
-if (process.env.NODE_ENV === 'production') {
+// Controlled by TRUST_PROXY env var: "1"=trust one hop, "2"=two hops, etc.
+// Leaving it unset (dev direct-connect) ignores X-Forwarded-For so a local
+// caller can't spoof it to bypass rate limiting. Staging behind an LB
+// should set TRUST_PROXY=1 even with NODE_ENV != production.
+if (process.env.TRUST_PROXY) {
+  const hops = parseInt(process.env.TRUST_PROXY, 10);
+  if (Number.isFinite(hops) && hops > 0) {
+    app.set('trust proxy', hops);
+  } else {
+    logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY}`);
+  }
+} else if (process.env.NODE_ENV === 'production') {
+  // Default for production if nothing configured.
   app.set('trust proxy', 1);
 }
 
