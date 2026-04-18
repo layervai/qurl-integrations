@@ -154,7 +154,7 @@ db.exec(`
 // validated against it. Never expand this list with user-supplied input.
 const ALLOW_COLUMNS = ['attachment_content_type', 'attachment_url'];
 for (const col of ALLOW_COLUMNS) {
-  if (!/^[a-z_][a-z0-9_]*$/i.test(col)) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(col)) {
     throw new Error(`Refusing ALTER TABLE with unexpected column name: ${col}`);
   }
   try {

@@ -256,6 +256,13 @@ function monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn
   }
 
   let pollCount = 0;
+  // INVARIANT: `trackedQurlIds` starts null and is populated on the first tick
+  // (see line ~277). control.addRecipients() sets it back to null mid-tick so
+  // the NEXT tick re-initializes tracking against the new link set. Any read
+  // of `trackedQurlIds` inside this callback that happens AFTER an `await`
+  // must first re-check `if (!trackedQurlIds) return;` because addRecipients
+  // can null it during any awaited gap. If you add new awaits here, guard
+  // subsequent reads accordingly.
   timer = setInterval(async () => {
     pollCount++;
     if (pollCount > 20 && pollCount % 4 !== 0) return;
@@ -360,8 +367,13 @@ async function fetchGuildMembers(guild) {
   memberFetchCache.set(guild.id, { timestamp: now, inFlight: promise });
   try {
     await promise;
-  } finally {
+    // Only stamp success — on failure, drop the entry so the next caller
+    // retries immediately instead of sitting on a stale-or-empty member list
+    // for the full TTL window.
     memberFetchCache.set(guild.id, { timestamp: Date.now(), inFlight: null });
+  } catch (err) {
+    memberFetchCache.delete(guild.id);
+    throw err;
   }
 }
 
@@ -479,6 +491,7 @@ async function handleSend(interaction, apiKey) {
       await fetchGuildMembers(interaction.guild);
     } catch (err) {
       logger.error('Failed to fetch guild members', { error: err.message });
+      clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
     }
     recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
@@ -616,8 +629,12 @@ async function handleSend(interaction, apiKey) {
       locationUrl = detectedUrl;
       const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
       const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-      if (queryMatch) locationName = decodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
-      else if (placeMatch) locationName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+      // decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
+      // Swallow and fall back to the raw string — a garbled label is better
+      // than a crashed command handler.
+      const safeDecode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
+      if (queryMatch) locationName = safeDecode(queryMatch[1].replace(/\+/g, ' '));
+      else if (placeMatch) locationName = safeDecode(placeMatch[1].replace(/\+/g, ' '));
     } else if (detectedUrl) {
       // Regex matched but isGoogleMapsURL() rejected — treat as text search
       locationName = locationValue;
@@ -755,8 +772,11 @@ async function handleSend(interaction, apiKey) {
       expiresIn, channelId: interaction.channelId, targetType: target,
     })));
   } catch (err) {
+    // Log the orphaned QURL resources at error level so an operator can
+    // manually revoke them — they exist on the QURL side with no local row.
     logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
       sendId, error: err.message, linkCount: qurlLinks.length,
+      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
     });
     clearCooldown(interaction.user.id);
     return interaction.editReply({
@@ -2127,6 +2147,11 @@ async function handleCommand(interaction) {
     await command.execute(interaction);
   } catch (error) {
     logger.error(`Error executing ${interaction.commandName}`, { error: error.message });
+    // Any throw after setCooldown (e.g. deferReply failure, modal timeout path
+    // that bubbles) would leave the user in a 30s block for an action that
+    // never completed. clearCooldown is idempotent and a no-op for commands
+    // that don't use it, so call unconditionally.
+    clearCooldown(interaction.user.id);
     const reply = {
       content: 'There was an error executing this command.',
       ephemeral: true,
