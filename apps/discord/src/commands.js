@@ -593,7 +593,11 @@ async function handleSend(interaction, apiKey) {
       });
     }
 
-    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim();
+    // Hard-cap input length BEFORE regex matching. The Maps regexes have
+    // unbounded character classes that can backtrack on pathological input;
+    // trimming to 2000 chars prevents a ReDoS while still accepting every
+    // legitimate Google Maps URL (real-world max is ~300 chars).
+    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
     await modalSubmit.deferUpdate();
 
     const mapsPatterns = [
@@ -1128,7 +1132,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
         return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds, delivered: 0, failed: 0 };
       }
-      newRecipients.forEach((r, i) => {
+      // Iterate by allLinks length so an off-by-one can never index out of bounds.
+      // The guard above ensures allLinks.length >= newRecipients.length.
+      for (let i = 0; i < allLinks.length; i++) {
+        const r = newRecipients[i];
+        if (!r) break;
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
         recipientLinks[r.id].push({
           qurlLink: allLinks[i].qurl_link,
@@ -1136,7 +1144,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           resType: RESOURCE_TYPES.FILE,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
-      });
+      }
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
@@ -1945,6 +1953,18 @@ const commands = [
         }
         if (!interaction.memberPermissions?.has('ManageGuild')) {
           return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
+        }
+        // Refuse to accept a guild API key unless encryption-at-rest is
+        // configured. Falling through to the crypto module's plaintext
+        // fallback would silently store a billing-sensitive secret on disk.
+        if (!process.env.KEY_ENCRYPTION_KEY) {
+          logger.error('Refusing /qurl setup: KEY_ENCRYPTION_KEY is not set');
+          return interaction.reply({
+            content: '❌ **QURL is not ready to accept API keys on this server.**\n\n' +
+              'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
+              + '/qurl setup can store keys safely. Ask them to check the deployment env.',
+            ephemeral: true,
+          });
         }
         // Use a modal to collect the API key — modal inputs are NOT recorded in Discord audit logs
         // Nonce the customId so two concurrent /qurl setup flows don't consume each other's submissions.

@@ -151,7 +151,11 @@ const rateLimitStore = new Map();
 // Node.js single-threaded: no true data race, but eviction could theoretically
 // interleave with a request's filter→set. Acceptable for in-memory rate limiting.
 
-// Evict stale entries every 5 minutes to prevent unbounded growth
+// Evict stale entries on a 30-second timer (was 5 minutes). Under a burst
+// from many unique IPs, a longer sweep interval lets the Map grow much
+// larger than the per-request 10% eviction can keep up with. 30s is a
+// sweet spot: short enough to bound steady-state memory, long enough to
+// not matter as load.
 setInterval(() => {
   const cutoff = Date.now() - config.RATE_LIMIT_WINDOW_MS * 2;
   for (const [ip, requests] of rateLimitStore) {
@@ -159,7 +163,7 @@ setInterval(() => {
     if (recent.length === 0) rateLimitStore.delete(ip);
     else rateLimitStore.set(ip, recent);
   }
-}, 5 * 60 * 1000).unref();
+}, 30 * 1000).unref();
 
 // Absolute cap on how many timestamps we keep per IP so an abusive IP can't
 // grow its array unboundedly between eviction sweeps.

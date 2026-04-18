@@ -20,7 +20,7 @@ async function revokeOne(accessToken) {
       'Authorization': 'Basic ' + Buffer.from(`${config.GITHUB_CLIENT_ID}:${config.GITHUB_CLIENT_SECRET}`).toString('base64'),
       'Accept': 'application/json',
       'Content-Type': 'application/json',
-      'User-Agent': 'OpenNHP-Bot',
+      'User-Agent': 'qurl-discord-bot/1.0',
     },
     body: JSON.stringify({ access_token: accessToken }),
     signal: AbortSignal.timeout(5000),
