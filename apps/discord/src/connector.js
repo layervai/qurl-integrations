@@ -91,9 +91,14 @@ function connectorAuthHeaders(apiKey) {
 }
 
 /**
- * Upload a file to the qurl-s3-connector.
- * Downloads from Discord CDN, then uploads to connector.
- * Note: file is fully buffered in memory (up to 25MB max).
+ * Upload a file to the qurl-s3-connector. Downloads from Discord CDN, then
+ * uploads to the connector.
+ *
+ * @deprecated for NEW code — use `downloadAndUpload` which also returns the
+ * buffered file so callers can re-upload without a second round trip. This
+ * function is retained because its SSRF-rejection path is directly tested in
+ * tests/connector-coverage.test.js and tests/qurl-send.test.js, and those
+ * cases would lose coverage if it were removed.
  */
 async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   filename = sanitizeFilename(filename);

@@ -409,9 +409,12 @@ router.get('/github/callback', rateLimit, async (req, res) => {
         // Record in the DB for a future background sweep + alert on count.
         // The user's GitHub token (read:user scope) is orphaned-alive until
         // cleanup runs, so a rising rate should page oncall.
+        // Log a hash prefix, not a raw token prefix — GitHub tokens have a
+        // 4-char public marker (`gho_`) so slice(0,8) would leak 4 real chars.
+        const tokenHash8 = require('crypto').createHash('sha256').update(accessToken).digest('hex').slice(0, 8);
         logger.error('Failed to revoke GitHub OAuth token after retries', {
           error: lastErr.message,
-          orphanedTokenPrefix: accessToken.slice(0, 8),
+          tokenHash8,
         });
         try {
           db.recordOrphanedToken(accessToken);

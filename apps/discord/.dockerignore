@@ -13,3 +13,7 @@ railway.json
 src/loadtest-standalone.js
 jest.config.js
 README.md
+# Defense-in-depth: never ship a local private key or npm auth token.
+*.pem
+*.key
+.npmrc

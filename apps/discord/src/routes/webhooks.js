@@ -6,6 +6,12 @@ const config = require('../config');
 const db = require('../database');
 const logger = require('../logger');
 const { COLORS, GOOD_FIRST_ISSUE_PATTERNS } = require('../constants');
+const { escapeDiscordMarkdown } = require('../utils/sanitize');
+// Short alias — GitHub webhook payloads put user-controlled text everywhere
+// (PR title, issue title, commit message, branch name, label). We render
+// those inside Discord embeds, which render markdown including [text](url)
+// links, so every field below goes through `md()` before interpolation.
+const md = escapeDiscordMarkdown;
 const {
   assignContributorRole,
   notifyPRMerge,
@@ -172,10 +178,10 @@ async function handlePullRequest(payload) {
       const embed = new EmbedBuilder()
         .setColor(COLORS.GITHUB_GREEN)
         .setTitle(`🔀 PR Opened: #${pr.number}`)
-        .setDescription(`**${pr.title}**`)
+        .setDescription(`**${md(pr.title)}**`)
         .addFields(
-          { name: 'Author', value: `@${pr.user.login}`, inline: true },
-          { name: 'Repo', value: payload.repository.full_name, inline: true }
+          { name: 'Author', value: `@${md(pr.user.login)}`, inline: true },
+          { name: 'Repo', value: md(payload.repository.full_name), inline: true }
         )
         .setURL(pr.html_url)
         .setTimestamp();
@@ -197,10 +203,10 @@ async function handlePullRequest(payload) {
   const mergeEmbed = new EmbedBuilder()
     .setColor(0x8957e5)
     .setTitle(`✅ PR Merged: #${prNumber}`)
-    .setDescription(`**${prTitle}**`)
+    .setDescription(`**${md(prTitle)}**`)
     .addFields(
-      { name: 'Author', value: `@${githubUsername}`, inline: true },
-      { name: 'Repo', value: repo, inline: true }
+      { name: 'Author', value: `@${md(githubUsername)}`, inline: true },
+      { name: 'Repo', value: md(repo), inline: true }
     )
     .setURL(prUrl)
     .setTimestamp();
@@ -263,16 +269,16 @@ async function handleIssue(payload) {
     const embed = new EmbedBuilder()
       .setColor(COLORS.GITHUB_GREEN)
       .setTitle(`📝 Issue Opened: #${issue.number}`)
-      .setDescription(`**${issue.title}**`)
+      .setDescription(`**${md(issue.title)}**`)
       .addFields(
-        { name: 'Author', value: `@${githubUsername}`, inline: true },
-        { name: 'Repo', value: repo, inline: true }
+        { name: 'Author', value: `@${md(githubUsername || 'unknown')}`, inline: true },
+        { name: 'Repo', value: md(repo), inline: true }
       )
       .setURL(issue.html_url)
       .setTimestamp();
 
     if (labels.length > 0) {
-      embed.addFields({ name: 'Labels', value: labels.slice(0, 5).map(l => `\`${l}\``).join(' '), inline: false });
+      embed.addFields({ name: 'Labels', value: labels.slice(0, 5).map(l => `\`${md(l)}\``).join(' '), inline: false });
     }
 
     await postToGitHubFeed(embed);
@@ -290,9 +296,9 @@ async function handleRelease(payload) {
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.PRIMARY)
-    .setTitle(`🚀 Release: ${release.tag_name}`)
-    .setDescription(`**${release.name || release.tag_name}**`)
-    .addFields({ name: 'Repo', value: repo, inline: true })
+    .setTitle(`🚀 Release: ${md(release.tag_name)}`)
+    .setDescription(`**${md(release.name || release.tag_name)}**`)
+    .addFields({ name: 'Repo', value: md(repo), inline: true })
     .setURL(release.html_url)
     .setTimestamp();
   await postToGitHubFeed(embed);
@@ -335,14 +341,14 @@ async function handleActivityFeed(event, payload) {
 
       embed = new EmbedBuilder()
         .setColor(COLORS.GITHUB_PURPLE)
-        .setTitle(`📤 ${commits.length} commit(s) pushed to ${branch}`)
+        .setTitle(`📤 ${commits.length} commit(s) pushed to ${md(branch)}`)
         .setDescription(
-          commits.slice(0, 3).map(c => `• \`${c.id.substring(0, 7)}\` ${c.message.split('\n')[0].substring(0, 50)}`).join('\n') +
+          commits.slice(0, 3).map(c => `• \`${c.id.substring(0, 7)}\` ${md(c.message.split('\n')[0].substring(0, 50))}`).join('\n') +
           (commits.length > 3 ? `\n... and ${commits.length - 3} more` : '')
         )
         .addFields(
-          { name: 'Pusher', value: `@${pusher}`, inline: true },
-          { name: 'Repo', value: repo, inline: true }
+          { name: 'Pusher', value: `@${md(pusher)}`, inline: true },
+          { name: 'Repo', value: md(repo), inline: true }
         )
         .setTimestamp();
       break;
@@ -352,14 +358,14 @@ async function handleActivityFeed(event, payload) {
       if (payload.ref_type === 'branch') {
         embed = new EmbedBuilder()
           .setColor(COLORS.GITHUB_GREEN)
-          .setTitle(`🌿 Branch Created: ${payload.ref}`)
-          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTitle(`🌿 Branch Created: ${md(payload.ref)}`)
+          .addFields({ name: 'Repo', value: md(repo), inline: true })
           .setTimestamp();
       } else if (payload.ref_type === 'tag') {
         embed = new EmbedBuilder()
           .setColor(COLORS.PRIMARY)
-          .setTitle(`🏷️ Tag Created: ${payload.ref}`)
-          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTitle(`🏷️ Tag Created: ${md(payload.ref)}`)
+          .addFields({ name: 'Repo', value: md(repo), inline: true })
           .setTimestamp();
       }
       break;
@@ -368,8 +374,8 @@ async function handleActivityFeed(event, payload) {
       if (payload.ref_type === 'branch') {
         embed = new EmbedBuilder()
           .setColor(COLORS.ERROR)
-          .setTitle(`🗑️ Branch Deleted: ${payload.ref}`)
-          .addFields({ name: 'Repo', value: repo, inline: true })
+          .setTitle(`🗑️ Branch Deleted: ${md(payload.ref)}`)
+          .addFields({ name: 'Repo', value: md(repo), inline: true })
           .setTimestamp();
       }
       break;
