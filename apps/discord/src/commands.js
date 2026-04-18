@@ -48,6 +48,11 @@ function stateSecret() {
   // misconfigured staging deploy surfaces the issue instead of silently
   // running with a static attacker-known key.
   if (!config.GITHUB_CLIENT_SECRET) {
+    // Belt-and-suspenders: fail hard in production if boot validation in
+    // index.js was ever bypassed. A static HMAC key is trivially forgeable.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Refusing to mint OAuth state: GITHUB_CLIENT_SECRET is not set in production.');
+    }
     if (!_warnedStateSecretFallback && process.env.NODE_ENV !== 'test') {
       logger.warn('OAuth state HMAC using static dev fallback — set GITHUB_CLIENT_SECRET');
       _warnedStateSecretFallback = true;
@@ -137,6 +142,11 @@ function isAllowedFileType(contentType) {
 }
 
 const sendCooldowns = new Map();
+// Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
+// them) can't grow the Map beyond this. Above this, the 10%-drop eviction
+// still fires; if that fails to reclaim, setCooldown drops the oldest
+// single entry to guarantee we never exceed the cap.
+const SEND_COOLDOWNS_MAX = 20000;
 
 function isOnCooldown(userId) {
   const last = sendCooldowns.get(userId);
@@ -158,6 +168,13 @@ function setCooldown(userId) {
       if (k === undefined) break;
       sendCooldowns.delete(k);
     }
+  }
+  // Belt-and-suspenders: guarantee the hard cap even if the bulk drop
+  // didn't reclaim enough (pathological insertion patterns).
+  while (sendCooldowns.size > SEND_COOLDOWNS_MAX) {
+    const oldest = sendCooldowns.keys().next().value;
+    if (oldest === undefined) break;
+    sendCooldowns.delete(oldest);
   }
 }
 
