@@ -142,8 +142,17 @@ router.post('/github', async (req, res) => {
 
   logger.info(`Received GitHub event: ${event}`, { repo, action: payload.action });
 
-  if (repo && !isAllowedRepo(repo)) {
-    logger.debug(`Ignoring webhook from non-allowed repo: ${repo}`);
+  // Ping is the only event GitHub sends without a repository — let it through
+  // so the webhook health check works.
+  if (event === 'ping') {
+    return res.status(200).send('OK - ping');
+  }
+
+  // Require a repository and verify it's on the allowlist. Rejects forged
+  // events from repos that happen to share the same webhook secret, and
+  // guards downstream handlers that dereference payload.repository.full_name.
+  if (!repo || !isAllowedRepo(repo)) {
+    logger.warn(`Rejecting webhook from non-allowed or missing repo`, { repo: repo || '(none)', event });
     return res.status(200).send('OK - ignored');
   }
 

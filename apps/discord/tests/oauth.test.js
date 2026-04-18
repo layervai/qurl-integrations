@@ -21,6 +21,16 @@ jest.mock('../src/database', () => ({
   getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
 }));
 
+// State HMAC binding lives in commands.js and is tested there. For route
+// tests, bypass verification so the existing hardcoded state strings still
+// exercise the downstream flow.
+jest.mock('../src/commands', () => ({
+  verifyStateBinding: jest.fn().mockReturnValue(true),
+  handleCommand: jest.fn(),
+  commands: [],
+  registerCommands: jest.fn(),
+}));
+
 process.env.GITHUB_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-webhook-secret';

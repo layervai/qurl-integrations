@@ -5,6 +5,7 @@ const db = require('../database');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { sendDM, assignContributorRole, notifyBadgeEarned } = require('../discord');
+const { verifyStateBinding } = require('../commands');
 
 const router = express.Router();
 
@@ -345,6 +346,23 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       message: 'Your session has expired. Please use /link in Discord to start over.',
       subtext: `Sessions expire after ${config.PENDING_LINK_EXPIRY_MINUTES} minutes for security.`,
       type: 'warning',
+    }));
+  }
+
+  // Verify the state HMAC binds the stored discord_id. A row in pending_links
+  // whose state was generated for a different discord_id (e.g. if the nonce
+  // collided or the table was tampered with) must NOT be able to complete a
+  // link under this discord_id. Defense-in-depth on top of the DB mapping.
+  if (!verifyStateBinding(state, pending.discord_id)) {
+    logger.error('OAuth state HMAC mismatch; refusing to complete link', {
+      discordId: pending.discord_id,
+    });
+    return res.status(400).send(renderPage({
+      title: 'Invalid Session',
+      icon: '🚫',
+      heading: 'Invalid Session',
+      message: 'This authorization session could not be verified. Please run /link in Discord to start over.',
+      type: 'error',
     }));
   }
 

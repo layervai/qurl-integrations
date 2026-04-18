@@ -186,19 +186,22 @@ const BADGE_INFO = {
   [BADGE_TYPES.MULTI_REPO]: { emoji: '🌐', name: 'Multi-Repo', description: 'Contributed to multiple repositories' },
 };
 
-// Get month string (YYYY-MM format) - used for monthly streak tracking
+// Get month string (YYYY-MM format) in UTC - used for monthly streak tracking.
+// Using UTC instead of local time guarantees contributions are bucketed by the
+// same month boundary regardless of container timezone (ECS images default to
+// UTC today but that's not contractually guaranteed).
 function getMonthString(date = new Date()) {
   const d = new Date(date);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
-// Get previous month string. Anchor the date to day 1 before decrementing so
-// March 31 rolls back to Feb 1 (the month we want) rather than Mar 3 (which
-// is what setMonth does when the target month has fewer days).
+// Get previous month string in UTC. Anchor the date to day 1 (UTC) before
+// decrementing so March 31 rolls back to Feb 1 (the month we want) rather
+// than Mar 3 (which is what setMonth does when the target month has fewer days).
 function getPreviousMonthString(date = new Date()) {
   const d = new Date(date);
-  d.setDate(1);
-  d.setMonth(d.getMonth() - 1);
+  d.setUTCDate(1);
+  d.setUTCMonth(d.getUTCMonth() - 1);
   return getMonthString(d);
 }
 

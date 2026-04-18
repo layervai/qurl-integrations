@@ -28,9 +28,41 @@ const TOKENS_PER_RESOURCE = 10;
 const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
 
 
-// Generate secure random state
-function generateState() {
-  return crypto.randomBytes(16).toString('hex');
+// Generate an OAuth state token bound to the initiating Discord user.
+//
+// Format: `{nonce}.{hmac}` where hmac = HMAC-SHA256(OAUTH_STATE_SECRET,
+// `${discordId}:${nonce}`). On callback we re-compute the HMAC against the
+// discord_id pulled from consumePendingLink(); a mismatch means the state
+// was tampered with or replayed across users, even if the random nonce
+// happened to collide with a live pending row.
+//
+// Defense-in-depth only — the primary binding is the single-use DB row
+// plus the HttpOnly/SameSite=Lax session cookie. This adds a third check
+// so a stolen state URL cannot be silently coerced to another user.
+function stateSecret() {
+  // Reuse GITHUB_CLIENT_SECRET as the HMAC key: it's already required in
+  // prod, rotated together with OAuth, and never leaves the server.
+  return config.GITHUB_CLIENT_SECRET || 'dev-oauth-state-secret';
+}
+function generateState(discordId) {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const sig = crypto.createHmac('sha256', stateSecret())
+    .update(`${discordId}:${nonce}`)
+    .digest('hex');
+  return `${nonce}.${sig}`;
+}
+function verifyStateBinding(state, discordId) {
+  if (typeof state !== 'string') return false;
+  const parts = state.split('.');
+  if (parts.length !== 2) return false;
+  const [nonce, sig] = parts;
+  if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(sig)) return false;
+  const expected = crypto.createHmac('sha256', stateSecret())
+    .update(`${discordId}:${nonce}`)
+    .digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
+  } catch { return false; }
 }
 
 // --- QURL send helpers ---
@@ -707,15 +739,22 @@ async function handleSend(interaction, apiKey) {
       // to 25MB in memory for up to an hour per concurrent send.
       const bufHolder = { buf: firstUpload.fileBuffer };
 
-      const allLinks = await mintLinksInBatches({
-        initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey),
-        expiresAt,
-        recipientCount: recipients.length,
-        apiKey,
-      });
-      // Release the buffer; nothing past this point needs it.
-      bufHolder.buf = null;
+      // try/finally around mintLinksInBatches so a throw inside batching
+      // still releases the 25 MB buffer — otherwise the reuploadFn closure
+      // would pin it on the activeMonitors set / pending error handler for
+      // up to an hour per concurrent send under GC pressure.
+      let allLinks;
+      try {
+        allLinks = await mintLinksInBatches({
+          initialResourceId: firstUpload.resource_id,
+          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey),
+          expiresAt,
+          recipientCount: recipients.length,
+          apiKey,
+        });
+      } finally {
+        bufHolder.buf = null;
+      }
 
       if (allLinks.length < recipients.length) {
         logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
@@ -1371,8 +1410,10 @@ const commands = [
       // Check if already linked
       const existing = db.getLinkByDiscord(discordId);
 
-      // Generate state and create pending link
-      const state = generateState();
+      // Generate state and create pending link. State is HMAC-bound to the
+      // discord user ID so the OAuth callback can verify cross-user replay
+      // didn't happen even if the random nonce were somehow leaked.
+      const state = generateState(discordId);
       db.createPendingLink(state, discordId);
 
       const authUrl = `${config.BASE_URL}/auth/github?state=${state}`;
@@ -2125,6 +2166,11 @@ const commands = [
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on access\n\n' +
+            '**Note on large servers:** `channel` and `voice` targets rely on ' +
+            "Discord's member cache. Without the `GUILD_PRESENCES` privileged " +
+            'intent, very large guilds (~1000+ members) may silently miss ' +
+            'members who appear offline — prefer `user` target if you need a ' +
+            'guaranteed recipient.\n\n' +
             'Sign up at **layerv.ai** to get your API key.',
           ephemeral: true,
         });
@@ -2185,6 +2231,7 @@ module.exports = {
   commands,
   registerCommands,
   handleCommand,
+  verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.
