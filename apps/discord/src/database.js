@@ -209,12 +209,24 @@ function getPreviousMonthString(date = new Date()) {
   return getMonthString(d);
 }
 
-// Clean up expired pending links
+// Clean up expired pending links.
+//
+// PENDING_LINK_EXPIRY_MINUTES is validated as a positive integer at boot
+// (see config.intEnv + index.js), but defense-in-depth: pre-format the
+// modifier string in JS and bind the whole literal as a parameter. That
+// way the '||' SQL concatenation pattern is eliminated — the bound value
+// is now the complete datetime modifier, so a future change to the env
+// validation can't open a SQL-injection path into this table.
 function cleanupExpiredPendingLinks() {
+  const mins = Math.trunc(Number(config.PENDING_LINK_EXPIRY_MINUTES));
+  if (!Number.isInteger(mins) || mins <= 0) {
+    throw new Error(`cleanupExpiredPendingLinks: invalid PENDING_LINK_EXPIRY_MINUTES: ${config.PENDING_LINK_EXPIRY_MINUTES}`);
+  }
+  const modifier = `-${mins} minutes`;
   const result = db.prepare(`
     DELETE FROM pending_links
-    WHERE datetime(created_at) < datetime('now', '-' || ? || ' minutes')
-  `).run(config.PENDING_LINK_EXPIRY_MINUTES);
+    WHERE datetime(created_at) < datetime('now', ?)
+  `).run(modifier);
 
   if (result.changes > 0) {
     logger.info(`Cleaned up ${result.changes} expired pending links`);

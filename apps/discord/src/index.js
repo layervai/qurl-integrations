@@ -36,6 +36,14 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
+  // Warn if the OAuth state HMAC is falling back to GITHUB_CLIENT_SECRET.
+  // This works, but couples the two secrets: rotating one would invalidate
+  // in-flight OAuth states (and vice versa). Set OAUTH_STATE_SECRET to
+  // isolate blast radius.
+  if (!process.env.OAUTH_STATE_SECRET) {
+    logger.warn('OAUTH_STATE_SECRET not set; falling back to GITHUB_CLIENT_SECRET for state HMAC. Set OAUTH_STATE_SECRET to decouple rotation.');
+  }
+
   // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot
   // instead of on the first encrypt() call (which could be an OAuth token
   // persist minutes into serving traffic). This validates the key material

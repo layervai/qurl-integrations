@@ -83,6 +83,16 @@ async function sweepOnce() {
   if (revoked > 0) {
     logger.info(`Orphan token sweep: revoked ${revoked}/${rows.length}`);
   }
+  // Log the remaining queue depth at error level so monitoring thresholds
+  // can page oncall on a rising trend — accumulating orphans means GitHub
+  // is persistently rejecting revokes, which is the signal we want alerts on.
+  let remaining = 0;
+  try { remaining = db.countOrphanedTokens(); } catch { /* non-fatal */ }
+  if (remaining > 0) {
+    logger.error('Orphan token queue has residual entries', {
+      remaining, sweepProcessed: rows.length, sweepRevoked: revoked,
+    });
+  }
 }
 
 function startOrphanTokenSweeper() {

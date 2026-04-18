@@ -24,7 +24,11 @@ ENV NODE_ENV=production
 
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package*.json ./
-COPY --chown=node:node . .
+# Copy only what the runtime needs. A bare `COPY . .` invalidates the
+# build cache on any repo file change (README, tests, CI config) even
+# though they're never needed in the runtime image. Enumerating src/
+# keeps layer caching effective across unrelated edits.
+COPY --chown=node:node src/ ./src/
 
 RUN mkdir -p /app/data && chown -R node:node /app/data
 

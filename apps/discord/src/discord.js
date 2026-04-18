@@ -177,9 +177,40 @@ function setupWeeklyDigest() {
   }
 }
 
+// Permissions the bot needs to do its job. A missing permission here means
+// a slash command will silently fail at runtime — log loud at boot instead
+// so misconfigurations surface immediately. Non-fatal: we still boot in
+// case the permission gap is intentional for a staging tenant.
+async function verifyBotPermissions() {
+  try {
+    const { PermissionFlagsBits } = require('discord.js');
+    const me = await guild.members.fetchMe();
+    const required = {
+      ManageRoles: PermissionFlagsBits.ManageRoles,
+      SendMessages: PermissionFlagsBits.SendMessages,
+      EmbedLinks: PermissionFlagsBits.EmbedLinks,
+      ReadMessageHistory: PermissionFlagsBits.ReadMessageHistory,
+      UseApplicationCommands: PermissionFlagsBits.UseApplicationCommands,
+    };
+    const missing = Object.entries(required)
+      .filter(([, bit]) => !me.permissions.has(bit))
+      .map(([name]) => name);
+    if (missing.length > 0) {
+      logger.error('Bot is missing required Discord permissions in guild', {
+        guild: guild?.name, missing,
+      });
+    } else {
+      logger.info('Bot permissions OK', { guild: guild?.name });
+    }
+  } catch (err) {
+    logger.warn('Could not verify bot permissions at boot', { error: err.message });
+  }
+}
+
 client.once('ready', async () => {
   logger.info(`Discord bot logged in as ${client.user.tag}`);
   await refreshCache();
+  await verifyBotPermissions();
   setupWeeklyDigest();
   logger.info(`Watching guild: ${guild?.name}`);
 });
