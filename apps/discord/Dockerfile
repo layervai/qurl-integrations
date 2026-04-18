@@ -1,5 +1,5 @@
 # Build stage — compile native modules (better-sqlite3)
-FROM node:22.21.0-alpine3.22 AS build
+FROM node:22.21.0-alpine3.22@sha256:bd26af08779f746650d95a2e4d653b0fd3c8030c44284b6b98d701c9b5eb66b9 AS build
 
 RUN apk add --no-cache python3 make g++
 
@@ -13,7 +13,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # Production stage — minimal image without build tools
-FROM node:22.21.0-alpine3.22
+FROM node:22.21.0-alpine3.22@sha256:bd26af08779f746650d95a2e4d653b0fd3c8030c44284b6b98d701c9b5eb66b9
 
 WORKDIR /app
 
