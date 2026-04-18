@@ -742,11 +742,19 @@ const dbModule = {
     return row ? row.c : 0;
   },
 
-  // Return up to `limit` orphaned rows (oldest first) with decrypted tokens
-  // so a background job can retry revocation. Encryption is transparent here.
+  // Return up to `limit` orphaned rows (oldest first). Access tokens are
+  // returned as encrypted blobs so the caller can decrypt one at a time and
+  // keep only a single plaintext in memory at once — narrows the window for
+  // memory-dump exposure vs. decrypting the whole batch up front.
   listOrphanedTokens(limit = 50) {
     const stmt = db.prepare('SELECT id, access_token FROM orphaned_oauth_tokens ORDER BY recorded_at ASC LIMIT ?');
-    return stmt.all(limit).map(r => ({ id: r.id, accessToken: decrypt(r.access_token) }));
+    return stmt.all(limit).map(r => ({ id: r.id, encryptedAccessToken: r.access_token }));
+  },
+
+  // Callers hold one plaintext token only for the duration of a single
+  // revoke call, then let it drop out of scope.
+  decryptOrphanedToken(encryptedAccessToken) {
+    return decrypt(encryptedAccessToken);
   },
 
   deleteOrphanedToken(id) {

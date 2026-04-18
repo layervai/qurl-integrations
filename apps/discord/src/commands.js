@@ -1240,8 +1240,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const links = recipientLinks[recipient.id];
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
-    const link = links[0];
-    const embed = buildDeliveryEmbed({
+    // Today a send has exactly one resource (file XOR location), so links
+    // will have length 1. The loop builds one embed per link so a future
+    // multi-resource send doesn't silently drop extras (Discord allows
+    // up to 10 embeds per message).
+    const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
       senderUsername: originalInteraction.user.username,
       resourceType: link.resType,
       resourceLabel: link.label,
@@ -1249,9 +1252,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       expiresIn: sendConfig.expires_in,
       filename: sendConfig.attachment_name ? sanitizeFilename(sendConfig.attachment_name) : null,
       personalMessage: sendConfig.personal_message,
-    });
+    }));
 
-    const sent = await sendDM(recipient.id, { embeds: [embed] });
+    const sent = await sendDM(recipient.id, { embeds });
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
@@ -2056,13 +2059,17 @@ const commands = [
         }
         const guildConfig = db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
-          const key = guildConfig.qurl_api_key;
-          // Redact: show only the last 4 chars. The old `lv_live_…abcd` preview
-          // leaked the full 8-char prefix which narrows brute-force space.
-          const keyPreview = '••••' + key.slice(-4);
+          // Show a short sha256 fingerprint instead of any key substring — a
+          // 4-char suffix narrows brute-force space and a prefix leaks tenant
+          // hints. An 8-char hex fingerprint is enough for an admin to confirm
+          // they re-ran setup with the same key, without exposing bytes.
+          const keyFingerprint = crypto.createHash('sha256')
+            .update(guildConfig.qurl_api_key)
+            .digest('hex')
+            .slice(0, 8);
           return interaction.reply({
             content: `✅ **QURL is configured**\n` +
-              `Key: \`${keyPreview}\`\n` +
+              `Key fingerprint: \`${keyFingerprint}\`\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}`,
             ephemeral: true,

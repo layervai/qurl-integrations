@@ -38,7 +38,14 @@ async function sweepOnce() {
   if (rows.length === 0) return;
   let revoked = 0;
   for (let i = 0; i < rows.length; i++) {
-    const { id, accessToken } = rows[i];
+    const { id, encryptedAccessToken } = rows[i];
+    // Decrypt inside the loop so only one plaintext token is in memory at
+    // a time. Whole-batch decryption would widen the memory-dump window.
+    let accessToken;
+    try { accessToken = db.decryptOrphanedToken(encryptedAccessToken); } catch (err) {
+      logger.warn('Orphan token decrypt failed (will retry next sweep)', { id, error: err.message });
+      continue;
+    }
     try {
       if (await revokeOne(accessToken)) {
         db.deleteOrphanedToken(id);

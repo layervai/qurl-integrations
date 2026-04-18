@@ -82,6 +82,7 @@ function isAutomatedBot(prUser) {
 // Per-IP counter of failed-signature attempts so an attacker can't burn CPU
 // by firing unlimited invalid webhooks. Legitimate GitHub traffic (valid
 // HMAC) is never throttled. Swept every 5 minutes.
+// SCALING: single-instance only. Move to Redis if the bot runs horizontally.
 const BAD_SIG_WINDOW_MS = 60_000;
 const BAD_SIG_MAX = 30;
 const badSigAttempts = new Map(); // ip -> number[]  (timestamps)

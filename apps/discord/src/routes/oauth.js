@@ -145,7 +145,10 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
   }
 }
 
-// Simple in-memory rate limiter with periodic eviction
+// Simple in-memory rate limiter with periodic eviction.
+// SCALING: single-instance only. If this bot ever runs horizontally (multiple
+// ECS tasks behind a LB), move this to Redis so limits are shared — otherwise
+// each replica carries its own counter and effective rate is N × configured.
 const rateLimitStore = new Map();
 
 // Node.js single-threaded: no true data race, but eviction could theoretically
