@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,10 +28,11 @@ func base64Encode(t *testing.T, s string) string {
 
 const testSigningSecret = "test-secret"
 
-// fixedNow pins the handler's clock so every signed-request test produces a
-// stable timestamp. 2026-04-19T12:00:00Z — matches the prevailing date when
-// this test was introduced so expired-replay tests can use round offsets.
-var fixedNow = time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+// fixedNow pins the handler's clock so every signed-request test produces
+// a stable timestamp. Arbitrary absolute value — tests inject h.now so the
+// wall clock is irrelevant; this constant just needs to be the same in both
+// sign-time and verify-time paths for any given test.
+var fixedNow = time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 
 func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	t.Helper()
@@ -276,6 +278,37 @@ func TestSlashCommand_RejectsStaleTimestamp(t *testing.T) {
 	}
 }
 
+// TestSlashCommand_ReplayWithDifferentTeamIDRejected documents the
+// signature's binding surface — the signature covers body + timestamp, so
+// swapping a different team_id into a previously-signed request doesn't
+// replay. Complementary to TestSlashCommand_RejectsTamperedBody which
+// mutates the text field; this one mutates team_id specifically because
+// that's what a resource-scope-escalation replay would target.
+func TestSlashCommand_ReplayWithDifferentTeamID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	originalBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_victim"}}.Encode()
+	headers := signSlackBody(t, originalBody)
+	attackerBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_attacker"}}.Encode()
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       attackerBody,
+		Headers:    headers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("replay with different team_id: status = %d, want 401", resp.StatusCode)
+	}
+}
+
 // Per-endpoint fences: the three Slack-receiving endpoints must each enforce
 // signing. Without this, /slack/events and /slack/interactions could regress
 // the fix while tests for /slack/commands stay green.
@@ -320,13 +353,18 @@ func TestInteraction_RejectsUnsigned(t *testing.T) {
 	}
 }
 
-// TestSlashCommand_Base64Body fences the API-Gateway-binary-media-type trap
-// called out in the #73 review: if the content type is ever misconfigured
-// into the Lambda's binary-media-types list, req.Body arrives base64-encoded
-// and the HMAC over that base64 would never match Slack's HMAC over raw
-// bytes. verifySlackRequest decodes on IsBase64Encoded so the check runs
-// against the same bytes Slack signed.
-func TestSlashCommand_Base64Body(t *testing.T) {
+// TestSlashCommand_Base64Body_Help fences the API-Gateway-binary-media-type
+// trap called out in the #73 review. Two invariants:
+//  1. The HMAC check runs against the decoded body (not the base64 blob).
+//  2. The decoded body is threaded to the downstream handler so
+//     url.ParseQuery sees real form data, not a base64 string. Without (2),
+//     a signed /qurl help would verify then fall through to the "unknown
+//     subcommand" branch because ParseQuery would find no "command" / "text"
+//     keys in the base64 blob.
+//
+// The help-path text assertion distinguishes (2) from (1) — a broken body
+// threading would still return 200 but with different body text.
+func TestSlashCommand_Base64Body_Help(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -335,8 +373,6 @@ func TestSlashCommand_Base64Body(t *testing.T) {
 	h := newTestHandler(t, srv)
 	rawBody := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
 	headers := signSlackBody(t, rawBody)
-
-	// API Gateway hands the handler base64(body) with IsBase64Encoded=true.
 	encoded := base64Encode(t, rawBody)
 
 	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
@@ -350,7 +386,56 @@ func TestSlashCommand_Base64Body(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("base64-encoded body with valid signature: status = %d, want 200", resp.StatusCode)
+		t.Fatalf("base64 body + valid signature: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
+	}
+	var result map[string]string
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "qurl create") {
+		t.Errorf("base64 body + text=help did not produce help response — body threading regressed. Got: %q", result["text"])
+	}
+}
+
+// TestSlashCommand_Base64Body_Create strengthens the body-threading fence:
+// a signed create command must actually reach handleCreate (which hits the
+// mock QURL server) rather than being misrouted through help.
+func TestSlashCommand_Base64Body_Create(t *testing.T) {
+	var qurlCalled bool
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		qurlCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"data": map[string]any{"resource_id": "r_test", "qurl_link": "https://qurl.link/at_t", "qurl_site": "https://r_test.qurl.site"},
+			"meta": map[string]string{"request_id": "req_test"},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer qurlSrv.Close()
+
+	t.Setenv("QURL_API_KEY", "test-key")
+	h := newTestHandler(t, qurlSrv)
+	rawBody := url.Values{"command": {"/qurl"}, "text": {"create https://example.com"}, "team_id": {"T123"}}.Encode()
+	headers := signSlackBody(t, rawBody)
+	encoded := base64Encode(t, rawBody)
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:            "/slack/commands",
+		HTTPMethod:      methodPost,
+		Body:            encoded,
+		Headers:         headers,
+		IsBase64Encoded: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("base64 create: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
+	}
+	if !qurlCalled {
+		t.Error("QURL backend was never called — handleCreate didn't run; body threading regressed")
 	}
 }
 

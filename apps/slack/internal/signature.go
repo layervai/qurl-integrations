@@ -60,16 +60,21 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 	if err != nil {
 		return errSlackSignatureMalformed
 	}
-	// Bound ts to a sane Unix-seconds range first so an attacker-supplied
-	// math.MinInt64 (or a wildly-future value that overflows time.Duration
-	// when subtracted) can't wrap the skew check. The HMAC check would
-	// still fail on garbage input, but rejecting structurally means no
-	// future refactor can accidentally make the overflow path reachable.
+	// Bound ts structurally before any arithmetic. time.Time.Sub saturates
+	// at the time.Duration extremes (MinInt64 / MaxInt64 nanoseconds) for
+	// extreme inputs and `-delta` on MinInt64 wraps back to MinInt64 in
+	// two's complement — so without these guards a sufficiently-large
+	// attacker ts could slip past `delta > skew`. The HMAC check is still
+	// the real gate (an attacker can't forge without the secret) but the
+	// guards make the skew check literally correct rather than best-effort.
 	if ts < 0 {
 		return errSlackTimestampStale
 	}
-	// time.Duration's range (~292 years) comfortably brackets any legit
-	// 5-minute skew window, so direct subtraction is safe here.
+	// 24h ceiling on "future" timestamps — well outside the 5-minute skew
+	// window and small enough that the subtraction can't saturate.
+	if ts > now.Unix()+24*60*60 {
+		return errSlackTimestampStale
+	}
 	delta := now.Sub(time.Unix(ts, 0))
 	if delta < 0 {
 		delta = -delta

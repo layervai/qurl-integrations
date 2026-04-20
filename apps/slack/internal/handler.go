@@ -95,7 +95,6 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 // turning the infra misconfig into a decode-error 401 with a distinct
 // log line instead of a silent outage.
 func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
-	body := req.Body
 	if req.IsBase64Encoded {
 		decoded, err := base64.StdEncoding.DecodeString(req.Body)
 		if err != nil {
@@ -104,19 +103,35 @@ func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
 				"error", err.Error())
 			return errSlackSignatureMalformed
 		}
-		body = string(decoded)
+		// Rewrite req.Body so every downstream handler (handleSlashCommand,
+		// handleEvent, handleInteraction) sees the same bytes Slack signed,
+		// not the API-Gateway-wrapped base64. Without this, a valid signed
+		// slash command would verify then silently fall through to the help
+		// path because url.ParseQuery would parse a base64 blob.
+		req.Body = string(decoded)
+		req.IsBase64Encoded = false
 	}
 
 	sig := headerValue(req.Headers, headerSlackSignature)
 	ts := headerValue(req.Headers, headerSlackTimestamp)
-	err := verifySlackSignature(h.cfg.SlackSigningSecret, body, sig, ts, h.now())
+	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
 	if err != nil {
-		slog.Warn("slack signature verification failed",
+		// Escalate empty-signing-secret to Error — it means the deployment
+		// is effectively open; the fail-closed 401s are defense-in-depth,
+		// not the primary guard. Pages should route differently for this.
+		// Other failure classes are noise from unauthenticated scans and
+		// stay at Warn.
+		attrs := []any{
 			"path", req.Path,
 			"reason", classifySlackErr(err),
 			"has_signature", sig != "",
 			"has_timestamp", ts != "",
-			"is_base64", req.IsBase64Encoded)
+		}
+		if errors.Is(err, errSlackSigningSecretEmpty) {
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
+		} else {
+			slog.Warn("slack signature verification failed", attrs...)
+		}
 	}
 	return err
 }
