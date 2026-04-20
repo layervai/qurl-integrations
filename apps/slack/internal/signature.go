@@ -18,10 +18,15 @@ const (
 // Sentinel errors so classifySlackErr can bucket metrics without
 // string-matching log lines. Empty-secret gets its own because it means
 // the deployment is effectively open — ops should page on it distinctly.
+// Malformed-signature and malformed-timestamp are separate sentinels so a
+// dashboard can tell "client sent junk" from "API Gateway is base64-wrapping
+// us and we can't parse the body" — those look identical under a single
+// "malformed" bucket but are different ops problems.
 var (
 	errSlackSigningSecretEmpty = errors.New("slack: signing secret is empty")
 	errSlackSignatureMissing   = errors.New("slack: missing X-Slack-Signature or X-Slack-Request-Timestamp")
 	errSlackSignatureMalformed = errors.New("slack: malformed X-Slack-Signature")
+	errSlackTimestampMalformed = errors.New("slack: malformed X-Slack-Request-Timestamp")
 	errSlackTimestampStale     = errors.New("slack: request timestamp outside allowed skew")
 	errSlackSignatureMismatch  = errors.New("slack: signature does not match body")
 )
@@ -55,11 +60,14 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 
 	ts, err := strconv.ParseInt(tsHeader, 10, 64)
 	if err != nil {
-		return errSlackSignatureMalformed
+		return errSlackTimestampMalformed
 	}
-	// Bound ts structurally so a MinInt64 input can't wrap the skew check.
-	// HMAC still gates the actual path; this makes the skew check literally
-	// correct for all inputs.
+	// Bound ts so a MinInt64 can't wrap the skew math below. The +24h
+	// upper bound is strictly belt-and-suspenders — the 5-min skew check
+	// already rejects anything meaningfully in the future, and with ts
+	// bounded to [0, MaxInt64) time.Unix / now.Sub won't wrap for centuries.
+	// Keeping the upper bound documented so a reader doesn't wonder why
+	// two overlapping checks exist.
 	if ts < 0 || ts > now.Unix()+24*60*60 {
 		return errSlackTimestampStale
 	}

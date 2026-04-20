@@ -358,16 +358,34 @@ func TestHandle_EmptySigningSecret(t *testing.T) {
 	}
 }
 
-// classifySlackErr must emit "secret_empty" for errSlackSigningSecretEmpty —
-// ops dashboards page on this label distinctly from ordinary 401 noise
-// because it means the deployment is effectively open. A regression that
-// downgraded the slog.Error / label path (e.g., a refactor mapping empty
-// secret into the generic "verify_failed" bucket) would silently lose the
-// page signal. The full-request TestHandle_EmptySigningSecret above only
-// asserts the 401 — this one pins the classification.
-func TestClassifySlackErr_EmptySecretLabelsDistinctly(t *testing.T) {
-	if got := classifySlackErr(errSlackSigningSecretEmpty); got != "secret_empty" {
-		t.Errorf("classifySlackErr(errSlackSigningSecretEmpty) = %q, want %q", got, "secret_empty")
+// classifySlackErr must emit stable, distinct labels for each sentinel —
+// ops dashboards page on "secret_empty" distinctly from ordinary 401
+// noise, and splitting "sig_malformed" from "ts_malformed" separates
+// client-sent-junk from API-Gateway-is-wrapping-us. A regression that
+// collapsed labels (or downgraded the secret_empty slog.Error) would
+// silently lose the page signal.
+func TestClassifySlackErr_SentinelsMapToDistinctLabels(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{errSlackSigningSecretEmpty, "secret_empty"},
+		{errSlackSignatureMissing, "headers_missing"},
+		{errSlackSignatureMalformed, "sig_malformed"},
+		{errSlackTimestampMalformed, "ts_malformed"},
+		{errSlackTimestampStale, "stale"},
+		{errSlackSignatureMismatch, "mismatch"},
+	}
+	seen := make(map[string]error, len(cases))
+	for _, tc := range cases {
+		got := classifySlackErr(tc.err)
+		if got != tc.want {
+			t.Errorf("classifySlackErr(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+		if prev, ok := seen[got]; ok {
+			t.Errorf("label %q is shared by %v and %v — dashboards can't tell them apart", got, prev, tc.err)
+		}
+		seen[got] = tc.err
 	}
 }
 
@@ -404,6 +422,39 @@ func TestSlashCommand_SignatureInMultiValueHeaders(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("signature delivered via MultiValueHeaders: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// End-to-end fence for the lowercase-key-over-MultiValueHeaders shape —
+// API Gateway v2 normalizes caller headers to lowercase, and headerValue
+// is pure (TestHeaderValue covers it in isolation), but nothing currently
+// exercises that shape all the way through Handle. This row closes the
+// loop: same Handle path, keys lowercased.
+func TestSlashCommand_SignatureInMultiValueHeaders_LowercaseKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	hdrs := signSlackBody(t, body)
+	multi := map[string][]string{
+		"x-slack-signature":         {hdrs[headerSlackSignature]},
+		"x-slack-request-timestamp": {hdrs[headerSlackTimestamp]},
+	}
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:              "/slack/commands",
+		HTTPMethod:        methodPost,
+		Body:              body,
+		Headers:           nil,
+		MultiValueHeaders: multi,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("lowercase MultiValueHeaders keys: status = %d, want 200", resp.StatusCode)
 	}
 }
 

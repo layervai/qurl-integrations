@@ -137,7 +137,9 @@ func classifySlackErr(err error) string {
 	case errors.Is(err, errSlackSignatureMissing):
 		return "headers_missing"
 	case errors.Is(err, errSlackSignatureMalformed):
-		return "malformed"
+		return "sig_malformed"
+	case errors.Is(err, errSlackTimestampMalformed):
+		return "ts_malformed"
 	case errors.Is(err, errSlackTimestampStale):
 		return "stale"
 	case errors.Is(err, errSlackSignatureMismatch):

@@ -64,7 +64,7 @@ func TestVerifySlackSignature_BoundaryCases(t *testing.T) {
 		},
 		{
 			name: "malformed timestamp",
-			want: errSlackSignatureMalformed,
+			want: errSlackTimestampMalformed,
 			call: func() error { return verifySlackSignature("secret", "hello", sig, "not-a-timestamp", now) },
 		},
 		{
