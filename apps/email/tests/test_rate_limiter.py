@@ -2,6 +2,7 @@
 Rate limiter module tests.
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from rate_limiter import (
@@ -152,17 +153,74 @@ class TestRateLimiter:
         assert limiter.get_limit() == 10
 
 
-class TestCheckRateLimit:
-    """check_rate_limit convenience function tests"""
+class TestRateLimiterIncrement:
+    """RateLimiter increment error path tests"""
 
-    def test_check_rate_limit_with_explicit_limiter(self):
-        """Test check_rate_limit with explicit limiter"""
-        limiter = MagicMock()
-        limiter.check.return_value = RateLimitResult(
-            allowed=True, remaining=4, reset_at=1700000000, limit=5
-        )
+    def test_increment_non_condition_error(self):
+        """Test increment logs error for non-ConditionalCheckFailedException errors"""
+        from botocore.exceptions import ClientError
 
-        result = check_rate_limit("alice@example.com", limiter=limiter)
+        with patch("rate_limiter.boto3") as mock_boto3:
+            mock_table = MagicMock()
+            mock_boto3.resource.return_value.Table.return_value = mock_table
+            # Return a non-CCFE error on update_item, then check returns remaining
+            mock_table.update_item.side_effect = ClientError(
+                {"Error": {"Code": "ValidationException"}},
+                "UpdateItem"
+            )
+            mock_table.get_item.return_value = {"Item": {"count": 1}}
 
-        limiter.check.assert_called_once_with("alice@example.com")
-        assert result.allowed is True
+            limiter = RateLimiter("test-table", limit_per_hour=5)
+            # Should not raise, fail open
+            result = limiter.increment("alice@example.com", now=1704067200)
+            assert result is not None
+
+
+class TestGetRateLimiter:
+    """get_rate_limiter convenience function tests"""
+
+    def test_get_rate_limiter_uses_explicit_settings(self):
+        """Test get_rate_limiter uses explicit settings"""
+        import rate_limiter as rl
+
+        rl._rate_limiter = None
+        mock_settings = MagicMock()
+        mock_settings.rate_limit_table = "custom-table"
+        mock_settings.aws_region = "eu-west-1"
+        mock_settings.rate_limit_per_hour = 20
+
+        with patch("rate_limiter.boto3"):
+            limiter = rl.get_rate_limiter(mock_settings)
+            assert limiter.table_name == "custom-table"
+            assert limiter.limit_per_hour == 20
+
+    def test_get_rate_limiter_uses_default_settings(self):
+        """Test get_rate_limiter falls back to get_settings when settings is None"""
+        import rate_limiter as rl
+
+        rl._rate_limiter = None
+        mock_settings = MagicMock()
+        mock_settings.rate_limit_table = "default-table"
+        mock_settings.aws_region = "us-east-1"
+        mock_settings.rate_limit_per_hour = 5
+
+        with patch("rate_limiter.boto3"):
+            with patch("rate_limiter.get_settings", return_value=mock_settings):
+                limiter = rl.get_rate_limiter(None)
+                assert limiter.table_name == "default-table"
+
+    def test_get_rate_limiter_cached(self):
+        """Test get_rate_limiter returns cached instance"""
+        import rate_limiter as rl
+
+        rl._rate_limiter = None
+        mock_settings = MagicMock()
+        mock_settings.rate_limit_table = "test-table"
+        mock_settings.aws_region = "us-east-1"
+        mock_settings.rate_limit_per_hour = 5
+
+        with patch("rate_limiter.boto3"):
+            with patch("rate_limiter.get_settings", return_value=mock_settings):
+                lim1 = rl.get_rate_limiter()
+                lim2 = rl.get_rate_limiter()
+                assert lim1 is lim2

@@ -205,6 +205,53 @@ class TestSendConfirmation:
                 # Should have Success indicators (checkmark characters)
                 assert "&#10003;" in body or "&#10004;" in body or "Success" in body
 
+    def test_confirmation_with_skipped(self):
+        """Test confirmation email with skipped results"""
+        with patch("email_sender.load_template") as mock_load:
+            with patch("email_sender.send_email") as mock_send:
+                mock_load.return_value = ""
+                mock_send.return_value = {"MessageId": "test-conf-skip"}
+
+                results = [
+                    {"recipient": "bob@example.com", "status": "sent"},
+                    {"recipient": "carol@example.com", "status": "skipped"},
+                ]
+
+                result = send_confirmation(
+                    to="alice@example.com",
+                    sender_name="Alice",
+                    resource_name="report.pdf",
+                    results=results,
+                )
+
+                assert "MessageId" in result
+                call_kwargs = mock_send.call_args[1]
+                body = call_kwargs["html_body"]
+                # Should have skipped indicator
+                assert "Skipped" in body or "skipped" in body.lower()
+
+    def test_confirmation_with_template(self):
+        """Test confirmation email with template rendering"""
+        with patch("email_sender.load_template") as mock_load:
+            with patch("email_sender.send_email") as mock_send:
+                mock_load.return_value = "<p>{{resource_name}}: {{total_sent}} sent</p>"
+                mock_send.return_value = {"MessageId": "test-conf-tmpl"}
+
+                results = [{"recipient": "bob@example.com", "status": "sent"}]
+                result = send_confirmation(
+                    to="alice@example.com",
+                    sender_name="Alice",
+                    resource_name="report.pdf",
+                    results=results,
+                )
+
+                assert "MessageId" in result
+                call_kwargs = mock_send.call_args[1]
+                body = call_kwargs["html_body"]
+                # Template variables replaced
+                assert "report.pdf" in body
+                assert "1" in body  # total_sent=1
+
     def test_confirmation_with_failures(self):
         """Test confirmation email with some failures"""
         with patch("email_sender.load_template") as mock_load:
