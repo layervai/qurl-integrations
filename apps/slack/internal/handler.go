@@ -96,7 +96,7 @@ func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyReques
 		decoded, err := base64.StdEncoding.DecodeString(req.Body)
 		if err != nil {
 			slog.Warn("slack signature verification failed — base64 decode error",
-				"path", req.Path, "error", err.Error())
+				"path", req.Path, "error", err)
 			return errSlackSignatureMalformed
 		}
 		req.Body = string(decoded)
@@ -126,7 +126,10 @@ func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyReques
 
 // classifySlackErr maps the sentinel verification errors to stable metric
 // labels so operator dashboards can group by cause without string-matching
-// error messages (which may be reworded over time).
+// error messages. "secret_empty" is unreachable under normal startup —
+// cmd/main.go refuses to boot without SLACK_SIGNING_SECRET — so seeing
+// it in telemetry implies a code path that bypassed the main entry point
+// (tests, lambda custom runtime, etc.).
 func classifySlackErr(err error) string {
 	switch {
 	case errors.Is(err, errSlackSigningSecretEmpty):

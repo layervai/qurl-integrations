@@ -359,6 +359,37 @@ func TestHandle_EmptySigningSecret(t *testing.T) {
 	}
 }
 
+// Fences the v1-API-Gateway multi-value-headers path end-to-end through
+// Handle. Isolated helper coverage lives in TestHeaderValue; this one
+// proves prepareAndVerifySlackRequest pulls from MultiValueHeaders when
+// Headers is nil.
+func TestSlashCommand_SignatureInMultiValueHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	hdrs := signSlackBody(t, body)
+	multi := map[string][]string{
+		headerSlackSignature: {hdrs[headerSlackSignature]},
+		headerSlackTimestamp: {hdrs[headerSlackTimestamp]},
+	}
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:              "/slack/commands",
+		HTTPMethod:        methodPost,
+		Body:              body,
+		MultiValueHeaders: multi,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("signature delivered via MultiValueHeaders: status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestHeaderValue(t *testing.T) {
 	// API Gateway v1 preserves caller casing (Slack sends mixed case);
 	// v2 lowercases. Some v1 configs populate MultiValueHeaders instead of
