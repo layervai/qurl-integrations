@@ -3,12 +3,15 @@ package internal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -19,6 +22,17 @@ import (
 const methodPost = "POST"
 
 const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
+
+// sigFailureResponse is the terse body we return for every 401 from the
+// signature-verify path. Distinguishing which check failed is already
+// captured in the structured slog line; the wire body stays uniform.
+const sigFailureResponse = "signature verification failed"
+
+const (
+	// Matched case-insensitively — API Gateway preserves or lowercases depending on version.
+	headerSlackSignature = "X-Slack-Signature"
+	headerSlackTimestamp = "X-Slack-Request-Timestamp"
+)
 
 // Config holds the Slack handler configuration.
 type Config struct {
@@ -31,11 +45,14 @@ type Config struct {
 // Handler processes Slack events and commands.
 type Handler struct {
 	cfg Config
+	// now is injected so tests can pin the clock for timestamp-skew checks
+	// without touching a package global. Defaults to time.Now.
+	now func() time.Time
 }
 
 // NewHandler creates a new Slack handler.
 func NewHandler(cfg Config) *Handler {
-	return &Handler{cfg: cfg}
+	return &Handler{cfg: cfg, now: time.Now}
 }
 
 // Handle routes incoming API Gateway requests to the appropriate handler.
@@ -44,16 +61,118 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
+		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
+		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
+		}
 		return h.handleInteraction(req)
 	case req.Path == "/health":
 		return respond(http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		return respond(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
+}
+
+// prepareAndVerifySlackRequest authenticates a Slack request and mutates
+// req.Body + IsBase64Encoded so downstream handlers see the decoded bytes
+// Slack signed. The name reflects the side effect — it's not a pure
+// predicate.
+//
+// API Gateway hands the Lambda a base64-wrapped body for any content type
+// in the binary-media-types list. If that config ever matches Slack's
+// types, HMAC-over-base64 wouldn't match Slack's HMAC-over-raw and every
+// valid request would 401 silently — so we decode first.
+func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyRequest) error {
+	if req.IsBase64Encoded {
+		decoded, err := base64.StdEncoding.DecodeString(req.Body)
+		if err != nil {
+			slog.Warn("slack signature verification failed — base64 decode error",
+				"path", req.Path, "error", err)
+			return errSlackSignatureMalformed
+		}
+		req.Body = string(decoded)
+		req.IsBase64Encoded = false
+	}
+
+	sig := headerValue(req.Headers, req.MultiValueHeaders, headerSlackSignature)
+	ts := headerValue(req.Headers, req.MultiValueHeaders, headerSlackTimestamp)
+	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
+	if err != nil {
+		attrs := []any{
+			"path", req.Path,
+			"reason", classifySlackErr(err),
+			"has_signature", sig != "",
+			"has_timestamp", ts != "",
+		}
+		// Empty secret means the deployment is effectively open — page on
+		// it distinctly from ordinary 401 noise.
+		if errors.Is(err, errSlackSigningSecretEmpty) {
+			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
+		} else {
+			slog.Warn("slack signature verification failed", attrs...)
+		}
+	}
+	return err
+}
+
+// classifySlackErr maps the sentinel verification errors to stable metric
+// labels so operator dashboards can group by cause without string-matching
+// error messages. "secret_empty" is unreachable under normal startup —
+// cmd/main.go refuses to boot without SLACK_SIGNING_SECRET — so seeing
+// it in telemetry implies a code path that bypassed the main entry point
+// (tests, lambda custom runtime, etc.).
+func classifySlackErr(err error) string {
+	switch {
+	case errors.Is(err, errSlackSigningSecretEmpty):
+		return "secret_empty"
+	case errors.Is(err, errSlackSignatureMissing):
+		return "headers_missing"
+	case errors.Is(err, errSlackSignatureMalformed):
+		return "sig_malformed"
+	case errors.Is(err, errSlackTimestampMalformed):
+		return "ts_malformed"
+	case errors.Is(err, errSlackTimestampStale):
+		return "stale"
+	case errors.Is(err, errSlackSignatureMismatch):
+		return "mismatch"
+	default:
+		return "unknown"
+	}
+}
+
+// headerValue does a case-insensitive lookup against both Headers and
+// MultiValueHeaders so v1 and v2 API Gateway both work. Assumes only one
+// casing of a given header name is present per request — if both
+// "X-Slack-Signature" and "x-slack-signature" appear in the same map,
+// Go's randomized map iteration means the returned value is
+// non-deterministic. API Gateway doesn't emit that shape in practice.
+func headerValue(headers map[string]string, multi map[string][]string, name string) string {
+	if v, ok := headers[name]; ok {
+		return v
+	}
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	if v, ok := multi[name]; ok && len(v) > 0 {
+		return v[0]
+	}
+	for k, v := range multi {
+		if strings.EqualFold(k, name) && len(v) > 0 {
+			return v[0]
+		}
+	}
+	return ""
 }
 
 func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
