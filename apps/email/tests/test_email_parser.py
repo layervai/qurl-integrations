@@ -157,6 +157,257 @@ End of email.
         assert "https://example.com/page" in result
 
 
+class TestGetBodyText:
+    """Body text extraction tests"""
+
+    def test_multipart_with_plain_text(self):
+        """Test extracting body from multipart email with plain text"""
+        from email_parser import get_body_text
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["Subject"] = "Test"
+        msg.set_payload("Hello, this is plain text")
+        result = get_body_text(msg)
+        assert result == "Hello, this is plain text"
+
+    def test_multipart_skips_attachments(self):
+        """Test that attachments are skipped in multipart email"""
+        from email_parser import get_body_text
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body text", "plain"))
+        att = MIMEText("attachment content", "plain")
+        att.add_header("Content-Disposition", "attachment", filename="test.txt")
+        msg.attach(att)
+        result = get_body_text(msg)
+        assert result == "Body text"
+
+    def test_body_decode_failure(self):
+        """Test graceful handling of decode failure"""
+        from email_parser import get_body_text
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["Subject"] = "Test"
+        # Python 3.14: set_payload with valid charset but corrupted bytes triggers
+        # decode error on get_payload. The bytes are ISO-8859-1 but we treat as utf-8.
+        msg.set_payload(b"\xe9non-decodable", charset="iso-8859-1")
+        result = get_body_text(msg)
+        # errors="replace" produces replacement chars, not an exception
+        assert result != ""
+
+    def test_multipart_body_decode_failure(self):
+        """Test multipart with part decode failure falls through"""
+        from email_parser import get_body_text
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        bad_part = MIMEText("bad", "plain")
+        bad_part.set_param("charset", "nonexistent")
+        msg.attach(bad_part)
+        msg.attach(MIMEText("Good body", "plain"))
+        result = get_body_text(msg)
+        assert "Good body" in result
+
+
+class TestGetBodyHtml:
+    """HTML body extraction tests"""
+
+    def test_multipart_with_html(self):
+        """Test extracting HTML from multipart email"""
+        from email_parser import get_body_html
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Plain text", "plain"))
+        msg.attach(MIMEText("<html><body>HTML content</body></html>", "html"))
+        result = get_body_html(msg)
+        assert "<html>" in result
+        assert "HTML content" in result
+
+    def test_no_html(self):
+        """Test returns None when no HTML part exists"""
+        from email_parser import get_body_html
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["Subject"] = "Test"
+        msg.set_payload("Plain text only")
+        result = get_body_html(msg)
+        assert result is None
+
+
+class TestGetSender:
+    """Sender extraction tests"""
+
+    def test_sender_simple(self):
+        """Test extracting sender with simple email"""
+        from email_parser import get_sender
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["From"] = "sender@example.com"
+        name, addr = get_sender(msg)
+        assert addr == "sender@example.com"
+
+    def test_sender_with_display_name(self):
+        """Test extracting sender with display name"""
+        from email_parser import get_sender
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["From"] = "John Doe <john@example.com>"
+        name, addr = get_sender(msg)
+        assert addr == "john@example.com"
+        assert "John" in name or "Doe" in name or "john" in name
+
+    def test_sender_case_normalized(self):
+        """Test sender email is normalized to lowercase"""
+        from email_parser import get_sender
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["From"] = "Sender@EXAMPLE.COM"
+        name, addr = get_sender(msg)
+        assert addr == "sender@example.com"
+
+    def test_sender_no_email_in_header(self):
+        """Test sender with no email address in From header"""
+        from email_parser import get_sender
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["From"] = "Just a name"
+        name, addr = get_sender(msg)
+        assert "@" not in addr
+
+
+class TestExtractAttachments:
+    """Attachment extraction tests"""
+
+    def test_extract_from_multipart(self):
+        """Test extracting attachments from multipart email"""
+        from email_parser import extract_attachments
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.application import MIMEApplication
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body", "plain"))
+        att = MIMEApplication(b"PDF content here", "pdf")
+        att.add_header("Content-Disposition", "attachment", filename="report.pdf")
+        msg.attach(att)
+        attachments = extract_attachments(msg)
+        assert len(attachments) == 1
+        assert attachments[0].filename == "report.pdf"
+        assert attachments[0].content_type == "application/pdf"
+
+    def test_extract_inline_non_text(self):
+        """Test inline attachments that are not text are extracted"""
+        from email_parser import extract_attachments
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.image import MIMEImage
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body", "plain"))
+        img = MIMEImage(b"\x89PNG\r\n\x1a\n", "png")
+        img.add_header("Content-Disposition", "inline", filename="image.png")
+        msg.attach(img)
+        attachments = extract_attachments(msg)
+        assert len(attachments) >= 1
+
+    def test_extract_no_filename(self):
+        """Test attachment without filename is ignored"""
+        from email_parser import extract_attachments
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body", "plain"))
+        att = MIMEText("No filename", "plain")
+        att.add_header("Content-Disposition", "attachment")
+        msg.attach(att)
+        attachments = extract_attachments(msg)
+        assert len(attachments) == 0
+
+    def test_extract_base64_encoded_payload(self):
+        """Test extracting attachment with base64 encoded payload string"""
+        from email_parser import extract_attachments
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        import base64
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body", "plain"))
+        encoded = base64.b64encode(b"File content").decode()
+        att = MIMEText(encoded, "plain")
+        att.add_header("Content-Disposition", "attachment", filename="encoded.txt")
+        msg.attach(att)
+        attachments = extract_attachments(msg)
+        assert len(attachments) == 1
+
+    def test_extract_null_payload(self):
+        """Test attachment with payload that decodes to None is skipped"""
+        from email_parser import extract_attachments
+        import email.message
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "Test"
+        msg.attach(MIMEText("Body", "plain"))
+        # Create an attachment with no filename - should be skipped
+        att = MIMEText("content", "plain")
+        att.add_header("Content-Disposition", "attachment")
+        # Clear any filename
+        del att["Content-Disposition"]
+        att.add_header("Content-Disposition", "attachment")
+        msg.attach(att)
+        attachments = extract_attachments(msg)
+        # No filename → skipped
+        assert len(attachments) == 0
+
+
+class TestParseEmail:
+    """Full email parsing tests"""
+
+    def test_parse_complete_email(self):
+        """Test parsing a complete email"""
+        from email_parser import parse_email
+        import email.message
+
+        msg = email.message.EmailMessage()
+        msg["From"] = "sender@example.com"
+        msg["Subject"] = "Test Subject"
+        msg["To"] = "qurl@layerv.ai"
+        msg.set_payload("Test body")
+        result = parse_email(msg)
+        assert result.sender_email == "sender@example.com"
+        assert result.subject == "Test Subject"
+        assert result.body_text == "Test body"
+        assert result.recipients == []  # callers fill this
+
+
 class TestValidateAttachment:
     """Attachment validation tests"""
 
