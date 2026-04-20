@@ -358,6 +358,19 @@ func TestHandle_EmptySigningSecret(t *testing.T) {
 	}
 }
 
+// classifySlackErr must emit "secret_empty" for errSlackSigningSecretEmpty —
+// ops dashboards page on this label distinctly from ordinary 401 noise
+// because it means the deployment is effectively open. A regression that
+// downgraded the slog.Error / label path (e.g., a refactor mapping empty
+// secret into the generic "verify_failed" bucket) would silently lose the
+// page signal. The full-request TestHandle_EmptySigningSecret above only
+// asserts the 401 — this one pins the classification.
+func TestClassifySlackErr_EmptySecretLabelsDistinctly(t *testing.T) {
+	if got := classifySlackErr(errSlackSigningSecretEmpty); got != "secret_empty" {
+		t.Errorf("classifySlackErr(errSlackSigningSecretEmpty) = %q, want %q", got, "secret_empty")
+	}
+}
+
 // Fences the v1-API-Gateway multi-value-headers path end-to-end through
 // Handle. Isolated helper coverage lives in TestHeaderValue; this one
 // proves prepareAndVerifySlackRequest pulls from MultiValueHeaders when
@@ -376,9 +389,14 @@ func TestSlashCommand_SignatureInMultiValueHeaders(t *testing.T) {
 		headerSlackTimestamp: {hdrs[headerSlackTimestamp]},
 	}
 	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:              "/slack/commands",
-		HTTPMethod:        methodPost,
-		Body:              body,
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       body,
+		// Explicit nil pins the v1-gateway shape (MultiValueHeaders only)
+		// rather than relying on implicit zero values — a future refactor
+		// that defaulted Headers to a populated map would otherwise make
+		// this test pass through the wrong code path.
+		Headers:           nil,
 		MultiValueHeaders: multi,
 	})
 	if err != nil {
