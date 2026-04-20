@@ -2,11 +2,16 @@ package internal
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -14,16 +19,40 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+const testSigningSecret = "test-secret"
+
+// fixedNow pins the handler's clock so every signed-request test produces a
+// stable timestamp. 2026-04-19T12:00:00Z — matches the prevailing date when
+// this test was introduced so expired-replay tests can use round offsets.
+var fixedNow = time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
 func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	t.Helper()
-	return NewHandler(Config{
+	h := NewHandler(Config{
 		QURLEndpoint:       qurlServer.URL,
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
-		SlackSigningSecret: "test-secret",
+		SlackSigningSecret: testSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlServer.URL, apiKey)
 		},
 	})
+	h.now = func() time.Time { return fixedNow }
+	return h
+}
+
+// signSlackBody returns the pair of headers Slack would send to authenticate
+// `body` at `fixedNow`. Using the same algorithm as the handler means any
+// drift between them gets caught by the verification tests themselves.
+func signSlackBody(t *testing.T, body string) map[string]string {
+	t.Helper()
+	tsHeader := strconv.FormatInt(fixedNow.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(testSigningSecret))
+	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":" + body))
+	sig := slackSignatureVersion + "=" + hex.EncodeToString(mac.Sum(nil))
+	return map[string]string{
+		headerSlackSignature: sig,
+		headerSlackTimestamp: tsHeader,
+	}
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -62,6 +91,7 @@ func TestSlashCommandHelp(t *testing.T) {
 		Path:       "/slack/commands",
 		HTTPMethod: methodPost,
 		Body:       body,
+		Headers:    signSlackBody(t, body),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +142,7 @@ func TestSlashCommandCreate(t *testing.T) {
 		Path:       "/slack/commands",
 		HTTPMethod: methodPost,
 		Body:       body,
+		Headers:    signSlackBody(t, body),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +173,7 @@ func TestURLVerificationChallenge(t *testing.T) {
 		Path:       "/slack/events",
 		HTTPMethod: methodPost,
 		Body:       body,
+		Headers:    signSlackBody(t, body),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,5 +185,144 @@ func TestURLVerificationChallenge(t *testing.T) {
 	}
 	if result["challenge"] != "test-challenge-123" {
 		t.Errorf("expected challenge echo, got %q", result["challenge"])
+	}
+}
+
+// Negative-path tests: the exact class of request that was reaching the
+// handler pre-fix (unsigned, tampered, stale) must now be rejected with 401.
+// Together these three cover Slack's three signing failure modes and fence
+// the qurl-integrations #71 exposure.
+
+func TestSlashCommand_RejectsUnsigned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       body,
+		// no signature headers — this is the pre-fix reproducer
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unsigned slash command: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestSlashCommand_RejectsTamperedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	signedBody := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	headers := signSlackBody(t, signedBody)
+
+	// Tamper: attacker swaps the body but reuses a legitimate signature.
+	tamperedBody := url.Values{"command": {"/qurl"}, "text": {"create https://evil.example"}, "team_id": {"T999"}}.Encode()
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       tamperedBody,
+		Headers:    headers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("tampered body: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestSlashCommand_RejectsStaleTimestamp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	headers := signSlackBody(t, body)
+
+	// Pin "now" 10 minutes after the signed timestamp — outside Slack's 5m skew.
+	h.now = func() time.Time { return fixedNow.Add(10 * time.Minute) }
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       body,
+		Headers:    headers,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("stale timestamp: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// Per-endpoint fences: the three Slack-receiving endpoints must each enforce
+// signing. Without this, /slack/events and /slack/interactions could regress
+// the fix while tests for /slack/commands stay green.
+
+func TestEvent_RejectsUnsigned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/events",
+		HTTPMethod: methodPost,
+		Body:       `{"type":"url_verification","challenge":"attacker-chosen"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unsigned event: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestInteraction_RejectsUnsigned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/interactions",
+		HTTPMethod: methodPost,
+		Body:       `{"type":"block_actions"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unsigned interaction: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestHeaderValue_CaseInsensitive(t *testing.T) {
+	// API Gateway v1 preserves caller header casing; Slack sends mixed case.
+	// API Gateway v2 lowercases. Both must match.
+	got := headerValue(map[string]string{"x-slack-signature": "v0=abc"}, "X-Slack-Signature")
+	if got != "v0=abc" {
+		t.Errorf("lowercase lookup = %q, want v0=abc", got)
+	}
+	got = headerValue(map[string]string{"X-Slack-Signature": "v0=abc"}, "X-Slack-Signature")
+	if got != "v0=abc" {
+		t.Errorf("mixed-case lookup = %q, want v0=abc", got)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -19,6 +20,14 @@ import (
 const methodPost = "POST"
 
 const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
+
+// Header names API Gateway passes through for Slack's signing scheme. Matched
+// case-insensitively per RFC 7230 — API Gateway may normalize to lowercase or
+// preserve the caller's casing.
+const (
+	headerSlackSignature = "X-Slack-Signature"
+	headerSlackTimestamp = "X-Slack-Request-Timestamp"
+)
 
 // Config holds the Slack handler configuration.
 type Config struct {
@@ -31,11 +40,14 @@ type Config struct {
 // Handler processes Slack events and commands.
 type Handler struct {
 	cfg Config
+	// now is injected so tests can pin the clock for timestamp-skew checks
+	// without touching a package global. Defaults to time.Now.
+	now func() time.Time
 }
 
 // NewHandler creates a new Slack handler.
 func NewHandler(cfg Config) *Handler {
-	return &Handler{cfg: cfg}
+	return &Handler{cfg: cfg, now: time.Now}
 }
 
 // Handle routes incoming API Gateway requests to the appropriate handler.
@@ -44,16 +56,67 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
+		if err := h.verifySlackRequest(req); err != nil {
+			return unauthorized(err)
+		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
+		if err := h.verifySlackRequest(req); err != nil {
+			return unauthorized(err)
+		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
+		if err := h.verifySlackRequest(req); err != nil {
+			return unauthorized(err)
+		}
 		return h.handleInteraction(req)
 	case req.Path == "/health":
 		return respond(http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		return respond(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
+}
+
+// verifySlackRequest authenticates an incoming Slack HTTP request. On any
+// verification error, the caller rejects the request with 401 and logs the
+// failure class so operator metrics can separate "not Slack" noise from
+// tampering attempts.
+func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
+	sig := headerValue(req.Headers, headerSlackSignature)
+	ts := headerValue(req.Headers, headerSlackTimestamp)
+	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
+	if err != nil {
+		slog.Warn("slack signature verification failed",
+			"path", req.Path,
+			"reason", err.Error(),
+			"has_signature", sig != "",
+			"has_timestamp", ts != "")
+	}
+	return err
+}
+
+// headerValue fetches a header case-insensitively — API Gateway preserves the
+// caller's casing, so "X-Slack-Signature" may arrive lowercased or not at all.
+// Uses MultiValueHeaders when present for endpoints that receive duplicates.
+func headerValue(headers map[string]string, name string) string {
+	if v, ok := headers[name]; ok {
+		return v
+	}
+	lower := strings.ToLower(name)
+	for k, v := range headers {
+		if strings.EqualFold(k, lower) {
+			return v
+		}
+	}
+	return ""
+}
+
+// unauthorized returns a 401 response for a Slack-signature failure. Body is
+// intentionally terse — a caller able to read it can only learn that signing
+// is required, not why the particular attempt failed. Misconfig vs. attacker
+// activity is already distinguished in the structured slog.Warn above.
+func unauthorized(_ error) (events.APIGatewayProxyResponse, error) {
+	return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 }
 
 func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
