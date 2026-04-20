@@ -41,10 +41,10 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 	if sigHeader == "" || tsHeader == "" {
 		return errSlackSignatureMissing
 	}
-	if !strings.HasPrefix(sigHeader, slackSignatureVersion+"=") {
+	providedHex, hasPrefix := strings.CutPrefix(sigHeader, slackSignatureVersion+"=")
+	if !hasPrefix {
 		return errSlackSignatureMalformed
 	}
-	providedHex := sigHeader[len(slackSignatureVersion)+1:]
 	if len(providedHex) != sha256.Size*2 {
 		return errSlackSignatureMalformed
 	}

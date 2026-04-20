@@ -23,6 +23,11 @@ const methodPost = "POST"
 
 const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
 
+// sigFailureResponse is the terse body we return for every 401 from the
+// signature-verify path. Distinguishing which check failed is already
+// captured in the structured slog line; the wire body stays uniform.
+const sigFailureResponse = "signature verification failed"
+
 const (
 	// Matched case-insensitively — API Gateway preserves or lowercases depending on version.
 	headerSlackSignature = "X-Slack-Signature"
@@ -57,17 +62,17 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
+			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleInteraction(req)
 	case req.Path == "/health":
@@ -140,8 +145,11 @@ func classifySlackErr(err error) string {
 }
 
 // headerValue does a case-insensitive lookup against both Headers and
-// MultiValueHeaders so v1 and v2 API Gateway both work. Single-value pick
-// is safe because Slack's signature/timestamp headers aren't multi-valued.
+// MultiValueHeaders so v1 and v2 API Gateway both work. Assumes only one
+// casing of a given header name is present per request — if both
+// "X-Slack-Signature" and "x-slack-signature" appear in the same map,
+// Go's randomized map iteration means the returned value is
+// non-deterministic. API Gateway doesn't emit that shape in practice.
 func headerValue(headers map[string]string, multi map[string][]string, name string) string {
 	if v, ok := headers[name]; ok {
 		return v
