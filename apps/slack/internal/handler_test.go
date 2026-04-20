@@ -215,15 +215,14 @@ func TestSlackEndpoints_Reject401(t *testing.T) {
 		name       string
 		path       string
 		body       string
-		signBody   string // if set, sign this body and send it with `body` (use for tamper/replay)
-		nowOffset  time.Duration
-		signedBody bool
+		signBody  string // if set, sign this body and send with `body` (tamper cases)
+		nowOffset time.Duration
 	}{
 		{name: "unsigned /slack/commands", path: "/slack/commands", body: body},
 		{name: "unsigned /slack/events", path: "/slack/events", body: `{"type":"url_verification","challenge":"attacker-chosen"}`},
 		{name: "unsigned /slack/interactions", path: "/slack/interactions", body: `{"type":"block_actions"}`},
 		{name: "tampered body (text swap)", path: "/slack/commands", body: tamperedBody, signBody: body},
-		{name: "replay with different team_id", path: "/slack/commands", body: replayBody, signBody: origReplayBody},
+		{name: "body swap with different team_id", path: "/slack/commands", body: replayBody, signBody: origReplayBody},
 		{name: "stale timestamp (10m outside skew)", path: "/slack/commands", body: body, signBody: body, nowOffset: 10 * time.Minute},
 	}
 
