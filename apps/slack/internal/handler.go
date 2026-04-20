@@ -3,7 +3,9 @@ package internal
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -57,17 +59,17 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
 		if err := h.verifySlackRequest(req); err != nil {
-			return unauthorized(err)
+			return unauthorized()
 		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
 		if err := h.verifySlackRequest(req); err != nil {
-			return unauthorized(err)
+			return unauthorized()
 		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
 		if err := h.verifySlackRequest(req); err != nil {
-			return unauthorized(err)
+			return unauthorized()
 		}
 		return h.handleInteraction(req)
 	case req.Path == "/health":
@@ -81,30 +83,72 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 // verification error, the caller rejects the request with 401 and logs the
 // failure class so operator metrics can separate "not Slack" noise from
 // tampering attempts.
+//
+// API Gateway sets IsBase64Encoded=true for any content type in the Lambda's
+// binary-media-types list. Slack slash commands arrive as
+// application/x-www-form-urlencoded and events as application/json; both are
+// normally treated as text. If the API Gateway config ever flips (or if a
+// new binary-media-type matches by accident), the body handed to the Lambda
+// is base64, and the HMAC over that base64 will not match Slack's HMAC over
+// the raw body — every valid request would start 401ing silently. Decode
+// here so the signature check runs against the same bytes Slack signed,
+// turning the infra misconfig into a decode-error 401 with a distinct
+// log line instead of a silent outage.
 func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
+	body := req.Body
+	if req.IsBase64Encoded {
+		decoded, err := base64.StdEncoding.DecodeString(req.Body)
+		if err != nil {
+			slog.Warn("slack signature verification failed — base64 body decode error",
+				"path", req.Path,
+				"error", err.Error())
+			return errSlackSignatureMalformed
+		}
+		body = string(decoded)
+	}
+
 	sig := headerValue(req.Headers, headerSlackSignature)
 	ts := headerValue(req.Headers, headerSlackTimestamp)
-	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
+	err := verifySlackSignature(h.cfg.SlackSigningSecret, body, sig, ts, h.now())
 	if err != nil {
 		slog.Warn("slack signature verification failed",
 			"path", req.Path,
-			"reason", err.Error(),
+			"reason", classifySlackErr(err),
 			"has_signature", sig != "",
-			"has_timestamp", ts != "")
+			"has_timestamp", ts != "",
+			"is_base64", req.IsBase64Encoded)
 	}
 	return err
 }
 
-// headerValue fetches a header case-insensitively — API Gateway preserves the
-// caller's casing, so "X-Slack-Signature" may arrive lowercased or not at all.
-// Uses MultiValueHeaders when present for endpoints that receive duplicates.
+// classifySlackErr maps the sentinel verification errors to stable metric
+// labels so operator dashboards can group by cause without string-matching
+// error messages (which may be reworded over time).
+func classifySlackErr(err error) string {
+	switch {
+	case errors.Is(err, errSlackSigningSecretEmpty):
+		return "secret_empty"
+	case errors.Is(err, errSlackSignatureMissing):
+		return "headers_missing"
+	case errors.Is(err, errSlackSignatureMalformed):
+		return "malformed"
+	case errors.Is(err, errSlackTimestampStale):
+		return "stale"
+	case errors.Is(err, errSlackSignatureMismatch):
+		return "mismatch"
+	default:
+		return "unknown"
+	}
+}
+
+// headerValue fetches a header case-insensitively — API Gateway v1 preserves
+// caller casing, v2 lowercases, and strings.EqualFold handles both.
 func headerValue(headers map[string]string, name string) string {
 	if v, ok := headers[name]; ok {
 		return v
 	}
-	lower := strings.ToLower(name)
 	for k, v := range headers {
-		if strings.EqualFold(k, lower) {
+		if strings.EqualFold(k, name) {
 			return v
 		}
 	}
@@ -115,7 +159,7 @@ func headerValue(headers map[string]string, name string) string {
 // intentionally terse — a caller able to read it can only learn that signing
 // is required, not why the particular attempt failed. Misconfig vs. attacker
 // activity is already distinguished in the structured slog.Warn above.
-func unauthorized(_ error) (events.APIGatewayProxyResponse, error) {
+func unauthorized() (events.APIGatewayProxyResponse, error) {
 	return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 }
 

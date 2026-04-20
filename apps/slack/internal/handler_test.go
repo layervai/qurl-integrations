@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -18,6 +19,11 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
+
+func base64Encode(t *testing.T, s string) string {
+	t.Helper()
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
 
 const testSigningSecret = "test-secret"
 
@@ -311,6 +317,73 @@ func TestInteraction_RejectsUnsigned(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("unsigned interaction: status = %d, want 401", resp.StatusCode)
+	}
+}
+
+// TestSlashCommand_Base64Body fences the API-Gateway-binary-media-type trap
+// called out in the #73 review: if the content type is ever misconfigured
+// into the Lambda's binary-media-types list, req.Body arrives base64-encoded
+// and the HMAC over that base64 would never match Slack's HMAC over raw
+// bytes. verifySlackRequest decodes on IsBase64Encoded so the check runs
+// against the same bytes Slack signed.
+func TestSlashCommand_Base64Body(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	rawBody := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	headers := signSlackBody(t, rawBody)
+
+	// API Gateway hands the handler base64(body) with IsBase64Encoded=true.
+	encoded := base64Encode(t, rawBody)
+
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:            "/slack/commands",
+		HTTPMethod:      methodPost,
+		Body:            encoded,
+		Headers:         headers,
+		IsBase64Encoded: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("base64-encoded body with valid signature: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestHandle_EmptySigningSecret fences the deploy-is-open failure mode — a
+// handler with no signing secret must 401 every request, not silently accept
+// them (the helper-level test covers the algorithm, this one pins the wire).
+func TestHandle_EmptySigningSecret(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	h.cfg.SlackSigningSecret = ""
+
+	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
+	// Even with "correct-looking" headers — an empty secret means no message
+	// can verify. We include them to prove the 401 isn't coming from the
+	// "missing headers" path.
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:       "/slack/commands",
+		HTTPMethod: methodPost,
+		Body:       body,
+		Headers: map[string]string{
+			headerSlackSignature: "v0=aaaa",
+			headerSlackTimestamp: "1761998400",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("empty signing secret: status = %d, want 401", resp.StatusCode)
 	}
 }
 

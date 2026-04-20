@@ -39,7 +39,7 @@ func TestVerifySlackSignature_BoundaryCases(t *testing.T) {
 	}{
 		{
 			name: "empty secret fails closed",
-			want: nil,
+			want: errSlackSigningSecretEmpty,
 			call: func() error { return verifySlackSignature("", "hello", sig, ts, now) },
 		},
 		{
@@ -86,6 +86,13 @@ func TestVerifySlackSignature_BoundaryCases(t *testing.T) {
 			name: "wrong secret",
 			want: errSlackSignatureMismatch,
 			call: func() error { return verifySlackSignature("different-secret", "hello", sig, ts, now) },
+		},
+		{
+			// Guard rails the defense-in-depth against a math.MinInt64
+			// timestamp that would wrap the subtraction/abs chain.
+			name: "negative timestamp fails stale",
+			want: errSlackTimestampStale,
+			call: func() error { return verifySlackSignature("secret", "hello", sig, "-9223372036854775808", now) },
 		},
 	}
 
