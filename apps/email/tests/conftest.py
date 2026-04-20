@@ -120,8 +120,8 @@ def settings():
         max_recipients=25,
         max_urls_per_email=3,
         max_attachment_size_mb=25,
-        authorized_senders_param="/test/authorized-senders",
-        qurl_api_key_param="/test/qurl-api-key",
+        authorized_senders_param="/qurl-email-bot/authorized-senders",
+        qurl_api_key_param="/qurl-email-bot/qurl-api-key",
         aws_region="us-east-1",
     )
 
@@ -210,20 +210,20 @@ def aws_services():
             BillingMode="PAY_PER_REQUEST",
         )
 
-        # SSM parameters
+        # SSM parameters — use names matching actual config defaults
         ssm = boto3.client("ssm", region_name="us-east-1")
         ssm.put_parameter(
-            Name="/test/authorized-senders",
+            Name="/qurl-email-bot/authorized-senders",
             Type="String",
             Value=json.dumps(["sender@example.com", "test@company.com"]),
         )
         ssm.put_parameter(
-            Name="/test/qurl-api-key",
+            Name="/qurl-email-bot/qurl-api-key",
             Type="SecureString",
             Value="test-api-key",
         )
         ssm.put_parameter(
-            Name="/test/forward-map",
+            Name="/qurl-email-bot/forward-map",
             Type="String",
             Value=json.dumps({
                 "justin@layerv.ai": "personal@icloud.com",
@@ -244,6 +244,59 @@ def aws_services():
             "queue_url": queue_url,
             "dlq_url": dlq_url,
         }
+
+
+
+@pytest.fixture
+def moto_inject(aws_services):
+    """
+    Inject moto-backed boto3 clients into module-level globals of
+    forwarder and handler modules so their handler functions use moto.
+
+    Also clears get_settings lru_cache so settings pick up SSM param names
+    created inside the moto context.
+    """
+    import importlib
+    import sys
+
+    _UNSET = object()
+
+    # Ensure modules are imported first (before we touch their globals)
+    for mod_name in ("forwarder", "handler", "config"):
+        if mod_name not in sys.modules:
+            importlib.import_module(mod_name)
+
+    # Clear get_settings cache so new settings pick up SSM params from moto
+    import config as _cfg
+    _cfg.get_settings.cache_clear()
+
+    originals = {}
+    targets = [
+        ("forwarder", "s3", aws_services["s3"]),
+        ("forwarder", "ssm", aws_services["ssm"]),
+        ("forwarder", "ses", aws_services["ses"]),
+        ("handler", "s3", aws_services["s3"]),
+    ]
+    for path, attr, client in targets:
+        parts = path.split(".")
+        mod = sys.modules[parts[0]]
+        current = getattr(mod, attr, _UNSET)
+        originals[(path, attr)] = current if current is not client else _UNSET
+        setattr(mod, attr, client)
+
+    yield aws_services
+
+    # Restore original values
+    for (path, attr), original in originals.items():
+        parts = path.split(".")
+        mod = sys.modules.get(parts[0])
+        if mod is None:
+            continue
+        if original is _UNSET:
+            if hasattr(mod, attr):
+                delattr(mod, attr)
+        else:
+            setattr(mod, attr, original)
 
 
 @pytest.fixture

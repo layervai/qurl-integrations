@@ -68,11 +68,11 @@ class TestConftestFixtures:
     def test_aws_services_ssm(self, aws_services):
         """Test aws_services fixture creates SSM parameters"""
         ssm = aws_services["ssm"]
-        senders_param = ssm.get_parameter(Name="/test/authorized-senders")
+        senders_param = ssm.get_parameter(Name="/qurl-email-bot/authorized-senders")
         value = senders_param["Parameter"]["Value"]
         assert "sender@example.com" in value
 
-        api_key_param = ssm.get_parameter(Name="/test/qurl-api-key", WithDecryption=True)
+        api_key_param = ssm.get_parameter(Name="/qurl-email-bot/qurl-api-key", WithDecryption=True)
         assert api_key_param["Parameter"]["Value"] == "test-api-key"
 
     def test_mock_qurl_client_upload(self, mock_qurl_client):

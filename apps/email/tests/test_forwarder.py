@@ -3,425 +3,275 @@ Email forwarding Lambda tests.
 """
 
 import json
-from unittest.mock import MagicMock, patch
+import pytest
+from unittest.mock import patch, MagicMock
 
 
 class TestLoadForwardMap:
-    """load_forward_map tests"""
+    """load_forward_map tests using moto SSM"""
 
-    def test_load_forward_map_success(self):
+    def test_load_forward_map_success(self, moto_inject):
         """Test successful load of forward map from SSM"""
-        with patch("forwarder.ssm") as mock_ssm:
-            mock_ssm.get_parameter.return_value = {
-                "Parameter": {
-                    "Value": json.dumps({
-                        "justin@layerv.ai": "personal@icloud.com",
-                        "admin@layerv.ai": "home@gmail.com",
-                    })
-                }
-            }
+        from forwarder import load_forward_map
+        # aws_services fixture already created the forward-map SSM param
+        result = load_forward_map()
+        assert result["justin@layerv.ai"] == "personal@icloud.com"
 
-            mock_settings = MagicMock()
-            mock_settings.forward_map_param = "/qurl-email-bot/forward-map"
+    def test_load_forward_map_returns_empty_on_empty_value(self, moto_inject):
+        """Test load_forward_map returns empty dict when SSM value is empty string.
 
-            with patch("forwarder.get_settings", return_value=mock_settings):
-                from forwarder import load_forward_map
-                result = load_forward_map()
+        moto does not allow creating empty-string SSM params, so we verify
+        the empty-check logic directly by patching ssm.get_parameter.
+        """
+        import forwarder
+        original_get = moto_inject["ssm"].get_parameter
 
-                assert result["justin@layerv.ai"] == "personal@icloud.com"
-                assert result["admin@layerv.ai"] == "home@gmail.com"
-                assert mock_ssm.get_parameter.called
+        def empty_param(**kw):
+            return {"Parameter": {"Value": ""}}
 
-    def test_load_forward_map_empty_value(self):
-        """Test load when SSM parameter is empty"""
-        with patch("forwarder.ssm") as mock_ssm:
-            mock_ssm.get_parameter.return_value = {"Parameter": {"Value": ""}}
+        moto_inject["ssm"].get_parameter = empty_param
+        try:
+            result = forwarder.load_forward_map()
+            assert result == {}
+        finally:
+            moto_inject["ssm"].get_parameter = original_get
 
-            mock_settings = MagicMock()
-            mock_settings.forward_map_param = "/qurl-email-bot/forward-map"
-
-            with patch("forwarder.get_settings", return_value=mock_settings):
-                from forwarder import load_forward_map
-                result = load_forward_map()
-                assert result == {}
-
-    def test_load_forward_map_invalid_json(self):
+    def test_load_forward_map_invalid_json(self, moto_inject):
         """Test load with invalid JSON"""
-        with patch("forwarder.ssm") as mock_ssm:
-            mock_ssm.get_parameter.return_value = {"Parameter": {"Value": "not valid json"}}
+        moto_inject["ssm"].put_parameter(
+            Name="/test/bad-map",
+            Type="String",
+            Value="not valid json",
+        )
+        import forwarder
+        original = forwarder.get_settings
 
-            mock_settings = MagicMock()
-            mock_settings.forward_map_param = "/qurl-email-bot/forward-map"
+        class FakeSettings:
+            forward_map_param = "/test/bad-map"
 
-            with patch("forwarder.get_settings", return_value=mock_settings):
-                from forwarder import load_forward_map
-                result = load_forward_map()
-                assert result == {}
+        forwarder.get_settings = lambda: FakeSettings()
+        try:
+            result = forwarder.load_forward_map()
+            assert result == {}
+        finally:
+            forwarder.get_settings = original
 
-    def test_load_forward_map_ssm_error(self):
+    def test_load_forward_map_ssm_error(self, moto_inject):
         """Test load when SSM raises ClientError"""
-        from botocore.exceptions import ClientError
+        import forwarder
+        original = forwarder.get_settings
 
-        with patch("forwarder.ssm") as mock_ssm:
-            mock_ssm.get_parameter.side_effect = ClientError(
-                {"Error": {"Code": "ParameterNotFound"}},
-                "GetParameter"
-            )
+        class FakeSettings:
+            forward_map_param = "/nonexistent/param"
 
-            mock_settings = MagicMock()
-            mock_settings.forward_map_param = "/qurl-email-bot/forward-map"
+        forwarder.get_settings = lambda: FakeSettings()
+        try:
+            result = forwarder.load_forward_map()
+            assert result == {}
+        finally:
+            forwarder.get_settings = original
 
-            with patch("forwarder.get_settings", return_value=mock_settings):
-                from forwarder import load_forward_map
-                result = load_forward_map()
-                assert result == {}
+
+def _fake_settings():
+    """Return a settings-like object for forwarder tests."""
+    class FakeSettings:
+        forward_map_param = "/test/forward-map"
+        bot_address = "qurl@layerv.ai"
+    return FakeSettings()
+
+
+def _raw_email_bytes():
+    return (
+        b"From: alice@external.com\r\n"
+        b"To: justin@layerv.ai\r\n"
+        b"Subject: Test\r\n\r\n"
+        b"Hello, this is a forwarded email.\r\n"
+    )
+
+
+def _ses_record(forward_to="justin@layerv.ai", forward_from="alice@external.com",
+                bucket="qurl-email-inbound-test", key="fwd/test.eml",
+                s3_bucket=True):
+    return {
+        "ses": {
+            "mail": {
+                "commonHeaders": {
+                    "from": [forward_from],
+                    "to": [forward_to],
+                }
+            },
+            "receipt": {
+                "action": {
+                    "bucketName": bucket if s3_bucket else None,
+                    "objectKey": key if s3_bucket else None,
+                }
+            },
+        }
+    }
+
+
+def _patch_settings_and_ses(moto_inject, raw_bytes=None, ses_side_effect=None):
+    """Common patcher: inject settings + optionally mock ses.send_raw_email."""
+    import forwarder
+    import config
+
+    original_settings = config.get_settings
+    config.get_settings = lambda: _fake_settings()
+
+    ses_mock = MagicMock(return_value={"MessageId": "fwd-123"})
+    if ses_side_effect:
+        ses_mock.side_effect = ses_side_effect
+
+    ses_patcher = patch.object(moto_inject["ses"], "send_raw_email", ses_mock)
+
+    def restore():
+        config.get_settings = original_settings
+
+    return restore, ses_patcher, ses_mock
+
+
+def _put_email_in_s3(moto_inject, key, raw_bytes):
+    moto_inject["s3"].put_object(
+        Bucket="qurl-email-inbound-test",
+        Key=key,
+        Body=raw_bytes,
+    )
 
 
 class TestForwarderHandler:
-    """Forwarder Lambda handler tests"""
+    """Forwarder Lambda handler tests using moto S3 + SES"""
 
-    def test_handler_no_records(self):
+    def test_handler_no_records(self, moto_inject):
         """Test handler with no records"""
-        with patch("forwarder.load_forward_map", return_value={}):
+        restore, ses_patcher, _ = _patch_settings_and_ses(moto_inject)
+        with ses_patcher:
             from forwarder import handler
             result = handler({"Records": []}, MagicMock())
             assert result["status"] == "ok"
+        restore()
 
-    def test_handler_no_forward_map_entry(self):
-        """Test handler skips when no forward map entry exists"""
-        with patch("forwarder.load_forward_map", return_value={}):
+    def test_handler_no_forward_map_entry(self, moto_inject):
+        """Test handler skips when no forward map entry"""
+        restore, ses_patcher, _ = _patch_settings_and_ses(moto_inject)
+        with ses_patcher:
             from forwarder import handler
-
-            record = {
-                "ses": {
-                    "mail": {
-                        "commonHeaders": {
-                            "from": ["alice@external.com"],
-                            "to": ["notmapped@layerv.ai"],
-                        }
-                    },
-                    "receipt": {
-                        "action": {
-                            "bucketName": "test-bucket",
-                            "objectKey": "fwd/test.eml",
-                        }
-                    },
-                }
-            }
-
+            record = _ses_record(forward_to="unmapped@layerv.ai")
             result = handler({"Records": [record]}, MagicMock())
             assert result["status"] == "ok"
+        restore()
 
-    def test_handler_no_s3_action(self):
+    def test_handler_no_s3_action(self, moto_inject):
         """Test handler skips when no S3 action in receipt"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
+        restore, ses_patcher, _ = _patch_settings_and_ses(moto_inject)
+        with ses_patcher:
             from forwarder import handler
-
-            record = {
-                "ses": {
-                    "mail": {
-                        "commonHeaders": {
-                            "from": ["alice@external.com"],
-                            "to": ["justin@layerv.ai"],
-                        }
-                    },
-                    "receipt": {
-                        "action": {}  # No bucketName or objectKey
-                    },
-                }
-            }
-
+            record = _ses_record(s3_bucket=False)
             result = handler({"Records": [record]}, MagicMock())
             assert result["status"] == "ok"
+        restore()
 
-    def test_handler_no_from_header(self):
+    def test_handler_no_from_header(self, moto_inject):
         """Test handler skips when no From header"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
+        restore, ses_patcher, _ = _patch_settings_and_ses(moto_inject)
+        with ses_patcher:
             from forwarder import handler
-
-            record = {
-                "ses": {
-                    "mail": {
-                        "commonHeaders": {
-                            "from": [],  # Empty From
-                            "to": ["justin@layerv.ai"],
-                        }
-                    },
-                    "receipt": {},
-                }
-            }
-
+            record = _ses_record(forward_from="")  # empty from
+            record["ses"]["mail"]["commonHeaders"]["from"] = []
             result = handler({"Records": [record]}, MagicMock())
             assert result["status"] == "ok"
+        restore()
 
-    def test_handler_forwards_email_successfully(self):
+    def test_handler_forwards_email_successfully(self, moto_inject):
         """Test successful email forwarding with header rewriting"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
+        restore, ses_patcher, ses_mock = _patch_settings_and_ses(moto_inject)
+        _put_email_in_s3(moto_inject, "fwd/test.eml", _raw_email_bytes())
+        with ses_patcher:
+            from forwarder import handler
+            result = handler({"Records": [_ses_record()]}, MagicMock())
+            assert result["status"] == "ok"
+            ses_mock.assert_called_once()
+            call_kwargs = ses_mock.call_args[1]
+            assert "noreply@layerv.ai" in call_kwargs["Source"]
+            assert call_kwargs["Destinations"] == ["personal@icloud.com"]
+        restore()
 
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-
-                        # Create a minimal raw email
-                        raw_email = (
-                            b"From: alice@external.com\r\n"
-                            b"To: justin@layerv.ai\r\n"
-                            b"Subject: Test\r\n\r\n"
-                            b"Hello, this is a forwarded email.\r\n"
-                        )
-
-                        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=raw_email))}
-                        mock_ses.send_raw_email.return_value = {"MessageId": "forwarded-123"}
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        result = handler({"Records": [record]}, MagicMock())
-
-                        assert result["status"] == "ok"
-                        mock_ses.send_raw_email.assert_called_once()
-                        call_kwargs = mock_ses.send_raw_email.call_args[1]
-                        assert "noreply@layerv.ai" in call_kwargs["Source"]
-                        assert call_kwargs["Destinations"] == ["personal@icloud.com"]
-
-    def test_handler_ses_error_does_not_crash(self):
-        """Test handler returns error status on SES failure"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
-
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-                        from botocore.exceptions import ClientError
-
-                        raw_email = (
-                            b"From: alice@external.com\r\n"
-                            b"To: justin@layerv.ai\r\n"
-                            b"Subject: Test\r\n\r\n"
-                            b"Hello.\r\n"
-                        )
-
-                        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=raw_email))}
-                        mock_ses.send_raw_email.side_effect = ClientError(
-                            {"Error": {"Code": "MessageRejected"}},
-                            "SendRawEmail"
-                        )
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        result = handler({"Records": [record]}, MagicMock())
-                        assert result["status"] == "ok"  # Still returns ok, logs error internally
-
-    def test_handler_forwarder_ses_error_continues(self):
+    def test_handler_ses_error_does_not_crash(self, moto_inject):
         """Test handler continues after SES send_raw_email error"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
+        from botocore.exceptions import ClientError
+        restore, ses_patcher, _ = _patch_settings_and_ses(
+            moto_inject,
+            ses_side_effect=ClientError(
+                {"Error": {"Code": "MessageRejected"}},
+                "SendRawEmail"
+            ),
+        )
+        _put_email_in_s3(moto_inject, "fwd/test.eml", _raw_email_bytes())
+        with ses_patcher:
+            from forwarder import handler
+            result = handler({"Records": [_ses_record()]}, MagicMock())
+            # SES error is caught and logged, handler continues
+            assert result["status"] == "ok"
+        restore()
 
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-                        from email_sender import SESError
+    def test_handler_forwarder_ses_error_continues(self, moto_inject):
+        """Test handler continues after SESError"""
+        from email_sender import SESError
+        restore, ses_patcher, _ = _patch_settings_and_ses(
+            moto_inject,
+            ses_side_effect=SESError("SES rejected"),
+        )
+        _put_email_in_s3(moto_inject, "fwd/test2.eml", _raw_email_bytes())
+        with ses_patcher:
+            from forwarder import handler
+            result = handler({"Records": [_ses_record(key="fwd/test2.eml")]}, MagicMock())
+            assert result["status"] == "ok"
+        restore()
 
-                        raw_email = (
-                            b"From: alice@external.com\r\n"
-                            b"To: justin@layerv.ai\r\n"
-                            b"Subject: Test\r\n\r\n"
-                            b"Hello.\r\n"
-                        )
-
-                        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=raw_email))}
-                        mock_ses.send_raw_email.side_effect = SESError("SES rejected")
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        result = handler({"Records": [record]}, MagicMock())
-                        assert result["status"] == "ok"
-
-    def test_handler_x_headers_added(self):
+    def test_handler_x_headers_added(self, moto_inject):
         """Test X-Original-To and X-Forwarded-For headers are added"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
+        restore, ses_patcher, ses_mock = _patch_settings_and_ses(moto_inject)
+        _put_email_in_s3(moto_inject, "fwd/hdr.eml", _raw_email_bytes())
+        with ses_patcher:
+            from forwarder import handler
+            import email
+            handler({"Records": [_ses_record(key="fwd/hdr.eml")]}, MagicMock())
+            call_kwargs = ses_mock.call_args[1]
+            raw_data = call_kwargs["RawMessage"]["Data"]
+            msg = email.message_from_bytes(raw_data)
+            assert "X-Original-To" in msg
+            assert "X-Forwarded-For" in msg
+        restore()
 
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-                        import email
+    def test_handler_record_exception_returns_error(self, moto_inject):
+        """Test handler returns error status when S3 raises unexpected exception"""
+        restore, ses_patcher, _ = _patch_settings_and_ses(moto_inject)
 
-                        raw_email = (
-                            b"From: alice@external.com\r\n"
-                            b"To: justin@layerv.ai\r\n"
-                            b"Subject: Test\r\n\r\n"
-                            b"Hello.\r\n"
-                        )
+        # Override S3 get_object to raise
+        original_get = moto_inject["s3"].get_object
+        moto_inject["s3"].get_object = MagicMock(
+            side_effect=RuntimeError("unexpected S3 error")
+        )
+        try:
+            with ses_patcher:
+                from forwarder import handler
+                result = handler({"Records": [_ses_record()]}, MagicMock())
+                assert result["status"] == "error"
+                assert "unexpected S3 error" in result["error"]
+        finally:
+            moto_inject["s3"].get_object = original_get
+            restore()
 
-                        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=raw_email))}
-                        mock_ses.send_raw_email.return_value = {"MessageId": "test-123"}
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        handler({"Records": [record]}, MagicMock())
-
-                        call_kwargs = mock_ses.send_raw_email.call_args[1]
-                        raw_data = call_kwargs["RawMessage"]["Data"]
-                        msg = email.message_from_bytes(raw_data)
-
-                        assert "X-Original-To" in msg
-                        assert "X-Forwarded-For" in msg
-
-    def test_handler_record_exception_returns_error(self):
-        """Test handler returns error status when record processing throws unexpected exception"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
-
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-
-                        # s3.get_object raises an unexpected error type
-                        mock_s3.get_object.side_effect = RuntimeError("unexpected S3 error")
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        result = handler({"Records": [record]}, MagicMock())
-                        assert result["status"] == "error"
-                        assert "unexpected S3 error" in result["error"]
-
-    def test_handler_with_multiple_records(self):
-        """Test handler processes multiple records, one fails gracefully"""
-        with patch("forwarder.load_forward_map", return_value={"justin@layerv.ai": "personal@icloud.com"}):
-            with patch("forwarder.s3") as mock_s3:
-                with patch("forwarder.ses") as mock_ses:
-                    mock_settings = MagicMock()
-                    mock_settings.bot_address = "qurl@layerv.ai"
-
-                    with patch("forwarder.get_settings", return_value=mock_settings):
-                        from forwarder import handler
-
-                        raw_email = (
-                            b"From: alice@external.com\r\n"
-                            b"To: justin@layerv.ai\r\n"
-                            b"Subject: Test\r\n\r\n"
-                            b"Hello.\r\n"
-                        )
-
-                        mock_s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=raw_email))}
-                        mock_ses.send_raw_email.return_value = {"MessageId": "msg-1"}
-
-                        record = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["alice@external.com"],
-                                        "to": ["justin@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {
-                                    "action": {
-                                        "bucketName": "test-bucket",
-                                        "objectKey": "fwd/test.eml",
-                                    }
-                                },
-                            }
-                        }
-
-                        # Second record has no forward destination
-                        record2 = {
-                            "ses": {
-                                "mail": {
-                                    "commonHeaders": {
-                                        "from": ["bob@external.com"],
-                                        "to": ["unmatched@layerv.ai"],
-                                    }
-                                },
-                                "receipt": {"action": {}},
-                            }
-                        }
-
-                        result = handler({"Records": [record, record2]}, MagicMock())
-                        assert result["status"] == "ok"
-                        mock_ses.send_raw_email.assert_called_once()
+    def test_handler_with_multiple_records(self, moto_inject):
+        """Test handler processes multiple records"""
+        restore, ses_patcher, ses_mock = _patch_settings_and_ses(moto_inject)
+        _put_email_in_s3(moto_inject, "fwd/test.eml", _raw_email_bytes())
+        _put_email_in_s3(moto_inject, "fwd/test2.eml", _raw_email_bytes())
+        with ses_patcher:
+            from forwarder import handler
+            record1 = _ses_record(key="fwd/test.eml")
+            record2 = _ses_record(forward_to="unmapped@layerv.ai", key="fwd/test2.eml")
+            result = handler({"Records": [record1, record2]}, MagicMock())
+            assert result["status"] == "ok"
+            # Only record1 matches forward map
+            ses_mock.assert_called_once()
+        restore()
