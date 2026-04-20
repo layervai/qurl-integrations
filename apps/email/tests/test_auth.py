@@ -3,6 +3,7 @@ Authentication module tests.
 """
 
 import json
+import httpx
 from unittest.mock import patch, MagicMock
 
 from auth import (
@@ -114,7 +115,203 @@ class TestAuthenticateSender:
             assert result is None
 
 
-class TestSpfDkim:
+    def test_load_ssm_client_error(self):
+        """Test SSM ClientError returns empty set"""
+        from botocore.exceptions import ClientError
+
+        with patch("auth.boto3") as mock_boto3:
+            mock_ssm = MagicMock()
+            mock_boto3.client.return_value = mock_ssm
+            mock_ssm.get_parameter.side_effect = ClientError(
+                {"Error": {"Code": "ParameterNotFound"}},
+                "GetParameter"
+            )
+
+            settings = MagicMock()
+            settings.authorized_senders_param = "/test/param"
+            settings.aws_region = "us-east-1"
+
+            result = load_authorized_senders_from_ssm(settings)
+            assert len(result) == 0
+
+    def test_load_ssm_empty_value(self):
+        """Test empty SSM parameter value returns empty set"""
+        with patch("auth.boto3") as mock_boto3:
+            mock_ssm = MagicMock()
+            mock_boto3.client.return_value = mock_ssm
+            mock_ssm.get_parameter.return_value = {"Parameter": {"Value": ""}}
+
+            settings = MagicMock()
+            settings.authorized_senders_param = "/test/param"
+            settings.aws_region = "us-east-1"
+
+            result = load_authorized_senders_from_ssm(settings)
+            assert len(result) == 0
+
+    def test_load_authorized_senders_default_settings(self):
+        """Test load_authorized_senders_from_ssm uses get_settings when settings is None"""
+        with patch("auth.boto3") as mock_boto3:
+            mock_ssm = MagicMock()
+            mock_boto3.client.return_value = mock_ssm
+            mock_ssm.get_parameter.return_value = {
+                "Parameter": {"Value": json.dumps(["alice@example.com"])}
+            }
+
+            mock_settings = MagicMock()
+            mock_settings.authorized_senders_param = "/test/param"
+            mock_settings.aws_region = "us-east-1"
+
+            with patch("auth.get_settings", return_value=mock_settings):
+                result = load_authorized_senders_from_ssm(None)
+                assert "alice@example.com" in result
+
+
+class TestLoadApiKey:
+    """load_api_key_from_ssm tests"""
+
+    def test_load_api_key_success(self):
+        """Test loading API key from SSM"""
+        with patch("auth.boto3") as mock_boto3:
+            mock_ssm = MagicMock()
+            mock_boto3.client.return_value = mock_ssm
+            mock_ssm.get_parameter.return_value = {
+                "Parameter": {"Value": "secret-api-key-123"}
+            }
+
+            settings = MagicMock()
+            settings.qurl_api_key_param = "/test/qurl-api-key"
+            settings.aws_region = "us-east-1"
+
+            from auth import load_api_key_from_ssm
+            result = load_api_key_from_ssm(settings)
+            assert result == "secret-api-key-123"
+
+    def test_load_api_key_ssm_error(self):
+        """Test SSM error returns empty string"""
+        from botocore.exceptions import ClientError
+
+        with patch("auth.boto3") as mock_boto3:
+            mock_ssm = MagicMock()
+            mock_boto3.client.return_value = mock_ssm
+            mock_ssm.get_parameter.side_effect = ClientError(
+                {"Error": {"Code": "AccessDeniedException"}},
+                "GetParameter"
+            )
+
+            settings = MagicMock()
+            settings.qurl_api_key_param = "/test/qurl-api-key"
+            settings.aws_region = "us-east-1"
+
+            from auth import load_api_key_from_ssm
+            result = load_api_key_from_ssm(settings)
+            assert result == ""
+
+
+class TestAuthenticateSenderWithApi:
+    """authenticate_sender_with_api tests"""
+
+    def test_authenticate_with_api_success(self):
+        """Test successful API authentication"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value.mint_link_api_url = "https://api.layerv.ai/v1/qurls"
+
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.json.return_value = {
+                "auth0_subject": "auth0|12345",
+                "tier": "growth",
+                "frozen": False,
+            }
+
+            with patch.object(httpx, "get", return_value=mock_response) as mock_get:
+                from auth import authenticate_sender_with_api
+                result = authenticate_sender_with_api(
+                    "Alice@Example.COM", "api-key-xyz"
+                )
+
+                assert result is not None
+                assert result.owner_id == "auth0|12345"
+                assert result.tier == "growth"
+
+    def test_authenticate_with_api_frozen(self):
+        """Test frozen account returns None"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value.mint_link_api_url = "https://api.layerv.ai/v1/qurls"
+
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.json.return_value = {
+                "auth0_subject": "auth0|12345",
+                "tier": "growth",
+                "frozen": True,
+            }
+
+            with patch.object(httpx, "get", return_value=mock_response):
+                from auth import authenticate_sender_with_api
+                result = authenticate_sender_with_api("alice@example.com", "api-key")
+                assert result is None
+
+    def test_authenticate_with_api_free_tier(self):
+        """Test free tier returns None"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value.mint_link_api_url = "https://api.layerv.ai/v1/qurls"
+
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.json.return_value = {
+                "auth0_subject": "auth0|free",
+                "tier": "free",
+                "frozen": False,
+            }
+
+            with patch.object(httpx, "get", return_value=mock_response):
+                from auth import authenticate_sender_with_api
+                result = authenticate_sender_with_api("free@example.com", "api-key")
+                assert result is None
+
+    def test_authenticate_with_api_error(self):
+        """Test API error returns None gracefully"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value.mint_link_api_url = "https://api.layerv.ai/v1/qurls"
+
+            with patch.object(httpx, "get", side_effect=Exception("Network error")):
+                from auth import authenticate_sender_with_api
+                result = authenticate_sender_with_api("alice@example.com", "api-key")
+                assert result is None
+
+    def test_authenticate_with_api_default_settings(self):
+        """Test uses default settings when settings is None"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                mint_link_api_url="https://api.layerv.ai/v1/qurls"
+            )
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.json.return_value = {
+                "auth0_subject": "auth0|123",
+                "tier": "growth",
+                "frozen": False,
+            }
+
+            with patch.object(httpx, "get", return_value=mock_response):
+                from auth import authenticate_sender_with_api
+                result = authenticate_sender_with_api("alice@example.com", "key")
+                assert result is not None
+
+
+class TestAuthenticateSenderDefaults:
+    """authenticate_sender defaults tests"""
+
+    def test_authenticate_sender_default_settings(self):
+        """Test uses default settings when settings is None"""
+        with patch("auth.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(bot_address="qurl@layerv.ai")
+            with patch("auth.load_authorized_senders_from_ssm") as mock_load:
+                mock_load.return_value = {"alice@example.com"}
+
+                from auth import authenticate_sender
+                result = authenticate_sender("alice@example.com", None)
+                assert result is not None
     """SPF/DKIM verification tests"""
 
     def test_spf_pass(self):
