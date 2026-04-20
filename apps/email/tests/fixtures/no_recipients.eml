@@ -1,0 +1,13 @@
+From: sender@example.com
+To: qurl@layerv.ai
+Subject: No recipients test
+Content-Type: multipart/alternative; boundary="boundary789"
+
+--boundary789
+Content-Type: text/plain; charset="utf-8"
+
+Hello, I want to share something but forgot to add recipients.
+
+Best
+
+--boundary789--

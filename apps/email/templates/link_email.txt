@@ -1,0 +1,25 @@
+{{sender_name}} shared a resource with you
+
+========================================
+
+Resource: {{resource_name}}
+
+========================================
+
+{{sender_name}} ({{sender_email}}) shared a resource with you.
+
+This link is one-time use and will expire after access.
+
+Access link: {{link_url}}
+
+========================================
+
+Security notice: This link can only be used once. After access, the content will no longer be available.
+
+========================================
+
+This email was sent by the Qurl Email Bot
+The link will expire in {{expires_in}}
+
+This is an automated email, please do not reply.
+If you have questions, please contact the sender or visit https://layerv.ai
