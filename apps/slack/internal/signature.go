@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// Check ordering below is: empty-secret → missing-headers → malformed
+// (format/hex/length/ts) → stale-ts → HMAC. All checks before HMAC only
+// touch caller-supplied data (never the signing secret), so no timing
+// oracle exists on the secret. Reordering could introduce one — don't
+// move the HMAC check earlier in response to a reviewer who wants faster
+// rejection paths.
+
 // slackSignatureVersion is the version prefix Slack uses on its request
 // signatures. See https://api.slack.com/authentication/verifying-requests-from-slack.
 const slackSignatureVersion = "v0"
@@ -51,6 +58,12 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 		return errSlackSignatureMalformed
 	}
 	providedHex := sigHeader[len(slackSignatureVersion)+1:]
+	// Length check before DecodeString gives a faster + clearer malformed
+	// rejection for "v0=abc" style payloads (hmac.Equal would still return
+	// false, but the error would be the less-informative mismatch sentinel).
+	if len(providedHex) != sha256.Size*2 {
+		return errSlackSignatureMalformed
+	}
 	providedSig, err := hex.DecodeString(providedHex)
 	if err != nil {
 		return errSlackSignatureMalformed

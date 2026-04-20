@@ -472,15 +472,57 @@ func TestHandle_EmptySigningSecret(t *testing.T) {
 	}
 }
 
-func TestHeaderValue_CaseInsensitive(t *testing.T) {
-	// API Gateway v1 preserves caller header casing; Slack sends mixed case.
-	// API Gateway v2 lowercases. Both must match.
-	got := headerValue(map[string]string{"x-slack-signature": "v0=abc"}, "X-Slack-Signature")
-	if got != "v0=abc" {
-		t.Errorf("lowercase lookup = %q, want v0=abc", got)
+func TestHeaderValue(t *testing.T) {
+	// API Gateway v1 preserves caller casing (Slack sends mixed case);
+	// v2 lowercases. Some v1 configs populate MultiValueHeaders instead of
+	// Headers. The helper handles all four combinations.
+	cases := []struct {
+		name   string
+		hdrs   map[string]string
+		multi  map[string][]string
+		lookup string
+		want   string
+	}{
+		{"mixed case in Headers", map[string]string{"X-Slack-Signature": "v0=abc"}, nil, "X-Slack-Signature", "v0=abc"},
+		{"lowercase in Headers", map[string]string{"x-slack-signature": "v0=abc"}, nil, "X-Slack-Signature", "v0=abc"},
+		{"not present returns empty", map[string]string{"other": "val"}, nil, "X-Slack-Signature", ""},
+		{"MultiValueHeaders mixed case", nil, map[string][]string{"X-Slack-Signature": {"v0=abc"}}, "X-Slack-Signature", "v0=abc"},
+		{"MultiValueHeaders lowercase", nil, map[string][]string{"x-slack-signature": {"v0=abc"}}, "X-Slack-Signature", "v0=abc"},
+		{"empty multi-value returns empty", nil, map[string][]string{"X-Slack-Signature": {}}, "X-Slack-Signature", ""},
+		{"Headers wins over MultiValueHeaders", map[string]string{"X-Slack-Signature": "v0=fromhdrs"}, map[string][]string{"X-Slack-Signature": {"v0=frommulti"}}, "X-Slack-Signature", "v0=fromhdrs"},
 	}
-	got = headerValue(map[string]string{"X-Slack-Signature": "v0=abc"}, "X-Slack-Signature")
-	if got != "v0=abc" {
-		t.Errorf("mixed-case lookup = %q, want v0=abc", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := headerValue(tc.hdrs, tc.multi, tc.lookup)
+			if got != tc.want {
+				t.Errorf("headerValue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSlashCommand_InvalidBase64_Returns401 covers the decode-error branch
+// in prepareAndVerifySlackRequest. A future refactor that drops the decode
+// would silently let API-Gateway binary-media-type regressions produce
+// either 200s or 500s — this test pins the 401 behavior.
+func TestSlashCommand_InvalidBase64_Returns401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t, srv)
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path:            "/slack/commands",
+		HTTPMethod:      methodPost,
+		Body:            "this is not valid base64 at all!@#$%",
+		Headers:         map[string]string{headerSlackSignature: "v0=deadbeef", headerSlackTimestamp: "1761998400"},
+		IsBase64Encoded: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("invalid base64 with IsBase64Encoded=true: status = %d, want 401", resp.StatusCode)
 	}
 }

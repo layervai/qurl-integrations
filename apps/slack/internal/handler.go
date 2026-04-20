@@ -58,17 +58,17 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
-		if err := h.verifySlackRequest(req); err != nil {
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return unauthorized()
 		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
-		if err := h.verifySlackRequest(req); err != nil {
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return unauthorized()
 		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
-		if err := h.verifySlackRequest(req); err != nil {
+		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return unauthorized()
 		}
 		return h.handleInteraction(req)
@@ -79,22 +79,25 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	}
 }
 
-// verifySlackRequest authenticates an incoming Slack HTTP request. On any
-// verification error, the caller rejects the request with 401 and logs the
-// failure class so operator metrics can separate "not Slack" noise from
-// tampering attempts.
+// prepareAndVerifySlackRequest authenticates an incoming Slack HTTP request
+// and mutates req so downstream handlers see the same bytes Slack signed.
+// The name reflects the side effect: it's not a pure predicate.
 //
-// API Gateway sets IsBase64Encoded=true for any content type in the Lambda's
-// binary-media-types list. Slack slash commands arrive as
-// application/x-www-form-urlencoded and events as application/json; both are
-// normally treated as text. If the API Gateway config ever flips (or if a
-// new binary-media-type matches by accident), the body handed to the Lambda
-// is base64, and the HMAC over that base64 will not match Slack's HMAC over
-// the raw body — every valid request would start 401ing silently. Decode
-// here so the signature check runs against the same bytes Slack signed,
-// turning the infra misconfig into a decode-error 401 with a distinct
-// log line instead of a silent outage.
-func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
+// API Gateway sets IsBase64Encoded=true for any content type in the
+// Lambda's binary-media-types list. Slack slash commands arrive as
+// application/x-www-form-urlencoded and events as application/json; both
+// are normally treated as text. If the API Gateway config ever flips (or
+// if a new binary-media-type matches by accident), the body handed to the
+// Lambda is base64, and the HMAC over that base64 will not match Slack's
+// HMAC over the raw body — every valid request would start 401ing
+// silently. Decode here so the signature check runs against the same bytes
+// Slack signed, and rewrite req.Body so url.ParseQuery / json.Unmarshal
+// downstream see real form/JSON data rather than a base64 blob.
+//
+// On any verification error, the caller rejects the request with 401 and
+// logs the failure class so operator metrics can separate "not Slack"
+// noise from tampering attempts.
+func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyRequest) error {
 	if req.IsBase64Encoded {
 		decoded, err := base64.StdEncoding.DecodeString(req.Body)
 		if err != nil {
@@ -112,8 +115,8 @@ func (h *Handler) verifySlackRequest(req *events.APIGatewayProxyRequest) error {
 		req.IsBase64Encoded = false
 	}
 
-	sig := headerValue(req.Headers, headerSlackSignature)
-	ts := headerValue(req.Headers, headerSlackTimestamp)
+	sig := headerValue(req.Headers, req.MultiValueHeaders, headerSlackSignature)
+	ts := headerValue(req.Headers, req.MultiValueHeaders, headerSlackTimestamp)
 	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
 	if err != nil {
 		// Escalate empty-signing-secret to Error — it means the deployment
@@ -156,15 +159,27 @@ func classifySlackErr(err error) string {
 	}
 }
 
-// headerValue fetches a header case-insensitively — API Gateway v1 preserves
-// caller casing, v2 lowercases, and strings.EqualFold handles both.
-func headerValue(headers map[string]string, name string) string {
+// headerValue fetches a header case-insensitively — API Gateway v1
+// preserves caller casing, v2 lowercases, and some v1 configurations
+// populate MultiValueHeaders instead of (or in addition to) Headers.
+// strings.EqualFold handles the casing; checking both maps handles the
+// multi-value case. Slack's signature/timestamp are single-valued so the
+// first-entry pick is safe.
+func headerValue(headers map[string]string, multi map[string][]string, name string) string {
 	if v, ok := headers[name]; ok {
 		return v
 	}
 	for k, v := range headers {
 		if strings.EqualFold(k, name) {
 			return v
+		}
+	}
+	if v, ok := multi[name]; ok && len(v) > 0 {
+		return v[0]
+	}
+	for k, v := range multi {
+		if strings.EqualFold(k, name) && len(v) > 0 {
+			return v[0]
 		}
 	}
 	return ""
