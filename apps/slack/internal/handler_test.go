@@ -196,174 +196,64 @@ func TestURLVerificationChallenge(t *testing.T) {
 	}
 }
 
-// Negative-path tests: the exact class of request that was reaching the
-// handler pre-fix (unsigned, tampered, stale) must now be rejected with 401.
-// Together these three cover Slack's three signing failure modes and fence
-// the qurl-integrations #71 exposure.
-
-func TestSlashCommand_RejectsUnsigned(t *testing.T) {
+// TestSlackEndpoints_Reject401 is the main negative-path fence. Every row
+// is a request the handler must reject; the three paths (commands / events
+// /interactions) ensure a future endpoint addition can't silently skip
+// signature verification.
+func TestSlackEndpoints_Reject401(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	h := newTestHandler(t, srv)
 	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		// no signature headers — this is the pre-fix reproducer
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unsigned slash command: status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestSlashCommand_RejectsTamperedBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	signedBody := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	headers := signSlackBody(t, signedBody)
-
-	// Tamper: attacker swaps the body but reuses a legitimate signature.
 	tamperedBody := url.Values{"command": {"/qurl"}, "text": {"create https://evil.example"}, "team_id": {"T999"}}.Encode()
+	replayBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_attacker"}}.Encode()
+	origReplayBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_victim"}}.Encode()
 
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       tamperedBody,
-		Headers:    headers,
-	})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name       string
+		path       string
+		body       string
+		signBody   string // if set, sign this body and send it with `body` (use for tamper/replay)
+		nowOffset  time.Duration
+		signedBody bool
+	}{
+		{name: "unsigned /slack/commands", path: "/slack/commands", body: body},
+		{name: "unsigned /slack/events", path: "/slack/events", body: `{"type":"url_verification","challenge":"attacker-chosen"}`},
+		{name: "unsigned /slack/interactions", path: "/slack/interactions", body: `{"type":"block_actions"}`},
+		{name: "tampered body (text swap)", path: "/slack/commands", body: tamperedBody, signBody: body},
+		{name: "replay with different team_id", path: "/slack/commands", body: replayBody, signBody: origReplayBody},
+		{name: "stale timestamp (10m outside skew)", path: "/slack/commands", body: body, signBody: body, nowOffset: 10 * time.Minute},
 	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("tampered body: status = %d, want 401", resp.StatusCode)
-	}
-}
 
-func TestSlashCommand_RejectsStaleTimestamp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	headers := signSlackBody(t, body)
-
-	// Pin "now" 10 minutes after the signed timestamp — outside Slack's 5m skew.
-	h.now = func() time.Time { return fixedNow.Add(10 * time.Minute) }
-
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		Headers:    headers,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("stale timestamp: status = %d, want 401", resp.StatusCode)
-	}
-}
-
-// TestSlashCommand_ReplayWithDifferentTeamIDRejected documents the
-// signature's binding surface — the signature covers body + timestamp, so
-// swapping a different team_id into a previously-signed request doesn't
-// replay. Complementary to TestSlashCommand_RejectsTamperedBody which
-// mutates the text field; this one mutates team_id specifically because
-// that's what a resource-scope-escalation replay would target.
-func TestSlashCommand_ReplayWithDifferentTeamID(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	originalBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_victim"}}.Encode()
-	headers := signSlackBody(t, originalBody)
-	attackerBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_attacker"}}.Encode()
-
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       attackerBody,
-		Headers:    headers,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("replay with different team_id: status = %d, want 401", resp.StatusCode)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(t, srv)
+			if tc.nowOffset != 0 {
+				h.now = func() time.Time { return fixedNow.Add(tc.nowOffset) }
+			}
+			headers := map[string]string{}
+			if tc.signBody != "" {
+				headers = signSlackBody(t, tc.signBody)
+			}
+			resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+				Path: tc.path, HTTPMethod: methodPost, Body: tc.body, Headers: headers,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
 	}
 }
 
-// Per-endpoint fences: the three Slack-receiving endpoints must each enforce
-// signing. Without this, /slack/events and /slack/interactions could regress
-// the fix while tests for /slack/commands stay green.
-
-func TestEvent_RejectsUnsigned(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/events",
-		HTTPMethod: methodPost,
-		Body:       `{"type":"url_verification","challenge":"attacker-chosen"}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unsigned event: status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestInteraction_RejectsUnsigned(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/interactions",
-		HTTPMethod: methodPost,
-		Body:       `{"type":"block_actions"}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("unsigned interaction: status = %d, want 401", resp.StatusCode)
-	}
-}
-
-// TestSlashCommand_Base64Body_Help fences the API-Gateway-binary-media-type
-// trap called out in the #73 review. Two invariants:
-//  1. The HMAC check runs against the decoded body (not the base64 blob).
-//  2. The decoded body is threaded to the downstream handler so
-//     url.ParseQuery sees real form data, not a base64 string. Without (2),
-//     a signed /qurl help would verify then fall through to the "unknown
-//     subcommand" branch because ParseQuery would find no "command" / "text"
-//     keys in the base64 blob.
-//
-// The help-path text assertion distinguishes (2) from (1) — a broken body
-// threading would still return 200 but with different body text.
+// Fences the API-Gateway-binary-media-type trap: HMAC runs against the
+// decoded body AND the decoded body reaches the downstream handler (the
+// help-text assertion catches a broken threading that would otherwise
+// silently 200 with the wrong body).
 func TestSlashCommand_Base64Body_Help(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -397,9 +287,8 @@ func TestSlashCommand_Base64Body_Help(t *testing.T) {
 	}
 }
 
-// TestSlashCommand_Base64Body_Create strengthens the body-threading fence:
-// a signed create command must actually reach handleCreate (which hits the
-// mock QURL server) rather than being misrouted through help.
+// Strengthens the body-threading fence: a signed create command must
+// actually reach handleCreate (which hits the mock QURL server).
 func TestSlashCommand_Base64Body_Create(t *testing.T) {
 	var qurlCalled bool
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -439,9 +328,7 @@ func TestSlashCommand_Base64Body_Create(t *testing.T) {
 	}
 }
 
-// TestHandle_EmptySigningSecret fences the deploy-is-open failure mode — a
-// handler with no signing secret must 401 every request, not silently accept
-// them (the helper-level test covers the algorithm, this one pins the wire).
+// Empty signing secret must 401 every request — deployment-is-open fence.
 func TestHandle_EmptySigningSecret(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -501,10 +388,7 @@ func TestHeaderValue(t *testing.T) {
 	}
 }
 
-// TestSlashCommand_InvalidBase64_Returns401 covers the decode-error branch
-// in prepareAndVerifySlackRequest. A future refactor that drops the decode
-// would silently let API-Gateway binary-media-type regressions produce
-// either 200s or 500s — this test pins the 401 behavior.
+// Fences the decode-error branch in prepareAndVerifySlackRequest.
 func TestSlashCommand_InvalidBase64_Returns401(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

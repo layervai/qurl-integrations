@@ -23,10 +23,8 @@ const methodPost = "POST"
 
 const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
 
-// Header names API Gateway passes through for Slack's signing scheme. Matched
-// case-insensitively per RFC 7230 — API Gateway may normalize to lowercase or
-// preserve the caller's casing.
 const (
+	// Matched case-insensitively — API Gateway preserves or lowercases depending on version.
 	headerSlackSignature = "X-Slack-Signature"
 	headerSlackTimestamp = "X-Slack-Request-Timestamp"
 )
@@ -59,17 +57,17 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	switch {
 	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return unauthorized()
+			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 		}
 		return h.handleSlashCommand(ctx, req)
 	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return unauthorized()
+			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 		}
 		return h.handleEvent(req)
 	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
-			return unauthorized()
+			return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 		}
 		return h.handleInteraction(req)
 	case req.Path == "/health":
@@ -79,38 +77,23 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	}
 }
 
-// prepareAndVerifySlackRequest authenticates an incoming Slack HTTP request
-// and mutates req so downstream handlers see the same bytes Slack signed.
-// The name reflects the side effect: it's not a pure predicate.
+// prepareAndVerifySlackRequest authenticates a Slack request and mutates
+// req.Body + IsBase64Encoded so downstream handlers see the decoded bytes
+// Slack signed. The name reflects the side effect — it's not a pure
+// predicate.
 //
-// API Gateway sets IsBase64Encoded=true for any content type in the
-// Lambda's binary-media-types list. Slack slash commands arrive as
-// application/x-www-form-urlencoded and events as application/json; both
-// are normally treated as text. If the API Gateway config ever flips (or
-// if a new binary-media-type matches by accident), the body handed to the
-// Lambda is base64, and the HMAC over that base64 will not match Slack's
-// HMAC over the raw body — every valid request would start 401ing
-// silently. Decode here so the signature check runs against the same bytes
-// Slack signed, and rewrite req.Body so url.ParseQuery / json.Unmarshal
-// downstream see real form/JSON data rather than a base64 blob.
-//
-// On any verification error, the caller rejects the request with 401 and
-// logs the failure class so operator metrics can separate "not Slack"
-// noise from tampering attempts.
+// API Gateway hands the Lambda a base64-wrapped body for any content type
+// in the binary-media-types list. If that config ever matches Slack's
+// types, HMAC-over-base64 wouldn't match Slack's HMAC-over-raw and every
+// valid request would 401 silently — so we decode first.
 func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyRequest) error {
 	if req.IsBase64Encoded {
 		decoded, err := base64.StdEncoding.DecodeString(req.Body)
 		if err != nil {
-			slog.Warn("slack signature verification failed — base64 body decode error",
-				"path", req.Path,
-				"error", err.Error())
+			slog.Warn("slack signature verification failed — base64 decode error",
+				"path", req.Path, "error", err.Error())
 			return errSlackSignatureMalformed
 		}
-		// Rewrite req.Body so every downstream handler (handleSlashCommand,
-		// handleEvent, handleInteraction) sees the same bytes Slack signed,
-		// not the API-Gateway-wrapped base64. Without this, a valid signed
-		// slash command would verify then silently fall through to the help
-		// path because url.ParseQuery would parse a base64 blob.
 		req.Body = string(decoded)
 		req.IsBase64Encoded = false
 	}
@@ -119,17 +102,14 @@ func (h *Handler) prepareAndVerifySlackRequest(req *events.APIGatewayProxyReques
 	ts := headerValue(req.Headers, req.MultiValueHeaders, headerSlackTimestamp)
 	err := verifySlackSignature(h.cfg.SlackSigningSecret, req.Body, sig, ts, h.now())
 	if err != nil {
-		// Escalate empty-signing-secret to Error — it means the deployment
-		// is effectively open; the fail-closed 401s are defense-in-depth,
-		// not the primary guard. Pages should route differently for this.
-		// Other failure classes are noise from unauthenticated scans and
-		// stay at Warn.
 		attrs := []any{
 			"path", req.Path,
 			"reason", classifySlackErr(err),
 			"has_signature", sig != "",
 			"has_timestamp", ts != "",
 		}
+		// Empty secret means the deployment is effectively open — page on
+		// it distinctly from ordinary 401 noise.
 		if errors.Is(err, errSlackSigningSecretEmpty) {
 			slog.Error("slack signature verification failed — signing secret is empty (deployment is open)", attrs...)
 		} else {
@@ -159,12 +139,9 @@ func classifySlackErr(err error) string {
 	}
 }
 
-// headerValue fetches a header case-insensitively — API Gateway v1
-// preserves caller casing, v2 lowercases, and some v1 configurations
-// populate MultiValueHeaders instead of (or in addition to) Headers.
-// strings.EqualFold handles the casing; checking both maps handles the
-// multi-value case. Slack's signature/timestamp are single-valued so the
-// first-entry pick is safe.
+// headerValue does a case-insensitive lookup against both Headers and
+// MultiValueHeaders so v1 and v2 API Gateway both work. Single-value pick
+// is safe because Slack's signature/timestamp headers aren't multi-valued.
 func headerValue(headers map[string]string, multi map[string][]string, name string) string {
 	if v, ok := headers[name]; ok {
 		return v
@@ -183,14 +160,6 @@ func headerValue(headers map[string]string, multi map[string][]string, name stri
 		}
 	}
 	return ""
-}
-
-// unauthorized returns a 401 response for a Slack-signature failure. Body is
-// intentionally terse — a caller able to read it can only learn that signing
-// is required, not why the particular attempt failed. Misconfig vs. attacker
-// activity is already distinguished in the structured slog.Warn above.
-func unauthorized() (events.APIGatewayProxyResponse, error) {
-	return respond(http.StatusUnauthorized, map[string]string{"error": "signature verification failed"})
 }
 
 func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {

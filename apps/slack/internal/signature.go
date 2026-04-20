@@ -10,26 +10,14 @@ import (
 	"time"
 )
 
-// Check ordering below is: empty-secret → missing-headers → malformed
-// (format/hex/length/ts) → stale-ts → HMAC. All checks before HMAC only
-// touch caller-supplied data (never the signing secret), so no timing
-// oracle exists on the secret. Reordering could introduce one — don't
-// move the HMAC check earlier in response to a reviewer who wants faster
-// rejection paths.
+const (
+	slackSignatureVersion = "v0"
+	slackTimestampSkew    = 5 * time.Minute // Slack's recommended replay window.
+)
 
-// slackSignatureVersion is the version prefix Slack uses on its request
-// signatures. See https://api.slack.com/authentication/verifying-requests-from-slack.
-const slackSignatureVersion = "v0"
-
-// slackTimestampSkew bounds how far from now a Slack request's timestamp may
-// be before it's treated as a replay. Slack's own recommendation is 5 minutes.
-const slackTimestampSkew = 5 * time.Minute
-
-// Sentinel errors so callers can tell "not signed" from "signed but wrong"
-// without string matching. A missing header is distinguishable from a tampered
-// body, which matters for operator metrics and for tests. The empty-secret
-// case gets its own sentinel too because it's the most important one to page
-// on — it means the deployment is effectively open.
+// Sentinel errors so classifySlackErr can bucket metrics without
+// string-matching log lines. Empty-secret gets its own because it means
+// the deployment is effectively open — ops should page on it distinctly.
 var (
 	errSlackSigningSecretEmpty = errors.New("slack: signing secret is empty")
 	errSlackSignatureMissing   = errors.New("slack: missing X-Slack-Signature or X-Slack-Request-Timestamp")
@@ -38,16 +26,15 @@ var (
 	errSlackSignatureMismatch  = errors.New("slack: signature does not match body")
 )
 
-// verifySlackSignature authenticates an incoming Slack HTTP request by
-// recomputing HMAC-SHA256("v0:"+timestamp+":"+body) with the shared signing
-// secret and comparing against the X-Slack-Signature header in constant time.
+// verifySlackSignature authenticates a Slack request by recomputing
+// HMAC-SHA256("v0:"+timestamp+":"+body) and comparing in constant time.
+// `now` is injected so tests can pin the clock.
 //
-// `now` is taken as a parameter so tests can pin the clock without a global
-// override.
+// Check order: empty-secret → missing-headers → malformed → stale-ts →
+// HMAC. All checks before HMAC touch only caller-supplied data (never the
+// signing secret), so there's no timing oracle on the secret. Don't
+// reorder.
 func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now time.Time) error {
-	// Treat an empty secret as a fail-closed misconfig: the caller must set
-	// one explicitly. This prevents a blank secret from silently accepting
-	// any request that happens to hash to "v0=".
 	if signingSecret == "" {
 		return errSlackSigningSecretEmpty
 	}
@@ -58,9 +45,6 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 		return errSlackSignatureMalformed
 	}
 	providedHex := sigHeader[len(slackSignatureVersion)+1:]
-	// Length check before DecodeString gives a faster + clearer malformed
-	// rejection for "v0=abc" style payloads (hmac.Equal would still return
-	// false, but the error would be the less-informative mismatch sentinel).
 	if len(providedHex) != sha256.Size*2 {
 		return errSlackSignatureMalformed
 	}
@@ -73,19 +57,10 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 	if err != nil {
 		return errSlackSignatureMalformed
 	}
-	// Bound ts structurally before any arithmetic. time.Time.Sub saturates
-	// at the time.Duration extremes (MinInt64 / MaxInt64 nanoseconds) for
-	// extreme inputs and `-delta` on MinInt64 wraps back to MinInt64 in
-	// two's complement — so without these guards a sufficiently-large
-	// attacker ts could slip past `delta > skew`. The HMAC check is still
-	// the real gate (an attacker can't forge without the secret) but the
-	// guards make the skew check literally correct rather than best-effort.
-	if ts < 0 {
-		return errSlackTimestampStale
-	}
-	// 24h ceiling on "future" timestamps — well outside the 5-minute skew
-	// window and small enough that the subtraction can't saturate.
-	if ts > now.Unix()+24*60*60 {
+	// Bound ts structurally so a MinInt64 input can't wrap the skew check.
+	// HMAC still gates the actual path; this makes the skew check literally
+	// correct for all inputs.
+	if ts < 0 || ts > now.Unix()+24*60*60 {
 		return errSlackTimestampStale
 	}
 	delta := now.Sub(time.Unix(ts, 0))
@@ -97,14 +72,8 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 	}
 
 	mac := hmac.New(sha256.New, []byte(signingSecret))
-	// Slack's base string is "v0:<timestamp>:<raw body>". Any deviation
-	// (trailing newline, re-encoded body, base64-encoded body from API
-	// Gateway when a binary-media-type is mis-listed — see the caller's
-	// IsBase64Encoded handling) breaks verification.
 	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":" + body))
-	expected := mac.Sum(nil)
-
-	if !hmac.Equal(expected, providedSig) {
+	if !hmac.Equal(mac.Sum(nil), providedSig) {
 		return errSlackSignatureMismatch
 	}
 	return nil
