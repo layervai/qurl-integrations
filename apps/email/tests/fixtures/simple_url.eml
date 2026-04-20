@@ -1,0 +1,17 @@
+From: sender@example.com
+To: qurl@layerv.ai
+Subject: Sharing a link
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="utf-8"
+
+Send to:
+bob@company.com
+carol@company.com
+
+Check out this link: https://example.com/document.pdf
+
+Best regards
+
+--boundary123--

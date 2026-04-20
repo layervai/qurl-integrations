@@ -1,0 +1,14 @@
+From: unauthorized@example.com
+To: qurl@layerv.ai
+Subject: Unauthorized test
+Content-Type: multipart/alternative; boundary="boundary222"
+
+--boundary222
+Content-Type: text/plain; charset="utf-8"
+
+Send to:
+bob@company.com
+
+This sender is not in the authorized list.
+
+--boundary222--
