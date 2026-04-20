@@ -212,9 +212,9 @@ func TestSlackEndpoints_Reject401(t *testing.T) {
 	origReplayBody := url.Values{"command": {"/qurl"}, "text": {"list"}, "team_id": {"T_victim"}}.Encode()
 
 	cases := []struct {
-		name       string
-		path       string
-		body       string
+		name      string
+		path      string
+		body      string
 		signBody  string // if set, sign this body and send with `body` (tamper cases)
 		nowOffset time.Duration
 	}{
