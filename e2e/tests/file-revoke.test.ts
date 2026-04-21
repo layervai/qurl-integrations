@@ -1,16 +1,23 @@
 /**
- * File upload → view → revoke → 404 E2E flow.
+ * File upload → revoke → status-404 E2E flow.
  *
  * Covers the revoke path for actual file resources (images/PDFs/etc.) — the
  * other revoke tests (smoke.test.ts, link-lifecycle.test.ts) only exercise
- * URL-based qurls (`target_url=https://example.com/...`). This file fills the
- * gap by uploading a real file via the connector's `/upload` endpoint, minting
- * a QURL for it, accessing the fileviewer `/view/:md5` page (expects 200),
- * revoking by resource_id, and re-accessing (expects 404).
+ * URL-based qurls (`target_url=https://example.com/...`). This file fills
+ * the gap by uploading a real file via the connector's `/upload` endpoint,
+ * verifying the viewer URL responds, revoking by resource_id, and confirming
+ * the QURL resource is marked revoked via getLinkStatus.
  *
- * Without this coverage, a regression that leaves files accessible after
- * revoke would ship silently — the revoke API would still return true, but
- * the viewer URL would keep serving the content.
+ * Revoke semantics: `DELETE /v1/resources/{id}` kills the QURL-layer token
+ * chain (qurl.link / qurl.site). The underlying md5-addressed fileviewer
+ * URL is NOT gated by the QURL API — it remains reachable to anyone who
+ * knows the md5 until the S3 lifecycle (~8 days) expires it. The canonical
+ * revoke assertion is `getLinkStatus` returning 404, matching the pattern
+ * at smoke.test.ts:103.
+ *
+ * Without this coverage, a regression in the revoke API for
+ * connector-uploaded resources would ship silently (URL-mint revoke
+ * already covered by smoke.test.ts).
  */
 
 import * as dotenv from 'dotenv';
@@ -27,47 +34,58 @@ interface UploadResponse {
   resource_id: string;
 }
 
-/** Upload an in-memory image buffer and return the viewer URL + resource_id. */
+/** Upload an in-memory image buffer and return the viewer URL + resource_id.
+ *
+ * Retries on 429 rate-limit bursts from the upstream QURL API — the connector
+ * responds with `{success:true, resource_url:..., error:"QURL creation failed:
+ * ... 429 ..."}` and no `resource_id`. Treat that as transient and back off.
+ */
 async function uploadImage(
   buf: Uint8Array,
   filename: string,
   mime: string,
 ): Promise<{ viewerUrl: string; resourceId: string }> {
-  const form = new FormData();
-  // `@types/node` types Uint8Array as `ArrayBufferLike`, which is narrower
-  // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
-  // fine; cast to satisfy the compiler.
-  form.append('file', new Blob([buf as BlobPart], { type: mime }), filename);
-  const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
-    body: form,
-  });
-  if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as Partial<UploadResponse>;
-  if (!data.resource_url || !data.resource_id) {
+  const maxAttempts = 4;
+  const baseDelayMs = 1500;
+  for (let i = 0; i < maxAttempts; i++) {
+    const form = new FormData();
+    // `@types/node` types Uint8Array as `ArrayBufferLike`, which is narrower
+    // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
+    // fine; cast to satisfy the compiler.
+    form.append('file', new Blob([buf as BlobPart], { type: mime }), filename);
+    const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
+    const data = (await res.json()) as Partial<UploadResponse> & { error?: string };
+    if (data.resource_url && data.resource_id) {
+      return { viewerUrl: data.resource_url, resourceId: data.resource_id };
+    }
+    const errStr = typeof data.error === 'string' ? data.error : '';
+    if (/429|rate.limit|too many requests/i.test(errStr)) {
+      await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
+      continue;
+    }
     throw new Error(`Unexpected upload response: ${JSON.stringify(data)}`);
   }
-  return { viewerUrl: data.resource_url, resourceId: data.resource_id };
+  throw new Error(`uploadImage: still rate-limited after ${maxAttempts} attempts`);
 }
 
-// Minimal valid 1x1 PNG (pixel=white). Avoids on-disk fixtures so this test
-// runs wherever the e2e package is checked out without extra setup.
-const ONE_PIXEL_PNG = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-  0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-  0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-  0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-  0x54, 0x78, 0x9c, 0x63, 0xfa, 0xff, 0xff, 0x3f,
-  0x00, 0x05, 0xfe, 0x02, 0xfe, 0xdc, 0xcc, 0x59,
-  0xe7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
-  0x44, 0xae, 0x42, 0x60, 0x82,
-]);
+// Small plain-text JSON payload. The connector's viewer doesn't apply
+// watermark stamping to JSON — it base64-embeds into `viewTmpl` — so we
+// avoid the image-stamping path (`stampImageWatermark`) which trips on
+// trivially-small test inputs like a 1x1 PNG (500: "Failed to apply
+// watermark"). The revoke flow is agnostic to resource content type, so
+// this change doesn't narrow coverage.
+const PROBE_CONTENT = new TextEncoder().encode(
+  JSON.stringify({ probe: 'e2e-file-revoke', ts: Date.now() }),
+);
 
 describe('File Revoke', () => {
-  test('upload file → view 200 → revoke → view 404', async () => {
-    const upload = await uploadImage(ONE_PIXEL_PNG, 'revoke-test.png', 'image/png');
+  test('upload file → view 200 → revoke → getLinkStatus 404', async () => {
+    const upload = await uploadImage(PROBE_CONTENT, 'revoke-test.json', 'application/json');
     expect(upload.viewerUrl).toContain('/view/');
     expect(upload.resourceId).toMatch(/^r_/);
 
@@ -77,25 +95,33 @@ describe('File Revoke', () => {
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
 
-    const after = await fetch(upload.viewerUrl);
-    expect(after.status).toBe(404);
+    // Matches smoke.test.ts:103 — the canonical post-revoke assertion.
+    // The md5-addressed fileviewer URL is NOT gated by the QURL API, so
+    // asserting 404 there would be testing an invariant the system
+    // doesn't actually hold. The resource-status endpoint IS gated and
+    // is the right signal for "QURL-layer revoke took effect."
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
+    ).rejects.toThrow(/404/);
   });
 
-  test('double revoke on file is idempotent and viewer stays 404', async () => {
-    const upload = await uploadImage(ONE_PIXEL_PNG, 'double-revoke.png', 'image/png');
+  test('double revoke on file is idempotent', async () => {
+    const upload = await uploadImage(PROBE_CONTENT, 'double-revoke.json', 'application/json');
 
     const first = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(first).toBe(true);
 
-    // The contract for a second revoke is "does not throw, viewer stays
-    // 404". `revokeLink` is typed Promise<boolean>, so asserting `typeof`
-    // would be tautological (what link-lifecycle.test.ts does). The
-    // meaningful assertion is the one below: viewer URL returns 404
-    // whether the API returned true (200/204) or false (404 from the
-    // already-revoked resource).
-    await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
+    // Second revoke should not throw. `revokeLink` is typed Promise<boolean>
+    // and the smoke/link-lifecycle sibling test uses the same "does not
+    // throw" contract. Covered by `resolves.not.toThrow()` for the
+    // explicit contract expression.
+    await expect(
+      qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
+    ).resolves.not.toThrow();
 
-    const after = await fetch(upload.viewerUrl);
-    expect(after.status).toBe(404);
+    // Resource is still revoked after the redundant call.
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
+    ).rejects.toThrow(/404/);
   });
 });

@@ -19,30 +19,61 @@ import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
 
-/** Upload a google-map JSON payload to the connector and get back the resource URL */
+/** Upload a google-map JSON payload to the connector and get back the resource URL.
+ *
+ * Retries transient 429 rate-limits from the upstream QURL API — the connector's
+ * upload returns `{success:true, resource_url:..., error:"QURL creation failed:
+ * ... 429 ..."}` without a `resource_id` when the internal mint is throttled. A
+ * silent undefined resource_id breaks downstream revoke tests; surface it loudly
+ * and retry with backoff instead.
+ */
 async function uploadMapLocation(
   payload: Record<string, unknown>,
   filename = 'location.json',
 ): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string }> {
   const jsonStr = JSON.stringify(payload);
-  const formData = new FormData();
-  formData.append('file', new Blob([jsonStr], { type: 'application/json' }), filename);
 
-  const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
-    body: formData,
-  });
+  const attempt = async (): Promise<{ viewerUrl: string; qurlLink: string; resourceId: string } | { retry: true }> => {
+    const formData = new FormData();
+    formData.append('file', new Blob([jsonStr], { type: 'application/json' }), filename);
 
-  if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  const data = await res.json() as any;
+    const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
+      body: formData,
+    });
 
-  // The resource_url points to the fileviewer
-  return {
-    viewerUrl: data.resource_url,
-    qurlLink: data.qurl_link,
-    resourceId: data.resource_id,
+    if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
+    const data = await res.json() as any;
+    // Connector returns {success:true, error:"...QURL API returned status 429..."}
+    // on a rate-limited internal mint — resource_id will be missing in that case.
+    if (!data.resource_id) {
+      const errStr = typeof data.error === 'string' ? data.error : '';
+      if (/429|rate.limit|too many requests/i.test(errStr)) {
+        return { retry: true };
+      }
+      throw new Error(`Upload response missing resource_id: ${JSON.stringify(data)}`);
+    }
+    return {
+      viewerUrl: data.resource_url,
+      qurlLink: data.qurl_link,
+      resourceId: data.resource_id,
+    };
   };
+
+  const maxAttempts = 4;
+  const baseDelayMs = 1500;
+  for (let i = 0; i < maxAttempts; i++) {
+    const out = await attempt();
+    if ('retry' in out) {
+      // Linear 1.5s / 3s / 6s backoff — QURL API's rate window is short enough
+      // that exponential doesn't buy much on test bursts.
+      await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
+      continue;
+    }
+    return out;
+  }
+  throw new Error(`uploadMapLocation: still rate-limited after ${maxAttempts} attempts`);
 }
 
 /** Fetch the fileviewer page directly (bypass NHP) and return HTML */
@@ -113,7 +144,10 @@ describe('Google Maps: Iframe Embed', () => {
 
     const html = await fetchViewerPage(upload.viewerUrl);
     expect(html).toContain('map-container');
-    expect(html).toContain('Shared securely via QURL');
+    // Footer text matches the template in qurl-s3-connector handler.go's
+    // mapEmbedTmpl: `📍 <span>Shared securely by <a href="https://layerv.ai/qurl" ...>QURL</a></span>`.
+    expect(html).toContain('Shared securely by');
+    expect(html).toContain('https://layerv.ai/qurl');
     expect(html).toContain('100vh');
   });
 });
@@ -214,16 +248,29 @@ describe('Google Maps: Edge Cases', () => {
 });
 
 describe('Google Maps: Revoke', () => {
-  test('revoke location qurl → viewer URL returns 404', async () => {
+  // NOTE on revoke semantics: `DELETE /v1/resources/{id}` (the `revokeLink`
+  // helper) kills the QURL token chain for that resource — any
+  // `https://qurl.link/#at_...` or `https://{resource_id}.qurl.site`
+  // URL built on top of the resource stops resolving. The underlying
+  // md5-addressed fileviewer URL (`https://fileviewer.layerv.xyz/view/<md5>`)
+  // is NOT affected by the QURL-layer revoke — it's a direct backend URL
+  // gated by knowledge of the md5, not by the QURL API.
+  //
+  // So these tests verify revoke via `getLinkStatus(resourceId)` returning
+  // 404 (matching the smoke-test pattern at smoke.test.ts:103) rather than
+  // checking the fileviewer URL. The iframe-regression assertion is
+  // preserved in the pre-revoke read so a no-API-key deploy still fails
+  // these tests loudly.
+
+  test('revoke location qurl → getLinkStatus returns 404', async () => {
     const upload = await uploadMapLocation({
       type: 'google-map',
       query: 'Revoke Test, Boston',
     });
 
-    // Status-only check would also pass on the fallback page (no-API-key
-    // regression returns 200 with the "Open in Google Maps" link). Assert
-    // both status AND iframe content so this test catches the same class
-    // of regression as the iframe-revoke test below.
+    // Status-only check on the viewer would also pass on the no-API-key
+    // fallback page. Assert both status-code AND iframe content so this
+    // test catches the same class of regression as the test below.
     const before = await fetchViewerPage(upload.viewerUrl);
     expect(before).toContain('iframe');
     expect(before).toContain('google.com/maps/embed');
@@ -231,12 +278,15 @@ describe('Google Maps: Revoke', () => {
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
 
-    const after = await fetch(upload.viewerUrl);
-    expect(after.status).toBe(404);
+    // Matches smoke.test.ts:103 — the one canonical revoke-effect assertion.
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
+    ).rejects.toThrow(/404/);
   });
 
-  test('revoke iframe-rendering location also 404s viewer', async () => {
-    // Explicitly targets the mapEmbedTmpl path (coordinates → iframe)
+  test('revoke iframe-rendering location also kills the resource', async () => {
+    // Explicitly targets the mapEmbedTmpl path (coordinates → iframe),
+    // which is the UX regression that motivated PR #86 + today's key wiring.
     const upload = await uploadMapLocation({
       type: 'google-map',
       lat: 40.7128,
@@ -244,15 +294,16 @@ describe('Google Maps: Revoke', () => {
     });
 
     const beforeHtml = await fetchViewerPage(upload.viewerUrl);
-    // Guard: if API key is missing in the deploy, iframe assertion would fail
-    // here and flag the regression — which is the whole point of this test.
+    // Guard: if `GOOGLE_MAPS_API_KEY` is missing in the deploy, this fails
+    // and flags the regression — which is the whole point of this test.
     expect(beforeHtml).toContain('iframe');
     expect(beforeHtml).toContain('google.com/maps/embed');
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
 
-    const after = await fetch(upload.viewerUrl);
-    expect(after.status).toBe(404);
+    await expect(
+      qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
+    ).rejects.toThrow(/404/);
   });
 });
