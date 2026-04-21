@@ -37,6 +37,17 @@ let channels = {
 async function ensureRolesAndChannels() {
   if (!guild) return { createdRoles: new Map(), createdChannels: new Map() };
 
+  // Gated on ENABLE_OPENNHP_FEATURES. In any guild that hasn't explicitly
+  // opted in to OpenNHP community features, the bot only has the 4
+  // runtime permissions it was invited with (View Channels, Send
+  // Messages, Embed Links, Use Application Commands) — ManageRoles and
+  // ManageChannels are intentionally NOT granted. Attempting create()
+  // here produces a cascade of "Missing Permissions" errors on every
+  // boot + cache refresh, which obscures real issues in the logs.
+  if (!config.ENABLE_OPENNHP_FEATURES) {
+    return { createdRoles: new Map(), createdChannels: new Map() };
+  }
+
   const { ChannelType } = require('discord.js');
 
   const requiredRoles = [
@@ -196,26 +207,38 @@ function setupWeeklyDigest() {
 // a slash command will silently fail at runtime — log loud at boot instead
 // so misconfigurations surface immediately. Non-fatal: we still boot in
 // case the permission gap is intentional for a staging tenant.
+//
+// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla /qurl
+// send tool only needs 4 perms (ViewChannel for target:channel/voice
+// member enumeration, SendMessages for interaction replies, EmbedLinks
+// for QURL link previews, UseApplicationCommands for slash commands).
+// ManageRoles/ManageChannels are OpenNHP-only — demanding them in every
+// guild would produce a confusing "missing permissions" error in guilds
+// that correctly granted only the 4 runtime perms.
 async function verifyBotPermissions() {
   try {
     const { PermissionFlagsBits } = require('discord.js');
     const me = await guild.members.fetchMe();
     const required = {
-      ManageRoles: PermissionFlagsBits.ManageRoles,
+      ViewChannel: PermissionFlagsBits.ViewChannel,
       SendMessages: PermissionFlagsBits.SendMessages,
       EmbedLinks: PermissionFlagsBits.EmbedLinks,
-      ReadMessageHistory: PermissionFlagsBits.ReadMessageHistory,
       UseApplicationCommands: PermissionFlagsBits.UseApplicationCommands,
     };
+    if (config.ENABLE_OPENNHP_FEATURES) {
+      required.ManageRoles = PermissionFlagsBits.ManageRoles;
+      required.ManageChannels = PermissionFlagsBits.ManageChannels;
+      required.ReadMessageHistory = PermissionFlagsBits.ReadMessageHistory;
+    }
     const missing = Object.entries(required)
       .filter(([, bit]) => !me.permissions.has(bit))
       .map(([name]) => name);
     if (missing.length > 0) {
       logger.error('Bot is missing required Discord permissions in guild', {
-        guild: guild?.name, missing,
+        guild: guild?.name, missing, opennhp: config.ENABLE_OPENNHP_FEATURES,
       });
     } else {
-      logger.info('Bot permissions OK', { guild: guild?.name });
+      logger.info('Bot permissions OK', { guild: guild?.name, opennhp: config.ENABLE_OPENNHP_FEATURES });
     }
   } catch (err) {
     logger.warn('Could not verify bot permissions at boot', { error: err.message });
@@ -240,8 +263,13 @@ client.once('ready', async () => {
 
   await refreshCache();
   await verifyBotPermissions();
-  setupWeeklyDigest();
-  logger.info(`Watching guild: ${guild?.name}`);
+  // Weekly digest is OpenNHP-specific (star milestones, contributor
+  // stats, announcements to #general). No value in a guild running the
+  // bot purely for /qurl send.
+  if (config.ENABLE_OPENNHP_FEATURES) {
+    setupWeeklyDigest();
+  }
+  logger.info(`Watching guild: ${guild?.name}`, { opennhp: config.ENABLE_OPENNHP_FEATURES });
 });
 
 // Handle role/channel deletion - refresh cache
@@ -267,12 +295,24 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
-// Welcome new members
+// Welcome new members. Gated on ENABLE_OPENNHP_FEATURES — the handler
+// posts "🎉 Welcome Back, Contributor!" to #general and a DM that
+// explicitly greets the user as joining the OpenNHP community, including
+// promises of contributor-role progression. Neither is appropriate in a
+// guild that hasn't opted in. Skipping the handler outright also avoids
+// the DB read (getContributions) for every join in vanilla guilds.
 client.on('guildMemberAdd', async (member) => {
-  // Multi-tenant mode: no single guild to scope welcome DMs to. The
-  // existing `member.guild.id !== config.GUILD_ID` check below also
-  // catches this case (null !== any-guild-id is always true), but an
-  // explicit guard is self-documenting about the mode.
+  // OpenNHP-only behavior. Two short-circuits before any work:
+  //   1. Flag off → no welcome DM / "Welcome Back, Contributor!" embed
+  //      anywhere, regardless of whether the bot is single-guild or
+  //      multi-tenant. A vanilla /qurl send install shouldn't introduce
+  //      itself as the OpenNHP community bot.
+  //   2. In multi-tenant mode (no single GUILD_ID to scope to) there is
+  //      no cached `guild`/`channels` state to post into anyway. The
+  //      existing `member.guild.id !== config.GUILD_ID` below would also
+  //      catch that (null !== any-id is always true), but an explicit
+  //      guard keeps the intent readable.
+  if (!config.ENABLE_OPENNHP_FEATURES) return;
   if (!config.GUILD_ID) return;
   if (member.guild.id !== config.GUILD_ID) return;
 
@@ -368,6 +408,20 @@ async function updateMemberRoles(member, contributionCount) {
 
 // Assign Contributor role and check for progression
 async function assignContributorRole(discordId, prNumber, repo, githubUsername) {
+  // No-op in guilds that haven't opted in to OpenNHP community features.
+  // Callers (oauth.js, webhooks.js) still record the contribution in the
+  // DB before calling this; the role-assign + announcement is the only
+  // piece gated off. Returning { success: false, reason: 'opennhp-disabled' }
+  // so callers can distinguish "flag off" from "Discord API error" in logs.
+  // Log at debug so the "why did user X not get the role" question is
+  // answerable from prod logs without adding noise for every PR merge.
+  if (!config.ENABLE_OPENNHP_FEATURES) {
+    logger.debug('assignContributorRole skipped: OpenNHP features disabled', {
+      discordId, prNumber, repo, githubUsername,
+    });
+    return { success: false, reason: 'opennhp-disabled' };
+  }
+
   if (!guild) await refreshCache();
 
   try {
@@ -462,6 +516,17 @@ async function notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl) {
 
 // Notify about badges earned
 async function notifyBadgeEarned(discordId, badgeTypes) {
+  // No-op when OpenNHP features are disabled — the bot has no standing
+  // expectation that #general exists, and a 🏅 Badge Earned embed is
+  // nonsensical in a guild that never opted in to the contributor
+  // workflow in the first place.
+  if (!config.ENABLE_OPENNHP_FEATURES) {
+    logger.debug('notifyBadgeEarned skipped: OpenNHP features disabled', {
+      discordId, badgeCount: badgeTypes?.length ?? 0,
+    });
+    return;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general || badgeTypes.length === 0) return;
 
@@ -481,8 +546,17 @@ async function notifyBadgeEarned(discordId, badgeTypes) {
   }
 }
 
-// Post good-first-issue to contribute channel
+// Post good-first-issue to contribute channel. OpenNHP-only — posts to
+// #contribute (which only exists in the OpenNHP guild) and is part of
+// the community onboarding loop. Skipped entirely when the flag is off.
 async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
+  if (!config.ENABLE_OPENNHP_FEATURES) {
+    logger.debug('postGoodFirstIssue skipped: OpenNHP features disabled', {
+      repo, issueNumber,
+    });
+    return null;
+  }
+
   if (!channels.contribute) await refreshCache();
   if (!channels.contribute) {
     logger.warn('Cannot post good-first-issue - contribute channel not found');

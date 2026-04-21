@@ -2391,28 +2391,45 @@ const commands = [
   },
 ];
 
-// Commands that are safe to register in multi-tenant mode. Everything else
-// (/link, /whois, /contributions, /stats, /leaderboard, /forcelink,
-// /bulklink, /unlinked, /backfill-milestones, /unlink) are OpenNHP-community
-// features that depend on single-guild state (the cached guild, BASE_URL,
-// GITHUB_* secrets). Registering them globally would put them in customer
-// autocomplete where they'd fail opaquely — /link would build a URL with an
-// undefined BASE_URL, /forcelink would try to fetch members from a null
-// guild, etc.
+// Commands that are safe to register outside the OpenNHP community guild.
+// Everything else (/link, /whois, /contributions, /stats, /leaderboard,
+// /forcelink, /bulklink, /unlinked, /backfill-milestones, /unlink) are
+// OpenNHP-community features that depend on single-guild state (the
+// cached guild, BASE_URL, GITHUB_* secrets). Registering them outside
+// the OpenNHP guild would put them in autocomplete where they'd fail
+// opaquely — /link would build a URL with an undefined BASE_URL,
+// /forcelink would try to fetch members from a null guild, etc.
 //
-// Keep the allowlist explicit and near the commands array so adding a new
-// customer-safe command requires updating both locations intentionally.
-// A per-command `multiTenant: true` flag would be even cleaner but would
-// touch every existing command; deferred to a follow-up.
-const MULTI_TENANT_SAFE_COMMANDS = new Set(['qurl']);
+// The full command set is only registered when the bot is in "OpenNHP
+// mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
+// true. Every other configuration (multi-tenant, OR single-guild-plain
+// /qurl send install like the test playground or a customer server) gets
+// only the allowlist.
+//
+// Keep the allowlist explicit and near the commands array so adding a
+// new customer-safe command requires updating both locations
+// intentionally. A per-command `openNHPOnly: true` flag would be even
+// cleaner but would touch every existing command; deferred to a
+// follow-up.
+const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
 
-function getMultiTenantCommands() {
-  return commands.filter(cmd => MULTI_TENANT_SAFE_COMMANDS.has(cmd.data.name));
+function getCustomerSafeCommands() {
+  return commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
+}
+
+// A guild is "OpenNHP-active" iff it's the single-guild deployment that
+// explicitly opted in to community features. Multi-tenant always means
+// no OpenNHP. Single-guild with the flag off (the common customer case)
+// also means no OpenNHP. Centralizing this derivation means every
+// site that cares — command registration, interaction dispatch, and
+// everywhere in src/discord.js — asks the same question.
+function isOpenNHPActive() {
+  return !config.isMultiTenant && config.ENABLE_OPENNHP_FEATURES;
 }
 
 // Register commands with Discord
 async function registerCommands(client) {
-  const activeCommands = config.isMultiTenant ? getMultiTenantCommands() : commands;
+  const activeCommands = isOpenNHPActive() ? commands : getCustomerSafeCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
@@ -2442,15 +2459,17 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
-  // Defense-in-depth for mode-flip: if an operator switches from single-
-  // guild to multi-tenant, the prior guild-scoped command registrations
-  // remain in the old guild (Discord's two namespaces — guild and global —
-  // don't purge each other on a new .set() call). Those stale /link,
-  // /whois, etc. handlers all assume cached guild state (BASE_URL,
-  // contributor roles) that multi-tenant mode doesn't populate and would
-  // crash on. Filter the handler lookup to the active set so a stale
-  // registration from a previous deploy can't dispatch to a broken path.
-  const activeCommands = config.isMultiTenant ? getMultiTenantCommands() : commands;
+  // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
+  // mode to customer-safe mode (flip GUILD_ID unset OR flip
+  // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
+  // /whois, etc. registrations remain in the old guild — Discord's two
+  // namespaces (guild and global) don't purge each other on a new .set()
+  // call. Those stale handlers all assume cached guild state (BASE_URL,
+  // contributor roles) that customer-safe mode doesn't populate and
+  // would crash on. Filter the handler lookup to the active set so a
+  // stale registration from a previous deploy can't dispatch to a broken
+  // path.
+  const activeCommands = isOpenNHPActive() ? commands : getCustomerSafeCommands();
   const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) return;
 

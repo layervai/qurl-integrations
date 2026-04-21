@@ -111,8 +111,9 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     expect(data.map(c => c.name).sort()).toEqual(['qurl']);
   });
 
-  it('single-guild: registers ALL commands scoped to the guild', async () => {
+  it('single-guild + ENABLE_OPENNHP_FEATURES=true: registers ALL commands scoped to the guild', async () => {
     process.env.GUILD_ID = '123456789012345678';
+    process.env.ENABLE_OPENNHP_FEATURES = 'true';
     jest.resetModules();
     const commandsModule = require('../src/commands');
 
@@ -125,8 +126,30 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     expect(guildArg).toBe('123456789012345678');
     expect(data.length).toBeGreaterThan(1);
     expect(data.map(c => c.name)).toContain('qurl');
-    // OpenNHP commands must still be registered in single-guild mode
+    // OpenNHP commands register alongside /qurl in the OpenNHP guild
     expect(data.map(c => c.name)).toContain('link');
+
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+  });
+
+  it('single-guild + ENABLE_OPENNHP_FEATURES unset: registers only customer-safe commands scoped to the guild', async () => {
+    process.env.GUILD_ID = '123456789012345678';
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+    jest.resetModules();
+    const commandsModule = require('../src/commands');
+
+    const mockSet = jest.fn().mockResolvedValue(undefined);
+    const mockClient = { application: { commands: { set: mockSet } } };
+    await commandsModule.registerCommands(mockClient);
+
+    expect(mockSet).toHaveBeenCalledTimes(1);
+    const [data, guildArg] = mockSet.mock.calls[0];
+    expect(guildArg).toBe('123456789012345678');
+    // Only /qurl, even in single-guild mode, because OpenNHP features are off
+    expect(data.map(c => c.name).sort()).toEqual(['qurl']);
+    expect(data.map(c => c.name)).not.toContain('link');
+    expect(data.map(c => c.name)).not.toContain('leaderboard');
+    expect(data.map(c => c.name)).not.toContain('forcelink');
   });
 });
 
