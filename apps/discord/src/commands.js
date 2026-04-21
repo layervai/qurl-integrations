@@ -1118,6 +1118,25 @@ async function handleSend(interaction, apiKey) {
     components: delivered > 0 ? [buttonRow] : [],
   });
 
+  // Non-ephemeral channel notification when sending to "Everyone" (channel
+  // target) or "Voice users" (voice target). The sender's ephemeral reply
+  // confirms the send to THEM; this message is what recipients see in the
+  // channel so they know to look for the Qurl Bot DM. Without this, a
+  // passive channel member who missed the DM ping has no signal that a
+  // send happened. Logged-and-swallowed on failure — a missing
+  // "Send Messages" permission in a customer server shouldn't fail the
+  // whole send (DMs already went out successfully).
+  if ((target === 'channel' || target === 'voice') && delivered > 0) {
+    const notifyMsg = target === 'voice'
+      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+    try {
+      await interaction.channel.send({ content: notifyMsg });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message });
+    }
+  }
+
   logger.info('/qurl send completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
