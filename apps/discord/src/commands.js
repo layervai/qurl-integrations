@@ -1168,22 +1168,6 @@ async function handleSend(interaction, apiKey) {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
-  // Non-ephemeral nudge so recipients know to check DMs. Only fires on
-  // group targets (channel/voice) with at least one successful delivery.
-  // Wrapped in try/catch because missing SendMessages in the invoking
-  // channel should degrade silently, not fail the send that already
-  // succeeded.
-  if ((target === 'channel' || target === 'voice') && delivered > 0 && interaction.channel) {
-    const notifyMsg = target === 'voice'
-      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
-    try {
-      await interaction.channel.send({ content: notifyMsg });
-    } catch (err) {
-      logger.warn('Failed to send channel notification', { error: err.message, sendId });
-    }
-  }
-
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
   let monitor = null;
   if (delivered > 0) {
@@ -2485,7 +2469,7 @@ function getActiveCommands() {
 // always leak "Users in my voice channel" into text channels where it
 // fails loudly at dispatch time ("You must be in a voice channel..."),
 // which is worse UX than not offering the option at all.
-function handleTargetAutocomplete(interaction) {
+async function handleTargetAutocomplete(interaction) {
   const channel = interaction.channel;
   const isVoice = channel && (
     channel.type === ChannelType.GuildVoice ||
@@ -2498,7 +2482,15 @@ function handleTargetAutocomplete(interaction) {
   if (isVoice) {
     choices.push({ name: 'Only voice users', value: 'voice' });
   }
-  return interaction.respond(choices);
+  // respond() can reject on the 3s autocomplete deadline, Unknown
+  // interaction, or network errors. Swallow + log so the rejection
+  // doesn't bubble as an unhandled promise in the InteractionCreate
+  // listener — the user just sees no suggestions in that case.
+  try {
+    await interaction.respond(choices);
+  } catch (err) {
+    logger.warn('Failed to respond to target autocomplete', { error: err.message });
+  }
 }
 
 // Proactively clear stale guild-scoped command registrations from any

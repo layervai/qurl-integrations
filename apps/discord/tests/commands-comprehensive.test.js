@@ -1241,6 +1241,10 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
+    // Guard against a future refactor re-introducing a duplicate notify
+    // block. If anyone adds a second channel.send call in handleSend, this
+    // assertion will catch it before shipping.
+    expect(interaction.channel.send).toHaveBeenCalledTimes(1);
     expect(interaction.channel.send).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('has shared something with all members of this channel'),
@@ -1804,6 +1808,80 @@ describe('handleCommand — autocomplete', () => {
       { name: 'A specific user', value: 'user' },
       { name: 'Only voice users', value: 'voice' },
     ]);
+  });
+
+  it('target autocomplete in a stage-voice channel also offers the voice option', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 13 }, // GuildStageVoice
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
+  });
+
+  it('target autocomplete with null channel falls back to non-voice choices', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: null,
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('autocomplete on a non-target focused option (e.g. expiry) does not dispatch', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'expiry', value: '1h' })),
+      },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete swallows interaction.respond errors (deadline/Unknown)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 },
+      respond: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+    });
+
+    // Should not throw — the rejection is caught + logged.
+    await expect(handleCommand(interaction)).resolves.not.toThrow();
   });
 });
 
