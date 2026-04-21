@@ -19,6 +19,20 @@ import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
 
+/** Connector /upload response shape. Matches the interface in
+ * file-revoke.test.ts; in the rate-limited case the fields are
+ * present-but-missing (hence `Partial<>`) with the reason in `error`.
+ * Claude review on the branch-update commit 57141aa3 flagged that the
+ * prior `as any` cast here was asymmetric with the sibling test file
+ * — a field rename upstream would surface cleanly on one path and
+ * silently on the other. Shared shape makes both paths fail-same.
+ */
+interface UploadResponse {
+  resource_url: string;
+  resource_id: string;
+  qurl_link: string;
+}
+
 /** Upload a google-map JSON payload to the connector and get back the resource URL.
  *
  * Retries transient 429 rate-limits from the upstream QURL API — the connector's
@@ -44,15 +58,15 @@ async function uploadMapLocation(
     });
 
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-    const data = await res.json() as any;
+    const data = (await res.json()) as Partial<UploadResponse> & { error?: string };
     // Connector returns {success:true, error:"...QURL API returned status 429..."}
     // on a rate-limited internal mint — resource_id will be missing in that case.
-    if (!data.resource_id) {
+    if (!data.resource_id || !data.resource_url || !data.qurl_link) {
       const errStr = typeof data.error === 'string' ? data.error : '';
       if (/429|rate.limit|too many requests/i.test(errStr)) {
         return { retry: true };
       }
-      throw new Error(`Upload response missing resource_id: ${JSON.stringify(data)}`);
+      throw new Error(`Upload response missing required fields: ${JSON.stringify(data)}`);
     }
     return {
       viewerUrl: data.resource_url,
