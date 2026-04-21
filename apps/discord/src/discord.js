@@ -44,7 +44,7 @@ async function ensureRolesAndChannels() {
   // ManageChannels are intentionally NOT granted. Attempting create()
   // here produces a cascade of "Missing Permissions" errors on every
   // boot + cache refresh, which obscures real issues in the logs.
-  if (!config.ENABLE_OPENNHP_FEATURES) {
+  if (!config.isOpenNHPActive) {
     return { createdRoles: new Map(), createdChannels: new Map() };
   }
 
@@ -234,7 +234,7 @@ async function verifyBotPermissions() {
       EmbedLinks: PermissionFlagsBits.EmbedLinks,
       UseApplicationCommands: PermissionFlagsBits.UseApplicationCommands,
     };
-    if (config.ENABLE_OPENNHP_FEATURES) {
+    if (config.isOpenNHPActive) {
       required.ManageRoles = PermissionFlagsBits.ManageRoles;
       required.ManageChannels = PermissionFlagsBits.ManageChannels;
       required.ReadMessageHistory = PermissionFlagsBits.ReadMessageHistory;
@@ -244,10 +244,10 @@ async function verifyBotPermissions() {
       .map(([name]) => name);
     if (missing.length > 0) {
       logger.error('Bot is missing required Discord permissions in guild', {
-        guild: guild?.name, missing, opennhp: config.ENABLE_OPENNHP_FEATURES,
+        guild: guild?.name, missing, opennhp: config.isOpenNHPActive,
       });
     } else {
-      logger.info('Bot permissions OK', { guild: guild?.name, opennhp: config.ENABLE_OPENNHP_FEATURES });
+      logger.info('Bot permissions OK', { guild: guild?.name, opennhp: config.isOpenNHPActive });
     }
   } catch (err) {
     logger.warn('Could not verify bot permissions at boot', { error: err.message });
@@ -275,10 +275,10 @@ client.once('ready', async () => {
   // Weekly digest is OpenNHP-specific (star milestones, contributor
   // stats, announcements to #general). No value in a guild running the
   // bot purely for /qurl send.
-  if (config.ENABLE_OPENNHP_FEATURES) {
+  if (config.isOpenNHPActive) {
     setupWeeklyDigest();
   }
-  logger.info(`Watching guild: ${guild?.name}`, { opennhp: config.ENABLE_OPENNHP_FEATURES });
+  logger.info(`Watching guild: ${guild?.name}`, { opennhp: config.isOpenNHPActive });
 });
 
 // Handle role/channel deletion - refresh cache
@@ -321,7 +321,7 @@ client.on('guildMemberAdd', async (member) => {
   //      existing `member.guild.id !== config.GUILD_ID` below would also
   //      catch that (null !== any-id is always true), but an explicit
   //      guard keeps the intent readable.
-  if (!config.ENABLE_OPENNHP_FEATURES) return;
+  if (!config.isOpenNHPActive) return;
   if (!config.GUILD_ID) return;
   if (member.guild.id !== config.GUILD_ID) return;
 
@@ -424,7 +424,7 @@ async function assignContributorRole(discordId, prNumber, repo, githubUsername) 
   // so callers can distinguish "flag off" from "Discord API error" in logs.
   // Log at debug so the "why did user X not get the role" question is
   // answerable from prod logs without adding noise for every PR merge.
-  if (!config.ENABLE_OPENNHP_FEATURES) {
+  if (!config.isOpenNHPActive) {
     logger.debug('assignContributorRole skipped: OpenNHP features disabled', {
       discordId, prNumber, repo, githubUsername,
     });
@@ -491,6 +491,18 @@ async function assignContributorRole(discordId, prNumber, repo, githubUsername) 
 
 // Notify about a PR merge (for unlinked users)
 async function notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl) {
+  // Same OpenNHP gate as the other notifier helpers — debug-log the
+  // skip so prod triage of "why was a PR merge not announced" is
+  // answerable without reading #general directly, and the "channel not
+  // found" warn below stays reserved for actual misconfigurations
+  // (OpenNHP active but #general missing) rather than the normal
+  // non-OpenNHP fall-through. Defense-in-depth; /webhook routes aren't
+  // mounted outside OpenNHP mode so this is also unreachable.
+  if (!config.isOpenNHPActive) {
+    logger.debug('notifyPRMerge skipped: OpenNHP features disabled', { prNumber, repo });
+    return null;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general) {
     logger.warn('Cannot notify PR merge - general channel not found');
@@ -529,7 +541,7 @@ async function notifyBadgeEarned(discordId, badgeTypes) {
   // expectation that #general exists, and a 🏅 Badge Earned embed is
   // nonsensical in a guild that never opted in to the contributor
   // workflow in the first place.
-  if (!config.ENABLE_OPENNHP_FEATURES) {
+  if (!config.isOpenNHPActive) {
     logger.debug('notifyBadgeEarned skipped: OpenNHP features disabled', {
       discordId, badgeCount: badgeTypes?.length ?? 0,
     });
@@ -559,7 +571,7 @@ async function notifyBadgeEarned(discordId, badgeTypes) {
 // #contribute (which only exists in the OpenNHP guild) and is part of
 // the community onboarding loop. Skipped entirely when the flag is off.
 async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
-  if (!config.ENABLE_OPENNHP_FEATURES) {
+  if (!config.isOpenNHPActive) {
     logger.debug('postGoodFirstIssue skipped: OpenNHP features disabled', {
       repo, issueNumber,
     });
@@ -606,6 +618,11 @@ async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
 
 // Post release announcement
 async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postReleaseAnnouncement skipped: OpenNHP features disabled', { repo, tagName });
+    return null;
+  }
+
   if (!channels.announcements) await refreshCache();
   if (!channels.announcements) {
     logger.warn('Cannot post release - announcements channel not found');
@@ -642,6 +659,11 @@ async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
 
 // Post star milestone
 async function postStarMilestone(repo, stars, repoUrl) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postStarMilestone skipped: OpenNHP features disabled', { repo, stars });
+    return null;
+  }
+
   if (!channels.announcements) await refreshCache();
   if (!channels.announcements) {
     logger.warn('Cannot post milestone - announcements channel not found');
@@ -669,6 +691,11 @@ async function postStarMilestone(repo, stars, repoUrl) {
 
 // Post to GitHub feed
 async function postToGitHubFeed(embed) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postToGitHubFeed skipped: OpenNHP features disabled');
+    return null;
+  }
+
   if (!channels.githubFeed) await refreshCache();
   if (!channels.githubFeed) return null;
 
@@ -682,6 +709,14 @@ async function postToGitHubFeed(embed) {
 
 // Post weekly digest
 async function postWeeklyDigest() {
+  if (!config.isOpenNHPActive) {
+    // The ready handler already gates setupWeeklyDigest() on the flag,
+    // so this branch is only reachable via a direct caller in a future
+    // refactor. Defense-in-depth — matches every other notifier.
+    logger.debug('postWeeklyDigest skipped: OpenNHP features disabled');
+    return null;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general) {
     logger.warn('Cannot post weekly digest - general channel not found');
