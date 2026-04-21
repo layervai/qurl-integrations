@@ -73,7 +73,14 @@ if (process.env.NODE_ENV === 'production') {
     logger.error(`BASE_URL must use https:// in production (OpenNHP mode). Got: ${config.BASE_URL}`);
     process.exit(1);
   }
-  const baseUrlExplicitlySet = Boolean(process.env.BASE_URL); // config.js applies http://localhost:3000 default if unset
+  // Treat "" and whitespace-only as unset (matches GUILD_ID's normalization
+  // robustness). An operator who parameterized the SSM value but seeded it
+  // with "" or " " should not silently escape the https check — but they
+  // also shouldn't get a false-positive boot failure from an accidentally-
+  // empty param, since config.BASE_URL falls through to the localhost
+  // default in that case and the downstream "http://localhost:3000" is
+  // caught by the OpenNHP https check above anyway.
+  const baseUrlExplicitlySet = Boolean(process.env.BASE_URL?.trim());
   if (!config.isOpenNHPActive && baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
     logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
     process.exit(1);

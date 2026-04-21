@@ -1126,7 +1126,14 @@ async function handleSend(interaction, apiKey) {
   // send happened. Logged-and-swallowed on failure — a missing
   // "Send Messages" permission in a customer server shouldn't fail the
   // whole send (DMs already went out successfully).
-  if ((target === 'channel' || target === 'voice') && delivered > 0) {
+  //
+  // Guard on `interaction.channel` being present: for a slash command
+  // invoked in a guild channel this is always set, but in edge cases
+  // (partial-cache on a fresh gateway connect, thread that got
+  // archived mid-send, DM-channel dispatch) the channel object can be
+  // null — and `.send()` on null throws synchronously, before the
+  // try/catch can see it.
+  if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
     const notifyMsg = target === 'voice'
       ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
       : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
