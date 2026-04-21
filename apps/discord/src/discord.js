@@ -237,7 +237,12 @@ async function verifyBotPermissions() {
     if (config.isOpenNHPActive) {
       required.ManageRoles = PermissionFlagsBits.ManageRoles;
       required.ManageChannels = PermissionFlagsBits.ManageChannels;
-      required.ReadMessageHistory = PermissionFlagsBits.ReadMessageHistory;
+      // Note: `ReadMessageHistory` was previously demanded here but no
+      // OpenNHP code path actually reads message history (verified by
+      // grep — `messages.fetch` / `channel.messages.*` / thread backfill
+      // all absent). Adding it to the OAuth invite bitmask creates
+      // friction for guild admins for no operational gain. Re-add only
+      // if a future OpenNHP feature genuinely needs it.
     }
     const missing = Object.entries(required)
       .filter(([, bit]) => !me.permissions.has(bit))

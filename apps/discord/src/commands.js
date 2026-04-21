@@ -1148,9 +1148,14 @@ async function handleSend(interaction, apiKey) {
   // null — and `.send()` on null throws synchronously, before the
   // try/catch can see it.
   if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
+    // Wrap displayName in escapeDiscordMarkdown so a user with `**`,
+    // backticks, or `_` in their display name can't break the bold or
+    // inject a code span. Cap at 64 chars to mirror the existing
+    // `safeSender` pattern at line 242.
+    const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
     const notifyMsg = target === 'voice'
-      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+      ? `📩 **${safeName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });
     } catch (err) {
