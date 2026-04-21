@@ -2208,6 +2208,11 @@ const commands = [
     },
   },
   {
+    // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
+    // expected-set assertion in
+    // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
+    // pins this exact set to catch command-registration regressions at
+    // deploy time.
     data: new SlashCommandBuilder()
       .setName('qurl')
       .setDescription('Share resources securely via QURL')
