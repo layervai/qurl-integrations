@@ -22,8 +22,9 @@ const { isMultiTenant } = config;
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives. Lists live in
 // boot-requirements.js so they can be unit-tested without side-effecting
-// a bot boot.
-const missing = missingBootKeys(config, isMultiTenant);
+// a bot boot. Gated on isOpenNHPActive (see config.js) — single-guild-plain
+// and multi-tenant both use the short required list.
+const missing = missingBootKeys(config, config.isOpenNHPActive);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
@@ -42,12 +43,11 @@ if (isMultiTenant) {
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is the global-fallback key for /qurl send. In multi-tenant
-  // mode each guild brings their own key via /qurl setup, so the env-var
-  // fallback is optional (a guild that hasn't run setup just gets an
-  // "admin must configure" error on their first /qurl send). List is in
+  // QURL_API_KEY is the global-fallback key for /qurl send. Only the
+  // OpenNHP community server demands it at boot; single-guild-plain and
+  // multi-tenant deployments rely on per-guild /qurl setup. List is in
   // boot-requirements.js for testability.
-  const prodMissing = missingProdKeys(process.env, isMultiTenant);
+  const prodMissing = missingProdKeys(process.env, config.isOpenNHPActive);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
@@ -66,10 +66,10 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant in
-  // multi-tenant mode (no /auth or /webhook routes are mounted by
-  // server.js). Only require it when single-guild mode is active.
-  if (!isMultiTenant && !process.env.OAUTH_STATE_SECRET) {
+  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
+  // unless OpenNHP mode is active (the only mode that mounts /auth +
+  // /webhook routes). Require it only when that surface is live.
+  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
     // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
     // rotating GitHub's client secret would invalidate all in-flight
     // OAuth states and vice versa. A prod deploy must set this explicitly.

@@ -4,31 +4,35 @@
 // the highest-risk branch in the module: a regression here could either
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
-// Required at boot in EVERY environment. Split by mode: multi-tenant
-// doesn't need GITHUB_* / BASE_URL / GUILD_ID because /auth + /webhook
-// routes stay unmounted and every OpenNHP code path is gated off.
-function bootRequired(isMultiTenant) {
-  if (isMultiTenant) return ['DISCORD_TOKEN'];
+// Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
+// NOT `isMultiTenant`: the GITHUB_* + BASE_URL + GUILD_ID vars only
+// matter when /auth + /webhook routes are actually mounted. A
+// single-guild-plain deployment (GUILD_ID set but ENABLE_OPENNHP_FEATURES
+// off) never mounts those routes, so demanding dummy values just to
+// pass the boot check would be a papercut for every customer server.
+function bootRequired(isOpenNHPActive) {
+  if (!isOpenNHPActive) return ['DISCORD_TOKEN'];
   return ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is the
-// global-fallback for /qurl send; in multi-tenant mode each guild brings
-// their own via /qurl setup, so it's optional there.
-function prodRequired(isMultiTenant) {
-  if (isMultiTenant) return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
+// global-fallback for /qurl send; single-guild-plain and multi-tenant
+// deployments both rely on per-guild /qurl setup, so it's optional
+// outside the OpenNHP community server.
+function prodRequired(isOpenNHPActive) {
+  if (!isOpenNHPActive) return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
   return ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
 }
 
 // Compute which required keys are missing from a given config-like
 // object. Separate from bootRequired so tests can build a "config" with
 // specific holes and assert the exact missing list.
-function missingBootKeys(cfg, isMultiTenant) {
-  return bootRequired(isMultiTenant).filter(key => !cfg[key]);
+function missingBootKeys(cfg, isOpenNHPActive) {
+  return bootRequired(isOpenNHPActive).filter(key => !cfg[key]);
 }
 
-function missingProdKeys(env, isMultiTenant) {
-  return prodRequired(isMultiTenant).filter(k => !env[k]);
+function missingProdKeys(env, isOpenNHPActive) {
+  return prodRequired(isOpenNHPActive).filter(k => !env[k]);
 }
 
 module.exports = { bootRequired, prodRequired, missingBootKeys, missingProdKeys };

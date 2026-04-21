@@ -34,9 +34,10 @@ jest.mock('../src/config', () => ({
   GUILD_ID: 'guild-1',
   isMultiTenant: false,
   // OpenNHP commands (/link, /stats, /leaderboard, /bulklink, etc.) are
-  // only dispatch-active when ENABLE_OPENNHP_FEATURES is true. This
-  // suite exercises several of them; enable the flag here.
+  // only dispatch-active when config.isOpenNHPActive is true. This
+  // suite exercises several of them; set it here.
   ENABLE_OPENNHP_FEATURES: true,
+  isOpenNHPActive: true,
   STAR_MILESTONES: [10, 25, 50, 100],
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',

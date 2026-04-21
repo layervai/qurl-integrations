@@ -2417,19 +2417,11 @@ function getCustomerSafeCommands() {
   return commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
-// A guild is "OpenNHP-active" iff it's the single-guild deployment that
-// explicitly opted in to community features. Multi-tenant always means
-// no OpenNHP. Single-guild with the flag off (the common customer case)
-// also means no OpenNHP. Centralizing this derivation means every
-// site that cares — command registration, interaction dispatch, and
-// everywhere in src/discord.js — asks the same question.
-function isOpenNHPActive() {
-  return !config.isMultiTenant && config.ENABLE_OPENNHP_FEATURES;
-}
-
-// Register commands with Discord
+// Register commands with Discord. `config.isOpenNHPActive` is the
+// single source of truth for "this deployment exercises the OpenNHP
+// community surface" — see config.js for the derivation.
 async function registerCommands(client) {
-  const activeCommands = isOpenNHPActive() ? commands : getCustomerSafeCommands();
+  const activeCommands = config.isOpenNHPActive ? commands : getCustomerSafeCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
@@ -2469,7 +2461,7 @@ async function handleCommand(interaction) {
   // would crash on. Filter the handler lookup to the active set so a
   // stale registration from a previous deploy can't dispatch to a broken
   // path.
-  const activeCommands = isOpenNHPActive() ? commands : getCustomerSafeCommands();
+  const activeCommands = config.isOpenNHPActive ? commands : getCustomerSafeCommands();
   const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) return;
 

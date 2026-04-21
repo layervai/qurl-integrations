@@ -161,12 +161,10 @@ app.get('/metrics', metricsRateLimit, (req, res) => {
 // callback, or a webhook that fails after its signature passes) plus
 // one wasted DB hit per OAuth callback on the orphan state token.
 //
-// Symmetry with commands.js:isOpenNHPActive — the full OpenNHP surface
-// (commands + routes) turns on together when GUILD_ID is set AND
-// ENABLE_OPENNHP_FEATURES is true; everything else gets the plain
-// /qurl send tool.
-const openNHPActive = config.GUILD_ID && config.ENABLE_OPENNHP_FEATURES;
-if (openNHPActive) {
+// Symmetry with commands.js — the full OpenNHP surface (commands +
+// routes) turns on together when config.isOpenNHPActive is true;
+// everything else gets the plain /qurl send tool.
+if (config.isOpenNHPActive) {
   app.use('/auth', oauthRouter);
   app.use('/webhook', webhooksRouter);
 } else if (!config.GUILD_ID) {
@@ -195,7 +193,7 @@ function startServer() {
     // Only log OAuth/Webhook URLs when those routes are actually mounted —
     // avoids misleading operators into curl-ing a 404 endpoint in multi-
     // tenant or single-guild-plain mode. Metrics URL is always mounted.
-    if (config.GUILD_ID && config.ENABLE_OPENNHP_FEATURES) {
+    if (config.isOpenNHPActive) {
       logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
       logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
     }

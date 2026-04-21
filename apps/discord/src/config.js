@@ -23,8 +23,9 @@ function intEnv(key, defaultVal, { minPositive = false } = {}) {
 const rawGuildId = process.env.GUILD_ID;
 let normalizedGuildId = null;
 if (rawGuildId) {
-  if (/^\d{17,20}$/.test(rawGuildId.trim())) {
-    normalizedGuildId = rawGuildId.trim();
+  const trimmed = rawGuildId.trim();
+  if (/^\d{17,20}$/.test(trimmed)) {
+    normalizedGuildId = trimmed;
   } else {
     // logger isn't loaded this early in config import — use console directly.
     console.warn(`[config] GUILD_ID=${JSON.stringify(rawGuildId)} is not a valid Discord snowflake (17-20 digits); starting in multi-tenant mode. To run in single-guild mode, set GUILD_ID to a real guild ID.`);
@@ -69,6 +70,27 @@ if (rawGuildId) {
 //       effect in multi-tenant mode.
 const isMultiTenant = !normalizedGuildId;
 
+// OpenNHP community features (role auto-creation + auto-assign, channel
+// auto-creation, welcome DM, badge announcements). Default OFF so a
+// vanilla install of the bot into any guild — single-tenant or
+// multi-tenant — only exercises the 4 runtime permissions it was
+// invited with (View Channels, Send Messages, Embed Links, Use
+// Application Commands). Only the OpenNHP community server sets this
+// true; everywhere else the bot is a plain /qurl send tool with no
+// elevated expectations. Must be the literal string "true" — any other
+// value (including unset, empty, "TRUE", "1", "yes") keeps it disabled,
+// so an env-var typo can't silently re-enable role/channel creation
+// attempts in a guild that hasn't granted those permissions.
+const enableOpenNHPFeatures = process.env.ENABLE_OPENNHP_FEATURES === 'true';
+
+// Single source of truth for "OpenNHP is active". Consumed by
+// commands.js (command-set filter), server.js (route-mount gate),
+// boot-requirements.js (which env-vars are required), and discord.js
+// (every OpenNHP short-circuit). Deriving in one place means a future
+// change to the predicate — e.g. adding a third flag, or broadening
+// what "multi-tenant" means — only touches this file.
+const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -76,19 +98,8 @@ module.exports = {
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
-
-  // OpenNHP community features (role auto-creation + auto-assign, channel
-  // auto-creation, welcome DM, badge announcements). Default OFF so a
-  // vanilla install of the bot into any guild — single-tenant or
-  // multi-tenant — only exercises the 4 runtime permissions it was
-  // invited with (View Channels, Send Messages, Embed Links, Use
-  // Application Commands). Only the OpenNHP community server sets this
-  // true; everywhere else the bot is a plain /qurl send tool with no
-  // elevated expectations. Must be the literal string "true" — any other
-  // value (including unset, empty, "TRUE", "1", "yes") keeps it disabled,
-  // so an env-var typo can't silently re-enable role/channel creation
-  // attempts in a guild that hasn't granted those permissions.
-  ENABLE_OPENNHP_FEATURES: process.env.ENABLE_OPENNHP_FEATURES === 'true',
+  ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
+  isOpenNHPActive,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',

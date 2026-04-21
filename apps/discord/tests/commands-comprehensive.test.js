@@ -23,10 +23,11 @@ jest.mock('../src/config', () => ({
   isMultiTenant: false,
   // This suite exercises every slash command (both /qurl and the OpenNHP
   // ones). registerCommands + handleCommand filter to the customer-safe
-  // allowlist unless BOTH GUILD_ID is set AND ENABLE_OPENNHP_FEATURES is
-  // true — enable the flag here to keep the full-command coverage. The
-  // flag=false dispatch-filter behavior is covered in multi-tenant.test.js.
+  // allowlist unless config.isOpenNHPActive is true — set it here to
+  // keep the full-command coverage. The flag=false dispatch-filter
+  // behavior is covered in multi-tenant.test.js.
   ENABLE_OPENNHP_FEATURES: true,
+  isOpenNHPActive: true,
   STAR_MILESTONES: [10, 25, 50, 100],
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
