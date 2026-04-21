@@ -71,7 +71,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -80,7 +80,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -1224,6 +1224,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       },
       channel: {
         awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+        send: jest.fn().mockResolvedValue(undefined),
       },
       editReply: jest.fn().mockResolvedValue({
         createMessageComponentCollector: jest.fn(() => collectorObj),
@@ -1239,6 +1240,15 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
+    // Guard against a future refactor re-introducing a duplicate notify
+    // block. If anyone adds a second channel.send call in handleSend, this
+    // assertion will catch it before shipping.
+    expect(interaction.channel.send).toHaveBeenCalledTimes(1);
+    expect(interaction.channel.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('has shared something with all members of this channel'),
+      }),
+    );
   });
 });
 
@@ -1742,7 +1752,7 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('returns early for autocomplete interactions', async () => {
+  it('returns early for unhandled autocomplete focus (e.g. location)', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1755,8 +1765,101 @@ describe('handleCommand — autocomplete', () => {
 
     await handleCommand(interaction);
 
-    // Autocomplete now returns early without dispatching
     expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete offers channel + user when sender is NOT in voice', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      member: { voice: { channelId: null } },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('target autocomplete adds the "Only voice users" option when sender IS in voice', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      member: { voice: { channelId: 'vc-123' } },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
+  });
+
+  it('target autocomplete with null member (DM dispatch) falls back to non-voice choices', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      member: null,
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('autocomplete on a non-target focused option (e.g. expiry) does not dispatch', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'expiry', value: '1h' })),
+      },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete swallows interaction.respond errors (deadline/Unknown)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      member: { voice: { channelId: null } },
+      respond: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+    });
+
+    // Should not throw — the rejection is caught + logged.
+    await expect(handleCommand(interaction)).resolves.not.toThrow();
   });
 });
 

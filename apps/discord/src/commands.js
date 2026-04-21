@@ -2218,11 +2218,7 @@ const commands = [
             opt.setName('target')
               .setDescription('Who receives this')
               .setRequired(true)
-              .addChoices(
-                { name: 'Everyone in this channel', value: 'channel' },
-                { name: 'Users in my voice channel', value: 'voice' },
-                { name: 'A specific user', value: 'user' },
-              ))
+              .setAutocomplete(true))
           .addStringOption(opt =>
             opt.setName('expiry')
               .setDescription('Link expiry (default: 24h)')
@@ -2466,6 +2462,35 @@ function getActiveCommands() {
     : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
+// Target choices are surfaced via autocomplete (not static addChoices)
+// so the "voice" option only appears when the SENDER is currently
+// connected to a voice channel in this guild. Gating on the invoking
+// channel's type (voice vs text) would misalign with the backend at
+// handleSend → getVoiceChannelMembers, which resolves recipients off
+// the sender's voiceStates.cache regardless of where they ran the
+// command. Matching the gates here keeps "option visible ⇔ send will
+// succeed" — static choices can't express that context-dependence,
+// which is why they were wrong.
+async function handleTargetAutocomplete(interaction) {
+  const inVoice = interaction.member?.voice?.channelId != null;
+  const choices = [
+    { name: 'Everyone in this channel', value: 'channel' },
+    { name: 'A specific user', value: 'user' },
+  ];
+  if (inVoice) {
+    choices.push({ name: 'Only voice users', value: 'voice' });
+  }
+  // respond() can reject on the 3s autocomplete deadline, Unknown
+  // interaction, or network errors. Swallow + log so the rejection
+  // doesn't bubble as an unhandled promise in the InteractionCreate
+  // listener — the user just sees no suggestions in that case.
+  try {
+    await interaction.respond(choices);
+  } catch (err) {
+    logger.warn('Failed to respond to target autocomplete', { error: err.message });
+  }
+}
+
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
 // not purge each other on a fresh .set() call, so a bot that previously
@@ -2545,7 +2570,15 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  if (interaction.isAutocomplete()) return;
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === 'qurl') {
+      const focused = interaction.options.getFocused(true);
+      if (focused.name === 'target') {
+        return handleTargetAutocomplete(interaction);
+      }
+    }
+    return;
+  }
 
   if (!interaction.isChatInputCommand()) return;
 
