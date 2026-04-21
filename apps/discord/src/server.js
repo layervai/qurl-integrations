@@ -182,8 +182,13 @@ app.use((err, req, res, next) => {
 function startServer() {
   const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
-    logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
-    logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
+    // Only log OAuth/Webhook URLs when those routes are actually mounted —
+    // avoids misleading operators into curl-ing a 404 endpoint in multi-
+    // tenant mode. Metrics URL is always mounted.
+    if (config.GUILD_ID) {
+      logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
+      logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
+    }
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
   });
   return server;

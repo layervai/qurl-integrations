@@ -2442,7 +2442,16 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
-  const command = commands.find(cmd => cmd.data.name === interaction.commandName);
+  // Defense-in-depth for mode-flip: if an operator switches from single-
+  // guild to multi-tenant, the prior guild-scoped command registrations
+  // remain in the old guild (Discord's two namespaces — guild and global —
+  // don't purge each other on a new .set() call). Those stale /link,
+  // /whois, etc. handlers all assume cached guild state (BASE_URL,
+  // contributor roles) that multi-tenant mode doesn't populate and would
+  // crash on. Filter the handler lookup to the active set so a stale
+  // registration from a previous deploy can't dispatch to a broken path.
+  const activeCommands = config.isMultiTenant ? getMultiTenantCommands() : commands;
+  const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) return;
 
   try {
