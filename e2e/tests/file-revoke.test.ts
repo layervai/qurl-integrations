@@ -73,19 +73,25 @@ async function uploadImage(
   throw new Error(`uploadImage: still rate-limited after ${maxAttempts} attempts`);
 }
 
-// Small plain-text JSON payload. The connector's viewer doesn't apply
-// watermark stamping to JSON — it base64-embeds into `viewTmpl` — so we
-// avoid the image-stamping path (`stampImageWatermark`) which trips on
-// trivially-small test inputs like a 1x1 PNG (500: "Failed to apply
-// watermark"). The revoke flow is agnostic to resource content type, so
-// this change doesn't narrow coverage.
-const PROBE_CONTENT = new TextEncoder().encode(
-  JSON.stringify({ probe: 'e2e-file-revoke', ts: Date.now() }),
+// Valid 1x1 transparent PNG (standard test fixture — widely used, CRC/zlib
+// checks pass). Exercises the image-upload path including the fileviewer's
+// watermark-stamping flow end-to-end, so a regression in image handling
+// fails this test loudly.
+//
+// Source: the canonical "smallest valid PNG" (67 bytes) — base64 form is
+// `iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=`.
+// Hex-literal spelling below keeps the test self-contained and easy to
+// diff if bytes need swapping for a different fixture.
+const ONE_PIXEL_PNG = Uint8Array.from(
+  Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+    'base64',
+  ),
 );
 
 describe('File Revoke', () => {
   test('upload file → view 200 → revoke → getLinkStatus 404', async () => {
-    const upload = await uploadImage(PROBE_CONTENT, 'revoke-test.json', 'application/json');
+    const upload = await uploadImage(ONE_PIXEL_PNG, 'revoke-test.png', 'image/png');
     expect(upload.viewerUrl).toContain('/view/');
     expect(upload.resourceId).toMatch(/^r_/);
 
@@ -106,7 +112,7 @@ describe('File Revoke', () => {
   });
 
   test('double revoke on file is idempotent', async () => {
-    const upload = await uploadImage(PROBE_CONTENT, 'double-revoke.json', 'application/json');
+    const upload = await uploadImage(ONE_PIXEL_PNG, 'double-revoke.png', 'image/png');
 
     const first = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(first).toBe(true);
