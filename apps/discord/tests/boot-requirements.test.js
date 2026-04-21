@@ -18,10 +18,10 @@ const {
 } = require('../src/boot-requirements');
 
 describe('bootRequired', () => {
-  it('OpenNHP-active mode demands the OpenNHP-linking env vars', () => {
+  it('OpenNHP-active mode demands DISCORD_TOKEN + GITHUB_* (but not GUILD_ID or BASE_URL — those are enforced upstream)', () => {
     expect(bootRequired(true).sort()).toEqual([
-      'BASE_URL', 'DISCORD_TOKEN', 'GITHUB_CLIENT_ID',
-      'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID',
+      'DISCORD_TOKEN', 'GITHUB_CLIENT_ID',
+      'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET',
     ]);
   });
 
@@ -55,9 +55,9 @@ describe('missingBootKeys', () => {
   });
 
   it('surfaces exact missing keys (not just a count) in OpenNHP mode', () => {
-    const cfg = { DISCORD_TOKEN: 't', GUILD_ID: '123' };
+    const cfg = { DISCORD_TOKEN: 't' };
     expect(missingBootKeys(cfg, true).sort()).toEqual([
-      'BASE_URL', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET',
+      'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET',
     ]);
   });
 
@@ -75,7 +75,7 @@ describe('missingBootKeys', () => {
   it('treats empty strings as missing (not just undefined)', () => {
     const cfg = {
       DISCORD_TOKEN: '', GITHUB_CLIENT_ID: '', GITHUB_CLIENT_SECRET: 'x',
-      GITHUB_WEBHOOK_SECRET: 'x', GUILD_ID: '123', BASE_URL: 'https://h',
+      GITHUB_WEBHOOK_SECRET: 'x',
     };
     expect(missingBootKeys(cfg, true).sort()).toEqual([
       'DISCORD_TOKEN', 'GITHUB_CLIENT_ID',

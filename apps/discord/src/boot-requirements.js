@@ -5,14 +5,27 @@
 // boot in prod with missing secrets OR die on a spurious false-positive.
 
 // Required at boot in EVERY environment. Gated on `isOpenNHPActive`,
-// NOT `isMultiTenant`: the GITHUB_* + BASE_URL + GUILD_ID vars only
-// matter when /auth + /webhook routes are actually mounted. A
-// single-guild-plain deployment (GUILD_ID set but ENABLE_OPENNHP_FEATURES
-// off) never mounts those routes, so demanding dummy values just to
-// pass the boot check would be a papercut for every customer server.
+// NOT `isMultiTenant`: the GITHUB_* vars only matter when /auth +
+// /webhook routes are actually mounted. A single-guild-plain deployment
+// (GUILD_ID set but ENABLE_OPENNHP_FEATURES off) never mounts those
+// routes, so demanding dummy values just to pass the boot check would
+// be a papercut for every customer server.
+//
+// Explicitly NOT on this list even in OpenNHP mode:
+//   - GUILD_ID: if isOpenNHPActive === true then !isMultiTenant, which
+//     means the snowflake validator in config.js already accepted a
+//     17-20 digit value. Re-checking truthiness here would never catch
+//     a missing GUILD_ID — the upstream check is the authority.
+//   - BASE_URL: config.js supplies an unconditional "http://localhost:3000"
+//     default, so `cfg.BASE_URL` is always truthy. The real enforcement
+//     is the https-startswith check in index.js, which runs regardless
+//     of this required-list membership.
+// Listing either would be decorative — the downstream checks are the
+// authority. Keeping this list to the keys whose absence is actually a
+// boot blocker.
 function bootRequired(isOpenNHPActive) {
   if (!isOpenNHPActive) return ['DISCORD_TOKEN'];
-  return ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
+  return ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET'];
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is the

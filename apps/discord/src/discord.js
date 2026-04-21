@@ -244,10 +244,10 @@ async function verifyBotPermissions() {
       .map(([name]) => name);
     if (missing.length > 0) {
       logger.error('Bot is missing required Discord permissions in guild', {
-        guild: guild?.name, missing, opennhp: config.isOpenNHPActive,
+        guild: guild?.name, missing, opennhp_active: config.isOpenNHPActive,
       });
     } else {
-      logger.info('Bot permissions OK', { guild: guild?.name, opennhp: config.isOpenNHPActive });
+      logger.info('Bot permissions OK', { guild: guild?.name, opennhp_active: config.isOpenNHPActive });
     }
   } catch (err) {
     logger.warn('Could not verify bot permissions at boot', { error: err.message });
@@ -278,7 +278,7 @@ client.once('ready', async () => {
   if (config.isOpenNHPActive) {
     setupWeeklyDigest();
   }
-  logger.info(`Watching guild: ${guild?.name}`, { opennhp: config.isOpenNHPActive });
+  logger.info(`Watching guild: ${guild?.name}`, { opennhp_active: config.isOpenNHPActive });
 });
 
 // Handle role/channel deletion - refresh cache
