@@ -93,7 +93,6 @@ class TestDBLogDispatch:
         dispatch_table = aws_services["dispatch_table"]
         # Force a conditional check failure by patching
         db = DB(_table_name(dispatch_table))
-        original_put = db.table.put_item
 
         def bad_put(**kw):
             raise ClientError(
@@ -268,7 +267,7 @@ class TestGetDb:
         import db as _db
         _db._db_instance = None
         settings = _make_settings()
-        with pytest.MonkeyPatch.context() as mp:
+        with pytest.MonkeyPatch.context():
             import config as _cfg
             original = _cfg.get_settings
             _cfg.get_settings = lambda: settings

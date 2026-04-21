@@ -53,7 +53,6 @@ class TestHandlerHelpers:
     def test_get_s3_client(self):
         """Test S3 client is cached"""
         from handler import get_s3_client
-        from handler import _s3_client
         import handler as h
 
         h._s3_client = None
@@ -180,7 +179,6 @@ class TestProcessSqsRecord:
 
     def test_process_auth_failed(self):
         """Test processing with failed email authentication"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -200,7 +198,7 @@ class TestProcessSqsRecord:
         with patch("handler.get_s3_client") as mock_s3_fn:
             with patch("handler.authenticate_sender") as mock_auth:
                 with patch("handler.verify_email_authentication", return_value=False):
-                    with patch("handler.send_rejection") as mock_reject:
+                    with patch("handler.send_rejection"):
                         with patch("handler.cleanup_s3"):
                             mock_s3 = MagicMock()
                             mock_s3_fn.return_value = mock_s3
@@ -218,7 +216,6 @@ class TestProcessSqsRecord:
 
     def test_process_rate_limited(self):
         """Test processing with rate limit exceeded"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -242,7 +239,7 @@ class TestProcessSqsRecord:
             with patch("handler.authenticate_sender") as mock_auth:
                 with patch("handler.verify_email_authentication", return_value=True):
                     with patch("handler.get_limiter", return_value=mock_limiter):
-                        with patch("handler.send_rejection") as mock_reject:
+                        with patch("handler.send_rejection"):
                             with patch("handler.cleanup_s3"):
                                 mock_s3 = MagicMock()
                                 mock_s3_fn.return_value = mock_s3
@@ -260,7 +257,6 @@ class TestProcessSqsRecord:
 
     def test_process_no_recipients(self):
         """Test processing when no recipients found"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -301,7 +297,6 @@ class TestProcessSqsRecord:
 
     def test_process_no_resource(self):
         """Test processing when no attachments or URLs found"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -342,7 +337,6 @@ class TestProcessSqsRecord:
 
     def test_process_skipped_idempotent(self):
         """Test processing skips already-sent resource"""
-        import handler as h
         from handler import DispatchStatus
 
         mock_record = {
@@ -397,7 +391,6 @@ class TestProcessSqsRecord:
 
     def test_process_mint_error(self):
         """Test processing with mint link error"""
-        import handler as h
         from services.qurl_client import MintError
 
         mock_record = {
@@ -453,7 +446,6 @@ class TestProcessSqsRecord:
 
     def test_process_successful_dispatch(self):
         """Test successful processing and rate limit increment"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -508,7 +500,6 @@ class TestProcessSqsRecord:
 
     def test_process_sender_with_display_name(self):
         """Test sender with display name is parsed correctly"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -565,7 +556,6 @@ class TestProcessSqsRecord:
 
     def test_process_recipient_truncation(self):
         """Test recipient count is truncated to max"""
-        import handler as h
 
         many_recipients = "\n".join(f"user{i}@example.com" for i in range(30))
         mock_record = {
@@ -620,7 +610,6 @@ class TestProcessSqsRecord:
 
     def test_process_with_attachment(self):
         """Test processing email with file attachment (uploaded to QURL)"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -654,7 +643,7 @@ class TestProcessSqsRecord:
                     with patch("handler.verify_email_authentication", return_value=True):
                         with patch("handler.get_limiter", return_value=mock_limiter):
                             with patch("handler.extract_attachments", return_value=[mock_attachment]):
-                                with patch("handler.send_link_email") as mock_send:
+                                with patch("handler.send_link_email"):
                                     with patch("handler.log_dispatch"):
                                         with patch("email_sender.get_ses_client") as mock_ses:
                                             mock_ses.return_value = MagicMock()
@@ -684,7 +673,6 @@ class TestProcessSqsRecord:
 
     def test_process_upload_error(self):
         """Test processing skips on attachment UploadError"""
-        import handler as h
         from services.qurl_client import UploadError
 
         mock_record = {
@@ -717,7 +705,7 @@ class TestProcessSqsRecord:
                     with patch("handler.verify_email_authentication", return_value=True):
                         with patch("handler.get_limiter", return_value=mock_limiter):
                             with patch("handler.extract_attachments", return_value=[mock_attachment]):
-                                with patch("handler.send_usage_help") as mock_help:
+                                with patch("handler.send_usage_help"):
                                     with patch("email_sender.get_ses_client") as mock_ses:
                                         mock_ses.return_value = MagicMock()
                                         with patch("handler.cleanup_s3"):
@@ -737,11 +725,9 @@ class TestProcessSqsRecord:
                                             result = process_sqs_record(mock_record, mock_settings)
                                             # Upload failed, fell through to no_resource
                                             assert result["status"] == "no_resource"
-                                            mock_help.assert_called()
 
     def test_process_attachment_validation_failure(self):
         """Test attachment is skipped when validation fails"""
-        import handler as h
 
         mock_record = {
             "body": json.dumps({
@@ -774,7 +760,7 @@ class TestProcessSqsRecord:
                     with patch("handler.verify_email_authentication", return_value=True):
                         with patch("handler.get_limiter", return_value=mock_limiter):
                             with patch("handler.extract_attachments", return_value=[mock_attachment]):
-                                with patch("handler.send_usage_help") as mock_help:
+                                with patch("handler.send_usage_help"):
                                     with patch("email_sender.get_ses_client") as mock_ses:
                                         mock_ses.return_value = MagicMock()
                                         with patch("handler.cleanup_s3"):

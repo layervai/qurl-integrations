@@ -2,8 +2,6 @@
 Authentication module tests.
 """
 
-import json
-import pytest
 
 from auth import (
     authenticate_sender,
@@ -275,7 +273,6 @@ class _HttpxGetPatcher:
         self._mock = mock_response
 
     def __enter__(self):
-        import httpx as _httpx
         import sys
         self._mod = sys.modules["httpx"]
         self._orig = getattr(self._mod, "get", None)
