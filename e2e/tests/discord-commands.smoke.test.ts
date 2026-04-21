@@ -15,12 +15,19 @@ interface ApplicationCommand {
   options?: Array<{ type: number; name: string }>;
 }
 
+// Tag every fetched registration with the scope it came from. Guild-
+// scoped ghost registrations (the Kevin-playground failure class) are
+// the most interesting thing this test catches, and knowing WHICH scope
+// leaked a stale subcommand starts failure triage at "guild scope has
+// stale /qurl list" instead of "something, somewhere, has /qurl list".
+type ScopedCommand = ApplicationCommand & { _scope: 'global' | 'guild' };
+
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
   // Shared across both assertions so we only hit the Discord API twice per
   // run instead of four times (halves rate-limit exposure). Initialized
   // to `[]` so the type doesn't lie during the pre-beforeAll window.
-  let registrations: ApplicationCommand[] = [];
+  let registrations: ScopedCommand[] = [];
 
   beforeAll(async () => {
     // Union of globally-registered and guild-scoped `/qurl` commands.
@@ -35,6 +42,16 @@ describe('Discord command registration (smoke)', () => {
     // registrations" and fall through to global-only. Any other class
     // of failure (auth, network) still propagates out of beforeAll and
     // fails the suite loudly.
+    //
+    // NOTE on propagation: per Discord's docs, GLOBAL application
+    // commands can take up to ~1 hour to propagate after a fresh
+    // `commands.set()` call. Guild-scoped ones are effectively instant.
+    // If this test fails right after a deploy that ADDS/RENAMES a
+    // subcommand in multi-tenant mode, it may be the propagation window
+    // rather than a real regression — wait ~5–10 min and re-run before
+    // debugging. A removal-only change doesn't have this issue because
+    // Discord reflects the new set via this API immediately; only the
+    // user-visible autocomplete cache is what takes up to an hour.
     const [globalCommands, guildCommands] = await Promise.all([
       api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/commands`) as Promise<ApplicationCommand[]>,
       (api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/guilds/${env.GUILD_ID}/commands`) as Promise<ApplicationCommand[]>)
@@ -49,8 +66,12 @@ describe('Discord command registration (smoke)', () => {
         }),
     ]);
     registrations = [
-      ...globalCommands.filter((c) => c.name === 'qurl'),
-      ...guildCommands.filter((c) => c.name === 'qurl'),
+      ...globalCommands
+        .filter((c) => c.name === 'qurl')
+        .map((c) => ({ ...c, _scope: 'global' as const })),
+      ...guildCommands
+        .filter((c) => c.name === 'qurl')
+        .map((c) => ({ ...c, _scope: 'guild' as const })),
     ];
 
     // Fail the whole suite loudly if Discord returned no /qurl registrations
@@ -65,7 +86,7 @@ describe('Discord command registration (smoke)', () => {
     }
   });
 
-  it('exposes the expected /qurl subcommand set as a chat-input command', () => {
+  it('every /qurl registration exposes the expected chat-input subcommand set', () => {
     for (const qurl of registrations) {
       // Guard against accidental re-registration as a user- or
       // message-context command. `type` is absent in Discord's older
@@ -76,7 +97,10 @@ describe('Discord command registration (smoke)', () => {
         .filter((o) => o.type === SUBCOMMAND_OPTION_TYPE)
         .map((o) => o.name)
         .sort();
-      expect(subcommands).toEqual(['help', 'revoke', 'send', 'setup', 'status']);
+      // Prepend scope to the expectation so a mismatch surfaces which
+      // scope regressed in the Jest failure header.
+      expect({ scope: qurl._scope, subcommands })
+        .toEqual({ scope: qurl._scope, subcommands: ['help', 'revoke', 'send', 'setup', 'status'] });
     }
   });
 
@@ -89,12 +113,18 @@ describe('Discord command registration (smoke)', () => {
     //
     // Both subcommands were the Python bot's catalog-era commands,
     // removed when the bot was rewritten in Node.js.
-    const allSubcommandNames = registrations.flatMap((q) =>
-      (q.options ?? [])
+    for (const qurl of registrations) {
+      const subcommandNames = (qurl.options ?? [])
         .filter((o) => o.type === SUBCOMMAND_OPTION_TYPE)
-        .map((o) => o.name),
-    );
-    expect(allSubcommandNames).not.toContain('list');
-    expect(allSubcommandNames).not.toContain('clear');
+        .map((o) => o.name);
+      // Scope the assertion per-registration so the failure header
+      // names WHICH scope leaked a stale subcommand (global vs guild).
+      expect({ scope: qurl._scope, subcommandNames }).toEqual(
+        expect.objectContaining({
+          scope: qurl._scope,
+          subcommandNames: expect.not.arrayContaining(['list', 'clear']),
+        }),
+      );
+    }
   });
 });
