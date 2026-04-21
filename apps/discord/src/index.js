@@ -58,14 +58,23 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // BASE_URL https check is unconditional when BASE_URL is set. In
-  // single-guild mode BASE_URL is required (caught by the boot-required
-  // list above); in multi-tenant mode it's unused, but if someone leaves
-  // a stale http:// value in SSM and a future change re-enables a
-  // BASE_URL-using code path, plaintext shouldn't slip through just
-  // because the mode changed. Cheap catch for a misconfig.
+  // BASE_URL https check: unconditional in OpenNHP mode. An OpenNHP
+  // prod deploy that forgets to set BASE_URL in its task-def would
+  // otherwise fall through to the "http://localhost:3000" default in
+  // config.js — which would boot successfully but fail at the first
+  // OAuth callback, exactly the deferred-error mode this fail-fast
+  // exists to prevent. In non-OpenNHP modes BASE_URL is unused
+  // (no /auth or /webhook routes mounted), so we only enforce https
+  // there if the operator explicitly set it — lets single-guild-plain
+  // and multi-tenant deployments ignore BASE_URL without a false-
+  // positive failure, while still catching a stale http:// SSM value
+  // if a future code path re-enables BASE_URL use.
+  if (config.isOpenNHPActive && !config.BASE_URL.startsWith('https://')) {
+    logger.error(`BASE_URL must use https:// in production (OpenNHP mode). Got: ${config.BASE_URL}`);
+    process.exit(1);
+  }
   const baseUrlExplicitlySet = Boolean(process.env.BASE_URL); // config.js applies http://localhost:3000 default if unset
-  if (baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
+  if (!config.isOpenNHPActive && baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
     logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
     process.exit(1);
   }

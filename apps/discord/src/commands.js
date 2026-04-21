@@ -2441,10 +2441,20 @@ function getActiveCommands() {
 // guilds we've never joined.
 async function purgeStaleGuildCommands(client) {
   if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
-  for (const guild of client.guilds.cache.values()) {
+  // Parallelize the per-guild fetch+set. Sequentializing makes boot
+  // time O(guilds) at ~500ms per round-trip, which scales badly for
+  // the public-bot install path this PR targets. Promise.allSettled
+  // so one slow/failing guild doesn't block the others, and so a
+  // single rejection doesn't bubble and abort registerCommands.
+  // Discord's guild-commands endpoint has a separate rate bucket
+  // per guild, so parallel fans out cleanly until the global
+  // app-command rate limit (~200/min) — well above any realistic
+  // boot-time burst.
+  const guilds = [...client.guilds.cache.values()];
+  await Promise.allSettled(guilds.map(async (guild) => {
     try {
       const existing = await client.application.commands.fetch({ guildId: guild.id });
-      if (existing.size === 0) continue;
+      if (existing.size === 0) return;
       await client.application.commands.set([], guild.id);
       logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
     } catch (error) {
@@ -2452,7 +2462,7 @@ async function purgeStaleGuildCommands(client) {
       // handleCommand is the correctness guarantee; purge is UX polish.
       logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
     }
-  }
+  }));
 }
 
 // Register commands with Discord. `config.isOpenNHPActive` is the
