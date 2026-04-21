@@ -1,18 +1,26 @@
 # CODEOWNERS - Define code ownership for automatic review requests
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Branch protection on main has `require_code_owner_reviews = true`.
+# That setting only has force when the patterns below resolve to real
+# humans. The previous revision pointed every rule at @layervai/platform,
+# a team that does not exist in this org (404 via the API), so "require
+# code owner reviews" silently no-op'd — branch protection passed on
+# any single approval from any org member with review rights. This
+# revision pins to active humans so the gate actually gates.
 
 # Default owners for everything
-* @layervai/platform
+* @justin-layerv @Kevin-layerV @vikramlayerv
 
-# Infrastructure and CI require platform team review
-/.github/workflows/ @layervai/platform
+# Infrastructure and CI require review
+/.github/workflows/ @justin-layerv @Kevin-layerV @vikramlayerv
 
-# Shared code changes affect all apps — require platform review
-shared/ @layervai/platform
+# Shared code changes affect all apps — require review
+shared/ @justin-layerv @Kevin-layerV @vikramlayerv
 
 # Repo config
-/.github/ @layervai/platform
-Makefile @layervai/platform
-.golangci.yml @layervai/platform
-.pre-commit-config.yaml @layervai/platform
-.editorconfig @layervai/platform
+/.github/ @justin-layerv @Kevin-layerV @vikramlayerv
+Makefile @justin-layerv @Kevin-layerV @vikramlayerv
+.golangci.yml @justin-layerv @Kevin-layerV @vikramlayerv
+.pre-commit-config.yaml @justin-layerv @Kevin-layerV @vikramlayerv
+.editorconfig @justin-layerv @Kevin-layerV @vikramlayerv
