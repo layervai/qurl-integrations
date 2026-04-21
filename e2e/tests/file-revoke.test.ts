@@ -22,31 +22,38 @@ import * as qurl from '../helpers/qurl-api';
 
 const env = loadEnv();
 
+interface UploadResponse {
+  resource_url: string;
+  resource_id: string;
+}
+
 /** Upload an in-memory image buffer and return the viewer URL + resource_id. */
 async function uploadImage(
-  buf: Buffer,
+  buf: Uint8Array,
   filename: string,
   mime: string,
 ): Promise<{ viewerUrl: string; resourceId: string }> {
   const form = new FormData();
-  // Buffer.from(array) returns `Buffer<ArrayBufferLike>` which TS won't accept
-  // as a BlobPart (it narrows to `ArrayBufferView<ArrayBuffer>`). Cast through
-  // unknown — the runtime value is a valid ArrayBufferView and the lib.dom
-  // type is overly strict here.
-  form.append('file', new Blob([buf as unknown as BlobPart], { type: mime }), filename);
+  // `@types/node` types Uint8Array with `ArrayBufferLike` which narrower
+   // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
+   // fine; cast to satisfy the compiler.
+  form.append('file', new Blob([buf as BlobPart], { type: mime }), filename);
   const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.QURL_API_KEY}` },
     body: form,
   });
   if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  const data = await res.json() as any;
+  const data = (await res.json()) as Partial<UploadResponse>;
+  if (!data.resource_url || !data.resource_id) {
+    throw new Error(`Unexpected upload response: ${JSON.stringify(data)}`);
+  }
   return { viewerUrl: data.resource_url, resourceId: data.resource_id };
 }
 
 // Minimal valid 1x1 PNG (pixel=white). Avoids on-disk fixtures so this test
 // runs wherever the e2e package is checked out without extra setup.
-const ONE_PIXEL_PNG = Buffer.from([
+const ONE_PIXEL_PNG = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
   0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
   0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
@@ -80,10 +87,13 @@ describe('File Revoke', () => {
     const first = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(first).toBe(true);
 
-    // Second revoke: API accepts 404 or 200 as non-failure — mirrors the
-    // existing idempotency test in link-lifecycle.test.ts
-    const second = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
-    expect(typeof second).toBe('boolean');
+    // The contract for a second revoke is "does not throw, viewer stays
+    // 404". `revokeLink` is typed Promise<boolean>, so asserting `typeof`
+    // would be tautological (what link-lifecycle.test.ts does). The
+    // meaningful assertion is the one below: viewer URL returns 404
+    // whether the API returned true (200/204) or false (404 from the
+    // already-revoked resource).
+    await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
 
     const after = await fetch(upload.viewerUrl);
     expect(after.status).toBe(404);
