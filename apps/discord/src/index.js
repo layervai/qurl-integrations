@@ -56,24 +56,27 @@ if (process.env.NODE_ENV === 'production') {
     process.exit(1);
   }
 
-  // BASE_URL + OAUTH_STATE_SECRET guard the GitHub OAuth flow, which is
-  // dormant in multi-tenant mode (no single guild to link against).
-  if (!isMultiTenant) {
-    // OAuth state flows through BASE_URL; plaintext http:// would expose the
-    // state token (and the redirect itself) to any network path observer.
-    if (!config.BASE_URL.startsWith('https://')) {
-      logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
-      process.exit(1);
-    }
+  // BASE_URL https check is unconditional when BASE_URL is set to a non-
+  // default value. In single-guild mode BASE_URL is required (caught by
+  // the boot-required list above); in multi-tenant mode it's unused, but
+  // if someone leaves a stale http:// value in SSM and a future change
+  // re-enables a BASE_URL-using code path, plaintext shouldn't slip
+  // through just because the mode changed. Cheap catch for a misconfig.
+  const baseUrlIsDefault = !process.env.BASE_URL; // config.js applies http://localhost:3000 default
+  if (!baseUrlIsDefault && !config.BASE_URL.startsWith('https://')) {
+    logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
+    process.exit(1);
+  }
 
-    // OAUTH_STATE_SECRET is required in production. Falling back to
-    // GITHUB_CLIENT_SECRET couples the two secrets — rotating GitHub's
-    // client secret would invalidate all in-flight OAuth states and vice
-    // versa. A prod deploy must set this explicitly.
-    if (!process.env.OAUTH_STATE_SECRET) {
-      logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
-      process.exit(1);
-    }
+  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant in
+  // multi-tenant mode (no /auth or /webhook routes are mounted by
+  // server.js). Only require it when single-guild mode is active.
+  if (!isMultiTenant && !process.env.OAUTH_STATE_SECRET) {
+    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
+    // rotating GitHub's client secret would invalidate all in-flight
+    // OAuth states and vice versa. A prod deploy must set this explicitly.
+    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+    process.exit(1);
   }
 
   // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot

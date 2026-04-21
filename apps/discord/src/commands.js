@@ -2391,16 +2391,23 @@ const commands = [
   },
 ];
 
-// In multi-tenant mode, only /qurl is registered. The other commands
+// Commands that are safe to register in multi-tenant mode. Everything else
 // (/link, /whois, /contributions, /stats, /leaderboard, /forcelink,
-// /bulklink, /unlinked, /backfill-milestones, /unlink) are OpenNHP-
-// community features that depend on single-guild state (the cached guild,
-// BASE_URL, GITHUB_* secrets). Registering them globally would put them
-// in customer autocomplete where they'd fail opaquely — /link would
-// build a URL with an undefined BASE_URL, /forcelink would try to fetch
-// members from a null guild, etc. Filter them out.
+// /bulklink, /unlinked, /backfill-milestones, /unlink) are OpenNHP-community
+// features that depend on single-guild state (the cached guild, BASE_URL,
+// GITHUB_* secrets). Registering them globally would put them in customer
+// autocomplete where they'd fail opaquely — /link would build a URL with an
+// undefined BASE_URL, /forcelink would try to fetch members from a null
+// guild, etc.
+//
+// Keep the allowlist explicit and near the commands array so adding a new
+// customer-safe command requires updating both locations intentionally.
+// A per-command `multiTenant: true` flag would be even cleaner but would
+// touch every existing command; deferred to a follow-up.
+const MULTI_TENANT_SAFE_COMMANDS = new Set(['qurl']);
+
 function getMultiTenantCommands() {
-  return commands.filter(cmd => cmd.data.name === 'qurl');
+  return commands.filter(cmd => MULTI_TENANT_SAFE_COMMANDS.has(cmd.data.name));
 }
 
 // Register commands with Discord
