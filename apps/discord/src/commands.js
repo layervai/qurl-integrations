@@ -2316,7 +2316,7 @@ const commands = [
             signal: AbortSignal.timeout(10000),
           });
           if (resp.status === 401 || resp.status === 403) {
-            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **layerv.ai**.' });
+            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
           }
           if (!resp.ok) {
             return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
@@ -2376,7 +2376,7 @@ const commands = [
         }
         return interaction.reply({
           content: '❌ **QURL is not configured for this server.**\n\n' +
-            '1. Sign up at **layerv.ai** to get your API key\n' +
+            '1. Sign up at **https://layerv.ai** to get your API key\n' +
             '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
             'Only server administrators can run setup.',
           ephemeral: true,
@@ -2391,7 +2391,7 @@ const commands = [
           return interaction.reply({
             content: '❌ **QURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first.\n' +
-              'Sign up at **layerv.ai** to get your API key.',
+              'Sign up at **https://layerv.ai** to get your API key.',
             ephemeral: true,
           });
         }
@@ -2418,13 +2418,14 @@ const commands = [
             '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
-            '  4. Links self-destruct on access\n\n' +
-            '**Note on large servers:** `channel` and `voice` targets rely on ' +
-            "Discord's member cache. Without the `GUILD_PRESENCES` privileged " +
-            'intent, very large guilds (~1000+ members) may silently miss ' +
-            'members who appear offline — prefer `user` target if you need a ' +
-            'guaranteed recipient.\n\n' +
-            'Sign up at **layerv.ai** to get your API key.',
+            '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
+            '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
+            'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
+            'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
+            '**Large servers (~1000+ members):** when sending to a `channel` or `voice` target, ' +
+            'members who appear offline in Discord may be skipped. ' +
+            'If you need to reach a specific person for sure, use the `user` target.\n\n' +
+            'Sign up at **https://layerv.ai** to get your API key.',
           ephemeral: true,
         });
       }
