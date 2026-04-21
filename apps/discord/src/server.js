@@ -58,14 +58,22 @@ app.use(helmet({
 // Startup contract: routes/webhooks.js verifySignature() asserts req.rawBody
 // exists at request time and refuses the request with an error log if the
 // middleware chain drops it. See that file's guard comment for details.
-app.use('/webhook', express.json({
-  // GitHub push-event payloads can exceed Express's 100KB default. Cap at
-  // 1MB so we accept legitimate payloads but still bound request memory.
-  limit: '1mb',
-  verify: (req, _res, buf) => {
-    req.rawBody = buf;
-  }
-}));
+//
+// Gated on isOpenNHPActive for symmetry with the router mount below —
+// when /webhook routes aren't mounted, Express would still parse up to
+// 1 MB of JSON per request before falling through to the 404 handler.
+// Skipping the parser registration avoids that wasted work (and the
+// small DoS surface of parsing unauthenticated request bodies).
+if (config.isOpenNHPActive) {
+  app.use('/webhook', express.json({
+    // GitHub push-event payloads can exceed Express's 100KB default. Cap at
+    // 1MB so we accept legitimate payloads but still bound request memory.
+    limit: '1mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    }
+  }));
+}
 
 app.use(express.json({ limit: '1mb' }));
 

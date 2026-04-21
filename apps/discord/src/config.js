@@ -83,6 +83,14 @@ const isMultiTenant = !normalizedGuildId;
 // attempts in a guild that hasn't granted those permissions.
 const enableOpenNHPFeatures = process.env.ENABLE_OPENNHP_FEATURES === 'true';
 
+// Unsupported combination — catch at config load so an operator doesn't
+// spend time wondering why "ENABLE_OPENNHP_FEATURES=true" had no effect
+// in multi-tenant mode. logger isn't available this early (config is
+// a require() dependency of logger's callers), so use console.warn.
+if (!normalizedGuildId && enableOpenNHPFeatures) {
+  console.warn('[config] ENABLE_OPENNHP_FEATURES=true is ignored when GUILD_ID is unset (multi-tenant mode): OpenNHP behaviors target a cached single guild that multi-tenant mode never populates. Either set GUILD_ID to the OpenNHP guild snowflake, or clear ENABLE_OPENNHP_FEATURES to silence this warning.');
+}
+
 // Single source of truth for "OpenNHP is active". Consumed by
 // commands.js (command-set filter), server.js (route-mount gate),
 // boot-requirements.js (which env-vars are required), and discord.js

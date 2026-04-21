@@ -33,10 +33,14 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// Boot-log the effective mode so prod triage can grep it. The three
+// lines correspond exactly to the supported modes in config.js.
 if (isMultiTenant) {
   logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
+} else if (config.isOpenNHPActive) {
+  logger.info(`Single-guild OpenNHP mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
 } else {
-  logger.info(`Single-guild mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
+  logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
 }
 
 // Production-only required secrets. In dev these are optional so localhost
