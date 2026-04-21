@@ -14,12 +14,100 @@ function intEnv(key, defaultVal, { minPositive = false } = {}) {
   return v;
 }
 
+// Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
+// Any other value — including an unset env, the literal string "PLACEHOLDER"
+// that SSM-seeded params carry, or a whitespace-only value — normalizes to
+// null so every downstream truthy check (`if (config.GUILD_ID)`) correctly
+// treats the bot as multi-tenant. Prevents a malformed SSM value from
+// silently registering commands to a nonexistent guild.
+const rawGuildId = process.env.GUILD_ID;
+let normalizedGuildId = null;
+if (rawGuildId) {
+  const trimmed = rawGuildId.trim();
+  if (/^\d{17,20}$/.test(trimmed)) {
+    normalizedGuildId = trimmed;
+  } else {
+    // logger isn't loaded this early in config import — use console directly.
+    console.warn(`[config] GUILD_ID=${JSON.stringify(rawGuildId)} is not a valid Discord snowflake (17-20 digits); starting in multi-tenant mode. To run in single-guild mode, set GUILD_ID to a real guild ID.`);
+  }
+}
+
+// Multi-tenant mode: derived once here, consumed everywhere else. When true,
+// the bot treats itself as a public multi-server app (commands global,
+// OpenNHP features dormant, /auth + /webhook routes not mounted). When
+// false, the bot runs in single-guild mode targeting normalizedGuildId.
+// Keeping this derived in config.js (single source of truth) means every
+// downstream check is `if (config.isMultiTenant)` — semantic name at
+// every callsite.
+//
+// Together with ENABLE_OPENNHP_FEATURES (below), this selects one of
+// three supported modes:
+//
+//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
+//       Single-guild OpenNHP community server. Full command set
+//       registers scoped to the guild; ensureRolesAndChannels creates
+//       contributor roles + #contribute / #github-feed; /auth and
+//       /webhook routes mount; weekly digest runs. Requires
+//       ManageRoles + ManageChannels perms in the guild.
+//
+//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
+//       Single-guild plain /qurl send tool. Only /qurl registers
+//       (scoped to the guild for instant propagation); no role or
+//       channel creation; /auth and /webhook routes dormant. Needs
+//       only the 4 runtime perms (ViewChannel, SendMessages,
+//       EmbedLinks, UseApplicationCommands).
+//
+//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
+//       Multi-tenant plain /qurl send tool. Commands register
+//       globally (up to 1 hr Discord cache propagation); per-guild
+//       config via /qurl setup; every OpenNHP code path is gated off.
+//       Default for the public-bot install.
+//
+//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
+//       Not a supported combination. OpenNHP behaviors need a
+//       specific guild cache to target; the ready handler skips its
+//       single-guild setup when isMultiTenant, so the flag has no
+//       effect in multi-tenant mode.
+const isMultiTenant = !normalizedGuildId;
+
+// OpenNHP community features (role auto-creation + auto-assign, channel
+// auto-creation, welcome DM, badge announcements). Default OFF so a
+// vanilla install of the bot into any guild — single-tenant or
+// multi-tenant — only exercises the 4 runtime permissions it was
+// invited with (View Channels, Send Messages, Embed Links, Use
+// Application Commands). Only the OpenNHP community server sets this
+// true; everywhere else the bot is a plain /qurl send tool with no
+// elevated expectations. Must be the literal string "true" — any other
+// value (including unset, empty, "TRUE", "1", "yes") keeps it disabled,
+// so an env-var typo can't silently re-enable role/channel creation
+// attempts in a guild that hasn't granted those permissions.
+const enableOpenNHPFeatures = process.env.ENABLE_OPENNHP_FEATURES === 'true';
+
+// Unsupported combination — catch at config load so an operator doesn't
+// spend time wondering why "ENABLE_OPENNHP_FEATURES=true" had no effect
+// in multi-tenant mode. logger isn't available this early (config is
+// a require() dependency of logger's callers), so use console.warn.
+if (!normalizedGuildId && enableOpenNHPFeatures) {
+  console.warn('[config] ENABLE_OPENNHP_FEATURES=true is ignored when GUILD_ID is unset (multi-tenant mode): OpenNHP behaviors target a cached single guild that multi-tenant mode never populates. Either set GUILD_ID to the OpenNHP guild snowflake, or clear ENABLE_OPENNHP_FEATURES to silence this warning.');
+}
+
+// Single source of truth for "OpenNHP is active". Consumed by
+// commands.js (command-set filter), server.js (route-mount gate),
+// boot-requirements.js (which env-vars are required), and discord.js
+// (every OpenNHP short-circuit). Deriving in one place means a future
+// change to the predicate — e.g. adding a third flag, or broadening
+// what "multi-tenant" means — only touches this file.
+const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
+
 // Configuration from environment variables
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
-  GUILD_ID: process.env.GUILD_ID,
+  GUILD_ID: normalizedGuildId,
+  isMultiTenant,
+  ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
+  isOpenNHPActive,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',

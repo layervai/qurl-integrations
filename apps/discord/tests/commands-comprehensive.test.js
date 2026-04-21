@@ -20,6 +20,14 @@ jest.mock('../src/config', () => ({
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
+  isMultiTenant: false,
+  // This suite exercises every slash command (both /qurl and the OpenNHP
+  // ones). registerCommands + handleCommand filter to the customer-safe
+  // allowlist unless config.isOpenNHPActive is true — set it here to
+  // keep the full-command coverage. The flag=false dispatch-filter
+  // behavior is covered in multi-tenant.test.js.
+  ENABLE_OPENNHP_FEATURES: true,
+  isOpenNHPActive: true,
   STAR_MILESTONES: [10, 25, 50, 100],
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
@@ -331,12 +339,19 @@ describe('handleCommand', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('ignores unknown command names', async () => {
+  it('replies "no longer available" for unknown command names (stale-registration path)', async () => {
+    // A command name we don't know either doesn't exist globally or is a
+    // stale guild-scoped registration from a prior deploy. Either way
+    // the user deserves an acknowledgement instead of Discord's
+    // "interaction failed" timeout.
     const interaction = makeInteraction({
       commandName: 'nonexistent-cmd',
     });
     await handleCommand(interaction);
-    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('no longer available'),
+      ephemeral: true,
+    }));
   });
 
   it('handles errors gracefully when command throws and not deferred', async () => {
@@ -1154,7 +1169,11 @@ describe('/qurl send — too many recipients', () => {
     await cmd.execute(interaction);
 
     expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Too many recipients') }),
+      expect.objectContaining({
+        // Updated message names the cap, the overage, AND the recovery
+        // action (trim or split) so the user knows what to do.
+        content: expect.stringMatching(/per-send cap is \d+.*Trim \d+ recipient.*split into multiple/i),
+      }),
     );
   });
 });
@@ -1413,6 +1432,69 @@ describe('/qurl send — file validation errors', () => {
 });
 
 describe('/qurl send — link creation failure', () => {
+  it('shows quota-specific message on quota_exceeded API error (file)', async () => {
+    const recipients = [{ id: 'r1', username: 'Alice' }];
+    mockGetText.mockReturnValue(recipients);
+    // Simulate connector mint_link returning 502 wrapping a QURL API
+    // 403 quota_exceeded — connector.js's throwConnectorError tags this
+    // as Error.apiCode='quota_exceeded'.
+    const quotaErr = new Error('Connector mint_link failed (502)');
+    quotaErr.status = 502;
+    quotaErr.apiCode = 'quota_exceeded';
+    quotaErr.apiDetail = 'quota exceeded: token limit per QURL reached (12/10)';
+    mockDownloadAndUpload.mockResolvedValue({
+      resource_id: 'conn-1',
+      fileBuffer: new ArrayBuffer(10),
+    });
+    mockMintLinks.mockRejectedValue(quotaErr);
+
+    const attachment = {
+      name: 'doc.pdf',
+      contentType: 'application/pdf',
+      size: 100,
+      url: 'https://cdn.discordapp.com/doc.pdf',
+    };
+
+    const resInteraction = {
+      customId: `qurl_res_file_${MOCK_NONCE}`,
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'send'),
+        getString: jest.fn((name) => {
+          if (name === 'target') return 'channel';
+          return null;
+        }),
+        getAttachment: jest.fn(() => attachment),
+      },
+      channel: {
+        awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    // Specific user-facing message — must mention the share limit + the
+    // recovery action (re-upload). Generic "Failed to create links" is
+    // unhelpful in this case because retrying will keep failing.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/share limit.*re-upload/is),
+      }),
+    );
+    // Should NOT fall through to the generic message.
+    expect(interaction.editReply).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/^Failed to create links\. Please try again\.$/),
+      }),
+    );
+  });
+
   it('handles upload failure gracefully', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);

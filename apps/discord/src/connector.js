@@ -34,11 +34,41 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
 // upstream callers log err.message into application logs.
+// QURL API error codes the connector can pass back via the `error` string.
+// Surface them as Error.apiCode so the caller can branch on a typed value
+// instead of substring-matching the human-readable message (which the
+// connector / upstream API can rephrase without notice).
+const QUOTA_EXCEEDED_PATTERNS = [
+  /quota[\s_-]?exceeded/i,
+  /token limit per QURL reached/i,
+  /per[\s_-]?resource (token|link|mint) (limit|cap)/i,
+];
+
 async function throwConnectorError(label, response) {
-  let bodyLen = 0;
-  try { bodyLen = (await response.text()).length; } catch { /* ignore */ }
-  logger.debug(`${label} error`, { status: response.status, bodyLen });
-  throw new Error(`${label} failed (${response.status})`);
+  let bodyText = '';
+  let apiCode = null;
+  let apiDetail = null;
+  try {
+    bodyText = await response.text();
+    if (bodyText) {
+      try {
+        const parsed = JSON.parse(bodyText);
+        // Connector wraps upstream API errors as `{success:false, error:"..."}`.
+        // The wrapped string is what we pattern-match for known codes.
+        const errStr = typeof parsed.error === 'string' ? parsed.error : '';
+        if (QUOTA_EXCEEDED_PATTERNS.some((rx) => rx.test(errStr))) {
+          apiCode = 'quota_exceeded';
+          apiDetail = errStr;
+        }
+      } catch { /* not JSON, ignore */ }
+    }
+  } catch { /* network read failed, fall through with empty body */ }
+  logger.debug(`${label} error`, { status: response.status, apiCode, bodyLen: bodyText.length });
+  const err = new Error(`${label} failed (${response.status})`);
+  err.status = response.status;
+  err.apiCode = apiCode;
+  err.apiDetail = apiDetail;
+  throw err;
 }
 
 // Read the response body chunk-by-chunk and abort as soon as we cross the cap.

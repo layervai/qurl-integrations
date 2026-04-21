@@ -111,6 +111,105 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('throwConnectorError — quota_exceeded tagging', () => {
+    // The connector wraps upstream QURL API errors as
+    //   { success: false, error: "QURL API error (403): quota exceeded: token limit per QURL reached (12/10)", links: [] }
+    // throwConnectorError must surface this as Error.apiCode = 'quota_exceeded'
+    // so the /qurl send catch block can show a specific user-facing message
+    // instead of a generic "Failed to create links. Please try again." (which
+    // is unhelpful — the user needs to re-upload, not retry).
+    it('tags quota_exceeded when error string contains "quota exceeded"', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'QURL API error (403): quota exceeded: token limit per QURL reached (12/10)',
+          links: [],
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.message).toMatch(/Connector mint_link failed \(502\)/);
+        expect(e.status).toBe(502);
+        expect(e.apiCode).toBe('quota_exceeded');
+        expect(e.apiDetail).toMatch(/token limit per QURL reached/);
+      }
+    });
+
+    it('tags quota_exceeded for the "token limit per QURL" pattern', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'token limit per QURL reached (11/10)',
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.apiCode).toBe('quota_exceeded');
+      }
+    });
+
+    it('leaves apiCode null for unknown errors (so callers fall through to generic)', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: async () => JSON.stringify({
+          success: false,
+          error: 'Internal server error',
+        }),
+      });
+
+      try {
+        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(500);
+        expect(e.apiCode).toBeNull();
+      }
+    });
+
+    it('handles non-JSON error body without crashing', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        text: async () => '<html>503 Service Unavailable</html>',
+      });
+
+      try {
+        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(503);
+        expect(e.apiCode).toBeNull();
+      }
+    });
+
+    it('handles missing/unreadable body without crashing', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 504,
+        text: async () => { throw new Error('network read failed'); },
+      });
+
+      try {
+        await connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1);
+        throw new Error('expected throw');
+      } catch (e) {
+        expect(e.status).toBe(504);
+        expect(e.apiCode).toBeNull();
+      }
+    });
+  });
+
   describe('mintLinks — null/missing links guard (line 96)', () => {
     it('throws when result.links is null', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
