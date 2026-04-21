@@ -18,8 +18,9 @@ interface ApplicationCommand {
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
   // Shared across both assertions so we only hit the Discord API twice per
-  // run instead of four times (halves rate-limit exposure).
-  let registrations: ApplicationCommand[];
+  // run instead of four times (halves rate-limit exposure). Initialized
+  // to `[]` so the type doesn't lie during the pre-beforeAll window.
+  let registrations: ApplicationCommand[] = [];
 
   beforeAll(async () => {
     // Union of globally-registered and guild-scoped `/qurl` commands.
@@ -38,7 +39,12 @@ describe('Discord command registration (smoke)', () => {
       api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/commands`) as Promise<ApplicationCommand[]>,
       (api(env.BOT_TOKEN, 'GET', `/applications/${env.BOT_CLIENT_ID}/guilds/${env.GUILD_ID}/commands`) as Promise<ApplicationCommand[]>)
         .catch((err: Error) => {
-          if (/\b(403|404)\b/.test(err.message)) return [] as ApplicationCommand[];
+          // Match the exact error-message format from `helpers/discord-api.ts`:
+          //   `Discord API GET /path: ${status} ${body}`
+          // Matching `: <status> ` (with space-separator on both sides) avoids
+          // false-matching 403/404 that appear inside the response `${body}`
+          // as an unrelated snowflake ID or Discord error code.
+          if (/:\s(403|404)\s/.test(err.message)) return [] as ApplicationCommand[];
           throw err;
         }),
     ]);
