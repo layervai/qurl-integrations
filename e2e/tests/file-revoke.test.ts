@@ -34,9 +34,9 @@ async function uploadImage(
   mime: string,
 ): Promise<{ viewerUrl: string; resourceId: string }> {
   const form = new FormData();
-  // `@types/node` types Uint8Array with `ArrayBufferLike` which narrower
-   // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
-   // fine; cast to satisfy the compiler.
+  // `@types/node` types Uint8Array as `ArrayBufferLike`, which is narrower
+  // than `BlobPart`'s `ArrayBufferView<ArrayBuffer>` expects. Runtime is
+  // fine; cast to satisfy the compiler.
   form.append('file', new Blob([buf as BlobPart], { type: mime }), filename);
   const res = await fetch(`${env.UPLOAD_API_URL}/upload`, {
     method: 'POST',

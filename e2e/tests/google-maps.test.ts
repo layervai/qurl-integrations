@@ -220,8 +220,13 @@ describe('Google Maps: Revoke', () => {
       query: 'Revoke Test, Boston',
     });
 
-    const before = await fetch(upload.viewerUrl);
-    expect(before.status).toBe(200);
+    // Status-only check would also pass on the fallback page (no-API-key
+    // regression returns 200 with the "Open in Google Maps" link). Assert
+    // both status AND iframe content so this test catches the same class
+    // of regression as the iframe-revoke test below.
+    const before = await fetchViewerPage(upload.viewerUrl);
+    expect(before).toContain('iframe');
+    expect(before).toContain('google.com/maps/embed');
 
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
