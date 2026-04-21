@@ -2,7 +2,6 @@
 conftest.py fixture tests — exercises aws_services, settings, and sample fixtures.
 """
 
-import pytest
 
 
 class TestConftestFixtures:

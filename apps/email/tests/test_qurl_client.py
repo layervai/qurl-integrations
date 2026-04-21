@@ -9,8 +9,6 @@ from services.qurl_client import (
     UploadError,
     CreateError,
     MintError,
-    UploadedResource,
-    MintedLink,
 )
 
 

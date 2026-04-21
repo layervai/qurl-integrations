@@ -3,7 +3,7 @@ Email sender module tests.
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from email_sender import (
     send_email,

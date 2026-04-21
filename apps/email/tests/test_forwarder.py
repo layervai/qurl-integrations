@@ -2,8 +2,6 @@
 Email forwarding Lambda tests.
 """
 
-import json
-import pytest
 from unittest.mock import patch, MagicMock
 
 
@@ -112,7 +110,6 @@ def _ses_record(forward_to="justin@layerv.ai", forward_from="alice@external.com"
 
 def _patch_settings_and_ses(moto_inject, raw_bytes=None, ses_side_effect=None):
     """Common patcher: inject settings + optionally mock ses.send_raw_email."""
-    import forwarder
     import config
 
     original_settings = config.get_settings

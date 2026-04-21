@@ -174,7 +174,6 @@ class TestGetBodyText:
     def test_multipart_skips_attachments(self):
         """Test that attachments are skipped in multipart email"""
         from email_parser import get_body_text
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -204,7 +203,6 @@ class TestGetBodyText:
     def test_multipart_body_decode_failure(self):
         """Test multipart with part decode failure falls through"""
         from email_parser import get_body_text
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -224,7 +222,6 @@ class TestGetBodyHtml:
     def test_multipart_with_html(self):
         """Test extracting HTML from multipart email"""
         from email_parser import get_body_html
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -299,7 +296,6 @@ class TestExtractAttachments:
     def test_extract_from_multipart(self):
         """Test extracting attachments from multipart email"""
         from email_parser import extract_attachments
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
         from email.mime.application import MIMEApplication
@@ -318,7 +314,6 @@ class TestExtractAttachments:
     def test_extract_inline_non_text(self):
         """Test inline attachments that are not text are extracted"""
         from email_parser import extract_attachments
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
         from email.mime.image import MIMEImage
@@ -335,7 +330,6 @@ class TestExtractAttachments:
     def test_extract_no_filename(self):
         """Test attachment without filename is ignored"""
         from email_parser import extract_attachments
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
@@ -351,7 +345,6 @@ class TestExtractAttachments:
     def test_extract_base64_encoded_payload(self):
         """Test extracting attachment with base64 encoded payload string"""
         from email_parser import extract_attachments
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
         import base64
@@ -369,7 +362,6 @@ class TestExtractAttachments:
     def test_extract_null_payload(self):
         """Test attachment with payload that decodes to None is skipped"""
         from email_parser import extract_attachments
-        import email.message
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
 
