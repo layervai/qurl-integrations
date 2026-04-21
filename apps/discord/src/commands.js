@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -1167,6 +1168,22 @@ async function handleSend(interaction, apiKey) {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
+  // Non-ephemeral nudge so recipients know to check DMs. Only fires on
+  // group targets (channel/voice) with at least one successful delivery.
+  // Wrapped in try/catch because missing SendMessages in the invoking
+  // channel should degrade silently, not fail the send that already
+  // succeeded.
+  if ((target === 'channel' || target === 'voice') && delivered > 0 && interaction.channel) {
+    const notifyMsg = target === 'voice'
+      ? `📩 **${interaction.user.displayName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${interaction.user.displayName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+    try {
+      await interaction.channel.send({ content: notifyMsg });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message, sendId });
+    }
+  }
+
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
   let monitor = null;
   if (delivered > 0) {
@@ -2218,11 +2235,7 @@ const commands = [
             opt.setName('target')
               .setDescription('Who receives this')
               .setRequired(true)
-              .addChoices(
-                { name: 'Everyone in this channel', value: 'channel' },
-                { name: 'Users in my voice channel', value: 'voice' },
-                { name: 'A specific user', value: 'user' },
-              ))
+              .setAutocomplete(true))
           .addStringOption(opt =>
             opt.setName('expiry')
               .setDescription('Link expiry (default: 24h)')
@@ -2466,6 +2479,28 @@ function getActiveCommands() {
     : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
+// Target choices are surfaced via autocomplete (not static addChoices) so
+// the "voice" option only appears when the invoking channel is a voice
+// channel. Static choices can't depend on invocation context, so they
+// always leak "Users in my voice channel" into text channels where it
+// fails loudly at dispatch time ("You must be in a voice channel..."),
+// which is worse UX than not offering the option at all.
+function handleTargetAutocomplete(interaction) {
+  const channel = interaction.channel;
+  const isVoice = channel && (
+    channel.type === ChannelType.GuildVoice ||
+    channel.type === ChannelType.GuildStageVoice
+  );
+  const choices = [
+    { name: 'Everyone in this channel', value: 'channel' },
+    { name: 'A specific user', value: 'user' },
+  ];
+  if (isVoice) {
+    choices.push({ name: 'Only voice users', value: 'voice' });
+  }
+  return interaction.respond(choices);
+}
+
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
 // not purge each other on a fresh .set() call, so a bot that previously
@@ -2545,7 +2580,15 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  if (interaction.isAutocomplete()) return;
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === 'qurl') {
+      const focused = interaction.options.getFocused(true);
+      if (focused.name === 'target') {
+        return handleTargetAutocomplete(interaction);
+      }
+    }
+    return;
+  }
 
   if (!interaction.isChatInputCommand()) return;
 

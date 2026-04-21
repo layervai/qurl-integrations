@@ -71,7 +71,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -80,7 +80,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -101,6 +101,7 @@ jest.mock('discord.js', () => ({
     setURL: jest.fn().mockReturnThis(),
   })),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
   StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
@@ -1224,6 +1225,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       },
       channel: {
         awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+        send: jest.fn().mockResolvedValue(undefined),
       },
       editReply: jest.fn().mockResolvedValue({
         createMessageComponentCollector: jest.fn(() => collectorObj),
@@ -1239,6 +1241,11 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
+    expect(interaction.channel.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('has shared something with all members of this channel'),
+      }),
+    );
   });
 });
 
@@ -1742,7 +1749,7 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('returns early for autocomplete interactions', async () => {
+  it('returns early for unhandled autocomplete focus (e.g. location)', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1755,8 +1762,48 @@ describe('handleCommand — autocomplete', () => {
 
     await handleCommand(interaction);
 
-    // Autocomplete now returns early without dispatching
     expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete in a text channel offers channel + user (no voice option)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 }, // GuildText
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('target autocomplete in a voice channel adds the "Only voice users" option', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 2 }, // GuildVoice
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
   });
 });
 
