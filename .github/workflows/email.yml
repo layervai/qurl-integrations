@@ -79,8 +79,38 @@ jobs:
           # Python coverage does not produce a simple percentage; use pytest-cov output instead
           echo "Coverage report generated above"
 
-  trigger-deploy:
+  package:
     needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@0b5f2e80d03eb5a87a3abdbe56c5f6ad2f65a # v6.0.1
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r apps/email/requirements.txt -r apps/email/requirements-dev.txt
+
+      - name: Package Lambda
+        run: |
+          mkdir -p package
+          pip install -r apps/email/requirements.txt -t package/
+          cp apps/email/*.py apps/email/services/ apps/email/templates/ package/
+          cd package && zip -r ../lambda.zip .
+        working-directory: apps/email
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: email-lambda
+          path: apps/email/lambda.zip
+          retention-days: 7
+
+  trigger-deploy:
+    needs: [package]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
