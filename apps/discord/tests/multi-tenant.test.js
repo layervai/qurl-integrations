@@ -114,7 +114,10 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     const commandsModule = require('../src/commands');
 
     const mockSet = jest.fn().mockResolvedValue(undefined);
-    const mockClient = { application: { commands: { set: mockSet } } };
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: jest.fn().mockResolvedValue(new Map()) } },
+      guilds: { cache: new Map() },
+    };
     await commandsModule.registerCommands(mockClient);
 
     expect(mockSet).toHaveBeenCalledTimes(1);
@@ -131,7 +134,10 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     const commandsModule = require('../src/commands');
 
     const mockSet = jest.fn().mockResolvedValue(undefined);
-    const mockClient = { application: { commands: { set: mockSet } } };
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: jest.fn().mockResolvedValue(new Map()) } },
+      guilds: { cache: new Map() },
+    };
     await commandsModule.registerCommands(mockClient);
 
     expect(mockSet).toHaveBeenCalledTimes(1);
@@ -149,7 +155,10 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     const commandsModule = require('../src/commands');
 
     const mockSet = jest.fn().mockResolvedValue(undefined);
-    const mockClient = { application: { commands: { set: mockSet } } };
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: jest.fn().mockResolvedValue(new Map()) } },
+      guilds: { cache: new Map() },
+    };
     await commandsModule.registerCommands(mockClient);
 
     expect(mockSet).toHaveBeenCalledTimes(1);
@@ -158,8 +167,113 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     // Only /qurl, even in single-guild mode, because OpenNHP features are off
     expect(data.map(c => c.name).sort()).toEqual(['qurl']);
     expect(data.map(c => c.name)).not.toContain('link');
-    expect(data.map(c => c.name)).not.toContain('leaderboard');
-    expect(data.map(c => c.name)).not.toContain('forcelink');
+  });
+});
+
+describe('registerCommands stale-command purge (issue #86)', () => {
+  // When the bot was previously in OpenNHP mode and has since flipped
+  // to non-OpenNHP mode, prior guild-scoped /link etc. registrations
+  // persist in those guilds' slash-command caches. registerCommands
+  // should proactively clear them so users don't see dead commands in
+  // autocomplete. Only runs in non-OpenNHP modes — in OpenNHP mode the
+  // fresh guild-scoped .set() is the whole point.
+  let originalGuildId;
+  let originalFlag;
+  beforeAll(() => {
+    originalGuildId = process.env.GUILD_ID;
+    originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
+  });
+  afterAll(() => {
+    if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
+    if (originalFlag === undefined) delete process.env.ENABLE_OPENNHP_FEATURES; else process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
+    jest.resetModules();
+  });
+  beforeEach(() => { jest.resetModules(); });
+
+  it('multi-tenant mode: purges stale guild-scoped registrations from every guild the bot is in', async () => {
+    delete process.env.GUILD_ID;
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+    const commandsModule = require('../src/commands');
+
+    // Two guilds with stale registrations, one empty guild (should not be purged)
+    const mockFetch = jest.fn()
+      .mockResolvedValueOnce(new Map([['cmd-1', {}], ['cmd-2', {}], ['cmd-3', {}]])) // guild A: 3 stale
+      .mockResolvedValueOnce(new Map([['cmd-4', {}]]))                                 // guild B: 1 stale
+      .mockResolvedValueOnce(new Map());                                               // guild C: empty — skip
+    const mockSet = jest.fn().mockResolvedValue(undefined);
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: mockFetch } },
+      guilds: { cache: new Map([
+        ['ga', { id: 'ga', name: 'A' }],
+        ['gb', { id: 'gb', name: 'B' }],
+        ['gc', { id: 'gc', name: 'C' }],
+      ]) },
+    };
+
+    await commandsModule.registerCommands(mockClient);
+
+    // fetch called once per guild (3)
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // set called 3 times total: 2 purges (empty array + guildId) + 1 final global register
+    expect(mockSet).toHaveBeenCalledTimes(3);
+    // Verify purge args: empty array, guildId
+    const purgeCalls = mockSet.mock.calls.filter(([data]) => Array.isArray(data) && data.length === 0);
+    expect(purgeCalls).toHaveLength(2);
+    expect(purgeCalls.map(c => c[1]).sort()).toEqual(['ga', 'gb']);
+    // Verify registration: the qurl command, no guildId (global)
+    const registerCalls = mockSet.mock.calls.filter(([data]) => Array.isArray(data) && data.length > 0);
+    expect(registerCalls).toHaveLength(1);
+    expect(registerCalls[0][1]).toBeUndefined();
+  });
+
+  it('OpenNHP mode: does NOT purge (guild-scoped registration is the goal)', async () => {
+    process.env.GUILD_ID = '123456789012345678';
+    process.env.ENABLE_OPENNHP_FEATURES = 'true';
+    const commandsModule = require('../src/commands');
+
+    const mockFetch = jest.fn();
+    const mockSet = jest.fn().mockResolvedValue(undefined);
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: mockFetch } },
+      guilds: { cache: new Map([['ga', { id: 'ga', name: 'A' }]]) },
+    };
+
+    await commandsModule.registerCommands(mockClient);
+
+    // fetch never called — purge skipped in OpenNHP mode
+    expect(mockFetch).not.toHaveBeenCalled();
+    // set called once for the register, no preceding empty-array purge
+    expect(mockSet).toHaveBeenCalledTimes(1);
+    expect(mockSet.mock.calls[0][0].length).toBeGreaterThan(0);
+  });
+
+  it('non-OpenNHP mode: purge failure in one guild does not block registration', async () => {
+    delete process.env.GUILD_ID;
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+    const commandsModule = require('../src/commands');
+
+    const mockFetch = jest.fn()
+      .mockRejectedValueOnce(new Error('Missing Access'))     // guild A: can't enumerate
+      .mockResolvedValueOnce(new Map([['cmd-1', {}]]));      // guild B: succeeds
+    const mockSet = jest.fn().mockResolvedValue(undefined);
+    const mockClient = {
+      application: { commands: { set: mockSet, fetch: mockFetch } },
+      guilds: { cache: new Map([
+        ['ga', { id: 'ga', name: 'A' }],
+        ['gb', { id: 'gb', name: 'B' }],
+      ]) },
+    };
+
+    await commandsModule.registerCommands(mockClient);
+
+    // Guild A's fetch failed but we still tried guild B
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    // Only guild B got purged (A failed before reaching set)
+    const purgeCalls = mockSet.mock.calls.filter(([data]) => Array.isArray(data) && data.length === 0);
+    expect(purgeCalls.map(c => c[1])).toEqual(['gb']);
+    // Final register still ran despite guild A's purge failure
+    const registerCalls = mockSet.mock.calls.filter(([data]) => Array.isArray(data) && data.length > 0);
+    expect(registerCalls).toHaveLength(1);
   });
 });
 

@@ -2421,10 +2421,49 @@ function getActiveCommands() {
     : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
+// Proactively clear stale guild-scoped command registrations from any
+// guild the bot is in. Discord's guild and global command namespaces do
+// not purge each other on a fresh .set() call, so a bot that previously
+// ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
+// X) and is now redeployed in multi-tenant or single-guild-plain mode
+// will leave /link, /leaderboard, etc. visible in X's slash-command
+// autocomplete until Discord's cache ages out. The dispatch-time filter
+// in handleCommand prevents those stale commands from doing anything
+// harmful, but users still see dead commands in the picker. Issuing
+// .set([], guildId) clears the guild-scoped set; any ALIVE guild-scoped
+// registration for the CURRENT mode gets reinstalled by the main
+// registerCommands path below.
+//
+// Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
+// guild-scoped commands to config.GUILD_ID, so purging there would
+// race with the upcoming set(). Only iterates guilds the bot is
+// actually in (client.guilds.cache) — we can't and shouldn't enumerate
+// guilds we've never joined.
+async function purgeStaleGuildCommands(client) {
+  if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const existing = await client.application.commands.fetch({ guildId: guild.id });
+      if (existing.size === 0) continue;
+      await client.application.commands.set([], guild.id);
+      logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
+    } catch (error) {
+      // Don't fail boot on a purge error — the dispatch-time filter in
+      // handleCommand is the correctness guarantee; purge is UX polish.
+      logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
+    }
+  }
+}
+
 // Register commands with Discord. `config.isOpenNHPActive` is the
 // single source of truth for "this deployment exercises the OpenNHP
 // community surface" — see config.js for the derivation.
 async function registerCommands(client) {
+  // Purge first — prevents stale OpenNHP-era registrations in guilds the
+  // bot is still in. See purgeStaleGuildCommands for details + why this
+  // is scoped to non-OpenNHP modes.
+  await purgeStaleGuildCommands(client);
+
   const activeCommands = getActiveCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
