@@ -6,9 +6,23 @@ const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./database');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 
+// Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
+// bot treats itself as a public multi-server app. Commands register globally,
+// per-guild QURL API keys come from /qurl setup (stored encrypted in
+// guild_configs), and OpenNHP-specific features (contributor roles, welcome
+// DMs, GitHub OAuth linking, PR webhook notifications) are dormant because
+// no single guild is being tracked.
+//
+// When GUILD_ID is set to a valid Discord snowflake, the original
+// single-guild OpenNHP deployment behavior is preserved: commands register
+// to that guild only, and all OpenNHP features are active.
+const isMultiTenant = !config.GUILD_ID;
+
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives.
-const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
+const required = isMultiTenant
+  ? ['DISCORD_TOKEN']
+  : ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
 const missing = required.filter(key => !config[key]);
 
 if (missing.length > 0) {
@@ -18,31 +32,46 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+if (isMultiTenant) {
+  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
+}
+
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
+  // QURL_API_KEY is the global-fallback key for /qurl send. In multi-tenant
+  // mode each guild brings their own key via /qurl setup, so the env-var
+  // fallback is optional (a guild that hasn't run setup just gets an
+  // "admin must configure" error on their first /qurl send).
+  const prodRequired = isMultiTenant
+    ? ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY']
+    : ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
   const prodMissing = prodRequired.filter(k => !process.env[k]);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
-  // OAuth state flows through BASE_URL; plaintext http:// would expose the
-  // state token (and the redirect itself) to any network path observer.
-  if (!config.BASE_URL.startsWith('https://')) {
-    logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
-    process.exit(1);
-  }
 
-  // OAUTH_STATE_SECRET is required in production. Falling back to
-  // GITHUB_CLIENT_SECRET couples the two secrets — rotating GitHub's
-  // client secret would invalidate all in-flight OAuth states and vice
-  // versa. A prod deploy must set this explicitly.
-  if (!process.env.OAUTH_STATE_SECRET) {
-    logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
-    process.exit(1);
+  // BASE_URL + OAUTH_STATE_SECRET guard the GitHub OAuth flow, which is
+  // dormant in multi-tenant mode (no single guild to link against).
+  if (!isMultiTenant) {
+    // OAuth state flows through BASE_URL; plaintext http:// would expose the
+    // state token (and the redirect itself) to any network path observer.
+    if (!config.BASE_URL.startsWith('https://')) {
+      logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
+      process.exit(1);
+    }
+
+    // OAUTH_STATE_SECRET is required in production. Falling back to
+    // GITHUB_CLIENT_SECRET couples the two secrets — rotating GitHub's
+    // client secret would invalidate all in-flight OAuth states and vice
+    // versa. A prod deploy must set this explicitly.
+    if (!process.env.OAUTH_STATE_SECRET) {
+      logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
+      process.exit(1);
+    }
   }
 
   // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot

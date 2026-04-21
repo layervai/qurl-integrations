@@ -214,6 +214,20 @@ async function verifyBotPermissions() {
 
 client.once('ready', async () => {
   logger.info(`Discord bot logged in as ${client.user.tag}`);
+
+  // Multi-tenant mode: GUILD_ID unset means no single "watched" guild.
+  // refreshCache() / verifyBotPermissions() / setupWeeklyDigest() are all
+  // single-guild operations (the first fetches one guild's roles/channels,
+  // the second checks perms in one guild, the third posts to one channel).
+  // In multi-tenant mode these are dormant — lazy refreshCache() calls in
+  // downstream OpenNHP features are already gated behind routes that don't
+  // fire without GITHUB_WEBHOOK_SECRET + BASE_URL wiring.
+  if (!config.GUILD_ID) {
+    logger.info('Multi-tenant mode: GUILD_ID unset — skipping single-guild cache init.');
+    logger.info('Bot is ready. /qurl commands will appear in any guild the bot joins.');
+    return;
+  }
+
   await refreshCache();
   await verifyBotPermissions();
   setupWeeklyDigest();

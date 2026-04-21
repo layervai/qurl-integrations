@@ -2396,9 +2396,21 @@ async function registerCommands(client) {
   const commandData = commands.map(cmd => cmd.data.toJSON());
 
   try {
-    logger.info('Registering slash commands...');
-    await client.application.commands.set(commandData, config.GUILD_ID);
-    logger.info(`Registered ${commands.length} slash commands!`);
+    if (config.GUILD_ID) {
+      // Guild-scoped registration: commands appear instantly in just this
+      // guild. Used by the single-guild OpenNHP deployment where fast command
+      // iteration matters more than appearing in other guilds.
+      logger.info(`Registering ${commands.length} slash commands to guild ${config.GUILD_ID}...`);
+      await client.application.commands.set(commandData, config.GUILD_ID);
+    } else {
+      // Global registration: commands appear in every guild the bot joins.
+      // Discord caches global commands for up to 1 hour, so newly-added
+      // commands may take that long to propagate. Used for multi-tenant
+      // deployments (customers invite the bot to their own servers).
+      logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode)...`);
+      await client.application.commands.set(commandData);
+    }
+    logger.info('Slash commands registered.');
   } catch (error) {
     logger.error('Failed to register commands', { error: error.message });
   }

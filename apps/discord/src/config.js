@@ -14,12 +14,29 @@ function intEnv(key, defaultVal, { minPositive = false } = {}) {
   return v;
 }
 
+// Normalize GUILD_ID: accept only a valid Discord snowflake (17–20 digits).
+// Any other value — including an unset env, the literal string "PLACEHOLDER"
+// that SSM-seeded params carry, or a whitespace-only value — normalizes to
+// null so every downstream truthy check (`if (config.GUILD_ID)`) correctly
+// treats the bot as multi-tenant. Prevents a malformed SSM value from
+// silently registering commands to a nonexistent guild.
+const rawGuildId = process.env.GUILD_ID;
+let normalizedGuildId = null;
+if (rawGuildId) {
+  if (/^\d{17,20}$/.test(rawGuildId.trim())) {
+    normalizedGuildId = rawGuildId.trim();
+  } else {
+    // logger isn't loaded this early in config import — use console directly.
+    console.warn(`[config] GUILD_ID=${JSON.stringify(rawGuildId)} is not a valid Discord snowflake (17-20 digits); starting in multi-tenant mode. To run in single-guild mode, set GUILD_ID to a real guild ID.`);
+  }
+}
+
 // Configuration from environment variables
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
-  GUILD_ID: process.env.GUILD_ID,
+  GUILD_ID: normalizedGuildId,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',
