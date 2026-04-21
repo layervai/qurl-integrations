@@ -212,3 +212,42 @@ describe('Google Maps: Edge Cases', () => {
     expect(html).not.toContain('google.com/maps/embed');
   });
 });
+
+describe('Google Maps: Revoke', () => {
+  test('revoke location qurl → viewer URL returns 404', async () => {
+    const upload = await uploadMapLocation({
+      type: 'google-map',
+      query: 'Revoke Test, Boston',
+    });
+
+    const before = await fetch(upload.viewerUrl);
+    expect(before.status).toBe(200);
+
+    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
+    expect(revoked).toBe(true);
+
+    const after = await fetch(upload.viewerUrl);
+    expect(after.status).toBe(404);
+  });
+
+  test('revoke iframe-rendering location also 404s viewer', async () => {
+    // Explicitly targets the mapEmbedTmpl path (coordinates → iframe)
+    const upload = await uploadMapLocation({
+      type: 'google-map',
+      lat: 40.7128,
+      lng: -74.0060,
+    });
+
+    const beforeHtml = await fetchViewerPage(upload.viewerUrl);
+    // Guard: if API key is missing in the deploy, iframe assertion would fail
+    // here and flag the regression — which is the whole point of this test.
+    expect(beforeHtml).toContain('iframe');
+    expect(beforeHtml).toContain('google.com/maps/embed');
+
+    const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
+    expect(revoked).toBe(true);
+
+    const after = await fetch(upload.viewerUrl);
+    expect(after.status).toBe(404);
+  });
+});
