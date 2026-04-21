@@ -110,6 +110,15 @@ async function ensureRolesAndChannels() {
 // (roleDelete + channelDelete + guildMemberAdd firing in quick succession)
 // would otherwise interleave the two fetches and cache an inconsistent
 // roles/channels snapshot. Coalesce into a single in-flight refresh.
+//
+// Return shape: the function resolves to `undefined` regardless of
+// mode. In multi-tenant mode it short-circuits immediately (no work,
+// no state mutation); in single-guild mode it populates the
+// module-level `guild` / `roles` / `channels` caches as a side
+// effect, but the resolved value is still undefined. All call-sites
+// `await refreshCache()` for sequencing and then read the cached
+// state directly — none inspect the return value, which is why the
+// side-effect-only contract is safe.
 let refreshCacheInFlight = null;
 async function refreshCache() {
   // Multi-tenant mode: there is no single watched guild to cache.
@@ -120,7 +129,7 @@ async function refreshCache() {
   // state, and this function doesn't populate `guild` so those sites skip
   // gracefully. Belt-and-suspenders: OpenNHP-command registration and
   // /auth + /webhook route mounting are also gated in multi-tenant mode.
-  if (!config.GUILD_ID) return null;
+  if (!config.GUILD_ID) return;
 
   if (refreshCacheInFlight) return refreshCacheInFlight;
   refreshCacheInFlight = (async () => {
