@@ -2467,7 +2467,27 @@ async function handleCommand(interaction) {
   // path.
   const activeCommands = getActiveCommands();
   const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
-  if (!command) return;
+  if (!command) {
+    // The interaction is for a command we know exists globally (Discord
+    // only dispatches registered commands to us) but is not in the
+    // currently-active set — so it's a stale guild-scoped registration
+    // from a previous deploy in a different mode. Acknowledge the
+    // interaction so the user sees a clear "no longer available" reply
+    // instead of Discord's 3-second "This interaction failed" timeout.
+    // Defensive: wrap in try/catch since the interaction may already
+    // have been responded to by a race elsewhere.
+    try {
+      await interaction.reply({
+        content: 'This command is no longer available in this server.',
+        ephemeral: true,
+      });
+    } catch (err) {
+      logger.warn('Failed to reply to stale command interaction', {
+        command: interaction.commandName, error: err.message,
+      });
+    }
+    return;
+  }
 
   try {
     await command.execute(interaction);

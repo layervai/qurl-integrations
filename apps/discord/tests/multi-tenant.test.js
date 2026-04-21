@@ -163,6 +163,120 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
   });
 });
 
+describe('handleCommand dispatch-time filter', () => {
+  // This is the defense-in-depth branch: stale guild-scoped command
+  // registrations survive a mode flip (Discord's guild and global
+  // command namespaces don't purge each other on .set()). The filter
+  // at commands.js:handleCommand prevents those stale handlers from
+  // dispatching to code paths that assume populated OpenNHP state,
+  // and replies with a clear "no longer available" message instead
+  // of letting Discord time out the interaction.
+  let originalGuildId;
+  let originalFlag;
+  beforeAll(() => {
+    originalGuildId = process.env.GUILD_ID;
+    originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
+  });
+  afterAll(() => {
+    if (originalGuildId === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = originalGuildId;
+    if (originalFlag === undefined) delete process.env.ENABLE_OPENNHP_FEATURES; else process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
+    jest.resetModules();
+  });
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it('non-OpenNHP mode: stale /link interaction gets an ephemeral "no longer available" reply', async () => {
+    // GUILD_ID set (single-guild mode) but flag unset → isOpenNHPActive=false.
+    // /link is an OpenNHP-only command, so a stale guild-scoped
+    // registration from a prior deploy must not dispatch.
+    process.env.GUILD_ID = '123456789012345678';
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+
+    // Mock dependencies that commands.js transitively pulls in
+    jest.doMock('../src/database', () => ({
+      getLinkByDiscord: jest.fn(), getLinkByGithub: jest.fn(),
+      createPendingLink: jest.fn(), getContributions: jest.fn(() => []),
+      getBadges: jest.fn(() => []), getStats: jest.fn(() => ({})),
+      getStreak: jest.fn(() => null), getTopContributors: jest.fn(() => []),
+      recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
+      getSendResourceIds: jest.fn(() => []), getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(), deleteLink: jest.fn(), forceLink: jest.fn(),
+    }));
+    jest.doMock('../src/discord', () => ({
+      sendDM: jest.fn(), assignContributorRole: jest.fn(),
+      notifyBadgeEarned: jest.fn(), getVoiceChannelMembers: jest.fn(),
+      getTextChannelMembers: jest.fn(), client: { user: { id: 'bot' } },
+    }));
+    jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
+    jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
+    jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
+
+    const { handleCommand } = require('../src/commands');
+
+    const reply = jest.fn().mockResolvedValue(undefined);
+    const interaction = {
+      isAutocomplete: () => false,
+      isChatInputCommand: () => true,
+      commandName: 'link',
+      user: { id: 'u1' },
+      reply,
+    };
+
+    await handleCommand(interaction);
+
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('no longer available'),
+      ephemeral: true,
+    }));
+  });
+
+  it('OpenNHP mode: /link dispatches normally (no "no longer available" reply)', async () => {
+    process.env.GUILD_ID = '123456789012345678';
+    process.env.ENABLE_OPENNHP_FEATURES = 'true';
+
+    jest.doMock('../src/database', () => ({
+      getLinkByDiscord: jest.fn().mockReturnValue({ github_username: 'existing' }),
+      createPendingLink: jest.fn(),
+      getLinkByGithub: jest.fn(), getContributions: jest.fn(() => []),
+      getBadges: jest.fn(() => []), getStats: jest.fn(() => ({})),
+      getStreak: jest.fn(() => null), getTopContributors: jest.fn(() => []),
+      recordQURLSend: jest.fn(), getRecentSends: jest.fn(() => []),
+      getSendResourceIds: jest.fn(() => []), getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(), deleteLink: jest.fn(), forceLink: jest.fn(),
+    }));
+    jest.doMock('../src/discord', () => ({
+      sendDM: jest.fn(), assignContributorRole: jest.fn(),
+      notifyBadgeEarned: jest.fn(), getVoiceChannelMembers: jest.fn(),
+      getTextChannelMembers: jest.fn(), client: { user: { id: 'bot' } },
+    }));
+    jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
+    jest.doMock('../src/connector', () => ({ uploadAttachment: jest.fn() }));
+    jest.doMock('../src/places', () => ({ autocomplete: jest.fn() }));
+
+    const { handleCommand } = require('../src/commands');
+
+    const reply = jest.fn().mockResolvedValue(undefined);
+    const interaction = {
+      isAutocomplete: () => false,
+      isChatInputCommand: () => true,
+      commandName: 'link',
+      user: { id: 'u1' },
+      reply,
+    };
+
+    await handleCommand(interaction);
+
+    // The real /link handler ran — it called reply with something
+    // OTHER than the "no longer available" string. (In the already-
+    // linked path it replies with a message about the existing link.)
+    const replyArgs = reply.mock.calls[0]?.[0];
+    expect(replyArgs).toBeDefined();
+    const replyContent = typeof replyArgs === 'string' ? replyArgs : (replyArgs.content || JSON.stringify(replyArgs));
+    expect(replyContent).not.toContain('no longer available');
+  });
+});
+
 describe('multi-tenant mode — server.js route mounting', () => {
   let originalGuildId;
   beforeAll(() => {

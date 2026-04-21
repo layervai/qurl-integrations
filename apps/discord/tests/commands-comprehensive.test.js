@@ -339,12 +339,19 @@ describe('handleCommand', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('ignores unknown command names', async () => {
+  it('replies "no longer available" for unknown command names (stale-registration path)', async () => {
+    // A command name we don't know either doesn't exist globally or is a
+    // stale guild-scoped registration from a prior deploy. Either way
+    // the user deserves an acknowledgement instead of Discord's
+    // "interaction failed" timeout.
     const interaction = makeInteraction({
       commandName: 'nonexistent-cmd',
     });
     await handleCommand(interaction);
-    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('no longer available'),
+      ephemeral: true,
+    }));
   });
 
   it('handles errors gracefully when command throws and not deferred', async () => {
