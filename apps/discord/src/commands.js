@@ -686,7 +686,11 @@ async function handleSend(interaction, apiKey) {
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
+    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
+    return interaction.editReply({
+      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
+      components: [],
+    });
   }
 
   // --- Step 2: Resource — auto-detect from file attachment ---
@@ -975,9 +979,19 @@ async function handleSend(interaction, apiKey) {
       }));
     }
   } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message });
+    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
+    // Surface a specific message for known upstream failure codes so the
+    // user knows what to do (re-upload to refresh the per-resource quota)
+    // instead of seeing a generic "try again" that won't help.
+    if (error.apiCode === 'quota_exceeded') {
+      const isFile = resourceType === RESOURCE_TYPES.FILE;
+      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
+      return interaction.editReply({
+        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+      });
+    }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
@@ -1117,6 +1131,37 @@ async function handleSend(interaction, apiKey) {
     content: confirmMsg,
     components: delivered > 0 ? [buttonRow] : [],
   });
+
+  // Non-ephemeral channel notification when sending to "Everyone" (channel
+  // target) or "Voice users" (voice target). The sender's ephemeral reply
+  // confirms the send to THEM; this message is what recipients see in the
+  // channel so they know to look for the Qurl Bot DM. Without this, a
+  // passive channel member who missed the DM ping has no signal that a
+  // send happened. Logged-and-swallowed on failure — a missing
+  // "Send Messages" permission in a customer server shouldn't fail the
+  // whole send (DMs already went out successfully).
+  //
+  // Guard on `interaction.channel` being present: for a slash command
+  // invoked in a guild channel this is always set, but in edge cases
+  // (partial-cache on a fresh gateway connect, thread that got
+  // archived mid-send, DM-channel dispatch) the channel object can be
+  // null — and `.send()` on null throws synchronously, before the
+  // try/catch can see it.
+  if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
+    // Wrap displayName in escapeDiscordMarkdown so a user with `**`,
+    // backticks, or `_` in their display name can't break the bold or
+    // inject a code span. Cap at 64 chars to mirror the existing
+    // `safeSender` pattern at line 242.
+    const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
+    const notifyMsg = target === 'voice'
+      ? `📩 **${safeName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+    try {
+      await interaction.channel.send({ content: notifyMsg });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message });
+    }
+  }
 
   logger.info('/qurl send completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
@@ -2391,14 +2436,108 @@ const commands = [
   },
 ];
 
-// Register commands with Discord
+// Commands that are safe to register outside the OpenNHP community guild.
+// Everything else (/link, /whois, /contributions, /stats, /leaderboard,
+// /forcelink, /bulklink, /unlinked, /backfill-milestones, /unlink) are
+// OpenNHP-community features that depend on single-guild state (the
+// cached guild, BASE_URL, GITHUB_* secrets). Registering them outside
+// the OpenNHP guild would put them in autocomplete where they'd fail
+// opaquely — /link would build a URL with an undefined BASE_URL,
+// /forcelink would try to fetch members from a null guild, etc.
+//
+// The full command set is only registered when the bot is in "OpenNHP
+// mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
+// true. Every other configuration (multi-tenant, OR single-guild-plain
+// /qurl send install like the test playground or a customer server) gets
+// only the allowlist.
+//
+// Keep the allowlist explicit and near the commands array so adding a
+// new customer-safe command requires updating both locations
+// intentionally.
+const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
+
+// Single callsite for the active command set. `registerCommands` (at
+// boot) and `handleCommand` (per interaction) both ask this so a future
+// gating change — e.g. a third mode, a per-command flag — touches one
+// place instead of two. Keeps the two sites from drifting.
+function getActiveCommands() {
+  return config.isOpenNHPActive
+    ? commands
+    : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
+}
+
+// Proactively clear stale guild-scoped command registrations from any
+// guild the bot is in. Discord's guild and global command namespaces do
+// not purge each other on a fresh .set() call, so a bot that previously
+// ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
+// X) and is now redeployed in multi-tenant or single-guild-plain mode
+// will leave /link, /leaderboard, etc. visible in X's slash-command
+// autocomplete until Discord's cache ages out. The dispatch-time filter
+// in handleCommand prevents those stale commands from doing anything
+// harmful, but users still see dead commands in the picker. Issuing
+// .set([], guildId) clears the guild-scoped set; any ALIVE guild-scoped
+// registration for the CURRENT mode gets reinstalled by the main
+// registerCommands path below.
+//
+// Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
+// guild-scoped commands to config.GUILD_ID, so purging there would
+// race with the upcoming set(). Only iterates guilds the bot is
+// actually in (client.guilds.cache) — we can't and shouldn't enumerate
+// guilds we've never joined.
+async function purgeStaleGuildCommands(client) {
+  if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
+  // Parallelize the per-guild fetch+set. Sequentializing makes boot
+  // time O(guilds) at ~500ms per round-trip, which scales badly for
+  // the public-bot install path this PR targets. Promise.allSettled
+  // so one slow/failing guild doesn't block the others, and so a
+  // single rejection doesn't bubble and abort registerCommands.
+  // Discord's guild-commands endpoint has a separate rate bucket
+  // per guild, so parallel fans out cleanly until the global
+  // app-command rate limit (~200/min) — well above any realistic
+  // boot-time burst.
+  const guilds = [...client.guilds.cache.values()];
+  await Promise.allSettled(guilds.map(async (guild) => {
+    try {
+      const existing = await client.application.commands.fetch({ guildId: guild.id });
+      if (existing.size === 0) return;
+      await client.application.commands.set([], guild.id);
+      logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
+    } catch (error) {
+      // Don't fail boot on a purge error — the dispatch-time filter in
+      // handleCommand is the correctness guarantee; purge is UX polish.
+      logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
+    }
+  }));
+}
+
+// Register commands with Discord. `config.isOpenNHPActive` is the
+// single source of truth for "this deployment exercises the OpenNHP
+// community surface" — see config.js for the derivation.
 async function registerCommands(client) {
-  const commandData = commands.map(cmd => cmd.data.toJSON());
+  // Purge first — prevents stale OpenNHP-era registrations in guilds the
+  // bot is still in. See purgeStaleGuildCommands for details + why this
+  // is scoped to non-OpenNHP modes.
+  await purgeStaleGuildCommands(client);
+
+  const activeCommands = getActiveCommands();
+  const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
-    logger.info('Registering slash commands...');
-    await client.application.commands.set(commandData, config.GUILD_ID);
-    logger.info(`Registered ${commands.length} slash commands!`);
+    if (config.GUILD_ID) {
+      // Guild-scoped registration: commands appear instantly in just this
+      // guild. Used by the single-guild OpenNHP deployment where fast command
+      // iteration matters more than appearing in other guilds.
+      logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
+      await client.application.commands.set(commandData, config.GUILD_ID);
+    } else {
+      // Global registration: commands appear in every guild the bot joins.
+      // Discord caches global commands for up to 1 hour, so newly-added
+      // commands may take that long to propagate. Used for multi-tenant
+      // deployments (customers invite the bot to their own servers).
+      logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
+      await client.application.commands.set(commandData);
+    }
+    logger.info('Slash commands registered.');
   } catch (error) {
     logger.error('Failed to register commands', { error: error.message });
   }
@@ -2410,8 +2549,39 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
-  const command = commands.find(cmd => cmd.data.name === interaction.commandName);
-  if (!command) return;
+  // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
+  // mode to customer-safe mode (flip GUILD_ID unset OR flip
+  // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
+  // /whois, etc. registrations remain in the old guild — Discord's two
+  // namespaces (guild and global) don't purge each other on a new .set()
+  // call. Those stale handlers all assume cached guild state (BASE_URL,
+  // contributor roles) that customer-safe mode doesn't populate and
+  // would crash on. Filter the handler lookup to the active set so a
+  // stale registration from a previous deploy can't dispatch to a broken
+  // path.
+  const activeCommands = getActiveCommands();
+  const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
+  if (!command) {
+    // The interaction is for a command we know exists globally (Discord
+    // only dispatches registered commands to us) but is not in the
+    // currently-active set — so it's a stale guild-scoped registration
+    // from a previous deploy in a different mode. Acknowledge the
+    // interaction so the user sees a clear "no longer available" reply
+    // instead of Discord's 3-second "This interaction failed" timeout.
+    // Defensive: wrap in try/catch since the interaction may already
+    // have been responded to by a race elsewhere.
+    try {
+      await interaction.reply({
+        content: 'This command is no longer available in this server.',
+        ephemeral: true,
+      });
+    } catch (err) {
+      logger.warn('Failed to reply to stale command interaction', {
+        command: interaction.commandName, error: err.message,
+      });
+    }
+    return;
+  }
 
   try {
     await command.execute(interaction);

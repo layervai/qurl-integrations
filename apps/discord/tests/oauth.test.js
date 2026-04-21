@@ -31,6 +31,12 @@ jest.mock('../src/commands', () => ({
   registerCommands: jest.fn(),
 }));
 
+// GUILD_ID + ENABLE_OPENNHP_FEATURES together gate whether /auth and
+// /webhook routes are mounted (OpenNHP mode only). This test suite
+// exercises those routes, so both must be set — valid Discord snowflake
+// for GUILD_ID, literal "true" string for the flag.
+process.env.GUILD_ID = '123456789012345678';
+process.env.ENABLE_OPENNHP_FEATURES = 'true';
 process.env.GITHUB_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-webhook-secret';
