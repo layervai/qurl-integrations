@@ -915,6 +915,36 @@ describe('/qurl help subcommand', () => {
       }),
     );
   });
+
+  // Positive assertions for the four copy fixes in PR #98. Without these,
+  // the only other help-text assertion is `stringContaining('Qurl Bot')`,
+  // which would stay green if every fix below were reverted. Pinning them
+  // here catches accidental regressions on the next edit to this block.
+  it('includes the four copy fixes from PR #98', async () => {
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'help'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const { content } = interaction.reply.mock.calls[0][0];
+
+    // (1) layerv.ai URL carries the scheme so Discord auto-linkifies it
+    expect(content).toContain('https://layerv.ai');
+    // (2) self-destruct note covers both access AND expiry
+    expect(content).toMatch(/self-destruct on first access.*expiry elapses/);
+    // (3) Terms block disambiguates "protected resource" from "qurl"
+    expect(content).toContain('protected resource');
+    expect(content).toContain('access link');
+    // (4) Large-servers note uses plain language, not GUILD_PRESENCES jargon
+    expect(content).toContain('Large servers');
+    expect(content).not.toContain('GUILD_PRESENCES');
+  });
 });
 
 describe('/qurl send — cooldown and API key checks', () => {
