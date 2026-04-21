@@ -82,9 +82,19 @@ describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
 });
 
 describe('multi-tenant mode — registerCommands command filtering', () => {
+  // Explicit reset on BOTH the env-var pair (GUILD_ID + ENABLE_OPENNHP_FEATURES)
+  // before each test — both inputs now drive the mode, and a leftover value
+  // from a prior test would silently flip the branch under inspection.
   let originalGuildId;
+  let originalOpenNHPFlag;
   beforeAll(() => {
     originalGuildId = process.env.GUILD_ID;
+    originalOpenNHPFlag = process.env.ENABLE_OPENNHP_FEATURES;
+  });
+  beforeEach(() => {
+    delete process.env.GUILD_ID;
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+    jest.resetModules();
   });
   afterAll(() => {
     if (originalGuildId === undefined) {
@@ -92,12 +102,15 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     } else {
       process.env.GUILD_ID = originalGuildId;
     }
+    if (originalOpenNHPFlag === undefined) {
+      delete process.env.ENABLE_OPENNHP_FEATURES;
+    } else {
+      process.env.ENABLE_OPENNHP_FEATURES = originalOpenNHPFlag;
+    }
     jest.resetModules();
   });
 
   it('multi-tenant: registers only /qurl globally (no guildId arg)', async () => {
-    delete process.env.GUILD_ID;
-    jest.resetModules();
     const commandsModule = require('../src/commands');
 
     const mockSet = jest.fn().mockResolvedValue(undefined);
@@ -128,13 +141,10 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     expect(data.map(c => c.name)).toContain('qurl');
     // OpenNHP commands register alongside /qurl in the OpenNHP guild
     expect(data.map(c => c.name)).toContain('link');
-
-    delete process.env.ENABLE_OPENNHP_FEATURES;
   });
 
   it('single-guild + ENABLE_OPENNHP_FEATURES unset: registers only customer-safe commands scoped to the guild', async () => {
     process.env.GUILD_ID = '123456789012345678';
-    delete process.env.ENABLE_OPENNHP_FEATURES;
     jest.resetModules();
     const commandsModule = require('../src/commands');
 

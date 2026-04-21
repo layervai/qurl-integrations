@@ -34,10 +34,39 @@ if (rawGuildId) {
 // Multi-tenant mode: derived once here, consumed everywhere else. When true,
 // the bot treats itself as a public multi-server app (commands global,
 // OpenNHP features dormant, /auth + /webhook routes not mounted). When
-// false, original single-guild OpenNHP behavior is preserved verbatim.
+// false, the bot runs in single-guild mode targeting normalizedGuildId.
 // Keeping this derived in config.js (single source of truth) means every
 // downstream check is `if (config.isMultiTenant)` — semantic name at
 // every callsite.
+//
+// Together with ENABLE_OPENNHP_FEATURES (below), this selects one of
+// three supported modes:
+//
+//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
+//       Single-guild OpenNHP community server. Full command set
+//       registers scoped to the guild; ensureRolesAndChannels creates
+//       contributor roles + #contribute / #github-feed; /auth and
+//       /webhook routes mount; weekly digest runs. Requires
+//       ManageRoles + ManageChannels perms in the guild.
+//
+//   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
+//       Single-guild plain /qurl send tool. Only /qurl registers
+//       (scoped to the guild for instant propagation); no role or
+//       channel creation; /auth and /webhook routes dormant. Needs
+//       only the 4 runtime perms (ViewChannel, SendMessages,
+//       EmbedLinks, UseApplicationCommands).
+//
+//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
+//       Multi-tenant plain /qurl send tool. Commands register
+//       globally (up to 1 hr Discord cache propagation); per-guild
+//       config via /qurl setup; every OpenNHP code path is gated off.
+//       Default for the public-bot install.
+//
+//   (isMultiTenant, ENABLE_OPENNHP_FEATURES=true)
+//       Not a supported combination. OpenNHP behaviors need a
+//       specific guild cache to target; the ready handler skips its
+//       single-guild setup when isMultiTenant, so the flag has no
+//       effect in multi-tenant mode.
 const isMultiTenant = !normalizedGuildId;
 
 // Configuration from environment variables

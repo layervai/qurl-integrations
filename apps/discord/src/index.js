@@ -5,6 +5,7 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./database');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
+const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
 // bot treats itself as a public multi-server app. Commands register globally,
@@ -19,11 +20,10 @@ const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { isMultiTenant } = config;
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
-// during deploy, not when the first request arrives.
-const required = isMultiTenant
-  ? ['DISCORD_TOKEN']
-  : ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
-const missing = required.filter(key => !config[key]);
+// during deploy, not when the first request arrives. Lists live in
+// boot-requirements.js so they can be unit-tested without side-effecting
+// a bot boot.
+const missing = missingBootKeys(config, isMultiTenant);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
@@ -45,25 +45,23 @@ if (process.env.NODE_ENV === 'production') {
   // QURL_API_KEY is the global-fallback key for /qurl send. In multi-tenant
   // mode each guild brings their own key via /qurl setup, so the env-var
   // fallback is optional (a guild that hasn't run setup just gets an
-  // "admin must configure" error on their first /qurl send).
-  const prodRequired = isMultiTenant
-    ? ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY']
-    : ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
-  const prodMissing = prodRequired.filter(k => !process.env[k]);
+  // "admin must configure" error on their first /qurl send). List is in
+  // boot-requirements.js for testability.
+  const prodMissing = missingProdKeys(process.env, isMultiTenant);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
 
-  // BASE_URL https check is unconditional when BASE_URL is set to a non-
-  // default value. In single-guild mode BASE_URL is required (caught by
-  // the boot-required list above); in multi-tenant mode it's unused, but
-  // if someone leaves a stale http:// value in SSM and a future change
-  // re-enables a BASE_URL-using code path, plaintext shouldn't slip
-  // through just because the mode changed. Cheap catch for a misconfig.
-  const baseUrlIsDefault = !process.env.BASE_URL; // config.js applies http://localhost:3000 default
-  if (!baseUrlIsDefault && !config.BASE_URL.startsWith('https://')) {
+  // BASE_URL https check is unconditional when BASE_URL is set. In
+  // single-guild mode BASE_URL is required (caught by the boot-required
+  // list above); in multi-tenant mode it's unused, but if someone leaves
+  // a stale http:// value in SSM and a future change re-enables a
+  // BASE_URL-using code path, plaintext shouldn't slip through just
+  // because the mode changed. Cheap catch for a misconfig.
+  const baseUrlExplicitlySet = Boolean(process.env.BASE_URL); // config.js applies http://localhost:3000 default if unset
+  if (baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
     logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
     process.exit(1);
   }

@@ -155,14 +155,24 @@ app.get('/metrics', metricsRateLimit, (req, res) => {
 // OAuth state uses BASE_URL, the callback calls assignContributorRole()
 // against the cached guild, and the webhook handler dispatches to
 // notifiers (notifyPRMerge, etc.) that also assume a cached guild. In
-// multi-tenant mode the cache is never populated, so mounting these
-// routes would only surface broken UX (a 500 from the OAuth callback, or
-// a webhook that fails after its signature passes). Leave them unmounted.
-if (config.GUILD_ID) {
+// any non-OpenNHP mode the cache is never populated OR the downstream
+// handlers short-circuit with reason:'opennhp-disabled', so mounting
+// these routes would only surface broken UX (a 500 from the OAuth
+// callback, or a webhook that fails after its signature passes) plus
+// one wasted DB hit per OAuth callback on the orphan state token.
+//
+// Symmetry with commands.js:isOpenNHPActive — the full OpenNHP surface
+// (commands + routes) turns on together when GUILD_ID is set AND
+// ENABLE_OPENNHP_FEATURES is true; everything else gets the plain
+// /qurl send tool.
+const openNHPActive = config.GUILD_ID && config.ENABLE_OPENNHP_FEATURES;
+if (openNHPActive) {
   app.use('/auth', oauthRouter);
   app.use('/webhook', webhooksRouter);
-} else {
+} else if (!config.GUILD_ID) {
   logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
+} else {
+  logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
@@ -184,8 +194,8 @@ function startServer() {
     logger.info(`Web server listening on port ${config.PORT}`);
     // Only log OAuth/Webhook URLs when those routes are actually mounted —
     // avoids misleading operators into curl-ing a 404 endpoint in multi-
-    // tenant mode. Metrics URL is always mounted.
-    if (config.GUILD_ID) {
+    // tenant or single-guild-plain mode. Metrics URL is always mounted.
+    if (config.GUILD_ID && config.ENABLE_OPENNHP_FEATURES) {
       logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
       logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
     }
