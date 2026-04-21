@@ -150,9 +150,20 @@ app.get('/metrics', metricsRateLimit, (req, res) => {
   });
 });
 
-// Mount routers
-app.use('/auth', oauthRouter);
-app.use('/webhook', webhooksRouter);
+// Mount routers — only in single-guild mode. /auth (GitHub OAuth redirect)
+// and /webhook (GitHub event delivery) both depend on OpenNHP state: the
+// OAuth state uses BASE_URL, the callback calls assignContributorRole()
+// against the cached guild, and the webhook handler dispatches to
+// notifiers (notifyPRMerge, etc.) that also assume a cached guild. In
+// multi-tenant mode the cache is never populated, so mounting these
+// routes would only surface broken UX (a 500 from the OAuth callback, or
+// a webhook that fails after its signature passes). Leave them unmounted.
+if (config.GUILD_ID) {
+  app.use('/auth', oauthRouter);
+  app.use('/webhook', webhooksRouter);
+} else {
+  logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
+}
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars

@@ -31,6 +31,10 @@ jest.mock('../src/commands', () => ({
   registerCommands: jest.fn(),
 }));
 
+// GUILD_ID gates whether /auth and /webhook routes are mounted (single-guild
+// mode only). This test suite exercises those routes, so it must run in
+// single-guild mode — set a valid Discord snowflake (17-20 digits).
+process.env.GUILD_ID = '123456789012345678';
 process.env.GITHUB_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-webhook-secret';

@@ -31,12 +31,22 @@ if (rawGuildId) {
   }
 }
 
+// Multi-tenant mode: derived once here, consumed everywhere else. When true,
+// the bot treats itself as a public multi-server app (commands global,
+// OpenNHP features dormant, /auth + /webhook routes not mounted). When
+// false, original single-guild OpenNHP behavior is preserved verbatim.
+// Keeping this derived in config.js (single source of truth) means every
+// downstream check is `if (config.isMultiTenant)` — semantic name at
+// every callsite.
+const isMultiTenant = !normalizedGuildId;
+
 // Configuration from environment variables
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
   GUILD_ID: normalizedGuildId,
+  isMultiTenant,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',

@@ -101,6 +101,16 @@ async function ensureRolesAndChannels() {
 // roles/channels snapshot. Coalesce into a single in-flight refresh.
 let refreshCacheInFlight = null;
 async function refreshCache() {
+  // Multi-tenant mode: there is no single watched guild to cache.
+  // client.guilds.fetch(null) would return ALL guilds the bot is in as a
+  // Collection (not a single Guild), and the downstream guild.roles.fetch()
+  // call would then crash on a Collection that has no .roles. Short-circuit
+  // to a no-op — all callers already check `if (!guild)` before using cached
+  // state, and this function doesn't populate `guild` so those sites skip
+  // gracefully. Belt-and-suspenders: OpenNHP-command registration and
+  // /auth + /webhook route mounting are also gated in multi-tenant mode.
+  if (!config.GUILD_ID) return null;
+
   if (refreshCacheInFlight) return refreshCacheInFlight;
   refreshCacheInFlight = (async () => {
     try {
@@ -259,6 +269,11 @@ client.on('channelDelete', async (channel) => {
 
 // Welcome new members
 client.on('guildMemberAdd', async (member) => {
+  // Multi-tenant mode: no single guild to scope welcome DMs to. The
+  // existing `member.guild.id !== config.GUILD_ID` check below also
+  // catches this case (null !== any-guild-id is always true), but an
+  // explicit guard is self-documenting about the mode.
+  if (!config.GUILD_ID) return;
   if (member.guild.id !== config.GUILD_ID) return;
 
   logger.info(`New member joined: ${member.user.tag}`);

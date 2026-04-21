@@ -30,7 +30,10 @@ jest.mock('../src/database', () => ({
   })),
 }));
 
-// Set required env vars
+// Set required env vars. GUILD_ID must be a valid Discord snowflake to
+// put the bot in single-guild mode so /auth and /webhook routes are
+// mounted — this suite tests those routes.
+process.env.GUILD_ID = '123456789012345678';
 process.env.GITHUB_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-webhook-secret';

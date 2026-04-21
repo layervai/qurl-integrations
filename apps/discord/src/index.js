@@ -16,7 +16,7 @@ const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 // When GUILD_ID is set to a valid Discord snowflake, the original
 // single-guild OpenNHP deployment behavior is preserved: commands register
 // to that guild only, and all OpenNHP features are active.
-const isMultiTenant = !config.GUILD_ID;
+const { isMultiTenant } = config;
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
 // during deploy, not when the first request arrives.
@@ -34,6 +34,8 @@ if (missing.length > 0) {
 
 if (isMultiTenant) {
   logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
+} else {
+  logger.info(`Single-guild mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
 }
 
 // Production-only required secrets. In dev these are optional so localhost

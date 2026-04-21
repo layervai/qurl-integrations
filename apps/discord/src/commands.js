@@ -2391,23 +2391,36 @@ const commands = [
   },
 ];
 
+// In multi-tenant mode, only /qurl is registered. The other commands
+// (/link, /whois, /contributions, /stats, /leaderboard, /forcelink,
+// /bulklink, /unlinked, /backfill-milestones, /unlink) are OpenNHP-
+// community features that depend on single-guild state (the cached guild,
+// BASE_URL, GITHUB_* secrets). Registering them globally would put them
+// in customer autocomplete where they'd fail opaquely — /link would
+// build a URL with an undefined BASE_URL, /forcelink would try to fetch
+// members from a null guild, etc. Filter them out.
+function getMultiTenantCommands() {
+  return commands.filter(cmd => cmd.data.name === 'qurl');
+}
+
 // Register commands with Discord
 async function registerCommands(client) {
-  const commandData = commands.map(cmd => cmd.data.toJSON());
+  const activeCommands = config.isMultiTenant ? getMultiTenantCommands() : commands;
+  const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
     if (config.GUILD_ID) {
       // Guild-scoped registration: commands appear instantly in just this
       // guild. Used by the single-guild OpenNHP deployment where fast command
       // iteration matters more than appearing in other guilds.
-      logger.info(`Registering ${commands.length} slash commands to guild ${config.GUILD_ID}...`);
+      logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
       await client.application.commands.set(commandData, config.GUILD_ID);
     } else {
       // Global registration: commands appear in every guild the bot joins.
       // Discord caches global commands for up to 1 hour, so newly-added
       // commands may take that long to propagate. Used for multi-tenant
       // deployments (customers invite the bot to their own servers).
-      logger.info(`Registering ${commands.length} slash commands globally (multi-tenant mode)...`);
+      logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
       await client.application.commands.set(commandData);
     }
     logger.info('Slash commands registered.');
