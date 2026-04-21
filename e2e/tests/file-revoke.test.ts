@@ -101,11 +101,12 @@ describe('File Revoke', () => {
     const revoked = await qurl.revokeLink(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId);
     expect(revoked).toBe(true);
 
-    // Matches smoke.test.ts:103 — the canonical post-revoke assertion.
-    // The md5-addressed fileviewer URL is NOT gated by the QURL API, so
-    // asserting 404 there would be testing an invariant the system
-    // doesn't actually hold. The resource-status endpoint IS gated and
-    // is the right signal for "QURL-layer revoke took effect."
+    // Canonical post-revoke assertion today — matches smoke.test.ts:103.
+    // The md5-addressed fileviewer URL is NOT yet gated by the QURL-layer
+    // revoke (product decision to FIX that is in infra#139, implementation
+    // folded into infra#93's synchronous-delete-on-revoke scope).
+    // TODO(infra#93/#139): add `expect((await fetch(upload.viewerUrl)).status).toBe(404)`
+    // after the revoke-triggered S3 delete wiring ships.
     await expect(
       qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
     ).rejects.toThrow(/404/);

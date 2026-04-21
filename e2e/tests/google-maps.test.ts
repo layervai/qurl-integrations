@@ -248,19 +248,24 @@ describe('Google Maps: Edge Cases', () => {
 });
 
 describe('Google Maps: Revoke', () => {
-  // NOTE on revoke semantics: `DELETE /v1/resources/{id}` (the `revokeLink`
-  // helper) kills the QURL token chain for that resource — any
-  // `https://qurl.link/#at_...` or `https://{resource_id}.qurl.site`
-  // URL built on top of the resource stops resolving. The underlying
-  // md5-addressed fileviewer URL (`https://fileviewer.layerv.xyz/view/<md5>`)
-  // is NOT affected by the QURL-layer revoke — it's a direct backend URL
-  // gated by knowledge of the md5, not by the QURL API.
+  // NOTE on revoke semantics (today vs. after infra#93/#139 ship):
   //
-  // So these tests verify revoke via `getLinkStatus(resourceId)` returning
-  // 404 (matching the smoke-test pattern at smoke.test.ts:103) rather than
-  // checking the fileviewer URL. The iframe-regression assertion is
-  // preserved in the pre-revoke read so a no-API-key deploy still fails
-  // these tests loudly.
+  // Today: `DELETE /v1/resources/{id}` kills the QURL-layer token chain
+  // (qurl.link / qurl.site / resource status endpoint) but the
+  // md5-addressed fileviewer URL still serves the content.
+  //
+  // Product decision (infra#139, accepted): revoke SHOULD also hard-kill
+  // the fileviewer URL. Implementation is folded into infra#93 — on revoke,
+  // the connector's new `DELETE /api/resources/:md5` fires synchronously
+  // alongside the QURL-layer delete, removing the S3 object, which makes
+  // subsequent fileviewer /view/:md5 requests 404 naturally.
+  //
+  // These tests verify today's revoke contract via `getLinkStatus()` → 404
+  // (the canonical post-revoke signal; matches smoke.test.ts:103). Once
+  // infra#93 ships, add `(await fetch(upload.viewerUrl)).status === 404`
+  // alongside — marked with a TODO below. The iframe-regression assertion
+  // is preserved in the pre-revoke read so a no-API-key deploy still fails
+  // these tests loudly regardless.
 
   test('revoke location qurl → getLinkStatus returns 404', async () => {
     const upload = await uploadMapLocation({
@@ -279,6 +284,8 @@ describe('Google Maps: Revoke', () => {
     expect(revoked).toBe(true);
 
     // Matches smoke.test.ts:103 — the one canonical revoke-effect assertion.
+    // TODO(infra#93/#139): once revoke-triggered S3 delete ships, also
+    // `expect((await fetch(upload.viewerUrl)).status).toBe(404)` here.
     await expect(
       qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, upload.resourceId),
     ).rejects.toThrow(/404/);
