@@ -18,10 +18,12 @@
 jest.mock('../src/config', () => ({
   DISCORD_TOKEN: 'test-token',
   DISCORD_CLIENT_ID: 'test-client',
-  GUILD_ID: 'guild-1',
-  isMultiTenant: false,
-  ENABLE_OPENNHP_FEATURES: false,
-  isOpenNHPActive: false,
+  // Mode-derivation via the shared helper — single-guild-plain
+  // (GUILD_ID set, flag off) → isOpenNHPActive=false.
+  ...require('./helpers/buildConfigMock').buildConfigMock({
+    guildId: 'guild-1',
+    enableOpenNHP: false,
+  }),
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
   CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',

@@ -8,16 +8,16 @@
 jest.mock('../src/config', () => ({
   DISCORD_TOKEN: 'test-token',
   DISCORD_CLIENT_ID: 'test-client',
-  GUILD_ID: 'guild-1',
   // This suite exercises the OpenNHP community features path (role
   // auto-creation, role assignment, welcome DM, badge/digest posts).
-  // Those gate on config.isOpenNHPActive in src/discord.js — set both
-  // this and the raw flag so the legacy happy paths stay covered.
-  // A separate suite (tests/opennhp-gating.test.js) covers the
-  // flag=false branches.
-  ENABLE_OPENNHP_FEATURES: true,
-  isMultiTenant: false,
-  isOpenNHPActive: true,
+  // Mode-derivation (GUILD_ID, isMultiTenant, ENABLE_OPENNHP_FEATURES,
+  // isOpenNHPActive) comes from the helper so a new derived field
+  // added to src/config.js is picked up here automatically. A separate
+  // suite (tests/opennhp-gating.test.js) covers the flag=false branches.
+  ...require('./helpers/buildConfigMock').buildConfigMock({
+    guildId: 'guild-1',
+    enableOpenNHP: true,
+  }),
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
   CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
