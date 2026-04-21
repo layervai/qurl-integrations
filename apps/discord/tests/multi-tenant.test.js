@@ -79,6 +79,34 @@ describe('multi-tenant mode — config.js GUILD_ID normalization', () => {
     expect(cfg.GUILD_ID).toBeNull();
     expect(cfg.isMultiTenant).toBe(true);
   });
+
+  it('warns when unsupported combo is set: GUILD_ID unset + ENABLE_OPENNHP_FEATURES=true', () => {
+    // Claude review flagged this as an "operator-UX feature without a
+    // test" — if someone removes the warning in a future refactor,
+    // operators who set ENABLE_OPENNHP_FEATURES=true intending to
+    // enable OpenNHP mode would silently get multi-tenant instead
+    // with no signal their intent was ignored.
+    const originalFlag = process.env.ENABLE_OPENNHP_FEATURES;
+    delete process.env.GUILD_ID;
+    process.env.ENABLE_OPENNHP_FEATURES = 'true';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      jest.resetModules();
+      const cfg = require('../src/config');
+      expect(cfg.isMultiTenant).toBe(true);
+      expect(cfg.isOpenNHPActive).toBe(false); // flag effectively ignored
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('ignored when GUILD_ID is unset'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      if (originalFlag === undefined) {
+        delete process.env.ENABLE_OPENNHP_FEATURES;
+      } else {
+        process.env.ENABLE_OPENNHP_FEATURES = originalFlag;
+      }
+    }
+  });
 });
 
 describe('multi-tenant mode — registerCommands command filtering', () => {
@@ -381,13 +409,24 @@ describe('handleCommand dispatch-time filter', () => {
 
     await handleCommand(interaction);
 
-    // The real /link handler ran — it called reply with something
-    // OTHER than the "no longer available" string. (In the already-
-    // linked path it replies with a message about the existing link.)
+    // The real /link handler ran. With getLinkByDiscord mocked to
+    // return { github_username: 'existing' }, the already-linked
+    // branch should fire — its positive signal is that the reply
+    // embed references the existing GitHub username. This is a
+    // specific-content assertion rather than a negation, so a future
+    // /link UX tweak that accidentally mentions "no longer available"
+    // (e.g. in the disambiguation text for a relink flow) wouldn't
+    // produce a false positive.
     const replyArgs = reply.mock.calls[0]?.[0];
     expect(replyArgs).toBeDefined();
-    const replyContent = typeof replyArgs === 'string' ? replyArgs : (replyArgs.content || JSON.stringify(replyArgs));
-    expect(replyContent).not.toContain('no longer available');
+    const serialized = typeof replyArgs === 'string' ? replyArgs : JSON.stringify(replyArgs);
+    // Either "existing" appears (already-linked confirmation) or
+    // "github" (the OAuth flow embed URL) — both are positive signals
+    // that the real /link handler ran, as opposed to the stale-command
+    // short-circuit. The stale-command branch replies with exactly
+    // "This command is no longer available in this server." which
+    // contains neither of those strings.
+    expect(serialized.toLowerCase()).toMatch(/existing|github/);
   });
 });
 
