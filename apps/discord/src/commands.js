@@ -2408,20 +2408,24 @@ const commands = [
 //
 // Keep the allowlist explicit and near the commands array so adding a
 // new customer-safe command requires updating both locations
-// intentionally. A per-command `openNHPOnly: true` flag would be even
-// cleaner but would touch every existing command; deferred to a
-// follow-up.
+// intentionally.
 const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
 
-function getCustomerSafeCommands() {
-  return commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
+// Single callsite for the active command set. `registerCommands` (at
+// boot) and `handleCommand` (per interaction) both ask this so a future
+// gating change — e.g. a third mode, a per-command flag — touches one
+// place instead of two. Keeps the two sites from drifting.
+function getActiveCommands() {
+  return config.isOpenNHPActive
+    ? commands
+    : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
 // Register commands with Discord. `config.isOpenNHPActive` is the
 // single source of truth for "this deployment exercises the OpenNHP
 // community surface" — see config.js for the derivation.
 async function registerCommands(client) {
-  const activeCommands = config.isOpenNHPActive ? commands : getCustomerSafeCommands();
+  const activeCommands = getActiveCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
@@ -2461,7 +2465,7 @@ async function handleCommand(interaction) {
   // would crash on. Filter the handler lookup to the active set so a
   // stale registration from a previous deploy can't dispatch to a broken
   // path.
-  const activeCommands = config.isOpenNHPActive ? commands : getCustomerSafeCommands();
+  const activeCommands = getActiveCommands();
   const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
   if (!command) return;
 
