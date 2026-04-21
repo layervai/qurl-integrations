@@ -686,7 +686,11 @@ async function handleSend(interaction, apiKey) {
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
+    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
+    return interaction.editReply({
+      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
+      components: [],
+    });
   }
 
   // --- Step 2: Resource — auto-detect from file attachment ---
@@ -975,9 +979,19 @@ async function handleSend(interaction, apiKey) {
       }));
     }
   } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message });
+    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
+    // Surface a specific message for known upstream failure codes so the
+    // user knows what to do (re-upload to refresh the per-resource quota)
+    // instead of seeing a generic "try again" that won't help.
+    if (error.apiCode === 'quota_exceeded') {
+      const isFile = resourceType === RESOURCE_TYPES.FILE;
+      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
+      return interaction.editReply({
+        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+      });
+    }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
