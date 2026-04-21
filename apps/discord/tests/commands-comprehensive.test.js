@@ -101,6 +101,7 @@ jest.mock('discord.js', () => ({
     setURL: jest.fn().mockReturnThis(),
   })),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
   StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
@@ -1768,7 +1769,7 @@ describe('handleCommand — autocomplete', () => {
     expect(interaction.respond).not.toHaveBeenCalled();
   });
 
-  it('target autocomplete offers channel + user when sender is NOT in voice', async () => {
+  it('target autocomplete in a text channel offers channel + user (no voice option)', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1777,7 +1778,7 @@ describe('handleCommand — autocomplete', () => {
         ...makeInteraction().options,
         getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
-      member: { voice: { channelId: null } },
+      channel: { type: 0 }, // GuildText
     });
 
     await handleCommand(interaction);
@@ -1788,7 +1789,7 @@ describe('handleCommand — autocomplete', () => {
     ]);
   });
 
-  it('target autocomplete adds the "Only voice users" option when sender IS in voice', async () => {
+  it('target autocomplete in a voice channel adds the "Only voice users" option', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1797,7 +1798,7 @@ describe('handleCommand — autocomplete', () => {
         ...makeInteraction().options,
         getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
-      member: { voice: { channelId: 'vc-123' } },
+      channel: { type: 2 }, // GuildVoice
     });
 
     await handleCommand(interaction);
@@ -1809,7 +1810,7 @@ describe('handleCommand — autocomplete', () => {
     ]);
   });
 
-  it('target autocomplete with null member (DM dispatch) falls back to non-voice choices', async () => {
+  it('target autocomplete in a stage-voice channel also offers the voice option', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1818,7 +1819,52 @@ describe('handleCommand — autocomplete', () => {
         ...makeInteraction().options,
         getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
-      member: null,
+      channel: { type: 13 }, // GuildStageVoice
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
+  });
+
+  it('target autocomplete with null channel falls back to non-voice choices', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: null,
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('target autocomplete does NOT offer voice option in a text channel even if sender is in voice elsewhere', async () => {
+    // Guard against regression back to the "sender-in-voice" gating
+    // we briefly had after PR #96: user in voice channel A invokes
+    // /qurl send from text channel B → voice option must stay hidden.
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 }, // GuildText
+      member: { voice: { channelId: 'vc-elsewhere' } },
     });
 
     await handleCommand(interaction);
@@ -1854,7 +1900,7 @@ describe('handleCommand — autocomplete', () => {
         ...makeInteraction().options,
         getFocused: jest.fn(() => ({ name: 'target', value: '' })),
       },
-      member: { voice: { channelId: null } },
+      channel: { type: 0 },
       respond: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
     });
 

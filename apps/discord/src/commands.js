@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -2463,21 +2464,26 @@ function getActiveCommands() {
 }
 
 // Target choices are surfaced via autocomplete (not static addChoices)
-// so the "voice" option only appears when the SENDER is currently
-// connected to a voice channel in this guild. Gating on the invoking
-// channel's type (voice vs text) would misalign with the backend at
-// handleSend → getVoiceChannelMembers, which resolves recipients off
-// the sender's voiceStates.cache regardless of where they ran the
-// command. Matching the gates here keeps "option visible ⇔ send will
-// succeed" — static choices can't express that context-dependence,
-// which is why they were wrong.
+// so the "voice" option only appears when the command is invoked FROM
+// a voice / stage-voice channel. Showing the voice option in text
+// channels — even when the invoking user happens to be connected to
+// voice elsewhere — was a persistent UX bug: users in text channels
+// don't expect a "voice users" target and the option reads as noise.
+// The backend (handleSend → getVoiceChannelMembers) still validates
+// the sender is in voice and returns a friendly error otherwise, so
+// channel-type gating here just hides the affordance in the wrong
+// context; it doesn't loosen any invariant.
 async function handleTargetAutocomplete(interaction) {
-  const inVoice = interaction.member?.voice?.channelId != null;
+  const channel = interaction.channel;
+  const isVoiceChannel = channel && (
+    channel.type === ChannelType.GuildVoice ||
+    channel.type === ChannelType.GuildStageVoice
+  );
   const choices = [
     { name: 'Everyone in this channel', value: 'channel' },
     { name: 'A specific user', value: 'user' },
   ];
-  if (inVoice) {
+  if (isVoiceChannel) {
     choices.push({ name: 'Only voice users', value: 'voice' });
   }
   // respond() can reject on the 3s autocomplete deadline, Unknown
