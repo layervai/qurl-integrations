@@ -110,7 +110,6 @@ jest.mock('discord.js', () => ({
     setURL: jest.fn().mockReturnThis(),
   })),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
-  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
   StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),

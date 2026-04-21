@@ -5,7 +5,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -2463,23 +2462,22 @@ function getActiveCommands() {
     : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
-// Target choices are surfaced via autocomplete (not static addChoices) so
-// the "voice" option only appears when the invoking channel is a voice
-// channel. Static choices can't depend on invocation context, so they
-// always leak "Users in my voice channel" into text channels where it
-// fails loudly at dispatch time ("You must be in a voice channel..."),
-// which is worse UX than not offering the option at all.
+// Target choices are surfaced via autocomplete (not static addChoices)
+// so the "voice" option only appears when the SENDER is currently
+// connected to a voice channel in this guild. Gating on the invoking
+// channel's type (voice vs text) would misalign with the backend at
+// handleSend → getVoiceChannelMembers, which resolves recipients off
+// the sender's voiceStates.cache regardless of where they ran the
+// command. Matching the gates here keeps "option visible ⇔ send will
+// succeed" — static choices can't express that context-dependence,
+// which is why they were wrong.
 async function handleTargetAutocomplete(interaction) {
-  const channel = interaction.channel;
-  const isVoice = channel && (
-    channel.type === ChannelType.GuildVoice ||
-    channel.type === ChannelType.GuildStageVoice
-  );
+  const inVoice = interaction.member?.voice?.channelId != null;
   const choices = [
     { name: 'Everyone in this channel', value: 'channel' },
     { name: 'A specific user', value: 'user' },
   ];
-  if (isVoice) {
+  if (inVoice) {
     choices.push({ name: 'Only voice users', value: 'voice' });
   }
   // respond() can reject on the 3s autocomplete deadline, Unknown
