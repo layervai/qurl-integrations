@@ -1558,6 +1558,55 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
 // --- /qurl revoke handler ---
 
+// Discord caps StringSelectMenuOption label at 100 chars and description
+// at 100 chars. Truncating to 99 + `…` leaves one for safety and keeps the
+// rendering predictable across Discord clients.
+// https://discord.com/developers/docs/interactions/message-components#select-menu-object-select-option-structure
+const SELECT_MENU_FIELD_MAX = 100;
+
+function truncate(s, max = SELECT_MENU_FIELD_MAX) {
+  if (!s) return '';
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+// Render the /qurl revoke dropdown label from a row returned by
+// db.getRecentSends. Prefers the human-identifiable bit (filename or
+// location name) over the previous abstract `${resource_type} to N users`.
+// Falls back gracefully for legacy rows that predate qurl_send_configs
+// being populated (LEFT JOIN produces null fields there).
+function formatRevokeLabel(s) {
+  const recipients = s.recipient_count === 1 ? '1 person' : `${s.recipient_count} people`;
+  const channelRef = s.target_type === 'user' ? 'DM' : (s.channel_id ? `#${s.channel_id}` : s.target_type);
+
+  if (s.resource_type === 'file') {
+    const name = s.attachment_name || 'file';
+    return truncate(`📎 ${name} — ${recipients} (${channelRef})`);
+  }
+  if (s.resource_type === 'location') {
+    const name = s.location_name || 'location';
+    return truncate(`📍 ${name} — ${recipients} (${channelRef})`);
+  }
+  // Unknown resource type — keep the old abstract shape so we never
+  // render a bare empty label.
+  return truncate(`${s.resource_type} — ${recipients} (${channelRef})`);
+}
+
+function formatRevokeDescription(s) {
+  const when = new Date(s.created_at).toLocaleString();
+  const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
+  const expiry = `expires ${s.expires_in}`;
+  const base = `${when} · ${delivery} · ${expiry}`;
+  // If there's space left, append a truncated message preview so users
+  // can disambiguate sends with the same filename but different notes.
+  if (s.personal_message) {
+    const remaining = SELECT_MENU_FIELD_MAX - base.length - 4; // ` · "…"` overhead
+    if (remaining > 8) {
+      return truncate(`${base} · "${truncate(s.personal_message, remaining)}"`);
+    }
+  }
+  return truncate(base);
+}
+
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
@@ -1577,8 +1626,8 @@ async function handleRevoke(interaction, apiKey) {
     .setCustomId(`qurl_revoke_select_${revokeNonce}`)
     .setPlaceholder('Select a send to revoke')
     .addOptions(recentSends.map(s => ({
-      label: `${s.resource_type} to ${s.recipient_count} users (${s.target_type})`,
-      description: `${new Date(s.created_at).toLocaleString()} | ${s.delivered_count} delivered | Expires: ${s.expires_in}`,
+      label: formatRevokeLabel(s),
+      description: formatRevokeDescription(s),
       value: s.send_id,
     })));
 
@@ -1620,6 +1669,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     if (r.status === 'fulfilled') success++;
     else logger.error('Failed to revoke QURL', { error: r.reason?.message });
   }
+
+  // Record the user's revocation intent so this send stops appearing in
+  // the /qurl revoke dropdown. We mark regardless of per-link success —
+  // partial failures are surfaced in the reply message ("Revoked X/Y"),
+  // and re-picking the same send from the dropdown wouldn't help anyway
+  // since the failed resource_ids are the same.
+  db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };

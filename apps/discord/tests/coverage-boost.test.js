@@ -157,6 +157,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
+  markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),

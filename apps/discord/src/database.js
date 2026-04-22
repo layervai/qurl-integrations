@@ -157,6 +157,10 @@ db.exec(`
 const SAFE_ALTERS = {
   attachment_content_type: 'ALTER TABLE qurl_send_configs ADD COLUMN attachment_content_type TEXT',
   attachment_url: 'ALTER TABLE qurl_send_configs ADD COLUMN attachment_url TEXT',
+  // Timestamp of when the sender hit /qurl revoke on this send. NULL ⇒ still
+  // revocable. Used to hide already-revoked sends from the /qurl revoke
+  // dropdown so users don't re-select a no-op and see "0/0 links revoked".
+  revoked_at: 'ALTER TABLE qurl_send_configs ADD COLUMN revoked_at TEXT',
 };
 for (const [col, sql] of Object.entries(SAFE_ALTERS)) {
   try {
@@ -698,17 +702,41 @@ const dbModule = {
   },
 
   getRecentSends(senderDiscordId, limit = 10) {
+    // LEFT JOIN on qurl_send_configs so we can:
+    // 1. Filter out already-revoked sends (`revoked_at IS NULL`)
+    // 2. Surface filename / location / message snippet in the /qurl revoke
+    //    dropdown so users can identify WHICH send they're about to revoke.
+    // LEFT (not INNER) JOIN because historical rows in qurl_sends may
+    // predate qurl_send_configs being populated — those still show up,
+    // just without the descriptive fields.
     const stmt = db.prepare(`
-      SELECT send_id, resource_type, target_type, channel_id, expires_in, created_at,
+      SELECT s.send_id, s.resource_type, s.target_type, s.channel_id, s.expires_in, s.created_at,
              COUNT(*) as recipient_count,
-             SUM(CASE WHEN dm_status = 'sent' THEN 1 ELSE 0 END) as delivered_count
-      FROM qurl_sends
-      WHERE sender_discord_id = ?
-      GROUP BY send_id
-      ORDER BY created_at DESC
+             SUM(CASE WHEN s.dm_status = 'sent' THEN 1 ELSE 0 END) as delivered_count,
+             c.attachment_name, c.location_name, c.personal_message
+      FROM qurl_sends s
+      LEFT JOIN qurl_send_configs c ON c.send_id = s.send_id
+      WHERE s.sender_discord_id = ?
+        AND (c.revoked_at IS NULL OR c.send_id IS NULL)
+      GROUP BY s.send_id
+      ORDER BY s.created_at DESC
       LIMIT ?
     `);
     return stmt.all(senderDiscordId, limit);
+  },
+
+  markSendRevoked(sendId, senderDiscordId) {
+    // Idempotent: hitting revoke twice on the same send is a no-op on the
+    // second call (revoked_at retains its earlier value). Also scoped by
+    // senderDiscordId so one user can't mark another user's send as
+    // revoked — defense-in-depth; the revoke handler is already gated on
+    // ownership upstream.
+    const stmt = db.prepare(`
+      UPDATE qurl_send_configs
+      SET revoked_at = CURRENT_TIMESTAMP
+      WHERE send_id = ? AND sender_discord_id = ? AND revoked_at IS NULL
+    `);
+    stmt.run(sendId, senderDiscordId);
   },
 
   saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType, attachmentUrl }) {
