@@ -22,6 +22,13 @@ interface ApplicationCommand {
 // stale /qurl list" instead of "something, somewhere, has /qurl list".
 type ScopedCommand = ApplicationCommand & { _scope: 'global' | 'guild' };
 
+// Coverage scope: this test inspects global-scoped command registrations
+// (visible in every guild the bot is in) plus guild-scoped registrations
+// for exactly one guild — `env.GUILD_ID`, the configured E2E test guild.
+// Stale subcommand leaks that survive only in a *different* production
+// guild are invisible to this test. Walking `GET /users/@me/guilds` to
+// spot-check more guilds is a legitimate follow-up if that failure class
+// becomes observed rather than theoretical.
 describe('Discord command registration (smoke)', () => {
   const env = loadEnv();
   // Shared across both assertions so we only hit the Discord API twice per
@@ -30,6 +37,16 @@ describe('Discord command registration (smoke)', () => {
   let registrations: ScopedCommand[] = [];
 
   beforeAll(async () => {
+    // Bot-identity sanity check. If BOT_TOKEN and BOT_CLIENT_ID drift —
+    // e.g. one secret rotated but not the other — every later assertion
+    // validates the *wrong* bot's command registrations and passes
+    // green. smoke.test.ts has the same guard on the login path;
+    // duplicating it here lets this file run in isolation
+    // (`--testPathPattern=discord-commands.smoke`) and still fail fast
+    // on misconfigured credentials.
+    const me = await api(env.BOT_TOKEN, 'GET', '/users/@me');
+    expect(me.id).toBe(env.BOT_CLIENT_ID);
+
     // Union of globally-registered and guild-scoped `/qurl` commands.
     // The bot registers `/qurl` globally in multi-tenant mode and
     // guild-scoped in OpenNHP mode (see commands.js's registerCommands).
