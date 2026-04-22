@@ -78,7 +78,21 @@ describe('Discord command registration (smoke)', () => {
           // Matching `: <status> ` (with space-separator on both sides) avoids
           // false-matching 403/404 that appear inside the response `${body}`
           // as an unrelated snowflake ID or Discord error code.
-          if (/:\s(403|404)\s/.test(err.message)) return [] as ApplicationCommand[];
+          // (Issue #104 tracks switching this to a structured `err.status`
+          // on the thrown error so the regex can go away.)
+          if (/:\s(403|404)\s/.test(err.message)) {
+            // Surface the fall-through in CI logs so a silently-dropped
+            // guild-scope coverage doesn't look identical to a bot that
+            // legitimately has no guild-scoped registrations. The Kevin
+            // incident was a guild-scoped ghost; we don't want this test
+            // to go green on a misconfigured GUILD_ID.
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[discord-commands.smoke] Guild-scoped fetch for GUILD_ID=${env.GUILD_ID} returned 403/404 — ` +
+              `bot may not be in this guild. Proceeding with global-only coverage.`,
+            );
+            return [] as ApplicationCommand[];
+          }
           throw err;
         }),
     ]);
