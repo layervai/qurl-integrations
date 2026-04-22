@@ -306,7 +306,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n }),
+    body: JSON.stringify({ expires_at: expiresAt, n, max_uses: 1 }),
     signal: AbortSignal.timeout(30000),
   });
 

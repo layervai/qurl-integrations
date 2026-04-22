@@ -729,6 +729,11 @@ describe('Connector client', () => {
       const body = JSON.parse(opts.body);
       expect(body.expires_at).toBe('2026-01-16T00:00:00.000Z');
       expect(body.n).toBe(2);
+      // Regression guard: bot MUST send max_uses: 1 so minted links are
+      // one-time regardless of upstream API-key-tier defaults. Dropping
+      // this field reopens the "links were reusable" bug the user
+      // reported (commit a293b42 on qurl-integrations-infra).
+      expect(body.max_uses).toBe(1);
       expect(result).toEqual(mockLinks);
     });
 
