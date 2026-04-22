@@ -167,14 +167,22 @@ describe('Google Maps: Iframe Embed', () => {
     });
 
     const html = await fetchViewerPage(upload.viewerUrl);
-    expect(html).toContain('Open in Google Maps');
-    // Anchored URL form: path segment with name + @lat,lng,17z suffix.
-    // The exact coord format uses %.7f precision on the server side.
-    expect(html).toMatch(/https:\/\/www\.google\.com\/maps\/place\/[^/]*\/@36\.1911000,44\.0094000,17z/);
-    // Must NOT fall back to the non-anchored search form for this input.
-    expect(html).not.toMatch(/https:\/\/www\.google\.com\/maps\/search\/[^"]*"[^>]*>\s*Open in Google Maps/);
+    // Anchored URL form: the NAME segment must pin the original query
+    // ("Erbil restaurant", with space as %20 or +) followed by the
+    // @lat,lng,17z anchor. Pinning the name — not just `[^/]*` — is
+    // what catches a regression that returns the right coords but the
+    // wrong place identity. `%.7f` formatting on the server side
+    // produces the trailing zeros.
+    expect(html).toMatch(
+      /https:\/\/www\.google\.com\/maps\/place\/Erbil(?:%20|\+)restaurant\/@36\.1911000,44\.0094000,17z/,
+    );
+    // Negative pin: /maps/search/Erbil must appear NOWHERE in the
+    // rendered HTML. It's only emitted by the pre-fix fallback path,
+    // so its presence is a direct regression signal. Looser than the
+    // prior href-structure-matching regex (which could be defeated by
+    // template reflows) but sharper at detecting the actual bug shape.
+    expect(html).not.toMatch(/\/maps\/search\/Erbil/);
   });
-
 
   test('google-map page has correct styling (map-container, bar)', async () => {
     const upload = await uploadMapLocation({
