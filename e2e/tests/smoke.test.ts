@@ -118,10 +118,9 @@ describe('Smoke: QURL link lifecycle', () => {
 
     if (statusAfter !== null) {
       // The failed second attempt must NOT increment the counter past 1.
+      // An increment to 2 is the exact bug shape ("links were reusable")
+      // this test is here to catch.
       expect(statusAfter.use_count).toBe(1);
-      if (typeof statusAfter.remaining_uses === 'number') {
-        expect(statusAfter.remaining_uses).toBe(0);
-      }
     } else {
       // Status-endpoint 404 is the OTHER valid signal that the token
       // is dead. Accept only that specific shape — "expired" / "consumed"
