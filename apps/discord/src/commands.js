@@ -1218,13 +1218,8 @@ async function handleSend(interaction, apiKey) {
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-          // When success < total, the delta is almost always links the recipient
-          // already opened — revoke is a no-op on used tokens by the QURL API's
-          // design. Surface that so users don't file phantom "partial failure"
-          // reports.
-          const usedNote = revoked.success < revoked.total ? ' Used links cannot be revoked.' : '';
           await interaction.editReply({
-            content: `Revoked ${revoked.success}/${revoked.total} links.${usedNote}`,
+            content: `Revoked ${revoked.success}/${revoked.total} links. Some links could not be revoked — they may have already been opened.`,
             components: [],
           }).catch(logIgnoredDiscordErr);
         } catch (err) {
@@ -1670,13 +1665,8 @@ async function handleRevoke(interaction, apiKey) {
     const sendId = selectInteraction.values[0];
     const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
-    // When success < total, the delta is almost always links the recipient
-    // already opened — revoke is a no-op on used tokens by the QURL API's
-    // design. Surface that so users don't file phantom "partial failure"
-    // reports.
-    const usedNote = revoked.success < revoked.total ? ' Used links cannot be revoked.' : '';
     await selectInteraction.update({
-      content: `Revoked ${revoked.success}/${revoked.total} links.${usedNote}`,
+      content: `Revoked ${revoked.success}/${revoked.total} links. Some links could not be revoked — they may have already been opened.`,
       components: [],
     });
   } catch {
