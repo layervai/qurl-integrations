@@ -106,8 +106,8 @@ jest.mock('discord.js', () => ({
     setFooter: jest.fn().mockReturnThis(), setTimestamp: jest.fn().mockReturnThis(),
     setURL: jest.fn().mockReturnThis(), setAuthor: jest.fn().mockReturnThis(),
   })),
-  ChannelType: { GuildText: 0 },
-  PermissionFlagsBits: {},
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
+  PermissionFlagsBits: { ViewChannel: 1024n },
 }));
 
 const discord = require('../src/discord');
@@ -337,18 +337,75 @@ describe('discord module', () => {
   });
 
   describe('getTextChannelMembers', () => {
-    it('filters sender and bots', () => {
-      const membersMap = new Map([
+    // Helper: turn a plain Map into something with .filter() returning an
+    // array that also has .map (matches discord.js Collection enough for
+    // these tests without pulling in the real class).
+    const asCollection = (map) => {
+      map.filter = (fn) => {
+        const r = []; for (const [, v] of map) if (fn(v)) r.push(v);
+        r.map = Array.prototype.map.bind(r); return r;
+      };
+      return map;
+    };
+
+    it('filters sender and bots on a text channel', () => {
+      const membersMap = asCollection(new Map([
         ['s1', { id: 's1', user: { bot: false } }],
         ['u2', { id: 'u2', user: { bot: false } }],
         ['b1', { id: 'b1', user: { bot: true } }],
-      ]);
-      membersMap.filter = (fn) => {
-        const r = []; for (const [k, v] of membersMap) if (fn(v)) r.push(v);
-        r.map = Array.prototype.map.bind(r); return r;
-      };
+      ]));
+      // Omit `type` so it falls through the isVoice branch — text channel
+      // semantics: channel.members is the viewer set by Discord's rules.
       const result = discord.getTextChannelMembers({ members: membersMap }, 's1');
       expect(result).toHaveLength(1);
+    });
+
+    it('on a voice channel, returns all guild members who CAN VIEW — not just voice-connected', () => {
+      // Regression for "target=channel from a voice channel only sent to
+      // voice-connected users." The bug was that channel.members on a
+      // voice channel returns currently-connected members only; we must
+      // instead compute viewers from guild.members.cache + permissionsFor.
+      const connected = asCollection(new Map([
+        ['u2', { id: 'u2', user: { bot: false } }],
+      ]));
+      const allGuildMembers = asCollection(new Map([
+        ['s1', { id: 's1', user: { bot: false } }],
+        ['u2', { id: 'u2', user: { bot: false } }], // connected
+        ['u3', { id: 'u3', user: { bot: false } }], // not connected but can view
+        ['b1', { id: 'b1', user: { bot: true } }],  // bot, filtered out
+        ['u4', { id: 'u4', user: { bot: false } }], // no perms — filtered out
+      ]));
+
+      const channel = {
+        type: 2, // GuildVoice
+        members: connected, // would return only u2 if we used this
+        guild: { members: { cache: allGuildMembers } },
+        permissionsFor: (m) => {
+          // Everyone can view except u4
+          if (m.id === 'u4') return { has: () => false };
+          return { has: () => true };
+        },
+      };
+
+      const result = discord.getTextChannelMembers(channel, 's1');
+      const ids = result.map(u => u.bot).length; // keep it explicit via count
+      expect(result).toHaveLength(2); // u2 + u3; sender s1 + bot b1 + no-perms u4 excluded
+      expect(ids).toBe(2);
+    });
+
+    it('on a stage-voice channel, also uses the guild-viewer path', () => {
+      const allGuildMembers = asCollection(new Map([
+        ['s1', { id: 's1', user: { bot: false } }],
+        ['u2', { id: 'u2', user: { bot: false } }],
+      ]));
+      const channel = {
+        type: 13, // GuildStageVoice
+        members: asCollection(new Map()), // zero voice-connected
+        guild: { members: { cache: allGuildMembers } },
+        permissionsFor: () => ({ has: () => true }),
+      };
+      const result = discord.getTextChannelMembers(channel, 's1');
+      expect(result).toHaveLength(1); // u2 only; sender excluded
     });
   });
 
