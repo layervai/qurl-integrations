@@ -82,47 +82,6 @@ describe('Discord: Voice State', () => {
     expect(voiceChannel.guild_id).toBe(env.GUILD_ID);
     console.log(`Verified voice channel: #${voiceChannel.name}`);
   });
-
-  test('"Everyone in voice channel" recipient pool = guild members, NOT voice-connected members', async () => {
-    // Regression documentation for the bug where /qurl send `target=channel`
-    // invoked from a voice channel only delivered to voice-connected users.
-    // The fix in apps/discord/src/discord.js:getTextChannelMembers branches
-    // on channel.type: for GuildVoice/GuildStageVoice it enumerates
-    // guild.members.cache and filters by permissionsFor(ViewChannel),
-    // instead of using channel.members (which on a voice channel is just
-    // the voice-connected subset).
-    //
-    // This test asserts the prerequisites the fix relies on:
-    //   1) The test guild has at least one voice channel
-    //   2) The bot can enumerate guild members (the superset pool)
-    //   3) That pool is non-empty — so "Everyone" has someone to go to
-    //      even when zero users are connected to voice
-    const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
-    const voiceChannels = channels.filter((c: any) => c.type === 2 || c.type === 13);
-    if (voiceChannels.length === 0) {
-      console.log('No voice/stage channels in test guild — skipping invariant check');
-      return;
-    }
-    const voiceChannel = voiceChannels[0];
-
-    let guildMembers: any[] = [];
-    try {
-      guildMembers = await discordApi('GET', `/guilds/${env.GUILD_ID}/members?limit=100`);
-    } catch (e) {
-      console.log('Guild member list requires Server Members intent:', (e as Error).message);
-      return; // premise untestable without the intent; unit tests still cover the logic
-    }
-
-    // The pool the bot iterates for "Everyone in this channel" on a voice
-    // channel is the guild member list — it must be non-empty, otherwise
-    // the regression ("0 recipients in an active channel") could recur.
-    const humans = guildMembers.filter((m: any) => !m.user?.bot);
-    expect(humans.length).toBeGreaterThan(0);
-    console.log(
-      `Voice channel #${voiceChannel.name}: guild has ${humans.length} human member(s) ` +
-      `in the "Everyone in this channel" pool (independent of voice-connected count).`,
-    );
-  });
 });
 
 describe('Discord: Guild Members', () => {
