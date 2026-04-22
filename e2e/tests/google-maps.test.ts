@@ -150,6 +150,32 @@ describe('Google Maps: Iframe Embed', () => {
     expect(html).toContain('https://www.google.com/maps/search/');
   });
 
+  test('"Open in Google Maps" URL is anchored to coords when query + lat/lng both supplied', async () => {
+    // Regression guard for the "Erbil restaurant" bug: when the bot
+    // uploads a named place that also carries lat/lng from Places
+    // autocomplete, the mapsURL (shown under "Open in Google Maps")
+    // must be a /maps/place/<name>/@<lat>,<lng>,17z form — NOT
+    // /maps/search/<name> — otherwise Google resolves the name on
+    // the recipient's side and opens a namesake near THEIR
+    // geolocation instead of the place the sender picked. Fixed in
+    // qurl-integrations-infra#155.
+    const upload = await uploadMapLocation({
+      type: 'google-map',
+      query: 'Erbil restaurant',
+      lat: 36.1911,
+      lng: 44.0094,
+    });
+
+    const html = await fetchViewerPage(upload.viewerUrl);
+    expect(html).toContain('Open in Google Maps');
+    // Anchored URL form: path segment with name + @lat,lng,17z suffix.
+    // The exact coord format uses %.7f precision on the server side.
+    expect(html).toMatch(/https:\/\/www\.google\.com\/maps\/place\/[^/]*\/@36\.1911000,44\.0094000,17z/);
+    // Must NOT fall back to the non-anchored search form for this input.
+    expect(html).not.toMatch(/https:\/\/www\.google\.com\/maps\/search\/[^"]*"[^>]*>\s*Open in Google Maps/);
+  });
+
+
   test('google-map page has correct styling (map-container, bar)', async () => {
     const upload = await uploadMapLocation({
       type: 'google-map',
