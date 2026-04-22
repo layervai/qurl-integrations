@@ -729,11 +729,14 @@ describe('Connector client', () => {
       const body = JSON.parse(opts.body);
       expect(body.expires_at).toBe('2026-01-16T00:00:00.000Z');
       expect(body.n).toBe(2);
-      // Regression guard: bot MUST send max_uses: 1 so minted links are
-      // one-time regardless of upstream API-key-tier defaults. Dropping
-      // this field reopens the "links were reusable" bug the user
-      // reported (commit a293b42 on qurl-integrations-infra).
-      expect(body.max_uses).toBe(1);
+      // Regression guard: bot MUST send one_time_use: true so each minted
+      // link is single-use. Proved correct by the pre-Node Python bot at
+      // qurl-bot-discord/services/mint_link_client.py:46 which used this
+      // exact field and produced genuinely one-time links. PR #45 dropped
+      // the field during the Node rewrite; that's the "links were reusable"
+      // regression the user reported. Companion infra PR #157 plumbs this
+      // field through the connector to the upstream QURL API.
+      expect(body.one_time_use).toBe(true);
       expect(result).toEqual(mockLinks);
     });
 
