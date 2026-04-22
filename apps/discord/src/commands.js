@@ -1222,7 +1222,7 @@ async function handleSend(interaction, apiKey) {
           // already opened — revoke is a no-op on used tokens by the QURL API's
           // design. Surface that so users don't file phantom "partial failure"
           // reports.
-          const usedNote = revoked.success < revoked.total ? '\nUsed links cannot be revoked.' : '';
+          const usedNote = revoked.success < revoked.total ? ' Used links cannot be revoked.' : '';
           await interaction.editReply({
             content: `Revoked ${revoked.success}/${revoked.total} links.${usedNote}`,
             components: [],
@@ -1674,7 +1674,7 @@ async function handleRevoke(interaction, apiKey) {
     // already opened — revoke is a no-op on used tokens by the QURL API's
     // design. Surface that so users don't file phantom "partial failure"
     // reports.
-    const usedNote = revoked.success < revoked.total ? '\nUsed links cannot be revoked.' : '';
+    const usedNote = revoked.success < revoked.total ? ' Used links cannot be revoked.' : '';
     await selectInteraction.update({
       content: `Revoked ${revoked.success}/${revoked.total} links.${usedNote}`,
       components: [],
