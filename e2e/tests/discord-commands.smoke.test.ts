@@ -117,14 +117,15 @@ describe('Discord command registration (smoke)', () => {
       const subcommandNames = (qurl.options ?? [])
         .filter((o) => o.type === SUBCOMMAND_OPTION_TYPE)
         .map((o) => o.name);
-      // Scope the assertion per-registration so the failure header
-      // names WHICH scope leaked a stale subcommand (global vs guild).
-      expect({ scope: qurl._scope, subcommandNames }).toEqual(
-        expect.objectContaining({
-          scope: qurl._scope,
-          subcommandNames: expect.not.arrayContaining(['list', 'clear']),
-        }),
-      );
+      // Assert each ghost name individually. `expect.not.arrayContaining(subset)`
+      // is the negation of "contains ALL of subset", so a single-ghost
+      // leak (only `list` or only `clear`) would slip past a combined
+      // `.not.arrayContaining(['list', 'clear'])`. Individual `.not.toContain`
+      // is unambiguous per-name. Scope context is preserved by the
+      // positive-set test's failure header, which fires first on any
+      // regression that also changes the full set.
+      expect(subcommandNames).not.toContain('list');
+      expect(subcommandNames).not.toContain('clear');
     }
   });
 });
