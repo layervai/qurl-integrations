@@ -290,6 +290,12 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
 
 /**
  * Mint one-time links for an uploaded resource via the connector.
+ *
+ * `one_time_use: true` is required — upstream default on some key
+ * tiers is unlimited, so omitting it produces reusable links. The
+ * field applies PER minted link: `n` recipients get `n` independent
+ * one-time tokens, so one recipient opening their link doesn't
+ * invalidate anyone else's.
  */
 async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
@@ -306,7 +312,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n }),
+    body: JSON.stringify({ expires_at: expiresAt, n, one_time_use: true }),
     signal: AbortSignal.timeout(30000),
   });
 

@@ -80,6 +80,56 @@ describe('Smoke: QURL link lifecycle', () => {
       console.log(`Status check: ${(e as Error).message} (may not be tracked server-side for SPA links)`);
     }
   });
+
+  test('second access of the same one-time link FAILS (use count consumed)', async () => {
+    // Regression guard for the reusable-links bug. Depends on the two
+    // prior tests setting qurlLink + qurlId — guard explicitly so a
+    // jest rerandomize or reordering doesn't silently no-op.
+    expect(qurlLink).toBeDefined();
+    expect(qurlId).toBeDefined();
+
+    // First-access must have already happened in the prior test and
+    // pushed use_count to exactly 1. Pin that baseline here so a broken
+    // system where the counter never increments would fail this test
+    // (the earlier `>= 1` assertion would pass at 0 too).
+    const baseline = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    expect(baseline.use_count).toBe(1);
+
+    const res2 = await qurl.accessLink(qurlLink);
+    console.log(`Second access: ${res2.status} -> ${res2.finalUrl}`);
+
+    // Two independent paths for "this token is dead":
+    //   (a) status endpoint reports use_count still === 1 after the
+    //       second attempt — the failed resolution MUST NOT increment
+    //       past max_uses. An increment to 2 is the exact bug shape.
+    //   (b) status endpoint returns 404 (some resource types return
+    //       this once a one-time QURL is fully consumed).
+    // Either proves the enforcement worked; we accept whichever path
+    // the API takes but tighten the pass conditions on both.
+    let statusAfter: Awaited<ReturnType<typeof qurl.getLinkStatus>> | null = null;
+    let statusError: Error | null = null;
+    try {
+      statusAfter = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+      console.log(`Link status after 2nd access:`, JSON.stringify(statusAfter));
+    } catch (e) {
+      statusError = e as Error;
+      console.log(`Link status after 2nd access (threw): ${statusError.message}`);
+    }
+
+    if (statusAfter !== null) {
+      // The failed second attempt must NOT increment the counter past 1.
+      expect(statusAfter.use_count).toBe(1);
+      if (typeof statusAfter.remaining_uses === 'number') {
+        expect(statusAfter.remaining_uses).toBe(0);
+      }
+    } else {
+      // Status-endpoint 404 is the OTHER valid signal that the token
+      // is dead. Accept only that specific shape — "expired" / "consumed"
+      // substrings were too permissive (could match unrelated errors).
+      expect(statusError).not.toBeNull();
+      expect(statusError!.message).toMatch(/\b404\b|\bnot found\b/i);
+    }
+  });
 });
 
 describe('Smoke: Revocation', () => {

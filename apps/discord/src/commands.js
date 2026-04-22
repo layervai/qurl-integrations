@@ -1219,7 +1219,7 @@ async function handleSend(interaction, apiKey) {
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
           await interaction.editReply({
-            content: `Revoked ${revoked.success}/${revoked.total} links.`,
+            content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
             components: [],
           }).catch(logIgnoredDiscordErr);
         } catch (err) {
@@ -1666,7 +1666,7 @@ async function handleRevoke(interaction, apiKey) {
     const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
     await selectInteraction.update({
-      content: `Revoked ${revoked.success}/${revoked.total} links.`,
+      content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
       components: [],
     });
   } catch {
