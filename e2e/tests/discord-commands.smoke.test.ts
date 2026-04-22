@@ -1,5 +1,5 @@
 import { loadEnv } from '../helpers/env';
-import { api } from '../helpers/discord-api';
+import { api, getMe } from '../helpers/discord-api';
 
 // Discord application-command option type for a subcommand.
 // https://discord.com/developers/docs/interactions/application-commands#application-command-object-application-command-option-type
@@ -44,7 +44,7 @@ describe('Discord command registration (smoke)', () => {
     // duplicating it here lets this file run in isolation
     // (`--testPathPattern=discord-commands.smoke`) and still fail fast
     // on misconfigured credentials.
-    const me = await api(env.BOT_TOKEN, 'GET', '/users/@me');
+    const me = await getMe(env.BOT_TOKEN);
     expect(me.id).toBe(env.BOT_CLIENT_ID);
 
     // Union of globally-registered and guild-scoped `/qurl` commands.
