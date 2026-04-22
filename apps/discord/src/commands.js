@@ -2254,7 +2254,7 @@ const commands = [
       )
       .addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if QURL is configured for this server')
+          .setDescription('Check if QURL is configured (admin only)')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
@@ -2410,7 +2410,7 @@ const commands = [
           content: '**Qurl Bot — Help**\n\n' +
             '**Getting started:**\n' +
             '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if QURL is configured\n\n' +
+            '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
             '**Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
