@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -812,13 +812,49 @@ function getVoiceChannelMembers(guildObj, senderUserId) {
   };
 }
 
-// Get non-bot members who can view a text channel (excludes the sender)
+// Get non-bot members who can view a channel (excludes the sender).
+//
+// Voice/stage-voice channels have a gotcha: in discord.js, `channel.members`
+// returns members CURRENTLY CONNECTED to voice — NOT everyone who can see
+// the channel. For text channels `channel.members` is computed off guild
+// members + ViewChannel permission, which is the semantic we want for
+// "Everyone in this channel." So for voice/stage-voice we compute the
+// viewer set explicitly from guild.members.cache.
+//
+// Callers rely on the sender having already done `guild.members.fetch()`
+// so the cache is warm; see the `target === 'channel'` branch in
+// handleSend (commands.js) for the fetch + call site pairing.
 function getTextChannelMembers(channel, senderUserId) {
-  const members = channel.members
+  const isVoice = channel.type === ChannelType.GuildVoice ||
+                  channel.type === ChannelType.GuildStageVoice;
+
+  let source;
+  if (isVoice) {
+    // Voice path: enumerate guild viewers via permissionsFor. If the
+    // channel is voice-typed but `.guild` is somehow missing (partial
+    // cache / unusual gateway state), do NOT silently fall back to
+    // `channel.members` — that's the voice-connected-only set which
+    // is exactly the bug this helper exists to avoid. Return empty and
+    // log so a caller's "no recipients" branch triggers loudly instead
+    // of shipping to a wrong subset.
+    if (!channel.guild) {
+      logger.warn('getTextChannelMembers: voice channel missing .guild; returning empty', {
+        channelId: channel.id, channelType: channel.type,
+      });
+      return [];
+    }
+    source = channel.guild.members.cache.filter(m => {
+      const perms = channel.permissionsFor(m);
+      return perms && perms.has(PermissionFlagsBits.ViewChannel);
+    });
+  } else {
+    // Text channel: `channel.members` is already the viewer set.
+    source = channel.members;
+  }
+
+  return source
     .filter(m => m.id !== senderUserId && !m.user.bot)
     .map(m => m.user);
-
-  return members;
 }
 
 // Graceful shutdown — awaits client.destroy() so the caller knows the
