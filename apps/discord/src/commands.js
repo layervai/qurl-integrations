@@ -602,8 +602,8 @@ async function handleSend(interaction, apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry') || '24h';
-  const rawMessage = interaction.options.getString('message');
+  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
+  const rawMessage = interaction.options.getString('message_optional');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
   const commandAttachment = interaction.options.getAttachment('file_optional');
 
@@ -1558,6 +1558,63 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
 // --- /qurl revoke handler ---
 
+// Discord caps StringSelectMenuOption label at 100 chars and description
+// at 100 chars. Truncating to 99 + `…` leaves one for safety and keeps the
+// rendering predictable across Discord clients.
+// https://discord.com/developers/docs/interactions/message-components#select-menu-object-select-option-structure
+const SELECT_MENU_FIELD_MAX = 100;
+
+function truncate(s, max = SELECT_MENU_FIELD_MAX) {
+  if (!s) return '';
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+// Render the /qurl revoke dropdown label from a row returned by
+// db.getRecentSends. Prefers the human-identifiable bit (filename or
+// location name) over the previous abstract `${resource_type} to N users`.
+// Falls back gracefully for legacy rows that predate qurl_send_configs
+// being populated (LEFT JOIN produces null fields there).
+//
+// `channelName` is passed in by the caller (handleRevoke) from
+// `interaction.guild?.channels.cache.get(s.channel_id)?.name`. Discord
+// mention syntax (`<#id>`) does NOT render inside StringSelectMenu
+// option labels — passing the name explicitly is the only way to avoid
+// showing a raw snowflake to the user.
+function formatRevokeLabel(s, channelName) {
+  const recipients = s.recipient_count === 1 ? '1 person' : `${s.recipient_count} people`;
+  const channelRef = s.target_type === 'user'
+    ? 'DM'
+    : (channelName ? `#${channelName}` : `${s.target_type} channel`);
+
+  if (s.resource_type === 'file') {
+    const name = s.attachment_name || 'file';
+    return truncate(`📎 ${name} — ${recipients} (${channelRef})`);
+  }
+  if (s.resource_type === 'location') {
+    const name = s.location_name || 'location';
+    return truncate(`📍 ${name} — ${recipients} (${channelRef})`);
+  }
+  // Unknown resource type — keep the old abstract shape so we never
+  // render a bare empty label.
+  return truncate(`${s.resource_type} — ${recipients} (${channelRef})`);
+}
+
+function formatRevokeDescription(s) {
+  const when = new Date(s.created_at).toLocaleString();
+  const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
+  const expiry = `expires ${s.expires_in}`;
+  const base = `${when} · ${delivery} · ${expiry}`;
+  // If there's space left, append a truncated message preview so users
+  // can disambiguate sends with the same filename but different notes.
+  if (s.personal_message) {
+    const remaining = SELECT_MENU_FIELD_MAX - base.length - 4; // ` · "…"` overhead
+    if (remaining > 8) {
+      return truncate(`${base} · "${truncate(s.personal_message, remaining)}"`);
+    }
+  }
+  return truncate(base);
+}
+
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
@@ -1576,11 +1633,21 @@ async function handleRevoke(interaction, apiKey) {
   const select = new StringSelectMenuBuilder()
     .setCustomId(`qurl_revoke_select_${revokeNonce}`)
     .setPlaceholder('Select a send to revoke')
-    .addOptions(recentSends.map(s => ({
-      label: `${s.resource_type} to ${s.recipient_count} users (${s.target_type})`,
-      description: `${new Date(s.created_at).toLocaleString()} | ${s.delivered_count} delivered | Expires: ${s.expires_in}`,
-      value: s.send_id,
-    })));
+    .addOptions(recentSends.map(s => {
+      // StringSelectMenu labels are plain text — <#id> mention syntax
+      // does NOT resolve. Look up the channel name from the guild cache
+      // so users see `#general` instead of `#1123456789012345678`.
+      // Cache hit is cheap; if cache is cold (DM context, bot just
+      // restarted) the formatter falls through to a generic label.
+      const channelName = s.channel_id
+        ? interaction.guild?.channels.cache.get(s.channel_id)?.name ?? null
+        : null;
+      return {
+        label: formatRevokeLabel(s, channelName),
+        description: formatRevokeDescription(s),
+        value: s.send_id,
+      };
+    }));
 
   const row = new ActionRowBuilder().addComponents(select);
   const response = await interaction.editReply({
@@ -1620,6 +1687,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     if (r.status === 'fulfilled') success++;
     else logger.error('Failed to revoke QURL', { error: r.reason?.message });
   }
+
+  // Record the user's revocation intent so this send stops appearing in
+  // the /qurl revoke dropdown. We mark regardless of per-link success —
+  // partial failures are surfaced in the reply message ("Revoked X/Y"),
+  // and re-picking the same send from the dropdown wouldn't help anyway
+  // since the failed resource_ids are the same.
+  db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
@@ -2226,7 +2300,7 @@ const commands = [
               .setRequired(true)
               .setAutocomplete(true))
           .addStringOption(opt =>
-            opt.setName('expiry')
+            opt.setName('expiry_optional')
               .setDescription('Link expiry (default: 24h)')
               .setRequired(false)
               .addChoices(
@@ -2241,7 +2315,7 @@ const commands = [
               .setDescription('Optional — attach a file here if sharing a file')
               .setRequired(false))
           .addStringOption(opt =>
-            opt.setName('message')
+            opt.setName('message_optional')
               .setDescription('Optional note sent alongside the link')
               .setRequired(false))
       )
@@ -2413,15 +2487,21 @@ const commands = [
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
-            '**Getting started:**\n' +
+            '**Setting up (for Admins):**\n' +
             '  `/qurl setup` — configure your API key (admin only)\n' +
             '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
-            '**Share resources securely via one-time links:**\n' +
+            '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
-            '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
+            // Leading tab on "1." keeps Discord's markdown parser from
+            // treating it as the start of an ordered list (which would
+            // renumber it relative to the subsequent lines and visually
+            // misalign "1." with "2.", "3.", "4."). The tab indent now
+            // matches the two-space indent below, but bypasses the list
+            // auto-formatter.
+            '\t1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
