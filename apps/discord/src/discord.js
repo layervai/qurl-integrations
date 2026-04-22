@@ -828,12 +828,29 @@ function getTextChannelMembers(channel, senderUserId) {
   const isVoice = channel.type === ChannelType.GuildVoice ||
                   channel.type === ChannelType.GuildStageVoice;
 
-  const source = (isVoice && channel.guild)
-    ? channel.guild.members.cache.filter(m => {
-        const perms = channel.permissionsFor(m);
-        return perms && perms.has(PermissionFlagsBits.ViewChannel);
-      })
-    : channel.members;
+  let source;
+  if (isVoice) {
+    // Voice path: enumerate guild viewers via permissionsFor. If the
+    // channel is voice-typed but `.guild` is somehow missing (partial
+    // cache / unusual gateway state), do NOT silently fall back to
+    // `channel.members` — that's the voice-connected-only set which
+    // is exactly the bug this helper exists to avoid. Return empty and
+    // log so a caller's "no recipients" branch triggers loudly instead
+    // of shipping to a wrong subset.
+    if (!channel.guild) {
+      logger.warn('getTextChannelMembers: voice channel missing .guild; returning empty', {
+        channelId: channel.id, channelType: channel.type,
+      });
+      return [];
+    }
+    source = channel.guild.members.cache.filter(m => {
+      const perms = channel.permissionsFor(m);
+      return perms && perms.has(PermissionFlagsBits.ViewChannel);
+    });
+  } else {
+    // Text channel: `channel.members` is already the viewer set.
+    source = channel.members;
+  }
 
   return source
     .filter(m => m.id !== senderUserId && !m.user.bot)

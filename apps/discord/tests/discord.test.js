@@ -366,14 +366,14 @@ describe('discord module', () => {
       // voice channel returns currently-connected members only; we must
       // instead compute viewers from guild.members.cache + permissionsFor.
       const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { bot: false } }],
+        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
       ]));
       const allGuildMembers = asCollection(new Map([
-        ['s1', { id: 's1', user: { bot: false } }],
-        ['u2', { id: 'u2', user: { bot: false } }], // connected
-        ['u3', { id: 'u3', user: { bot: false } }], // not connected but can view
-        ['b1', { id: 'b1', user: { bot: true } }],  // bot, filtered out
-        ['u4', { id: 'u4', user: { bot: false } }], // no perms — filtered out
+        ['s1', { id: 's1', user: { id: 's1', bot: false } }],
+        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }], // connected
+        ['u3', { id: 'u3', user: { id: 'u3', bot: false } }], // not connected but can view
+        ['b1', { id: 'b1', user: { id: 'b1', bot: true } }],  // bot, filtered out
+        ['u4', { id: 'u4', user: { id: 'u4', bot: false } }], // no perms — filtered out
       ]));
 
       const channel = {
@@ -388,15 +388,16 @@ describe('discord module', () => {
       };
 
       const result = discord.getTextChannelMembers(channel, 's1');
-      const ids = result.map(u => u.bot).length; // keep it explicit via count
-      expect(result).toHaveLength(2); // u2 + u3; sender s1 + bot b1 + no-perms u4 excluded
-      expect(ids).toBe(2);
+      // Pin identity, not just count — a swap of u2/u4 or inclusion of a
+      // bot would also give length 2 but wrong users.
+      const returnedIds = result.map(u => u.id).sort();
+      expect(returnedIds).toEqual(['u2', 'u3']);
     });
 
     it('on a stage-voice channel, also uses the guild-viewer path', () => {
       const allGuildMembers = asCollection(new Map([
-        ['s1', { id: 's1', user: { bot: false } }],
-        ['u2', { id: 'u2', user: { bot: false } }],
+        ['s1', { id: 's1', user: { id: 's1', bot: false } }],
+        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
       ]));
       const channel = {
         type: 13, // GuildStageVoice
@@ -405,7 +406,41 @@ describe('discord module', () => {
         permissionsFor: () => ({ has: () => true }),
       };
       const result = discord.getTextChannelMembers(channel, 's1');
-      expect(result).toHaveLength(1); // u2 only; sender excluded
+      expect(result.map(u => u.id)).toEqual(['u2']); // sender excluded
+    });
+
+    it('voice channel with missing .guild returns empty (does NOT fall back to broken channel.members)', () => {
+      // Defense-in-depth: if a voice-typed channel somehow lacks .guild
+      // (partial cache / unusual gateway state), the helper must not
+      // silently fall through to channel.members — that's the
+      // voice-connected-only set this function exists to avoid.
+      const connected = asCollection(new Map([
+        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
+      ]));
+      const channel = {
+        type: 2,           // GuildVoice
+        members: connected, // would be returned if the fallback kicked in
+        guild: undefined,
+      };
+      const result = discord.getTextChannelMembers(channel, 's1');
+      expect(result).toEqual([]);
+    });
+
+    it('voice channel — members with null permissionsFor are excluded cleanly', () => {
+      // permissionsFor can return null for partially-cached / unresolvable
+      // members. The filter must not throw and must not include such users.
+      const allGuildMembers = asCollection(new Map([
+        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
+        ['u3', { id: 'u3', user: { id: 'u3', bot: false } }], // null perms
+      ]));
+      const channel = {
+        type: 2,
+        members: asCollection(new Map()),
+        guild: { members: { cache: allGuildMembers } },
+        permissionsFor: (m) => (m.id === 'u3' ? null : { has: () => true }),
+      };
+      const result = discord.getTextChannelMembers(channel, 's1');
+      expect(result.map(u => u.id)).toEqual(['u2']);
     });
   });
 
