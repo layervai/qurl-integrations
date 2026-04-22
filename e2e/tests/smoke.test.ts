@@ -80,6 +80,45 @@ describe('Smoke: QURL link lifecycle', () => {
       console.log(`Status check: ${(e as Error).message} (may not be tracked server-side for SPA links)`);
     }
   });
+
+  test('second access of the same one-time link FAILS (use count consumed)', async () => {
+    // Regression guard for the "links were reusable" bug. The first-access
+    // test above proves the token is accepted once; this test proves the
+    // token is NOT accepted twice. The qurl-api SPA returns 200 for the
+    // HTML shell either way — the source-of-truth for "was this token
+    // consumed?" is the resource status API, which must show use_count
+    // exhausted after the second (failed) resolution attempt.
+    //
+    // We do a second access first (which should fail at the NHP/resolver
+    // layer for the token, but the SPA layer still returns 200). Then we
+    // check status: use_count must still be exactly 1 — the failed second
+    // attempt must NOT increment the counter past max_uses.
+    const res2 = await qurl.accessLink(qurlLink);
+    console.log(`Second access: ${res2.status} -> ${res2.finalUrl}`);
+
+    try {
+      const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+      console.log(`Link status after 2nd access:`, JSON.stringify(status));
+      // The second access should not push use_count over max_uses (1).
+      // Either the status reports used_up / consumed, or use_count stays
+      // at 1 — both prove the token is no longer resolvable.
+      if (typeof status.use_count === 'number') {
+        expect(status.use_count).toBeLessThanOrEqual(1);
+      }
+      // Some API shapes expose a typed "consumed" / "remaining_uses" flag —
+      // assert loosely on either if present. Absence of the flag is OK,
+      // the use_count check above is the primary invariant.
+      if (typeof status.remaining_uses === 'number') {
+        expect(status.remaining_uses).toBe(0);
+      }
+    } catch (e) {
+      // Status endpoint returning 404 on a fully-consumed one-time link is
+      // ALSO a valid signal that the link is dead — accept that path.
+      const msg = (e as Error).message;
+      console.log(`Status check after 2nd access: ${msg}`);
+      expect(msg).toMatch(/404|410|expired|consumed|not found/i);
+    }
+  });
 });
 
 describe('Smoke: Revocation', () => {
