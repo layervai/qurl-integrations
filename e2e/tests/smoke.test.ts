@@ -82,41 +82,52 @@ describe('Smoke: QURL link lifecycle', () => {
   });
 
   test('second access of the same one-time link FAILS (use count consumed)', async () => {
-    // Regression guard for the "links were reusable" bug. The first-access
-    // test above proves the token is accepted once; this test proves the
-    // token is NOT accepted twice. The qurl-api SPA returns 200 for the
-    // HTML shell either way — the source-of-truth for "was this token
-    // consumed?" is the resource status API, which must show use_count
-    // exhausted after the second (failed) resolution attempt.
-    //
-    // We do a second access first (which should fail at the NHP/resolver
-    // layer for the token, but the SPA layer still returns 200). Then we
-    // check status: use_count must still be exactly 1 — the failed second
-    // attempt must NOT increment the counter past max_uses.
+    // Regression guard for the reusable-links bug. Depends on the two
+    // prior tests setting qurlLink + qurlId — guard explicitly so a
+    // jest rerandomize or reordering doesn't silently no-op.
+    expect(qurlLink).toBeDefined();
+    expect(qurlId).toBeDefined();
+
+    // First-access must have already happened in the prior test and
+    // pushed use_count to exactly 1. Pin that baseline here so a broken
+    // system where the counter never increments would fail this test
+    // (the earlier `>= 1` assertion would pass at 0 too).
+    const baseline = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+    expect(baseline.use_count).toBe(1);
+
     const res2 = await qurl.accessLink(qurlLink);
     console.log(`Second access: ${res2.status} -> ${res2.finalUrl}`);
 
+    // Two independent paths for "this token is dead":
+    //   (a) status endpoint reports use_count still === 1 after the
+    //       second attempt — the failed resolution MUST NOT increment
+    //       past max_uses. An increment to 2 is the exact bug shape.
+    //   (b) status endpoint returns 404 (some resource types return
+    //       this once a one-time QURL is fully consumed).
+    // Either proves the enforcement worked; we accept whichever path
+    // the API takes but tighten the pass conditions on both.
+    let statusAfter: Awaited<ReturnType<typeof qurl.getLinkStatus>> | null = null;
+    let statusError: Error | null = null;
     try {
-      const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
-      console.log(`Link status after 2nd access:`, JSON.stringify(status));
-      // The second access should not push use_count over max_uses (1).
-      // Either the status reports used_up / consumed, or use_count stays
-      // at 1 — both prove the token is no longer resolvable.
-      if (typeof status.use_count === 'number') {
-        expect(status.use_count).toBeLessThanOrEqual(1);
-      }
-      // Some API shapes expose a typed "consumed" / "remaining_uses" flag —
-      // assert loosely on either if present. Absence of the flag is OK,
-      // the use_count check above is the primary invariant.
-      if (typeof status.remaining_uses === 'number') {
-        expect(status.remaining_uses).toBe(0);
-      }
+      statusAfter = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);
+      console.log(`Link status after 2nd access:`, JSON.stringify(statusAfter));
     } catch (e) {
-      // Status endpoint returning 404 on a fully-consumed one-time link is
-      // ALSO a valid signal that the link is dead — accept that path.
-      const msg = (e as Error).message;
-      console.log(`Status check after 2nd access: ${msg}`);
-      expect(msg).toMatch(/404|410|expired|consumed|not found/i);
+      statusError = e as Error;
+      console.log(`Link status after 2nd access (threw): ${statusError.message}`);
+    }
+
+    if (statusAfter !== null) {
+      // The failed second attempt must NOT increment the counter past 1.
+      expect(statusAfter.use_count).toBe(1);
+      if (typeof statusAfter.remaining_uses === 'number') {
+        expect(statusAfter.remaining_uses).toBe(0);
+      }
+    } else {
+      // Status-endpoint 404 is the OTHER valid signal that the token
+      // is dead. Accept only that specific shape — "expired" / "consumed"
+      // substrings were too permissive (could match unrelated errors).
+      expect(statusError).not.toBeNull();
+      expect(statusError!.message).toMatch(/\b404\b|\bnot found\b/i);
     }
   });
 });
