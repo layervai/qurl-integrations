@@ -703,12 +703,15 @@ const dbModule = {
 
   getRecentSends(senderDiscordId, limit = 10) {
     // LEFT JOIN on qurl_send_configs so we can:
-    // 1. Filter out already-revoked sends (`revoked_at IS NULL`)
+    // 1. Filter out already-revoked sends. With LEFT JOIN, rows that
+    //    have no config match (legacy sends predating qurl_send_configs)
+    //    get c.revoked_at = NULL and are preserved — so the single
+    //    `c.revoked_at IS NULL` check covers BOTH "unrevoked" AND "no
+    //    config row at all". markSendRevoked below backfills a minimal
+    //    config row when called against a legacy send, so the filter
+    //    stays honest across both cases.
     // 2. Surface filename / location / message snippet in the /qurl revoke
     //    dropdown so users can identify WHICH send they're about to revoke.
-    // LEFT (not INNER) JOIN because historical rows in qurl_sends may
-    // predate qurl_send_configs being populated — those still show up,
-    // just without the descriptive fields.
     const stmt = db.prepare(`
       SELECT s.send_id, s.resource_type, s.target_type, s.channel_id, s.expires_in, s.created_at,
              COUNT(*) as recipient_count,
@@ -717,7 +720,7 @@ const dbModule = {
       FROM qurl_sends s
       LEFT JOIN qurl_send_configs c ON c.send_id = s.send_id
       WHERE s.sender_discord_id = ?
-        AND (c.revoked_at IS NULL OR c.send_id IS NULL)
+        AND c.revoked_at IS NULL
       GROUP BY s.send_id
       ORDER BY s.created_at DESC
       LIMIT ?
@@ -726,17 +729,43 @@ const dbModule = {
   },
 
   markSendRevoked(sendId, senderDiscordId) {
-    // Idempotent: hitting revoke twice on the same send is a no-op on the
-    // second call (revoked_at retains its earlier value). Also scoped by
-    // senderDiscordId so one user can't mark another user's send as
-    // revoked — defense-in-depth; the revoke handler is already gated on
-    // ownership upstream.
-    const stmt = db.prepare(`
+    // Scoped by senderDiscordId so one user can't mark another user's
+    // send as revoked — defense-in-depth; the revoke handler is already
+    // gated on ownership upstream.
+    //
+    // Two cases:
+    // (a) Normal path: a qurl_send_configs row exists for this send.
+    //     UPDATE flips revoked_at; a second revoke is a no-op because
+    //     of the `revoked_at IS NULL` guard.
+    // (b) Legacy path: the send predates qurl_send_configs being
+    //     populated, so no config row exists. Without this fallback,
+    //     markSendRevoked silently updates zero rows and the send
+    //     reappears in the /qurl revoke dropdown on the next invocation
+    //     — the exact failure mode this fix targets. Insert a minimal
+    //     config row (NOT NULL columns: send_id, sender_discord_id,
+    //     resource_type, expires_in) pulled from the qurl_sends row,
+    //     with only the revocation marker populated.
+    const updateStmt = db.prepare(`
       UPDATE qurl_send_configs
       SET revoked_at = CURRENT_TIMESTAMP
       WHERE send_id = ? AND sender_discord_id = ? AND revoked_at IS NULL
     `);
-    stmt.run(sendId, senderDiscordId);
+    const result = updateStmt.run(sendId, senderDiscordId);
+    if (result.changes > 0) return;
+
+    const legacyStmt = db.prepare(`
+      SELECT resource_type, expires_in FROM qurl_sends
+      WHERE send_id = ? AND sender_discord_id = ? LIMIT 1
+    `);
+    const legacy = legacyStmt.get(sendId, senderDiscordId);
+    if (!legacy) return; // nothing to mark — caller targeted a non-existent send
+
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO qurl_send_configs
+        (send_id, sender_discord_id, resource_type, expires_in, revoked_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+    insertStmt.run(sendId, senderDiscordId, legacy.resource_type, legacy.expires_in || '24h');
   },
 
   saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType, attachmentUrl }) {

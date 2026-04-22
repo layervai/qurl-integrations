@@ -50,19 +50,12 @@ describe('QURL revoke (smoke)', () => {
     expect(revoked).toBe(true);
 
     // Canonical revoke assertion: getLinkStatus throws on non-2xx, and
-    // the deployed QURL API returns 404 for revoked resources. Catching
-    // the error lets us inspect the status in the message so a
-    // different failure mode (500, 403) produces a diagnosable report
-    // rather than just "threw".
-    try {
-      await getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, minted.resource_id);
-      throw new Error(
-        `getLinkStatus unexpectedly succeeded on revoked resource ${minted.resource_id} — ` +
-        `the QURL API is accepting DELETE but keeping the resource queryable.`,
-      );
-    } catch (err) {
-      const msg = String(err instanceof Error ? err.message : err);
-      expect(msg).toMatch(/404/);
-    }
+    // the deployed QURL API returns 404 for revoked resources.
+    // `rejects.toThrow(/404/)` gives a clean Jest diagnostic when the
+    // status is a different non-2xx (500, 403) — it surfaces what was
+    // actually thrown, no need for a manual try/catch dance.
+    await expect(
+      getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, minted.resource_id),
+    ).rejects.toThrow(/404/);
   });
 });

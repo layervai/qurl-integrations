@@ -1574,9 +1574,17 @@ function truncate(s, max = SELECT_MENU_FIELD_MAX) {
 // location name) over the previous abstract `${resource_type} to N users`.
 // Falls back gracefully for legacy rows that predate qurl_send_configs
 // being populated (LEFT JOIN produces null fields there).
-function formatRevokeLabel(s) {
+//
+// `channelName` is passed in by the caller (handleRevoke) from
+// `interaction.guild?.channels.cache.get(s.channel_id)?.name`. Discord
+// mention syntax (`<#id>`) does NOT render inside StringSelectMenu
+// option labels — passing the name explicitly is the only way to avoid
+// showing a raw snowflake to the user.
+function formatRevokeLabel(s, channelName) {
   const recipients = s.recipient_count === 1 ? '1 person' : `${s.recipient_count} people`;
-  const channelRef = s.target_type === 'user' ? 'DM' : (s.channel_id ? `#${s.channel_id}` : s.target_type);
+  const channelRef = s.target_type === 'user'
+    ? 'DM'
+    : (channelName ? `#${channelName}` : `${s.target_type} channel`);
 
   if (s.resource_type === 'file') {
     const name = s.attachment_name || 'file';
@@ -1625,11 +1633,21 @@ async function handleRevoke(interaction, apiKey) {
   const select = new StringSelectMenuBuilder()
     .setCustomId(`qurl_revoke_select_${revokeNonce}`)
     .setPlaceholder('Select a send to revoke')
-    .addOptions(recentSends.map(s => ({
-      label: formatRevokeLabel(s),
-      description: formatRevokeDescription(s),
-      value: s.send_id,
-    })));
+    .addOptions(recentSends.map(s => {
+      // StringSelectMenu labels are plain text — <#id> mention syntax
+      // does NOT resolve. Look up the channel name from the guild cache
+      // so users see `#general` instead of `#1123456789012345678`.
+      // Cache hit is cheap; if cache is cold (DM context, bot just
+      // restarted) the formatter falls through to a generic label.
+      const channelName = s.channel_id
+        ? interaction.guild?.channels.cache.get(s.channel_id)?.name ?? null
+        : null;
+      return {
+        label: formatRevokeLabel(s, channelName),
+        description: formatRevokeDescription(s),
+        value: s.send_id,
+      };
+    }));
 
   const row = new ActionRowBuilder().addComponents(select);
   const response = await interaction.editReply({
