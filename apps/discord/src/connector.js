@@ -290,6 +290,16 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
 
 /**
  * Mint one-time links for an uploaded resource via the connector.
+ *
+ * `one_time_use: true` is explicit because the Node.js migration
+ * (PR #45) dropped this field when rewriting the Python
+ * mint_link_client. Without it, upstream minted reusable links —
+ * the "accessed same link 5 times" bug the user reported. The field
+ * applies PER minted link: `n` recipients get `n` independent
+ * one-time tokens, so one recipient opening their link doesn't
+ * invalidate anyone else's. Python bot proved this shape in prod
+ * for months; see qurl-bot-discord/services/mint_link_client.py:46
+ * in the infra repo and qurl-integrations-infra#157.
  */
 async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
@@ -306,7 +316,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n, max_uses: 1 }),
+    body: JSON.stringify({ expires_at: expiresAt, n, one_time_use: true }),
     signal: AbortSignal.timeout(30000),
   });
 
