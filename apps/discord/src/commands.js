@@ -602,8 +602,8 @@ async function handleSend(interaction, apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry') || '24h';
-  const rawMessage = interaction.options.getString('message');
+  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
+  const rawMessage = interaction.options.getString('message_optional');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
   const commandAttachment = interaction.options.getAttachment('file_optional');
 
@@ -2221,7 +2221,7 @@ const commands = [
               .setRequired(true)
               .setAutocomplete(true))
           .addStringOption(opt =>
-            opt.setName('expiry')
+            opt.setName('expiry_optional')
               .setDescription('Link expiry (default: 24h)')
               .setRequired(false)
               .addChoices(
@@ -2236,7 +2236,7 @@ const commands = [
               .setDescription('Optional — attach a file here if sharing a file')
               .setRequired(false))
           .addStringOption(opt =>
-            opt.setName('message')
+            opt.setName('message_optional')
               .setDescription('Optional note sent alongside the link')
               .setRequired(false))
       )

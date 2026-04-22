@@ -1008,7 +1008,7 @@ describe('/qurl send — user target flow', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'user';
-          if (name === 'expiry') return '24h';
+          if (name === 'expiry_optional') return '24h';
           return null;
         }),
         getAttachment: jest.fn(() => null),
@@ -1247,8 +1247,8 @@ describe('/qurl send — file flow (channel target, full path)', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
-          if (name === 'message') return 'Check this out';
+          if (name === 'expiry_optional') return '1h';
+          if (name === 'message_optional') return 'Check this out';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -1316,7 +1316,7 @@ describe('/qurl send — location flow (channel target)', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '30m';
+          if (name === 'expiry_optional') return '30m';
           return null;
         }),
         getAttachment: jest.fn(() => null),
@@ -1617,7 +1617,7 @@ describe('/qurl send — DM failures', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -1912,7 +1912,7 @@ describe('handleCommand — autocomplete', () => {
       isChatInputCommand: jest.fn(() => false),
       options: {
         ...makeInteraction().options,
-        getFocused: jest.fn(() => ({ name: 'expiry', value: '1h' })),
+        getFocused: jest.fn(() => ({ name: 'expiry_optional', value: '1h' })),
       },
     });
 
@@ -2374,7 +2374,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2429,7 +2429,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2482,7 +2482,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2538,7 +2538,7 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
