@@ -2482,15 +2482,21 @@ const commands = [
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
-            '**Getting started:**\n' +
+            '**Setting up (for Admins):**\n' +
             '  `/qurl setup` — configure your API key (admin only)\n' +
             '  `/qurl status` — check if QURL is configured\n\n' +
-            '**Share resources securely via one-time links:**\n' +
+            '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
-            '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
+            // Leading tab on "1." keeps Discord's markdown parser from
+            // treating it as the start of an ordered list (which would
+            // renumber it relative to the subsequent lines and visually
+            // misalign "1." with "2.", "3.", "4."). The tab indent now
+            // matches the two-space indent below, but bypasses the list
+            // auto-formatter.
+            '\t1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
