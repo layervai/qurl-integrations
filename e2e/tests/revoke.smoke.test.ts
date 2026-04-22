@@ -54,11 +54,22 @@ describe('QURL revoke (smoke)', () => {
     expect(revoked).toBe(true);
 
     // Canonical revoke assertion: the qurl link is no longer reachable.
-    // The deployed QURL API returns 404 for revoked resources; any
-    // non-2xx response is accepted here because the specific failure
-    // code is a QURL-API implementation detail and the user-visible
-    // invariant is just "the link stops working."
+    // Asserting `status >= 400` (not `.ok === false`) so a failure prints
+    // the actual HTTP code in Jest's diff — distinguishes "revoke
+    // silently succeeded" (2xx still served) from "SPA shell returns 200
+    // regardless of revocation state" (200 served, client-side error).
+    // Any 4xx/5xx is accepted because the specific failure code is a
+    // QURL-API implementation detail; the user-visible invariant is
+    // just "the link stops working."
     const postAccess = await accessLink(minted.qurl_link);
-    expect(postAccess.ok).toBe(false);
+    if (postAccess.status < 400) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[revoke.smoke] Post-revoke access returned ${postAccess.status} — expected 4xx/5xx. ` +
+        `finalUrl=${postAccess.finalUrl}. If this is an SPA shell serving 200 with a client-side ` +
+        `error, the revoke API may be working but this test needs a different probe.`,
+      );
+    }
+    expect(postAccess.status).toBeGreaterThanOrEqual(400);
   });
 });
