@@ -2283,6 +2283,11 @@ const commands = [
     },
   },
   {
+    // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
+    // expected-set assertion in
+    // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
+    // pins the subcommand NAME set (not option types, requiredness, or
+    // descriptions) to catch registration regressions at deploy time.
     data: new SlashCommandBuilder()
       .setName('qurl')
       .setDescription('Share resources securely via QURL')
@@ -2328,7 +2333,7 @@ const commands = [
       )
       .addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if QURL is configured for this server')
+          .setDescription('Check if QURL is configured (admin only)')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
@@ -2484,7 +2489,7 @@ const commands = [
           content: '**Qurl Bot — Help**\n\n' +
             '**Setting up (for Admins):**\n' +
             '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if QURL is configured\n\n' +
+            '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
