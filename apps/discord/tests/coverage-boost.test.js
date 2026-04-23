@@ -32,6 +32,12 @@ jest.mock('../src/config', () => ({
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
+  isMultiTenant: false,
+  // OpenNHP commands (/link, /stats, /leaderboard, /bulklink, etc.) are
+  // only dispatch-active when config.isOpenNHPActive is true. This
+  // suite exercises several of them; set it here.
+  ENABLE_OPENNHP_FEATURES: true,
+  isOpenNHPActive: true,
   STAR_MILESTONES: [10, 25, 50, 100],
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
@@ -74,7 +80,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -83,7 +89,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -104,6 +110,7 @@ jest.mock('discord.js', () => ({
     setURL: jest.fn().mockReturnThis(),
   })),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
   StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
@@ -150,6 +157,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
+  markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -307,8 +315,8 @@ describe('buildDeliveryEmbed — location resource type', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
-          if (name === 'message') return 'Meet me here';
+          if (name === 'expiry_optional') return '1h';
+          if (name === 'message_optional') return 'Meet me here';
           return null;
         }),
         getAttachment: jest.fn(() => null),
@@ -361,7 +369,7 @@ describe('buildConfirmMsg — truncation with > 5 recipients + expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -417,7 +425,7 @@ describe('collector — revoke button', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -454,7 +462,7 @@ describe('collector — revoke button', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -495,7 +503,7 @@ describe('collector — end timeout', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -529,7 +537,7 @@ describe('/qurl send — fewer mint links than recipients', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -603,7 +611,7 @@ describe('/qurl send — location URL param extraction', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => null),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -630,7 +638,7 @@ describe('/qurl send — location URL param extraction', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => null),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -708,7 +716,7 @@ describe('/qurl send — all location link creation fails', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => null),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -746,7 +754,7 @@ describe('collector — add recipients button', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -890,7 +898,7 @@ describe('/qurl send — voice target with members', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'voice'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'voice'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
@@ -942,7 +950,7 @@ describe('/qurl send — DM batch with rejected promise', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
-        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry') return '1h'; return null; }),
+        getString: jest.fn((name) => { if (name === 'target') return 'channel'; if (name === 'expiry_optional') return '1h'; return null; }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: { awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction) },
