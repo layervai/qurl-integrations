@@ -729,6 +729,10 @@ describe('Connector client', () => {
       const body = JSON.parse(opts.body);
       expect(body.expires_at).toBe('2026-01-16T00:00:00.000Z');
       expect(body.n).toBe(2);
+      // Regression guard: bot MUST send one_time_use: true so each
+      // minted link is single-use. Dropping this field produces
+      // reusable links on some API-key tiers.
+      expect(body.one_time_use).toBe(true);
       expect(result).toEqual(mockLinks);
     });
 

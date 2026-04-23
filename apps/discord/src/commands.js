@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -601,8 +602,8 @@ async function handleSend(interaction, apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry') || '24h';
-  const rawMessage = interaction.options.getString('message');
+  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
+  const rawMessage = interaction.options.getString('message_optional');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
   const commandAttachment = interaction.options.getAttachment('file_optional');
 
@@ -686,7 +687,11 @@ async function handleSend(interaction, apiKey) {
 
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: `Too many recipients (${recipients.length}). Maximum is ${config.QURL_SEND_MAX_RECIPIENTS}.`, components: [] });
+    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
+    return interaction.editReply({
+      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
+      components: [],
+    });
   }
 
   // --- Step 2: Resource — auto-detect from file attachment ---
@@ -975,9 +980,19 @@ async function handleSend(interaction, apiKey) {
       }));
     }
   } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message });
+    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
+    // Surface a specific message for known upstream failure codes so the
+    // user knows what to do (re-upload to refresh the per-resource quota)
+    // instead of seeing a generic "try again" that won't help.
+    if (error.apiCode === 'quota_exceeded') {
+      const isFile = resourceType === RESOURCE_TYPES.FILE;
+      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
+      return interaction.editReply({
+        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+      });
+    }
     return interaction.editReply({ content: 'Failed to create links. Please try again.' });
   } finally {
     // Release the file-concurrency slot as soon as the mint+batch phase is
@@ -1118,6 +1133,37 @@ async function handleSend(interaction, apiKey) {
     components: delivered > 0 ? [buttonRow] : [],
   });
 
+  // Non-ephemeral channel notification when sending to "Everyone" (channel
+  // target) or "Voice users" (voice target). The sender's ephemeral reply
+  // confirms the send to THEM; this message is what recipients see in the
+  // channel so they know to look for the Qurl Bot DM. Without this, a
+  // passive channel member who missed the DM ping has no signal that a
+  // send happened. Logged-and-swallowed on failure — a missing
+  // "Send Messages" permission in a customer server shouldn't fail the
+  // whole send (DMs already went out successfully).
+  //
+  // Guard on `interaction.channel` being present: for a slash command
+  // invoked in a guild channel this is always set, but in edge cases
+  // (partial-cache on a fresh gateway connect, thread that got
+  // archived mid-send, DM-channel dispatch) the channel object can be
+  // null — and `.send()` on null throws synchronously, before the
+  // try/catch can see it.
+  if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
+    // Wrap displayName in escapeDiscordMarkdown so a user with `**`,
+    // backticks, or `_` in their display name can't break the bold or
+    // inject a code span. Cap at 64 chars to mirror the existing
+    // `safeSender` pattern at line 242.
+    const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
+    const notifyMsg = target === 'voice'
+      ? `📩 **${safeName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+    try {
+      await interaction.channel.send({ content: notifyMsg });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message });
+    }
+  }
+
   logger.info('/qurl send completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
@@ -1173,7 +1219,7 @@ async function handleSend(interaction, apiKey) {
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
           await interaction.editReply({
-            content: `Revoked ${revoked.success}/${revoked.total} links.`,
+            content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
             components: [],
           }).catch(logIgnoredDiscordErr);
         } catch (err) {
@@ -1512,6 +1558,63 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
 // --- /qurl revoke handler ---
 
+// Discord caps StringSelectMenuOption label at 100 chars and description
+// at 100 chars. Truncating to 99 + `…` leaves one for safety and keeps the
+// rendering predictable across Discord clients.
+// https://discord.com/developers/docs/interactions/message-components#select-menu-object-select-option-structure
+const SELECT_MENU_FIELD_MAX = 100;
+
+function truncate(s, max = SELECT_MENU_FIELD_MAX) {
+  if (!s) return '';
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+// Render the /qurl revoke dropdown label from a row returned by
+// db.getRecentSends. Prefers the human-identifiable bit (filename or
+// location name) over the previous abstract `${resource_type} to N users`.
+// Falls back gracefully for legacy rows that predate qurl_send_configs
+// being populated (LEFT JOIN produces null fields there).
+//
+// `channelName` is passed in by the caller (handleRevoke) from
+// `interaction.guild?.channels.cache.get(s.channel_id)?.name`. Discord
+// mention syntax (`<#id>`) does NOT render inside StringSelectMenu
+// option labels — passing the name explicitly is the only way to avoid
+// showing a raw snowflake to the user.
+function formatRevokeLabel(s, channelName) {
+  const recipients = s.recipient_count === 1 ? '1 person' : `${s.recipient_count} people`;
+  const channelRef = s.target_type === 'user'
+    ? 'DM'
+    : (channelName ? `#${channelName}` : `${s.target_type} channel`);
+
+  if (s.resource_type === 'file') {
+    const name = s.attachment_name || 'file';
+    return truncate(`📎 ${name} — ${recipients} (${channelRef})`);
+  }
+  if (s.resource_type === 'location') {
+    const name = s.location_name || 'location';
+    return truncate(`📍 ${name} — ${recipients} (${channelRef})`);
+  }
+  // Unknown resource type — keep the old abstract shape so we never
+  // render a bare empty label.
+  return truncate(`${s.resource_type} — ${recipients} (${channelRef})`);
+}
+
+function formatRevokeDescription(s) {
+  const when = new Date(s.created_at).toLocaleString();
+  const delivery = `${s.delivered_count}/${s.recipient_count} delivered`;
+  const expiry = `expires ${s.expires_in}`;
+  const base = `${when} · ${delivery} · ${expiry}`;
+  // If there's space left, append a truncated message preview so users
+  // can disambiguate sends with the same filename but different notes.
+  if (s.personal_message) {
+    const remaining = SELECT_MENU_FIELD_MAX - base.length - 4; // ` · "…"` overhead
+    if (remaining > 8) {
+      return truncate(`${base} · "${truncate(s.personal_message, remaining)}"`);
+    }
+  }
+  return truncate(base);
+}
+
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
@@ -1530,11 +1633,21 @@ async function handleRevoke(interaction, apiKey) {
   const select = new StringSelectMenuBuilder()
     .setCustomId(`qurl_revoke_select_${revokeNonce}`)
     .setPlaceholder('Select a send to revoke')
-    .addOptions(recentSends.map(s => ({
-      label: `${s.resource_type} to ${s.recipient_count} users (${s.target_type})`,
-      description: `${new Date(s.created_at).toLocaleString()} | ${s.delivered_count} delivered | Expires: ${s.expires_in}`,
-      value: s.send_id,
-    })));
+    .addOptions(recentSends.map(s => {
+      // StringSelectMenu labels are plain text — <#id> mention syntax
+      // does NOT resolve. Look up the channel name from the guild cache
+      // so users see `#general` instead of `#1123456789012345678`.
+      // Cache hit is cheap; if cache is cold (DM context, bot just
+      // restarted) the formatter falls through to a generic label.
+      const channelName = s.channel_id
+        ? interaction.guild?.channels.cache.get(s.channel_id)?.name ?? null
+        : null;
+      return {
+        label: formatRevokeLabel(s, channelName),
+        description: formatRevokeDescription(s),
+        value: s.send_id,
+      };
+    }));
 
   const row = new ActionRowBuilder().addComponents(select);
   const response = await interaction.editReply({
@@ -1553,7 +1666,7 @@ async function handleRevoke(interaction, apiKey) {
     const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
     await selectInteraction.update({
-      content: `Revoked ${revoked.success}/${revoked.total} links.`,
+      content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
       components: [],
     });
   } catch {
@@ -1574,6 +1687,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     if (r.status === 'fulfilled') success++;
     else logger.error('Failed to revoke QURL', { error: r.reason?.message });
   }
+
+  // Record the user's revocation intent so this send stops appearing in
+  // the /qurl revoke dropdown. We mark regardless of per-link success —
+  // partial failures are surfaced in the reply message ("Revoked X/Y"),
+  // and re-picking the same send from the dropdown wouldn't help anyway
+  // since the failed resource_ids are the same.
+  db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
@@ -2163,6 +2283,11 @@ const commands = [
     },
   },
   {
+    // NOTE: adding/removing/renaming a `/qurl` subcommand? Update the
+    // expected-set assertion in
+    // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
+    // pins the subcommand NAME set (not option types, requiredness, or
+    // descriptions) to catch registration regressions at deploy time.
     data: new SlashCommandBuilder()
       .setName('qurl')
       .setDescription('Share resources securely via QURL')
@@ -2173,13 +2298,9 @@ const commands = [
             opt.setName('target')
               .setDescription('Who receives this')
               .setRequired(true)
-              .addChoices(
-                { name: 'Everyone in this channel', value: 'channel' },
-                { name: 'Users in my voice channel', value: 'voice' },
-                { name: 'A specific user', value: 'user' },
-              ))
+              .setAutocomplete(true))
           .addStringOption(opt =>
-            opt.setName('expiry')
+            opt.setName('expiry_optional')
               .setDescription('Link expiry (default: 24h)')
               .setRequired(false)
               .addChoices(
@@ -2194,7 +2315,7 @@ const commands = [
               .setDescription('Optional — attach a file here if sharing a file')
               .setRequired(false))
           .addStringOption(opt =>
-            opt.setName('message')
+            opt.setName('message_optional')
               .setDescription('Optional note sent alongside the link')
               .setRequired(false))
       )
@@ -2212,7 +2333,7 @@ const commands = [
       )
       .addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if QURL is configured for this server')
+          .setDescription('Check if QURL is configured (admin only)')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
@@ -2275,7 +2396,7 @@ const commands = [
             signal: AbortSignal.timeout(10000),
           });
           if (resp.status === 401 || resp.status === 403) {
-            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **layerv.ai**.' });
+            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
           }
           if (!resp.ok) {
             return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
@@ -2335,7 +2456,7 @@ const commands = [
         }
         return interaction.reply({
           content: '❌ **QURL is not configured for this server.**\n\n' +
-            '1. Sign up at **layerv.ai** to get your API key\n' +
+            '1. Sign up at **https://layerv.ai** to get your API key\n' +
             '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
             'Only server administrators can run setup.',
           ephemeral: true,
@@ -2350,7 +2471,7 @@ const commands = [
           return interaction.reply({
             content: '❌ **QURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first.\n' +
-              'Sign up at **layerv.ai** to get your API key.',
+              'Sign up at **https://layerv.ai** to get your API key.',
             ephemeral: true,
           });
         }
@@ -2366,24 +2487,31 @@ const commands = [
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
-            '**Getting started:**\n' +
+            '**Setting up (for Admins):**\n' +
             '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if QURL is configured\n\n' +
-            '**Share resources securely via one-time links:**\n' +
+            '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
+            '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
-            '  1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
+            // Leading tab on "1." keeps Discord's markdown parser from
+            // treating it as the start of an ordered list (which would
+            // renumber it relative to the subsequent lines and visually
+            // misalign "1." with "2.", "3.", "4."). The tab indent now
+            // matches the two-space indent below, but bypasses the list
+            // auto-formatter.
+            '\t1. Use `/qurl send` and choose a target (user, channel, or voice)\n' +
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
-            '  4. Links self-destruct on access\n\n' +
-            '**Note on large servers:** `channel` and `voice` targets rely on ' +
-            "Discord's member cache. Without the `GUILD_PRESENCES` privileged " +
-            'intent, very large guilds (~1000+ members) may silently miss ' +
-            'members who appear offline — prefer `user` target if you need a ' +
-            'guaranteed recipient.\n\n' +
-            'Sign up at **layerv.ai** to get your API key.',
+            '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
+            '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
+            'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
+            'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
+            '**Large servers (~1000+ members):** when sending to a `channel` or `voice` target, ' +
+            'members who appear offline in Discord may be skipped. ' +
+            'If you need to reach a specific person for sure, use the `user` target.\n\n' +
+            'Sign up at **https://layerv.ai** to get your API key.',
           ephemeral: true,
         });
       }
@@ -2391,14 +2519,142 @@ const commands = [
   },
 ];
 
-// Register commands with Discord
+// Commands that are safe to register outside the OpenNHP community guild.
+// Everything else (/link, /whois, /contributions, /stats, /leaderboard,
+// /forcelink, /bulklink, /unlinked, /backfill-milestones, /unlink) are
+// OpenNHP-community features that depend on single-guild state (the
+// cached guild, BASE_URL, GITHUB_* secrets). Registering them outside
+// the OpenNHP guild would put them in autocomplete where they'd fail
+// opaquely — /link would build a URL with an undefined BASE_URL,
+// /forcelink would try to fetch members from a null guild, etc.
+//
+// The full command set is only registered when the bot is in "OpenNHP
+// mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
+// true. Every other configuration (multi-tenant, OR single-guild-plain
+// /qurl send install like the test playground or a customer server) gets
+// only the allowlist.
+//
+// Keep the allowlist explicit and near the commands array so adding a
+// new customer-safe command requires updating both locations
+// intentionally.
+const CUSTOMER_SAFE_COMMANDS = new Set(['qurl']);
+
+// Single callsite for the active command set. `registerCommands` (at
+// boot) and `handleCommand` (per interaction) both ask this so a future
+// gating change — e.g. a third mode, a per-command flag — touches one
+// place instead of two. Keeps the two sites from drifting.
+function getActiveCommands() {
+  return config.isOpenNHPActive
+    ? commands
+    : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
+}
+
+// Target choices are surfaced via autocomplete (not static addChoices)
+// so the "voice" option only appears when the command is invoked FROM
+// a voice / stage-voice channel. Showing the voice option in text
+// channels — even when the invoking user happens to be connected to
+// voice elsewhere — was a persistent UX bug: users in text channels
+// don't expect a "voice users" target and the option reads as noise.
+// The backend (handleSend → getVoiceChannelMembers) still validates
+// the sender is in voice and returns a friendly error otherwise, so
+// channel-type gating here just hides the affordance in the wrong
+// context; it doesn't loosen any invariant.
+async function handleTargetAutocomplete(interaction) {
+  const channel = interaction.channel;
+  const isVoiceChannel = channel && (
+    channel.type === ChannelType.GuildVoice ||
+    channel.type === ChannelType.GuildStageVoice
+  );
+  const choices = [
+    { name: 'Everyone in this channel', value: 'channel' },
+    { name: 'A specific user', value: 'user' },
+  ];
+  if (isVoiceChannel) {
+    choices.push({ name: 'Only voice users', value: 'voice' });
+  }
+  // respond() can reject on the 3s autocomplete deadline, Unknown
+  // interaction, or network errors. Swallow + log so the rejection
+  // doesn't bubble as an unhandled promise in the InteractionCreate
+  // listener — the user just sees no suggestions in that case.
+  try {
+    await interaction.respond(choices);
+  } catch (err) {
+    logger.warn('Failed to respond to target autocomplete', { error: err.message });
+  }
+}
+
+// Proactively clear stale guild-scoped command registrations from any
+// guild the bot is in. Discord's guild and global command namespaces do
+// not purge each other on a fresh .set() call, so a bot that previously
+// ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
+// X) and is now redeployed in multi-tenant or single-guild-plain mode
+// will leave /link, /leaderboard, etc. visible in X's slash-command
+// autocomplete until Discord's cache ages out. The dispatch-time filter
+// in handleCommand prevents those stale commands from doing anything
+// harmful, but users still see dead commands in the picker. Issuing
+// .set([], guildId) clears the guild-scoped set; any ALIVE guild-scoped
+// registration for the CURRENT mode gets reinstalled by the main
+// registerCommands path below.
+//
+// Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
+// guild-scoped commands to config.GUILD_ID, so purging there would
+// race with the upcoming set(). Only iterates guilds the bot is
+// actually in (client.guilds.cache) — we can't and shouldn't enumerate
+// guilds we've never joined.
+async function purgeStaleGuildCommands(client) {
+  if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
+  // Parallelize the per-guild fetch+set. Sequentializing makes boot
+  // time O(guilds) at ~500ms per round-trip, which scales badly for
+  // the public-bot install path this PR targets. Promise.allSettled
+  // so one slow/failing guild doesn't block the others, and so a
+  // single rejection doesn't bubble and abort registerCommands.
+  // Discord's guild-commands endpoint has a separate rate bucket
+  // per guild, so parallel fans out cleanly until the global
+  // app-command rate limit (~200/min) — well above any realistic
+  // boot-time burst.
+  const guilds = [...client.guilds.cache.values()];
+  await Promise.allSettled(guilds.map(async (guild) => {
+    try {
+      const existing = await client.application.commands.fetch({ guildId: guild.id });
+      if (existing.size === 0) return;
+      await client.application.commands.set([], guild.id);
+      logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
+    } catch (error) {
+      // Don't fail boot on a purge error — the dispatch-time filter in
+      // handleCommand is the correctness guarantee; purge is UX polish.
+      logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
+    }
+  }));
+}
+
+// Register commands with Discord. `config.isOpenNHPActive` is the
+// single source of truth for "this deployment exercises the OpenNHP
+// community surface" — see config.js for the derivation.
 async function registerCommands(client) {
-  const commandData = commands.map(cmd => cmd.data.toJSON());
+  // Purge first — prevents stale OpenNHP-era registrations in guilds the
+  // bot is still in. See purgeStaleGuildCommands for details + why this
+  // is scoped to non-OpenNHP modes.
+  await purgeStaleGuildCommands(client);
+
+  const activeCommands = getActiveCommands();
+  const commandData = activeCommands.map(cmd => cmd.data.toJSON());
 
   try {
-    logger.info('Registering slash commands...');
-    await client.application.commands.set(commandData, config.GUILD_ID);
-    logger.info(`Registered ${commands.length} slash commands!`);
+    if (config.GUILD_ID) {
+      // Guild-scoped registration: commands appear instantly in just this
+      // guild. Used by the single-guild OpenNHP deployment where fast command
+      // iteration matters more than appearing in other guilds.
+      logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
+      await client.application.commands.set(commandData, config.GUILD_ID);
+    } else {
+      // Global registration: commands appear in every guild the bot joins.
+      // Discord caches global commands for up to 1 hour, so newly-added
+      // commands may take that long to propagate. Used for multi-tenant
+      // deployments (customers invite the bot to their own servers).
+      logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
+      await client.application.commands.set(commandData);
+    }
+    logger.info('Slash commands registered.');
   } catch (error) {
     logger.error('Failed to register commands', { error: error.message });
   }
@@ -2406,12 +2662,51 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  if (interaction.isAutocomplete()) return;
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === 'qurl') {
+      const focused = interaction.options.getFocused(true);
+      if (focused.name === 'target') {
+        return handleTargetAutocomplete(interaction);
+      }
+    }
+    return;
+  }
 
   if (!interaction.isChatInputCommand()) return;
 
-  const command = commands.find(cmd => cmd.data.name === interaction.commandName);
-  if (!command) return;
+  // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
+  // mode to customer-safe mode (flip GUILD_ID unset OR flip
+  // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
+  // /whois, etc. registrations remain in the old guild — Discord's two
+  // namespaces (guild and global) don't purge each other on a new .set()
+  // call. Those stale handlers all assume cached guild state (BASE_URL,
+  // contributor roles) that customer-safe mode doesn't populate and
+  // would crash on. Filter the handler lookup to the active set so a
+  // stale registration from a previous deploy can't dispatch to a broken
+  // path.
+  const activeCommands = getActiveCommands();
+  const command = activeCommands.find(cmd => cmd.data.name === interaction.commandName);
+  if (!command) {
+    // The interaction is for a command we know exists globally (Discord
+    // only dispatches registered commands to us) but is not in the
+    // currently-active set — so it's a stale guild-scoped registration
+    // from a previous deploy in a different mode. Acknowledge the
+    // interaction so the user sees a clear "no longer available" reply
+    // instead of Discord's 3-second "This interaction failed" timeout.
+    // Defensive: wrap in try/catch since the interaction may already
+    // have been responded to by a race elsewhere.
+    try {
+      await interaction.reply({
+        content: 'This command is no longer available in this server.',
+        ephemeral: true,
+      });
+    } catch (err) {
+      logger.warn('Failed to reply to stale command interaction', {
+        command: interaction.commandName, error: err.message,
+      });
+    }
+    return;
+  }
 
   try {
     await command.execute(interaction);

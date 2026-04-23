@@ -20,6 +20,14 @@ jest.mock('../src/config', () => ({
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
+  isMultiTenant: false,
+  // This suite exercises every slash command (both /qurl and the OpenNHP
+  // ones). registerCommands + handleCommand filter to the customer-safe
+  // allowlist unless config.isOpenNHPActive is true — set it here to
+  // keep the full-command coverage. The flag=false dispatch-filter
+  // behavior is covered in multi-tenant.test.js.
+  ENABLE_OPENNHP_FEATURES: true,
+  isOpenNHPActive: true,
   STAR_MILESTONES: [10, 25, 50, 100],
   CONTRIBUTOR_ROLE_NAME: 'Contributor',
   ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
@@ -63,7 +71,7 @@ jest.mock('discord.js', () => ({
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
@@ -72,7 +80,7 @@ jest.mock('discord.js', () => ({
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
       addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
       addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
@@ -93,6 +101,7 @@ jest.mock('discord.js', () => ({
     setURL: jest.fn().mockReturnThis(),
   })),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
   StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
@@ -139,6 +148,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
+  markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
   forceLink: jest.fn(),
@@ -331,12 +341,19 @@ describe('handleCommand', () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it('ignores unknown command names', async () => {
+  it('replies "no longer available" for unknown command names (stale-registration path)', async () => {
+    // A command name we don't know either doesn't exist globally or is a
+    // stale guild-scoped registration from a prior deploy. Either way
+    // the user deserves an acknowledgement instead of Discord's
+    // "interaction failed" timeout.
     const interaction = makeInteraction({
       commandName: 'nonexistent-cmd',
     });
     await handleCommand(interaction);
-    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('no longer available'),
+      ephemeral: true,
+    }));
   });
 
   it('handles errors gracefully when command throws and not deferred', async () => {
@@ -899,6 +916,36 @@ describe('/qurl help subcommand', () => {
       }),
     );
   });
+
+  // Positive assertions for the four copy fixes in PR #98. Without these,
+  // the only other help-text assertion is `stringContaining('Qurl Bot')`,
+  // which would stay green if every fix below were reverted. Pinning them
+  // here catches accidental regressions on the next edit to this block.
+  it('includes the four copy fixes from PR #98', async () => {
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'help'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const { content } = interaction.reply.mock.calls[0][0];
+
+    // (1) layerv.ai URL carries the scheme so Discord auto-linkifies it
+    expect(content).toContain('https://layerv.ai');
+    // (2) self-destruct note covers both access AND expiry
+    expect(content).toMatch(/self-destruct on first access.*expiry elapses/);
+    // (3) Terms block disambiguates "protected resource" from "qurl"
+    expect(content).toContain('protected resource');
+    expect(content).toContain('access link');
+    // (4) Large-servers note uses plain language, not GUILD_PRESENCES jargon
+    expect(content).toContain('Large servers');
+    expect(content).not.toContain('GUILD_PRESENCES');
+  });
 });
 
 describe('/qurl send — cooldown and API key checks', () => {
@@ -962,7 +1009,7 @@ describe('/qurl send — user target flow', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'user';
-          if (name === 'expiry') return '24h';
+          if (name === 'expiry_optional') return '24h';
           return null;
         }),
         getAttachment: jest.fn(() => null),
@@ -1154,7 +1201,11 @@ describe('/qurl send — too many recipients', () => {
     await cmd.execute(interaction);
 
     expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Too many recipients') }),
+      expect.objectContaining({
+        // Updated message names the cap, the overage, AND the recovery
+        // action (trim or split) so the user knows what to do.
+        content: expect.stringMatching(/per-send cap is \d+.*Trim \d+ recipient.*split into multiple/i),
+      }),
     );
   });
 });
@@ -1197,14 +1248,15 @@ describe('/qurl send — file flow (channel target, full path)', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
-          if (name === 'message') return 'Check this out';
+          if (name === 'expiry_optional') return '1h';
+          if (name === 'message_optional') return 'Check this out';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
       },
       channel: {
         awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+        send: jest.fn().mockResolvedValue(undefined),
       },
       editReply: jest.fn().mockResolvedValue({
         createMessageComponentCollector: jest.fn(() => collectorObj),
@@ -1220,6 +1272,15 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.saveSendConfig).toHaveBeenCalled();
+    // Guard against a future refactor re-introducing a duplicate notify
+    // block. If anyone adds a second channel.send call in handleSend, this
+    // assertion will catch it before shipping.
+    expect(interaction.channel.send).toHaveBeenCalledTimes(1);
+    expect(interaction.channel.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('has shared something with all members of this channel'),
+      }),
+    );
   });
 });
 
@@ -1256,7 +1317,7 @@ describe('/qurl send — location flow (channel target)', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '30m';
+          if (name === 'expiry_optional') return '30m';
           return null;
         }),
         getAttachment: jest.fn(() => null),
@@ -1413,6 +1474,69 @@ describe('/qurl send — file validation errors', () => {
 });
 
 describe('/qurl send — link creation failure', () => {
+  it('shows quota-specific message on quota_exceeded API error (file)', async () => {
+    const recipients = [{ id: 'r1', username: 'Alice' }];
+    mockGetText.mockReturnValue(recipients);
+    // Simulate connector mint_link returning 502 wrapping a QURL API
+    // 403 quota_exceeded — connector.js's throwConnectorError tags this
+    // as Error.apiCode='quota_exceeded'.
+    const quotaErr = new Error('Connector mint_link failed (502)');
+    quotaErr.status = 502;
+    quotaErr.apiCode = 'quota_exceeded';
+    quotaErr.apiDetail = 'quota exceeded: token limit per QURL reached (12/10)';
+    mockDownloadAndUpload.mockResolvedValue({
+      resource_id: 'conn-1',
+      fileBuffer: new ArrayBuffer(10),
+    });
+    mockMintLinks.mockRejectedValue(quotaErr);
+
+    const attachment = {
+      name: 'doc.pdf',
+      contentType: 'application/pdf',
+      size: 100,
+      url: 'https://cdn.discordapp.com/doc.pdf',
+    };
+
+    const resInteraction = {
+      customId: `qurl_res_file_${MOCK_NONCE}`,
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+    };
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'send'),
+        getString: jest.fn((name) => {
+          if (name === 'target') return 'channel';
+          return null;
+        }),
+        getAttachment: jest.fn(() => attachment),
+      },
+      channel: {
+        awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    // Specific user-facing message — must mention the share limit + the
+    // recovery action (re-upload). Generic "Failed to create links" is
+    // unhelpful in this case because retrying will keep failing.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/share limit.*re-upload/is),
+      }),
+    );
+    // Should NOT fall through to the generic message.
+    expect(interaction.editReply).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/^Failed to create links\. Please try again\.$/),
+      }),
+    );
+  });
+
   it('handles upload failure gracefully', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
@@ -1494,7 +1618,7 @@ describe('/qurl send — DM failures', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -1660,7 +1784,7 @@ describe('/qurl revoke subcommand', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('returns early for autocomplete interactions', async () => {
+  it('returns early for unhandled autocomplete focus (e.g. location)', async () => {
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -1673,8 +1797,146 @@ describe('handleCommand — autocomplete', () => {
 
     await handleCommand(interaction);
 
-    // Autocomplete now returns early without dispatching
     expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete in a text channel offers channel + user (no voice option)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 }, // GuildText
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('target autocomplete in a voice channel adds the "Only voice users" option', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 2 }, // GuildVoice
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
+  });
+
+  it('target autocomplete in a stage-voice channel also offers the voice option', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 13 }, // GuildStageVoice
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+      { name: 'Only voice users', value: 'voice' },
+    ]);
+  });
+
+  it('target autocomplete with null channel falls back to non-voice choices', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: null,
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('target autocomplete does NOT offer voice option in a text channel even if sender is in voice elsewhere', async () => {
+    // Guard against regression back to the "sender-in-voice" gating
+    // we briefly had after PR #96: user in voice channel A invokes
+    // /qurl send from text channel B → voice option must stay hidden.
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 }, // GuildText
+      member: { voice: { channelId: 'vc-elsewhere' } },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).toHaveBeenCalledWith([
+      { name: 'Everyone in this channel', value: 'channel' },
+      { name: 'A specific user', value: 'user' },
+    ]);
+  });
+
+  it('autocomplete on a non-target focused option (e.g. expiry) does not dispatch', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'expiry_optional', value: '1h' })),
+      },
+    });
+
+    await handleCommand(interaction);
+
+    expect(interaction.respond).not.toHaveBeenCalled();
+  });
+
+  it('target autocomplete swallows interaction.respond errors (deadline/Unknown)', async () => {
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getFocused: jest.fn(() => ({ name: 'target', value: '' })),
+      },
+      channel: { type: 0 },
+      respond: jest.fn().mockRejectedValue(new Error('Unknown interaction')),
+    });
+
+    // Should not throw — the rejection is caught + logged.
+    await expect(handleCommand(interaction)).resolves.not.toThrow();
   });
 });
 
@@ -2113,7 +2375,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2168,7 +2430,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2221,7 +2483,7 @@ describe('collector button handlers — revoke and expand', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),
@@ -2277,7 +2539,7 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
         getSubcommand: jest.fn(() => 'send'),
         getString: jest.fn((name) => {
           if (name === 'target') return 'channel';
-          if (name === 'expiry') return '1h';
+          if (name === 'expiry_optional') return '1h';
           return null;
         }),
         getAttachment: jest.fn(() => attachment),

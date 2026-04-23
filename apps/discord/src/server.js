@@ -58,14 +58,22 @@ app.use(helmet({
 // Startup contract: routes/webhooks.js verifySignature() asserts req.rawBody
 // exists at request time and refuses the request with an error log if the
 // middleware chain drops it. See that file's guard comment for details.
-app.use('/webhook', express.json({
-  // GitHub push-event payloads can exceed Express's 100KB default. Cap at
-  // 1MB so we accept legitimate payloads but still bound request memory.
-  limit: '1mb',
-  verify: (req, _res, buf) => {
-    req.rawBody = buf;
-  }
-}));
+//
+// Gated on isOpenNHPActive for symmetry with the router mount below —
+// when /webhook routes aren't mounted, Express would still parse up to
+// 1 MB of JSON per request before falling through to the 404 handler.
+// Skipping the parser registration avoids that wasted work (and the
+// small DoS surface of parsing unauthenticated request bodies).
+if (config.isOpenNHPActive) {
+  app.use('/webhook', express.json({
+    // GitHub push-event payloads can exceed Express's 100KB default. Cap at
+    // 1MB so we accept legitimate payloads but still bound request memory.
+    limit: '1mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    }
+  }));
+}
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -150,9 +158,28 @@ app.get('/metrics', metricsRateLimit, (req, res) => {
   });
 });
 
-// Mount routers
-app.use('/auth', oauthRouter);
-app.use('/webhook', webhooksRouter);
+// Mount routers — only in single-guild mode. /auth (GitHub OAuth redirect)
+// and /webhook (GitHub event delivery) both depend on OpenNHP state: the
+// OAuth state uses BASE_URL, the callback calls assignContributorRole()
+// against the cached guild, and the webhook handler dispatches to
+// notifiers (notifyPRMerge, etc.) that also assume a cached guild. In
+// any non-OpenNHP mode the cache is never populated OR the downstream
+// handlers short-circuit with reason:'opennhp-disabled', so mounting
+// these routes would only surface broken UX (a 500 from the OAuth
+// callback, or a webhook that fails after its signature passes) plus
+// one wasted DB hit per OAuth callback on the orphan state token.
+//
+// Symmetry with commands.js — the full OpenNHP surface (commands +
+// routes) turns on together when config.isOpenNHPActive is true;
+// everything else gets the plain /qurl send tool.
+if (config.isOpenNHPActive) {
+  app.use('/auth', oauthRouter);
+  app.use('/webhook', webhooksRouter);
+} else if (!config.GUILD_ID) {
+  logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
+} else {
+  logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
+}
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars
@@ -171,8 +198,13 @@ app.use((err, req, res, next) => {
 function startServer() {
   const server = app.listen(config.PORT, () => {
     logger.info(`Web server listening on port ${config.PORT}`);
-    logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
-    logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
+    // Only log OAuth/Webhook URLs when those routes are actually mounted —
+    // avoids misleading operators into curl-ing a 404 endpoint in multi-
+    // tenant or single-guild-plain mode. Metrics URL is always mounted.
+    if (config.isOpenNHPActive) {
+      logger.info(`OAuth URL: ${config.BASE_URL}/auth/github`);
+      logger.info(`Webhook URL: ${config.BASE_URL}/webhook/github`);
+    }
     logger.info(`Metrics URL: ${config.BASE_URL}/metrics`);
   });
   return server;

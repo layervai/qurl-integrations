@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -36,6 +36,17 @@ let channels = {
 // slot could stay null for an eventual-consistency window otherwise.
 async function ensureRolesAndChannels() {
   if (!guild) return { createdRoles: new Map(), createdChannels: new Map() };
+
+  // Gated on ENABLE_OPENNHP_FEATURES. In any guild that hasn't explicitly
+  // opted in to OpenNHP community features, the bot only has the 4
+  // runtime permissions it was invited with (View Channels, Send
+  // Messages, Embed Links, Use Application Commands) — ManageRoles and
+  // ManageChannels are intentionally NOT granted. Attempting create()
+  // here produces a cascade of "Missing Permissions" errors on every
+  // boot + cache refresh, which obscures real issues in the logs.
+  if (!config.isOpenNHPActive) {
+    return { createdRoles: new Map(), createdChannels: new Map() };
+  }
 
   const { ChannelType } = require('discord.js');
 
@@ -99,8 +110,27 @@ async function ensureRolesAndChannels() {
 // (roleDelete + channelDelete + guildMemberAdd firing in quick succession)
 // would otherwise interleave the two fetches and cache an inconsistent
 // roles/channels snapshot. Coalesce into a single in-flight refresh.
+//
+// Return shape: the function resolves to `undefined` regardless of
+// mode. In multi-tenant mode it short-circuits immediately (no work,
+// no state mutation); in single-guild mode it populates the
+// module-level `guild` / `roles` / `channels` caches as a side
+// effect, but the resolved value is still undefined. All call-sites
+// `await refreshCache()` for sequencing and then read the cached
+// state directly — none inspect the return value, which is why the
+// side-effect-only contract is safe.
 let refreshCacheInFlight = null;
 async function refreshCache() {
+  // Multi-tenant mode: there is no single watched guild to cache.
+  // client.guilds.fetch(null) would return ALL guilds the bot is in as a
+  // Collection (not a single Guild), and the downstream guild.roles.fetch()
+  // call would then crash on a Collection that has no .roles. Short-circuit
+  // to a no-op — all callers already check `if (!guild)` before using cached
+  // state, and this function doesn't populate `guild` so those sites skip
+  // gracefully. Belt-and-suspenders: OpenNHP-command registration and
+  // /auth + /webhook route mounting are also gated in multi-tenant mode.
+  if (!config.GUILD_ID) return;
+
   if (refreshCacheInFlight) return refreshCacheInFlight;
   refreshCacheInFlight = (async () => {
     try {
@@ -186,26 +216,43 @@ function setupWeeklyDigest() {
 // a slash command will silently fail at runtime — log loud at boot instead
 // so misconfigurations surface immediately. Non-fatal: we still boot in
 // case the permission gap is intentional for a staging tenant.
+//
+// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla /qurl
+// send tool only needs 4 perms (ViewChannel for target:channel/voice
+// member enumeration, SendMessages for interaction replies, EmbedLinks
+// for QURL link previews, UseApplicationCommands for slash commands).
+// ManageRoles/ManageChannels are OpenNHP-only — demanding them in every
+// guild would produce a confusing "missing permissions" error in guilds
+// that correctly granted only the 4 runtime perms.
 async function verifyBotPermissions() {
   try {
     const { PermissionFlagsBits } = require('discord.js');
     const me = await guild.members.fetchMe();
     const required = {
-      ManageRoles: PermissionFlagsBits.ManageRoles,
+      ViewChannel: PermissionFlagsBits.ViewChannel,
       SendMessages: PermissionFlagsBits.SendMessages,
       EmbedLinks: PermissionFlagsBits.EmbedLinks,
-      ReadMessageHistory: PermissionFlagsBits.ReadMessageHistory,
       UseApplicationCommands: PermissionFlagsBits.UseApplicationCommands,
     };
+    if (config.isOpenNHPActive) {
+      required.ManageRoles = PermissionFlagsBits.ManageRoles;
+      required.ManageChannels = PermissionFlagsBits.ManageChannels;
+      // Note: `ReadMessageHistory` was previously demanded here but no
+      // OpenNHP code path actually reads message history (verified by
+      // grep — `messages.fetch` / `channel.messages.*` / thread backfill
+      // all absent). Adding it to the OAuth invite bitmask creates
+      // friction for guild admins for no operational gain. Re-add only
+      // if a future OpenNHP feature genuinely needs it.
+    }
     const missing = Object.entries(required)
       .filter(([, bit]) => !me.permissions.has(bit))
       .map(([name]) => name);
     if (missing.length > 0) {
       logger.error('Bot is missing required Discord permissions in guild', {
-        guild: guild?.name, missing,
+        guild: guild?.name, missing, opennhp_active: config.isOpenNHPActive,
       });
     } else {
-      logger.info('Bot permissions OK', { guild: guild?.name });
+      logger.info('Bot permissions OK', { guild: guild?.name, opennhp_active: config.isOpenNHPActive });
     }
   } catch (err) {
     logger.warn('Could not verify bot permissions at boot', { error: err.message });
@@ -214,10 +261,29 @@ async function verifyBotPermissions() {
 
 client.once('ready', async () => {
   logger.info(`Discord bot logged in as ${client.user.tag}`);
+
+  // Multi-tenant mode: GUILD_ID unset means no single "watched" guild.
+  // refreshCache() / verifyBotPermissions() / setupWeeklyDigest() are all
+  // single-guild operations (the first fetches one guild's roles/channels,
+  // the second checks perms in one guild, the third posts to one channel).
+  // In multi-tenant mode these are dormant — lazy refreshCache() calls in
+  // downstream OpenNHP features are already gated behind routes that don't
+  // fire without GITHUB_WEBHOOK_SECRET + BASE_URL wiring.
+  if (!config.GUILD_ID) {
+    logger.info('Multi-tenant mode: GUILD_ID unset — skipping single-guild cache init.');
+    logger.info('Bot is ready. /qurl commands will appear in any guild the bot joins.');
+    return;
+  }
+
   await refreshCache();
   await verifyBotPermissions();
-  setupWeeklyDigest();
-  logger.info(`Watching guild: ${guild?.name}`);
+  // Weekly digest is OpenNHP-specific (star milestones, contributor
+  // stats, announcements to #general). No value in a guild running the
+  // bot purely for /qurl send.
+  if (config.isOpenNHPActive) {
+    setupWeeklyDigest();
+  }
+  logger.info(`Watching guild: ${guild?.name}`, { opennhp_active: config.isOpenNHPActive });
 });
 
 // Handle role/channel deletion - refresh cache
@@ -243,8 +309,25 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
-// Welcome new members
+// Welcome new members. Gated on ENABLE_OPENNHP_FEATURES — the handler
+// posts "🎉 Welcome Back, Contributor!" to #general and a DM that
+// explicitly greets the user as joining the OpenNHP community, including
+// promises of contributor-role progression. Neither is appropriate in a
+// guild that hasn't opted in. Skipping the handler outright also avoids
+// the DB read (getContributions) for every join in vanilla guilds.
 client.on('guildMemberAdd', async (member) => {
+  // OpenNHP-only behavior. Two short-circuits before any work:
+  //   1. Flag off → no welcome DM / "Welcome Back, Contributor!" embed
+  //      anywhere, regardless of whether the bot is single-guild or
+  //      multi-tenant. A vanilla /qurl send install shouldn't introduce
+  //      itself as the OpenNHP community bot.
+  //   2. In multi-tenant mode (no single GUILD_ID to scope to) there is
+  //      no cached `guild`/`channels` state to post into anyway. The
+  //      existing `member.guild.id !== config.GUILD_ID` below would also
+  //      catch that (null !== any-id is always true), but an explicit
+  //      guard keeps the intent readable.
+  if (!config.isOpenNHPActive) return;
+  if (!config.GUILD_ID) return;
   if (member.guild.id !== config.GUILD_ID) return;
 
   logger.info(`New member joined: ${member.user.tag}`);
@@ -339,6 +422,20 @@ async function updateMemberRoles(member, contributionCount) {
 
 // Assign Contributor role and check for progression
 async function assignContributorRole(discordId, prNumber, repo, githubUsername) {
+  // No-op in guilds that haven't opted in to OpenNHP community features.
+  // Callers (oauth.js, webhooks.js) still record the contribution in the
+  // DB before calling this; the role-assign + announcement is the only
+  // piece gated off. Returning { success: false, reason: 'opennhp-disabled' }
+  // so callers can distinguish "flag off" from "Discord API error" in logs.
+  // Log at debug so the "why did user X not get the role" question is
+  // answerable from prod logs without adding noise for every PR merge.
+  if (!config.isOpenNHPActive) {
+    logger.debug('assignContributorRole skipped: OpenNHP features disabled', {
+      discordId, prNumber, repo, githubUsername,
+    });
+    return { success: false, reason: 'opennhp-disabled' };
+  }
+
   if (!guild) await refreshCache();
 
   try {
@@ -399,6 +496,18 @@ async function assignContributorRole(discordId, prNumber, repo, githubUsername) 
 
 // Notify about a PR merge (for unlinked users)
 async function notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl) {
+  // Same OpenNHP gate as the other notifier helpers — debug-log the
+  // skip so prod triage of "why was a PR merge not announced" is
+  // answerable without reading #general directly, and the "channel not
+  // found" warn below stays reserved for actual misconfigurations
+  // (OpenNHP active but #general missing) rather than the normal
+  // non-OpenNHP fall-through. Defense-in-depth; /webhook routes aren't
+  // mounted outside OpenNHP mode so this is also unreachable.
+  if (!config.isOpenNHPActive) {
+    logger.debug('notifyPRMerge skipped: OpenNHP features disabled', { prNumber, repo });
+    return null;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general) {
     logger.warn('Cannot notify PR merge - general channel not found');
@@ -433,6 +542,17 @@ async function notifyPRMerge(prNumber, repo, githubUsername, prTitle, prUrl) {
 
 // Notify about badges earned
 async function notifyBadgeEarned(discordId, badgeTypes) {
+  // No-op when OpenNHP features are disabled — the bot has no standing
+  // expectation that #general exists, and a 🏅 Badge Earned embed is
+  // nonsensical in a guild that never opted in to the contributor
+  // workflow in the first place.
+  if (!config.isOpenNHPActive) {
+    logger.debug('notifyBadgeEarned skipped: OpenNHP features disabled', {
+      discordId, badgeCount: badgeTypes?.length ?? 0,
+    });
+    return;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general || badgeTypes.length === 0) return;
 
@@ -452,8 +572,17 @@ async function notifyBadgeEarned(discordId, badgeTypes) {
   }
 }
 
-// Post good-first-issue to contribute channel
+// Post good-first-issue to contribute channel. OpenNHP-only — posts to
+// #contribute (which only exists in the OpenNHP guild) and is part of
+// the community onboarding loop. Skipped entirely when the flag is off.
 async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postGoodFirstIssue skipped: OpenNHP features disabled', {
+      repo, issueNumber,
+    });
+    return null;
+  }
+
   if (!channels.contribute) await refreshCache();
   if (!channels.contribute) {
     logger.warn('Cannot post good-first-issue - contribute channel not found');
@@ -494,6 +623,11 @@ async function postGoodFirstIssue(repo, issueNumber, title, url, labels) {
 
 // Post release announcement
 async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postReleaseAnnouncement skipped: OpenNHP features disabled', { repo, tagName });
+    return null;
+  }
+
   if (!channels.announcements) await refreshCache();
   if (!channels.announcements) {
     logger.warn('Cannot post release - announcements channel not found');
@@ -530,6 +664,11 @@ async function postReleaseAnnouncement(repo, tagName, releaseName, url, body) {
 
 // Post star milestone
 async function postStarMilestone(repo, stars, repoUrl) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postStarMilestone skipped: OpenNHP features disabled', { repo, stars });
+    return null;
+  }
+
   if (!channels.announcements) await refreshCache();
   if (!channels.announcements) {
     logger.warn('Cannot post milestone - announcements channel not found');
@@ -557,6 +696,11 @@ async function postStarMilestone(repo, stars, repoUrl) {
 
 // Post to GitHub feed
 async function postToGitHubFeed(embed) {
+  if (!config.isOpenNHPActive) {
+    logger.debug('postToGitHubFeed skipped: OpenNHP features disabled');
+    return null;
+  }
+
   if (!channels.githubFeed) await refreshCache();
   if (!channels.githubFeed) return null;
 
@@ -570,6 +714,14 @@ async function postToGitHubFeed(embed) {
 
 // Post weekly digest
 async function postWeeklyDigest() {
+  if (!config.isOpenNHPActive) {
+    // The ready handler already gates setupWeeklyDigest() on the flag,
+    // so this branch is only reachable via a direct caller in a future
+    // refactor. Defense-in-depth — matches every other notifier.
+    logger.debug('postWeeklyDigest skipped: OpenNHP features disabled');
+    return null;
+  }
+
   if (!channels.general) await refreshCache();
   if (!channels.general) {
     logger.warn('Cannot post weekly digest - general channel not found');
@@ -660,13 +812,49 @@ function getVoiceChannelMembers(guildObj, senderUserId) {
   };
 }
 
-// Get non-bot members who can view a text channel (excludes the sender)
+// Get non-bot members who can view a channel (excludes the sender).
+//
+// Voice/stage-voice channels have a gotcha: in discord.js, `channel.members`
+// returns members CURRENTLY CONNECTED to voice — NOT everyone who can see
+// the channel. For text channels `channel.members` is computed off guild
+// members + ViewChannel permission, which is the semantic we want for
+// "Everyone in this channel." So for voice/stage-voice we compute the
+// viewer set explicitly from guild.members.cache.
+//
+// Callers rely on the sender having already done `guild.members.fetch()`
+// so the cache is warm; see the `target === 'channel'` branch in
+// handleSend (commands.js) for the fetch + call site pairing.
 function getTextChannelMembers(channel, senderUserId) {
-  const members = channel.members
+  const isVoice = channel.type === ChannelType.GuildVoice ||
+                  channel.type === ChannelType.GuildStageVoice;
+
+  let source;
+  if (isVoice) {
+    // Voice path: enumerate guild viewers via permissionsFor. If the
+    // channel is voice-typed but `.guild` is somehow missing (partial
+    // cache / unusual gateway state), do NOT silently fall back to
+    // `channel.members` — that's the voice-connected-only set which
+    // is exactly the bug this helper exists to avoid. Return empty and
+    // log so a caller's "no recipients" branch triggers loudly instead
+    // of shipping to a wrong subset.
+    if (!channel.guild) {
+      logger.warn('getTextChannelMembers: voice channel missing .guild; returning empty', {
+        channelId: channel.id, channelType: channel.type,
+      });
+      return [];
+    }
+    source = channel.guild.members.cache.filter(m => {
+      const perms = channel.permissionsFor(m);
+      return perms && perms.has(PermissionFlagsBits.ViewChannel);
+    });
+  } else {
+    // Text channel: `channel.members` is already the viewer set.
+    source = channel.members;
+  }
+
+  return source
     .filter(m => m.id !== senderUserId && !m.user.bot)
     .map(m => m.user);
-
-  return members;
 }
 
 // Graceful shutdown — awaits client.destroy() so the caller knows the

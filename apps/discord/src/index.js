@@ -5,11 +5,26 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./database');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
+const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
+
+// Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
+// bot treats itself as a public multi-server app. Commands register globally,
+// per-guild QURL API keys come from /qurl setup (stored encrypted in
+// guild_configs), and OpenNHP-specific features (contributor roles, welcome
+// DMs, GitHub OAuth linking, PR webhook notifications) are dormant because
+// no single guild is being tracked.
+//
+// When GUILD_ID is set to a valid Discord snowflake, the original
+// single-guild OpenNHP deployment behavior is preserved: commands register
+// to that guild only, and all OpenNHP features are active.
+const { isMultiTenant } = config;
 
 // Validate required config. Fail fast at boot so misconfigurations are caught
-// during deploy, not when the first request arrives.
-const required = ['DISCORD_TOKEN', 'GITHUB_CLIENT_ID', 'GITHUB_CLIENT_SECRET', 'GITHUB_WEBHOOK_SECRET', 'GUILD_ID', 'BASE_URL'];
-const missing = required.filter(key => !config[key]);
+// during deploy, not when the first request arrives. Lists live in
+// boot-requirements.js so they can be unit-tested without side-effecting
+// a bot boot. Gated on isOpenNHPActive (see config.js) — single-guild-plain
+// and multi-tenant both use the short required list.
+const missing = missingBootKeys(config, config.isOpenNHPActive);
 
 if (missing.length > 0) {
   logger.error('Missing required environment variables:');
@@ -18,29 +33,66 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// Boot-log the effective mode so prod triage can grep it. The three
+// lines correspond exactly to the supported modes in config.js.
+if (isMultiTenant) {
+  logger.info('Multi-tenant mode (GUILD_ID unset): commands will register globally; OpenNHP features are dormant.');
+} else if (config.isOpenNHPActive) {
+  logger.info(`Single-guild OpenNHP mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP community features active.`);
+} else {
+  logger.info(`Single-guild plain mode: targeting GUILD_ID=${config.GUILD_ID}. OpenNHP features dormant; only /qurl registered.`);
+}
+
 // Production-only required secrets. In dev these are optional so localhost
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  const prodRequired = ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
-  const prodMissing = prodRequired.filter(k => !process.env[k]);
+  // QURL_API_KEY is the global-fallback key for /qurl send. Only the
+  // OpenNHP community server demands it at boot; single-guild-plain and
+  // multi-tenant deployments rely on per-guild /qurl setup. List is in
+  // boot-requirements.js for testability.
+  const prodMissing = missingProdKeys(process.env, config.isOpenNHPActive);
   if (prodMissing.length > 0) {
     logger.error(`NODE_ENV=production but missing required env vars: ${prodMissing.join(', ')}`);
     logger.error('For KEY_ENCRYPTION_KEY, generate with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
     process.exit(1);
   }
-  // OAuth state flows through BASE_URL; plaintext http:// would expose the
-  // state token (and the redirect itself) to any network path observer.
-  if (!config.BASE_URL.startsWith('https://')) {
+
+  // BASE_URL https check: unconditional in OpenNHP mode. An OpenNHP
+  // prod deploy that forgets to set BASE_URL in its task-def would
+  // otherwise fall through to the "http://localhost:3000" default in
+  // config.js — which would boot successfully but fail at the first
+  // OAuth callback, exactly the deferred-error mode this fail-fast
+  // exists to prevent. In non-OpenNHP modes BASE_URL is unused
+  // (no /auth or /webhook routes mounted), so we only enforce https
+  // there if the operator explicitly set it — lets single-guild-plain
+  // and multi-tenant deployments ignore BASE_URL without a false-
+  // positive failure, while still catching a stale http:// SSM value
+  // if a future code path re-enables BASE_URL use.
+  if (config.isOpenNHPActive && !config.BASE_URL.startsWith('https://')) {
+    logger.error(`BASE_URL must use https:// in production (OpenNHP mode). Got: ${config.BASE_URL}`);
+    process.exit(1);
+  }
+  // Treat "" and whitespace-only as unset (matches GUILD_ID's normalization
+  // robustness). An operator who parameterized the SSM value but seeded it
+  // with "" or " " should not silently escape the https check — but they
+  // also shouldn't get a false-positive boot failure from an accidentally-
+  // empty param, since config.BASE_URL falls through to the localhost
+  // default in that case and the downstream "http://localhost:3000" is
+  // caught by the OpenNHP https check above anyway.
+  const baseUrlExplicitlySet = Boolean(process.env.BASE_URL?.trim());
+  if (!config.isOpenNHPActive && baseUrlExplicitlySet && !config.BASE_URL.startsWith('https://')) {
     logger.error(`BASE_URL must use https:// in production (got ${config.BASE_URL})`);
     process.exit(1);
   }
 
-  // OAUTH_STATE_SECRET is required in production. Falling back to
-  // GITHUB_CLIENT_SECRET couples the two secrets — rotating GitHub's
-  // client secret would invalidate all in-flight OAuth states and vice
-  // versa. A prod deploy must set this explicitly.
-  if (!process.env.OAUTH_STATE_SECRET) {
+  // OAUTH_STATE_SECRET guards GitHub OAuth state, which is dormant
+  // unless OpenNHP mode is active (the only mode that mounts /auth +
+  // /webhook routes). Require it only when that surface is live.
+  if (config.isOpenNHPActive && !process.env.OAUTH_STATE_SECRET) {
+    // Falling back to GITHUB_CLIENT_SECRET couples the two secrets —
+    // rotating GitHub's client secret would invalidate all in-flight
+    // OAuth states and vice versa. A prod deploy must set this explicitly.
     logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
     process.exit(1);
   }

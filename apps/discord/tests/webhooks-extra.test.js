@@ -29,6 +29,11 @@ jest.mock('../src/database', () => ({
   getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
 }));
 
+// GUILD_ID + ENABLE_OPENNHP_FEATURES together gate whether /auth and
+// /webhook routes are mounted. This test suite exercises webhook
+// routes, so both must be set.
+process.env.GUILD_ID = '123456789012345678';
+process.env.ENABLE_OPENNHP_FEATURES = 'true';
 process.env.GITHUB_CLIENT_ID = 'test-client-id';
 process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
 process.env.GITHUB_WEBHOOK_SECRET = 'test-webhook-secret';
