@@ -203,13 +203,22 @@ async function consumePendingLink(state) {
 
 async function createLink(discordId, githubUsername) {
   const now = nowIso();
-  await ddb.send(new PutCommand({
+  // Preserve the original `linked_at` across re-links — SQLite's
+  // `ON CONFLICT(discord_id) DO UPDATE SET github_username = excluded…`
+  // only touched github_username + updated_at, so the "when did I
+  // first link" timestamp stayed stable. A naive PutItem would
+  // overwrite linked_at on every re-link, breaking any analytics
+  // on first-link cohort age. UpdateExpression with
+  // `if_not_exists(linked_at, :now)` keeps the SQLite behavior:
+  // set linked_at only on first write; always update
+  // github_username + updated_at.
+  await ddb.send(new UpdateCommand({
     TableName: TABLES.github_links,
-    Item: {
-      discord_id: discordId,
-      github_username: githubUsername.toLowerCase(),
-      linked_at: now,
-      updated_at: now,
+    Key: { discord_id: discordId },
+    UpdateExpression: 'SET github_username = :g, updated_at = :now, linked_at = if_not_exists(linked_at, :now)',
+    ExpressionAttributeValues: {
+      ':g': githubUsername.toLowerCase(),
+      ':now': now,
     },
   }));
   logger.info('Created/updated GitHub link', { discordId, github: githubUsername });
@@ -334,31 +343,48 @@ async function getContributions(discordId, limit = 50) {
 
 async function getAllContributions(limit = 100) {
   // No natural partition key for "newest N across all users" — full
-  // scan, sorted client-side. Acceptable at projected volume.
-  const items = [];
-  let ExclusiveStartKey;
-  do {
-    const res = await ddb.send(new ScanCommand({
-      TableName: TABLES.contributions,
-      ExclusiveStartKey,
-    }));
-    items.push(...(res.Items || []));
-    ExclusiveStartKey = res.LastEvaluatedKey;
-    if (items.length >= limit * 3) break; // cheap cap — 3x headroom for the sort
-  } while (ExclusiveStartKey);
+  // scan, sorted client-side. DDB Scan returns items in internal-hash
+  // order (not chronological), so an early-termination cap could miss
+  // the newest rows if they happen to sit late in the scan order.
+  // At projected volume (< 10k rows) a full scan is acceptable; if
+  // contributions ever grow past ~50k, introduce a dedicated "newest
+  // across users" GSI (pk=__all__, sk=merged_at) or an aggregated
+  // counter row and query that instead.
+  const items = await scanAll(TABLES.contributions);
   items.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || ''));
   return items.slice(0, limit);
 }
 
 async function getContributionCount(discordId) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: TABLES.contributions,
-    IndexName: 'discord_id-merged_at-index',
-    KeyConditionExpression: 'discord_id = :d',
-    ExpressionAttributeValues: { ':d': discordId },
-    Select: 'COUNT',
-  }));
-  return res.Count || 0;
+  // GSI queries are eventually consistent — ConsistentRead isn't
+  // supported on GSIs. A `Query` issued immediately after a base-
+  // table `PutItem` (see recordContribution → checkAndAwardBadges
+  // chain) can return a count of 0 when it should be 1, because
+  // the GSI hasn't propagated the new row yet. That's a permanent
+  // miss for the FIRST_PR badge — on the next contribution the
+  // count is 2 and the `count === 1` check never fires again.
+  //
+  // Mitigation: short retry loop. DDB GSI lag under normal load is
+  // typically <50ms; retry with backoff covers the tail. Only
+  // re-issues on count=0 to avoid noise for users with established
+  // histories (where count=0 is the correct answer for a
+  // never-contributor).
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TABLES.contributions,
+      IndexName: 'discord_id-merged_at-index',
+      KeyConditionExpression: 'discord_id = :d',
+      ExpressionAttributeValues: { ':d': discordId },
+      Select: 'COUNT',
+    }));
+    const count = res.Count || 0;
+    if (count > 0 || attempt === MAX_RETRIES) return count;
+    // Backoff: 50ms, 100ms, 200ms. Total worst case ~350ms before
+    // giving up and returning 0.
+    await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+  }
+  return 0;
 }
 
 async function getWeeklyContributions(discordId) {
@@ -771,32 +797,39 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // recipient_count / delivered_count (the GSI result may truncate
   // if one send has many recipients). Then Promise.all the config
   // fetches. Bounded fanout at ~10 queries + 10 gets.
-  const sendsRes = await ddb.send(new QueryCommand({
-    TableName: TABLES.qurl_sends,
-    IndexName: 'sender_discord_id-created_at-index',
-    KeyConditionExpression: 'sender_discord_id = :s',
-    ExpressionAttributeValues: { ':s': senderDiscordId },
-    ScanIndexForward: false,
-    Limit: limit * 3, // Overfetch — revoked-filter headroom.
-  }));
-
-  // Collect unique send_ids in newest-first order. `metaBySendId`
-  // tracks the chronologically-latest row seen for each send as the
-  // metadata carrier (resource_type / target_type / channel_id /
-  // expires_in / created_at). Counts come from a per-send Query
-  // below, NOT from the GSI result — the GSI can return fewer than
-  // all recipients when any single send has more rows than
-  // remaining GSI Limit headroom.
+  // Paginate the GSI until we've collected `limit * 2` unique
+  // send_ids (2x for revoked-filter headroom) OR the GSI is
+  // exhausted. Fixed-Limit overfetch would starve older sends if a
+  // single recent send has many recipients — their rows fill the
+  // window and push older distinct sends past the limit. Paginating
+  // until `limit * 2` unique send_ids collected avoids that
+  // starvation. Capped at 10 pagination rounds to bound worst-case
+  // cost when a sender has hundreds of recent sends.
   const metaBySendId = new Map();
   const sendIdOrder = [];
-  for (const row of sendsRes.Items || []) {
-    const existing = metaBySendId.get(row.send_id);
-    if (!existing) {
-      sendIdOrder.push(row.send_id);
-      metaBySendId.set(row.send_id, row);
-    } else if ((row.created_at || '') > (existing.created_at || '')) {
-      metaBySendId.set(row.send_id, row);
+  let ExclusiveStartKey;
+  const MAX_GSI_PAGES = 10;
+  const TARGET_UNIQUE_SENDS = limit * 2;
+  for (let page = 0; page < MAX_GSI_PAGES && sendIdOrder.length < TARGET_UNIQUE_SENDS; page++) {
+    const sendsRes = await ddb.send(new QueryCommand({
+      TableName: TABLES.qurl_sends,
+      IndexName: 'sender_discord_id-created_at-index',
+      KeyConditionExpression: 'sender_discord_id = :s',
+      ExpressionAttributeValues: { ':s': senderDiscordId },
+      ScanIndexForward: false,
+      ExclusiveStartKey,
+    }));
+    for (const row of sendsRes.Items || []) {
+      const existing = metaBySendId.get(row.send_id);
+      if (!existing) {
+        sendIdOrder.push(row.send_id);
+        metaBySendId.set(row.send_id, row);
+      } else if ((row.created_at || '') > (existing.created_at || '')) {
+        metaBySendId.set(row.send_id, row);
+      }
     }
+    ExclusiveStartKey = sendsRes.LastEvaluatedKey;
+    if (!ExclusiveStartKey) break;
   }
 
   // Parallel fetch: per-send recipient query + per-send config
@@ -853,16 +886,25 @@ async function markSendRevoked(sendId, senderDiscordId) {
   if (cfgRes.Item) {
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
     if (cfgRes.Item.revoked_at) return; // idempotent
-    await ddb.send(new UpdateCommand({
-      TableName: TABLES.qurl_send_configs,
-      Key: { send_id: sendId },
-      UpdateExpression: 'SET revoked_at = :t',
-      ExpressionAttributeValues: {
-        ':t': nowIso(),
-        ':s': senderDiscordId,
-      },
-      ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-    }));
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLES.qurl_send_configs,
+        Key: { send_id: sendId },
+        UpdateExpression: 'SET revoked_at = :t',
+        ExpressionAttributeValues: {
+          ':t': nowIso(),
+          ':s': senderDiscordId,
+        },
+        ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
+      }));
+    } catch (err) {
+      // Swallow CCFE — a concurrent revoke already flipped
+      // revoked_at (or a racing caller raced ownership swapping,
+      // which the condition also rejects). Either way the end
+      // state is "send is revoked" so no action needed. Any other
+      // error propagates.
+      if (err.name !== 'ConditionalCheckFailedException') throw err;
+    }
     return;
   }
 
@@ -1038,7 +1080,11 @@ async function listOrphanedTokens(limit = 50) {
 
 // Caller passes the encrypted blob from listOrphanedTokens; we
 // decrypt one at a time so only a single plaintext is in memory.
-function decryptOrphanedToken(encryptedAccessToken) {
+// Async to match the rest of the Store contract even though the
+// body is sync CPU work — callers `await` uniformly and a future
+// backend that needs async decrypt (e.g. KMS GenerateDataKey) can
+// drop in without call-site churn.
+async function decryptOrphanedToken(encryptedAccessToken) {
   return decrypt(encryptedAccessToken);
 }
 

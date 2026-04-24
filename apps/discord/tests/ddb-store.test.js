@@ -110,13 +110,22 @@ describe('pending links', () => {
 // ── GitHub links ──
 
 describe('github links', () => {
-  test('createLink: lowercases github_username and sets both timestamps', async () => {
-    ddbMock.on(PutCommand).resolves({});
+  test('createLink: lowercases github_username, sets updated_at, preserves linked_at on re-link', async () => {
+    // Now uses UpdateCommand with if_not_exists(linked_at, :now) so
+    // the first link sets linked_at; re-links only touch
+    // github_username + updated_at. Test by inspecting the
+    // UpdateExpression shape.
+    ddbMock.on(UpdateCommand).resolves({});
     await store.createLink('disc-1', 'OctoCat');
-    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-    expect(item.github_username).toBe('octocat');
-    expect(item.linked_at).toBeDefined();
-    expect(item.updated_at).toBeDefined();
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ discord_id: 'disc-1' });
+    expect(input.ExpressionAttributeValues[':g']).toBe('octocat');
+    expect(input.ExpressionAttributeValues[':now']).toBeDefined();
+    // Critical: `if_not_exists(linked_at, :now)` — preserves SQLite's
+    // ON CONFLICT behavior across re-links.
+    expect(input.UpdateExpression).toMatch(/if_not_exists\(linked_at, :now\)/);
+    expect(input.UpdateExpression).toMatch(/github_username = :g/);
+    expect(input.UpdateExpression).toMatch(/updated_at = :now/);
   });
 
   test('getLinkByGithub: queries GSI then hops to base table', async () => {
@@ -252,9 +261,9 @@ describe('orphaned tokens', () => {
     expect(typeof item.expires_at).toBe('number');
   });
 
-  test('decryptOrphanedToken: unwraps via crypto util', () => {
+  test('decryptOrphanedToken: unwraps via crypto util (now async for contract parity)', async () => {
     const cipher = `enc:v1:IV:TAG:${Buffer.from('the-token').toString('hex')}`;
-    expect(store.decryptOrphanedToken(cipher)).toBe('the-token');
+    expect(await store.decryptOrphanedToken(cipher)).toBe('the-token');
   });
 
   test('listOrphanedTokens: returns { id, encryptedAccessToken } shape matching SqliteStore', async () => {
