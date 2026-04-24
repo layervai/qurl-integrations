@@ -143,9 +143,14 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	name := resolveKeyName(keyName)
 	endpoint := resolveEndpoint(opts, loginCfg)
 
-	// Use loginCtx so key creation is bounded by the same 10-minute deadline
-	// as the browser flow rather than falling through to the HTTP client's default.
-	keyResp, err := auth.CreateAPIKey(loginCtx, nil, endpoint, token.AccessToken, auth.CreateKeyRequest{
+	// Use a fresh 30-second context for key creation so a slow browser flow
+	// (e.g. user takes 9m59s) doesn't leave only ~1 second for the API call,
+	// which would time out and leave an orphaned server-side key with no local
+	// config entry. The HTTP client's own timeout is also 30s, so this is
+	// belt-and-suspenders.
+	keyCtx, keyCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer keyCancel()
+	keyResp, err := auth.CreateAPIKey(keyCtx, nil, endpoint, token.AccessToken, auth.CreateKeyRequest{
 		Name:   name,
 		Scopes: scopes,
 	})
@@ -238,6 +243,9 @@ func authStatusCmd(opts *globalOpts) *cobra.Command {
 			_, _ = fmt.Fprintf(stdout, "  API Key: %s\n", faint.Sprintf("%s...", prefix))
 			_, _ = fmt.Fprintf(stdout, "  Source:  %s\n", source)
 
+			// Error is intentionally ignored: resolveAPIKeyWithSource already
+			// surfaces malformed config above, so this path is unreachable for
+			// a bad config file. We only need cfg for the endpoint fallback.
 			statusCfg, _ := config.LoadProfile(resolveProfile(opts))
 			ep := resolveEndpoint(opts, statusCfg)
 			c := client.New(ep, apiKey, client.WithUserAgent("qurl-cli/"+opts.version))
