@@ -195,8 +195,9 @@ func (s *LoginSession) WaitForToken(ctx context.Context) (*TokenResponse, error)
 			return nil, result.err
 		}
 		// Use a fresh 30s context for the token exchange so a slow browser flow
-		// (ctx nearly expired) doesn't time out the network call itself.
-		exchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// (ctx nearly expired) doesn't time out the network call itself. Derive
+		// from ctx (not Background) so Ctrl-C still cancels the exchange.
+		exchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		return s.flow.exchangeCode(exchCtx, result.code, s.codeVerifier, s.RedirectURI)
 	}
