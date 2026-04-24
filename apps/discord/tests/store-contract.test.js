@@ -79,19 +79,19 @@ describe('store/contract', () => {
 
     it('throws when a method is missing', () => {
       const incomplete = { ...completeBackend };
-      delete incomplete[STORE_METHODS[0]];
+      delete incomplete['createPendingLink'];
       // `.toThrow(string)` does a substring match, safer than
       // `new RegExp(...)` if a future contract entry ever contains
       // regex metacharacters ($, ., parens, etc.).
       expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
-      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow(STORE_METHODS[0]);
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('createPendingLink');
     });
 
     it('throws when a constant is missing', () => {
       const incomplete = { ...completeBackend };
-      delete incomplete[STORE_CONSTANTS[0]];
+      delete incomplete['BADGE_TYPES'];
       expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
-      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow(STORE_CONSTANTS[0]);
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('BADGE_TYPES');
     });
 
     it('throws when the backend is not an object', () => {
@@ -102,8 +102,8 @@ describe('store/contract', () => {
 
     it('names both missing methods AND missing constants in a single throw (one error, two diagnoses)', () => {
       const incomplete = { ...completeBackend };
-      delete incomplete[STORE_METHODS[0]];
-      delete incomplete[STORE_CONSTANTS[0]];
+      delete incomplete['createPendingLink'];
+      delete incomplete['BADGE_TYPES'];
       let caught;
       try {
         assertStoreShape(incomplete, 'double-gap');
@@ -113,8 +113,8 @@ describe('store/contract', () => {
       expect(caught).toBeDefined();
       // Substring contains — safer than regex if a future entry
       // ever has regex metacharacters.
-      expect(caught.message).toContain(STORE_METHODS[0]);
-      expect(caught.message).toContain(STORE_CONSTANTS[0]);
+      expect(caught.message).toContain('createPendingLink');
+      expect(caught.message).toContain('BADGE_TYPES');
     });
 
     it('METHODS and CONSTANTS lists are disjoint — no name can be both', () => {
@@ -167,36 +167,50 @@ describe('store/index boot-time assertions (via child_process)', () => {
   const path = require('path');
   const appRoot = path.resolve(__dirname, '..');
 
-  it('rejects an unknown STORE_TYPE with a listing of valid backends', () => {
-    // JSON.stringify-escape the path so a workspace dir containing
-    // a quote, backslash, or `${}` can't break out of the inline
-    // `node -e` script literal. Local Linux CI paths are boring
-    // today, but this future-proofs against contributors running
-    // against weirder paths (spaces + quotes on macOS, WSL, etc.).
+  // Helper: spawn a child `node -e` that requires the store module
+  // with a specific STORE_TYPE env, forcing the real boot path
+  // (JEST_WORKER_ID='' strips the skip-guard). Returns
+  // { status, stdout, stderr }. `JSON.stringify`-escaping the
+  // require path so a workspace dir with a quote / backslash /
+  // `${}` can't break out of the inline `node -e` script literal.
+  function spawnStoreBoot(storeTypeValue) {
     const requirePath = JSON.stringify(path.join(appRoot, 'src/store'));
-    const result = spawnSync(
-      process.execPath,
-      ['-e', `require(${requirePath})`],
-      {
-        env: {
-          ...process.env,
-          STORE_TYPE: 'sqlitte', // typo — must NOT silently fall back
-          // Intentionally strip the JEST marker so the child runs
-          // the real assertion path — this is the boot path we want
-          // to exercise end-to-end.
-          JEST_WORKER_ID: '',
-          // SQLite wouldn't get reached (throw happens before the
-          // backend is required), but set :memory: defensively.
-          DATABASE_PATH: ':memory:',
-        },
-        encoding: 'utf8',
-      },
-    );
+    const env = { ...process.env, JEST_WORKER_ID: '', DATABASE_PATH: ':memory:' };
+    // Distinguish "not set at all" (`undefined`) from "set to
+    // empty/whitespace" (both should fall back to sqlite).
+    if (storeTypeValue === undefined) {
+      delete env.STORE_TYPE;
+    } else {
+      env.STORE_TYPE = storeTypeValue;
+    }
+    return spawnSync(process.execPath, ['-e', `require(${requirePath})`], { env, encoding: 'utf8' });
+  }
+
+  it('rejects an unknown STORE_TYPE with a listing of valid backends', () => {
+    const result = spawnStoreBoot('sqlitte'); // typo — must NOT silently fall back
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/Unknown STORE_TYPE/);
     expect(result.stderr).toMatch(/sqlitte/);
     // Names the valid options so the operator knows how to fix.
     expect(result.stderr).toMatch(/sqlite/);
+  });
+
+  it('falls back to sqlite when STORE_TYPE is unset', () => {
+    const result = spawnStoreBoot(undefined);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('falls back to sqlite when STORE_TYPE is empty-string (typical container-templating bug)', () => {
+    const result = spawnStoreBoot('');
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('falls back to sqlite when STORE_TYPE is whitespace-only (another container-templating bug)', () => {
+    const result = spawnStoreBoot('   ');
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
   });
 
   // Note: exercising the "backend missing a method" throw end-to-end

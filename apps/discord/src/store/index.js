@@ -75,6 +75,14 @@ switch (BACKEND) {
 // backend AND a child-process spawn of the real boot path, so the
 // invariant is still enforced at PR time — the prod-boot assertion
 // is a runtime belt on top.
+//
+// Leak caveat: if a production container ever has `JEST_WORKER_ID`
+// injected (e.g. a CI env accidentally copied into a runtime
+// image), the boot-time assertion silently skips and a malformed
+// backend wouldn't fail-fast. Highly unlikely in practice, and the
+// PR-time contract test already guards against every realistic
+// drift. If you're chasing a "missing method" bug in prod, verify
+// `JEST_WORKER_ID` is unset on the running container first.
 if (!process.env.JEST_WORKER_ID) {
   assertStoreShape(store, BACKEND);
   logger.info('Store backend initialized', {
