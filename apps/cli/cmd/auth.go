@@ -116,9 +116,15 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	w.ln()
 	w.printf("  Waiting for authentication...")
 
-	token, err := session.WaitForToken(ctx)
+	// Give the user up to 10 minutes to complete the browser flow before timing out.
+	loginCtx, loginCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer loginCancel()
+	token, err := session.WaitForToken(loginCtx)
 	if err != nil {
 		w.ln()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.New("authentication timed out: browser flow not completed within 10 minutes")
+		}
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 	w.msg(" done")

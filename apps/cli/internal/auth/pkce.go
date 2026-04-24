@@ -140,7 +140,10 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 	}
 
 	lc := net.ListenConfig{}
-	listener, err := lc.Listen(ctx, "tcp", "localhost:0")
+	// Bind to 127.0.0.1 explicitly (not "localhost") so the listener and
+	// redirect URI use the same address on dual-stack hosts where "localhost"
+	// may resolve to ::1 while Auth0's callback targets 127.0.0.1.
+	listener, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("start callback server: %w", err)
 	}
@@ -150,7 +153,7 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 		_ = listener.Close()
 		return nil, errors.New("unexpected listener address type")
 	}
-	redirectURI := fmt.Sprintf("http://localhost:%d%s", addr.Port, callbackPath)
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d%s", addr.Port, callbackPath)
 	codeCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
