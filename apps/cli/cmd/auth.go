@@ -132,7 +132,9 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	w.printf("  Creating API key...")
 
 	name := resolveKeyName(keyName)
-	endpoint := resolveEndpoint(opts)
+	// Load config to honour endpoint from config file (flag/env take precedence).
+	loginCfg, _ := config.LoadProfile(resolveProfile(opts))
+	endpoint := resolveEndpoint(opts, loginCfg)
 
 	keyResp, err := auth.CreateAPIKey(ctx, nil, endpoint, token.AccessToken, auth.CreateKeyRequest{
 		Name:   name,
@@ -224,7 +226,8 @@ func authStatusCmd(opts *globalOpts) *cobra.Command {
 			_, _ = fmt.Fprintf(stdout, "  API Key: %s\n", faint.Sprintf("%s...", prefix))
 			_, _ = fmt.Fprintf(stdout, "  Source:  %s\n", source)
 
-			ep := resolveEndpoint(opts)
+			statusCfg, _ := config.LoadProfile(resolveProfile(opts))
+			ep := resolveEndpoint(opts, statusCfg)
 			c := client.New(ep, apiKey, client.WithUserAgent("qurl-cli/"+opts.version))
 
 			statusCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
@@ -296,9 +299,10 @@ func resolveProfile(opts *globalOpts) string {
 	return os.Getenv("QURL_PROFILE")
 }
 
-// resolveEndpoint returns the API endpoint from flag, env, or default.
-func resolveEndpoint(opts *globalOpts) string {
-	ep := resolveValue("QURL_ENDPOINT", &opts.endpoint, "endpoint", nil)
+// resolveEndpoint returns the API endpoint from flag, env, config file, or default.
+// cfg may be nil when no config has been loaded yet (falls back to flag/env only).
+func resolveEndpoint(opts *globalOpts, cfg *config.Config) string {
+	ep := resolveValue("QURL_ENDPOINT", &opts.endpoint, "endpoint", cfg)
 	if ep == "" {
 		ep = defaultEndpoint
 	}

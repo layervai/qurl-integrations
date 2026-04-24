@@ -26,10 +26,6 @@ const (
 	// DefaultAudience is the API audience identifier.
 	DefaultAudience = "https://api.layerv.ai"
 
-	// DefaultClientID is the Auth0 SPA client ID used by the CLI.
-	// Override via QURL_AUTH0_CLIENT_ID environment variable.
-	DefaultClientID = ""
-
 	maxResponseBytes = 1 << 20 // 1 MiB
 	formContentType  = "application/x-www-form-urlencoded"
 
@@ -39,6 +35,14 @@ const (
 
 	serverShutdownTimeout = 2 * time.Second
 )
+
+// DefaultClientID is the Auth0 SPA client ID compiled into the CLI.
+// It is a var (not const) so release builds can inject it at link time:
+//
+//	go build -ldflags "-X github.com/layervai/qurl-integrations/apps/cli/internal/auth.DefaultClientID=<id>"
+//
+// Override at runtime via the QURL_AUTH0_CLIENT_ID environment variable.
+var DefaultClientID = "" //nolint:gochecknoglobals // intentional: ldflags injection point
 
 // TokenResponse contains a successful OAuth token response.
 type TokenResponse struct {
