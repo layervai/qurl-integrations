@@ -432,6 +432,7 @@ func TestAuthLogoutNotLoggedIn(t *testing.T) {
 }
 
 func TestAuthStatusAuthenticated(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	apiSrv := newAPIKeyMockServer(t)
 	defer apiSrv.Close()
 
