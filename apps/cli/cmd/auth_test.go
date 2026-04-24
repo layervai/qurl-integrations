@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -140,11 +141,13 @@ func runLoginWithCallback(t *testing.T, auth0URL, apiURL string, extraArgs ...st
 	// send the callback. We only need to wait for stderr output.
 	var authURLStr string
 	deadline := time.After(10 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for authURLStr == "" {
 		select {
 		case <-deadline:
 			t.Fatalf("timeout waiting for auth URL in stderr:\n%s", stderrBuf.String())
-		case <-time.After(10 * time.Millisecond):
+		case <-ticker.C:
 			authURLStr = extractAuthURL(stderrBuf.String())
 		}
 	}
@@ -180,21 +183,18 @@ func runLoginWithCallback(t *testing.T, auth0URL, apiURL string, extraArgs ...st
 	return stdoutBuf.String(), cmdErr
 }
 
+// authURLRe matches a line containing an authorization URL (https://…/authorize?…).
+// Anchored to the start of a line (after optional whitespace) to prevent false
+// positives from log lines that contain "http" before the URL token.
+var authURLRe = regexp.MustCompile(`(?m)^\s*(https?://\S+/authorize\?\S+)`)
+
 // extractAuthURL finds and returns the authorization URL from command output.
 func extractAuthURL(output string) string {
-	idx := strings.Index(output, "/authorize?")
-	if idx <= 0 {
+	m := authURLRe.FindStringSubmatch(output)
+	if m == nil {
 		return ""
 	}
-	lineStart := strings.LastIndex(output[:idx], "http")
-	if lineStart < 0 {
-		return ""
-	}
-	end := strings.IndexAny(output[lineStart:], "\n\r")
-	if end <= 0 {
-		return ""
-	}
-	return strings.TrimSpace(output[lineStart : lineStart+end])
+	return strings.TrimSpace(m[1])
 }
 
 func TestAuthLoginSuccess(t *testing.T) {
