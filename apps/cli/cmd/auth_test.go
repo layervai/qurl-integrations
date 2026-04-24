@@ -36,6 +36,7 @@ func (b *safeBuffer) String() string {
 }
 
 const apiKeysPath = "/v1/api-keys"
+const quotaPath = "/v1/quota"
 
 // runAuthCmd executes a CLI command without setting QURL_API_KEY,
 // so that auth commands can test the unauthenticated state.
@@ -98,7 +99,7 @@ func newAPIKeyMockServer(t *testing.T) *httptest.Server {
 				"status":     "active",
 			})
 
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/quota":
+		case r.Method == http.MethodGet && r.URL.Path == quotaPath:
 			apiEnvelope(t, w, map[string]any{
 				"plan":         "growth",
 				"period_start": "2026-03-01T00:00:00Z",
@@ -462,7 +463,7 @@ func TestAuthStatusQuotaUnavailable(t *testing.T) {
 	// Mock server that returns 401 on /v1/quota to simulate a revoked key.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/quota" {
+		if r.Method == http.MethodGet && r.URL.Path == quotaPath {
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","title":"Unauthorized"}}`))
 			return
