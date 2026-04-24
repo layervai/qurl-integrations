@@ -115,7 +115,7 @@ type LoginSession struct {
 	// AuthURL is the authorization URL to open in the browser.
 	AuthURL string
 
-	// RedirectURI is the localhost callback URL (useful for testing).
+	// RedirectURI is the 127.0.0.1 callback URL (useful for testing).
 	RedirectURI string
 
 	codeCh       chan callbackResult
