@@ -198,30 +198,45 @@ func (s *LoginSession) Close() {
 }
 
 // callbackHandler returns an HTTP handler that processes the OAuth callback.
+// All sends to codeCh are non-blocking so that a second request (e.g. browser
+// refresh, port probe) never stalls the handler goroutine — the first result
+// wins and subsequent requests receive an HTTP response without hanging.
 func callbackHandler(expectedState string, codeCh chan<- callbackResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 
 		if q.Get("state") != expectedState {
-			codeCh <- callbackResult{err: errors.New("state mismatch — possible CSRF attack")}
+			select {
+			case codeCh <- callbackResult{err: errors.New("state mismatch — possible CSRF attack")}:
+			default:
+			}
 			http.Error(w, "State mismatch", http.StatusBadRequest)
 			return
 		}
 
 		if errCode := q.Get("error"); errCode != "" {
-			codeCh <- callbackResult{err: &OAuthError{Code: errCode, Description: q.Get("error_description")}}
+			select {
+			case codeCh <- callbackResult{err: &OAuthError{Code: errCode, Description: q.Get("error_description")}}:
+			default:
+			}
 			http.Error(w, "Authentication failed: "+errCode, http.StatusBadRequest)
 			return
 		}
 
 		code := q.Get("code")
 		if code == "" {
-			codeCh <- callbackResult{err: errors.New("no authorization code in callback")}
+			select {
+			case codeCh <- callbackResult{err: errors.New("no authorization code in callback")}:
+			default:
+			}
 			http.Error(w, "Missing code", http.StatusBadRequest)
 			return
 		}
 
-		codeCh <- callbackResult{code: code}
+		select {
+		case codeCh <- callbackResult{code: code}:
+		default:
+		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = fmt.Fprint(w, successHTML)

@@ -337,6 +337,52 @@ func TestOAuthErrorMessage(t *testing.T) {
 	}
 }
 
+// TestCallbackSecondRequestDoesNotBlock verifies that a second request to the
+// callback endpoint (e.g. browser refresh) returns without blocking even though
+// codeCh is already full from the first request.
+func TestCallbackSecondRequestDoesNotBlock(t *testing.T) {
+	flow := testPKCEFlow("https://mock.auth0.com")
+	session, err := flow.StartLogin(context.Background())
+	if err != nil {
+		t.Fatalf("StartLogin: %v", err)
+	}
+
+	authURL, _ := url.Parse(session.AuthURL)
+	state := authURL.Query().Get("state")
+
+	callbackURL := session.RedirectURI + "?code=test-auth-code&state=" + url.QueryEscape(state)
+
+	// First request: delivers the code and fills codeCh (capacity 1).
+	resp1 := httpGet(t, callbackURL)
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first callback: status = %d, want 200", resp1.StatusCode)
+	}
+
+	// Second request (simulates browser refresh): must return promptly even though
+	// codeCh is full. Without the non-blocking select this goroutine would block.
+	done := make(chan struct{})
+	go func() {
+		resp2 := httpGet(t, callbackURL)
+		_ = resp2.Body.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK — second request completed without hanging.
+	case <-time.After(3 * time.Second):
+		t.Fatal("second callback request blocked — non-blocking select missing on codeCh send")
+	}
+
+	// The code from the first request must still be readable.
+	result := <-session.codeCh
+	if result.code != "test-auth-code" {
+		t.Errorf("codeCh code = %q, want %q", result.code, "test-auth-code")
+	}
+	session.Close()
+}
+
 // httpGet is a test helper that makes a GET request with a context.
 func httpGet(t *testing.T, rawURL string) *http.Response {
 	t.Helper()

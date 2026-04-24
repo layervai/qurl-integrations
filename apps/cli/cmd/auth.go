@@ -323,11 +323,15 @@ func resolveKeyName(name string) string {
 	return "CLI"
 }
 
-// saveAuthConfig stores the API key and key ID in the config file.
-// A malformed existing config is silently replaced — the incoming credentials
-// are what matter and we are about to overwrite the file anyway.
+// saveAuthConfig stores the API key and key ID in the config file, preserving
+// any other fields (endpoint, output format, etc.) that are already present.
+// A malformed existing config is an error — the call site warns the user and
+// prints the key for manual recovery.
 func saveAuthConfig(profile, apiKey, keyID string) error {
-	cfg, _ := config.LoadProfile(profile)
+	cfg, err := config.LoadProfile(profile)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
