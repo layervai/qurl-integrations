@@ -115,14 +115,14 @@ type ResponseMeta struct {
 
 // QURL represents a QURL resource as returned by the API.
 type QURL struct {
-	ResourceID   string     `json:"resource_id"`
-	TargetURL    string     `json:"target_url"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	Description  string     `json:"description,omitempty"`
-	Tags         []string   `json:"tags,omitempty"`
-	QURLSite     string     `json:"qurl_site,omitempty"`
+	ResourceID  string     `json:"resource_id"`
+	TargetURL   string     `json:"target_url"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Description string     `json:"description,omitempty"`
+	Tags        []string   `json:"tags,omitempty"`
+	QURLSite    string     `json:"qurl_site,omitempty"`
 	// CustomDomain is a pointer to distinguish "not set" (nil) from "explicitly empty" on
 	// API responses. CreateInput.CustomDomain is a plain string with omitempty, which is
 	// sufficient for write requests where absence and empty mean the same thing.
