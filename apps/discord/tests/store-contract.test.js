@@ -162,9 +162,15 @@ describe('store/index boot-time assertions (via child_process)', () => {
   const appRoot = path.resolve(__dirname, '..');
 
   it('rejects an unknown STORE_TYPE with a listing of valid backends', () => {
+    // JSON.stringify-escape the path so a workspace dir containing
+    // a quote, backslash, or `${}` can't break out of the inline
+    // `node -e` script literal. Local Linux CI paths are boring
+    // today, but this future-proofs against contributors running
+    // against weirder paths (spaces + quotes on macOS, WSL, etc.).
+    const requirePath = JSON.stringify(path.join(appRoot, 'src/store'));
     const result = spawnSync(
       process.execPath,
-      ['-e', `require('${path.join(appRoot, 'src/store')}')`],
+      ['-e', `require(${requirePath})`],
       {
         env: {
           ...process.env,

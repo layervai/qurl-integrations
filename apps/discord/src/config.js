@@ -202,23 +202,4 @@ module.exports = {
   // disable the rate limit; a recipients cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
-
-  // Store backend selection. Read directly in `src/store/index.js` (not
-  // via this object) because it's a boot-time choice that controls how
-  // the store module is initialized — shoehorning it into the config
-  // object would require store/index.js to import config, which in turn
-  // inverts the intended "config is consumed by everyone, depends on
-  // nothing app-internal" layering.
-  //
-  //   sqlite (default) — better-sqlite3 over local file / EFS. Current
-  //                      prod + sandbox setup pre-PR-4b.
-  //   ddb              — DynamoDB, landing in PR 4b. Required for
-  //                      horizontal scale (desired_count > 1) on the
-  //                      greenfield prod bot module.
-  //
-  // Surfaced here as a doc-only reference so the env-var surface is
-  // discoverable in one place. Unknown values throw at boot (see
-  // `store/index.js`); a typo like `STORE_TYPE=sqlitte` fails loud,
-  // never silently falls back to the default.
-  // STORE_TYPE: process.env.STORE_TYPE || 'sqlite',
 };

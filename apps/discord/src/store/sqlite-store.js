@@ -1,10 +1,10 @@
-// store/sqlite-store — Store backend for the legacy SQLite-on-EFS path.
+// store/sqlite-store — Store backend for the SQLite-on-EFS data path.
 //
 // Thin pass-through over `src/database.js`. Every method this exports is
 // the same function object database.js owns — no wrapping, no behavior
-// change. The indirection exists so PR 4b can drop in a DdbStore beside
-// this one (implementing the same `STORE_METHODS` contract) without
-// touching any caller.
+// change. The indirection exists so an additional backend (DynamoDB,
+// etc.) can drop in beside this one (implementing the same
+// `STORE_METHODS` contract) without touching any caller.
 //
 // Why the separate module (vs. just re-exporting database.js from
 // store/index.js): the distinction matters for the contract assertion
@@ -20,8 +20,9 @@
 //
 // Async parity: every method is synchronous today (better-sqlite3 is
 // intentionally sync for throughput + transaction correctness). The
-// Store contract permits sync or async; PR 4b flips to async when the
-// DDB backend lands.
+// Store contract permits sync or async; when a Promise-returning
+// backend lands, the contract flips to async atomically (contract +
+// every call site in one change).
 
 const dbModule = require('../database');
 

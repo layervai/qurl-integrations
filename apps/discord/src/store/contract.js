@@ -3,24 +3,23 @@
 // The bot's data layer is reached through a single `Store` object that
 // every consumer gets via `require('./store')`. The contract below lists
 // every method a Store backend MUST implement. Runtime assertion at boot
-// (see `assertStoreShape`) fails fast **in a real (non-Jest) boot** if a
+// (see `assertStoreShape`) fails fast in a real (non-Jest) boot if a
 // backend drops a method — so a missing implementation surfaces as a
 // clear boot-time error, not as `TypeError: store.xMethod is not a
 // function` deep in a request path. Under Jest the boot-time assertion
 // is intentionally skipped so partial `jest.mock('../src/database', …)`
-// stubs keep working; the invariant is instead enforced at PR time by
+// stubs keep working; the invariant is instead enforced by
 // `tests/store-contract.test.js`, which calls `assertStoreShape`
 // directly against both a complete fixture AND the real default
 // backend AND a `child_process.spawnSync` of the real boot path.
 //
 // Backend lifecycle: a Store may keep synchronous or asynchronous
 // implementations as long as it preserves the method names and return
-// shapes. Today `SqliteStore` is synchronous (better-sqlite3 is sync);
-// `DdbStore` will be Promise-returning. Callers wrap consumption in
-// `await` uniformly so the switch is transparent at each call site.
-// PR 4a (this PR) keeps the sync shape; PR 4b flips the contract to
-// async alongside the DDB impl so the flag-day is a single, reviewable
-// conversion.
+// shapes. Today the SQLite backend is synchronous (better-sqlite3 is
+// sync). When a Promise-returning backend lands, flip the contract to
+// async atomically (contract + every call site in one change) so the
+// sync→async migration is a single reviewable flag-day rather than
+// two entangled concerns.
 //
 // Adding / removing a method:
 //   1. Update `STORE_METHODS` below.
