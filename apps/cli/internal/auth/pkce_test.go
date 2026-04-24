@@ -410,4 +410,3 @@ func httpGet(t *testing.T, rawURL string) *http.Response {
 	}
 	return resp
 }
-
