@@ -7,6 +7,50 @@ const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 
+// Process role — selects which subset of the bot runs in this
+// container. Three modes:
+//
+//   combined (default) — legacy single-process shape. Gateway
+//                        client logs in; Express HTTP server
+//                        listens; cron jobs run. Backward-compatible
+//                        for any env that hasn't opted into the
+//                        split (sandbox pre-migration, local dev).
+//
+//   gateway — Discord Gateway WebSocket + interaction handlers +
+//             cron jobs. No Express listener. Deployed as a
+//             singleton (desired_count=1) because a Discord bot
+//             token admits only one active Gateway connection —
+//             two concurrent logins cause a session-identity flap
+//             every few seconds as each replaces the other's
+//             WebSocket.
+//
+//   http — Express listener only (OAuth callback + GitHub
+//          webhooks + /health + /metrics). No Gateway login.
+//          Can scale horizontally behind an ALB. Outbound Discord
+//          API calls go through `discord-rest.js` (REST-only, no
+//          persistent connection).
+//
+// Invariant: `discord.js`'s Client object is still required at
+// module load (it exposes `sendDM` et al. that the current HTTP
+// routes import), but `client.login()` is gated on `isGateway`.
+// Creating a Client without login() does NOT open a WebSocket —
+// the WS only opens on login. HTTP-only replicas therefore never
+// collide with the gateway singleton. Routes that currently call
+// gateway-backed helpers (routes/oauth.js, routes/webhooks.js
+// imports from `./discord`) should progressively migrate to
+// `discord-rest.js` so the gateway client can eventually be
+// moved entirely behind a role check — tracked as a follow-up
+// once the split is in prod and patterns stabilize.
+const PROCESS_ROLE = (process.env.PROCESS_ROLE || 'combined').trim();
+const VALID_ROLES = ['combined', 'gateway', 'http'];
+if (!VALID_ROLES.includes(PROCESS_ROLE)) {
+  logger.error(`Invalid PROCESS_ROLE: '${PROCESS_ROLE}'. Valid values: ${VALID_ROLES.join(', ')}. Set PROCESS_ROLE to one of these, or leave unset to default to 'combined'.`);
+  process.exit(1);
+}
+const isGateway = PROCESS_ROLE === 'gateway' || PROCESS_ROLE === 'combined';
+const isHttp = PROCESS_ROLE === 'http' || PROCESS_ROLE === 'combined';
+logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
+
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
 // bot treats itself as a public multi-server app. Commands register globally,
 // per-guild qURL API keys come from /qurl setup (stored encrypted in
@@ -158,18 +202,24 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Register commands when ready
-client.once('ready', async () => {
-  await registerCommands(client);
-});
+// Gateway-only event wiring. HTTP-only replicas skip these because
+// they never login() and so the client never fires these events —
+// but the `.on()` registrations would still leak handler references
+// and register no-op listeners, so gate them for clarity.
+if (isGateway) {
+  // Register commands when ready
+  client.once('ready', async () => {
+    await registerCommands(client);
+  });
 
-// Handle interactions
-client.on('interactionCreate', handleCommand);
+  // Handle interactions
+  client.on('interactionCreate', handleCommand);
 
-// Error handling
-client.on('error', error => {
-  logger.error('Discord client error', { error: error.message });
-});
+  // Error handling
+  client.on('error', error => {
+    logger.error('Discord client error', { error: error.message });
+  });
+}
 
 // Log and continue on unhandled rejections. The old behavior killed the
 // entire process on any stray rejection (transient Discord timeouts, network
@@ -215,7 +265,13 @@ async function gracefulShutdown(code = 0) {
       });
     }
     stopServerIntervals();
-    await discordShutdown();
+    // Discord client shutdown only meaningful when we're the gateway
+    // role. HTTP-only replicas never called login(), so there's no
+    // WebSocket to close — discordShutdown() on an un-logged-in
+    // client just releases the event emitter handles.
+    if (isGateway) {
+      await discordShutdown();
+    }
     await db.close();
     logger.info('Shutdown complete');
   } catch (error) {
@@ -242,23 +298,38 @@ async function start() {
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-  // Start web server
-  httpServer = startServer();
+  // HTTP listener — OAuth callback, webhooks, health, metrics.
+  // Skipped in `gateway`-only mode; the ALB targets HTTP replicas
+  // only. `combined` keeps the legacy single-process behavior.
+  if (isHttp) {
+    httpServer = startServer();
+  }
 
-  // Background retry-revoke for any OAuth tokens whose initial revoke
-  // failed. Runs hourly on top of the 7-day purge in database.js.
-  startOrphanTokenSweeper();
+  // Background retry-revoke for any OAuth tokens whose initial
+  // revoke failed. Only on the gateway side — the sweeper calls
+  // into Discord via the gateway client (`user.send()` etc.) and
+  // would need to be refactored to `discord-rest.js` before
+  // running in `http`-only mode. Tracked as a follow-up.
+  if (isGateway) {
+    startOrphanTokenSweeper();
+  }
 
-  // Login to Discord with a 30s deadline. client.login() doesn't expose a
-  // native timeout; if the Discord API is unreachable the call can hang
-  // indefinitely and block boot without any log line pointing at the cause.
-  await Promise.race([
-    client.login(config.DISCORD_TOKEN),
-    new Promise((_, reject) => {
-      const t = setTimeout(() => reject(new Error('Discord login timed out after 30s')), 30_000);
-      t.unref();
-    }),
-  ]);
+  // Login to Discord with a 30s deadline. client.login() doesn't
+  // expose a native timeout; if the Discord API is unreachable
+  // the call can hang indefinitely and block boot without any
+  // log line pointing at the cause. Gated on `isGateway` — the
+  // HTTP-only replica must NOT open a second Gateway connection
+  // on the same bot token; Discord would flap session identity
+  // between the two WebSockets every few seconds.
+  if (isGateway) {
+    await Promise.race([
+      client.login(config.DISCORD_TOKEN),
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new Error('Discord login timed out after 30s')), 30_000);
+        t.unref();
+      }),
+    ]);
+  }
 }
 
 start().catch(error => {
