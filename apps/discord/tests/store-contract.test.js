@@ -29,8 +29,13 @@ const { STORE_METHODS, STORE_CONSTANTS, assertStoreShape } = require('../src/sto
 
 describe('store/contract', () => {
   describe('STORE_METHODS', () => {
-    it('is frozen', () => {
+    it('is frozen (mutation throws under strict mode)', () => {
       expect(Object.isFrozen(STORE_METHODS)).toBe(true);
+      // ES modules run in strict mode, so mutation should throw
+      // rather than silently no-op. Asserting the throw is sharper
+      // than just asserting frozen — catches a hypothetical future
+      // regression that e.g. returns a non-frozen proxy.
+      expect(() => STORE_METHODS.push('newMethod')).toThrow();
     });
 
     it('contains no duplicates (typo in the list would collide silently)', () => {
@@ -47,8 +52,9 @@ describe('store/contract', () => {
   });
 
   describe('STORE_CONSTANTS', () => {
-    it('is frozen', () => {
+    it('is frozen (mutation throws under strict mode)', () => {
       expect(Object.isFrozen(STORE_CONSTANTS)).toBe(true);
+      expect(() => STORE_CONSTANTS.push('NEW_CONSTANT')).toThrow();
     });
 
     it('contains no duplicates', () => {
@@ -176,10 +182,11 @@ describe('store/index boot-time assertions (via child_process)', () => {
           ...process.env,
           STORE_TYPE: 'sqlitte', // typo — must NOT silently fall back
           // Intentionally strip the JEST marker so the child runs
-          // the real assertion path.
+          // the real assertion path — this is the boot path we want
+          // to exercise end-to-end.
           JEST_WORKER_ID: '',
-          NODE_ENV: 'production',
-          // SQLite wouldn't get reached, but set :memory: defensively.
+          // SQLite wouldn't get reached (throw happens before the
+          // backend is required), but set :memory: defensively.
           DATABASE_PATH: ':memory:',
         },
         encoding: 'utf8',

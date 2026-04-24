@@ -31,11 +31,20 @@ const logger = require('../logger');
 const { assertStoreShape } = require('./contract');
 
 const VALID_BACKENDS = Object.freeze(['sqlite']);
-const rawStoreType = process.env.STORE_TYPE;
 // Treat unset, empty, and whitespace-only STORE_TYPE as "not
 // configured" — falls back to the sqlite default. Any non-empty
 // value is taken literally and must match VALID_BACKENDS.
-const BACKEND = (rawStoreType && rawStoreType.trim()) || 'sqlite';
+//
+// `configured` is derived once and reused for both the backend
+// selection AND the `source` log field below. Previously the two
+// were computed independently: `source: rawStoreType ? 'env' :
+// 'default'` treated a whitespace-only value as env-configured
+// while the trim fell back to sqlite — a real misreport that
+// defeated the field's purpose (diagnosing container-templating
+// bugs). Single derivation guarantees they can't drift.
+const rawStoreType = process.env.STORE_TYPE;
+const configured = rawStoreType && rawStoreType.trim();
+const BACKEND = configured || 'sqlite';
 
 if (!VALID_BACKENDS.includes(BACKEND)) {
   throw new Error(`Unknown STORE_TYPE: '${BACKEND}'. Valid backends: ${VALID_BACKENDS.join(', ')}. Set STORE_TYPE to one of these (or leave unset to default to sqlite).`);
@@ -74,8 +83,9 @@ if (!process.env.JEST_WORKER_ID) {
     // through to the sqlite default. Useful for confirming a
     // backend-change rollout actually landed — "default" in prod
     // logs after an env-var switch means the env var didn't
-    // propagate to the container.
-    source: rawStoreType ? 'env' : 'default',
+    // propagate to the container (or landed as empty/whitespace-
+    // only, which the normalization above treats as unset).
+    source: configured ? 'env' : 'default',
   });
 }
 

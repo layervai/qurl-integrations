@@ -21,6 +21,15 @@
 // sync→async migration is a single reviewable flag-day rather than
 // two entangled concerns.
 //
+// Scope of `assertStoreShape`: name-level only. A backend that exports
+// `createPendingLink` with a wrong arity / wrong return shape passes
+// this check happily, then crashes at the first call site. Parameter
+// and return-shape parity between backends is the test suite's job
+// (run the same behavioral tests against each backend's :memory: or
+// mock instance). Particularly relevant for future sync→async flips:
+// the assertion won't catch "method still exists but now returns a
+// Promise" drift — behavioral tests will.
+//
 // Adding / removing a method:
 //   1. Update `STORE_METHODS` below.
 //   2. Add the implementation to every concrete backend.
