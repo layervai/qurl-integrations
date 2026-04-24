@@ -38,12 +38,12 @@ func listCmd(opts *globalOpts) *cobra.Command {
 				}
 			}
 
-			var errs []error
-			errs = append(errs, validateRFC3339("created-after", createdAfter))
-			errs = append(errs, validateRFC3339("created-before", createdBefore))
-			errs = append(errs, validateRFC3339("expires-before", expiresBefore))
-			errs = append(errs, validateRFC3339("expires-after", expiresAfter))
-			if err := errors.Join(errs...); err != nil {
+			if err := errors.Join(
+				validateRFC3339("created-after", createdAfter),
+				validateRFC3339("created-before", createdBefore),
+				validateRFC3339("expires-before", expiresBefore),
+				validateRFC3339("expires-after", expiresAfter),
+			); err != nil {
 				return err
 			}
 
