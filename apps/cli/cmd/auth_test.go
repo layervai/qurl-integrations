@@ -456,6 +456,35 @@ func TestAuthStatusAuthenticated(t *testing.T) {
 	}
 }
 
+func TestAuthStatusQuotaUnavailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Mock server that returns 401 on /v1/quota to simulate a revoked key.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/quota" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","title":"Unauthorized"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	t.Setenv("QURL_API_KEY", "lv_live_testkey12345678")
+
+	out, err := runAuthCmd(t, "--endpoint", srv.URL, "auth", "status")
+	if err != nil {
+		t.Fatalf("auth status: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "Authenticated") {
+		t.Errorf("expected 'Authenticated' in output:\n%s", out)
+	}
+	if !strings.Contains(out, "unavailable") {
+		t.Errorf("expected 'unavailable' in output when quota fetch fails:\n%s", out)
+	}
+}
+
 func TestAuthStatusNotAuthenticated(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
