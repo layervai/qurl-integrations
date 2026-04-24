@@ -97,7 +97,7 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
     // Record each contribution (db handles duplicates)
     let newCount = 0;
     for (const contrib of contributions) {
-      const recorded = db.recordContribution(
+      const recorded = await db.recordContribution(
         discordId,
         githubUsername,
         contrib.prNumber,
@@ -127,7 +127,7 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
       const key = `${contrib.title}\x00${contrib.repo}`;
       if (seenTitleKeys.has(key)) continue;
       seenTitleKeys.add(key);
-      const badges = db.checkAndAwardBadges(discordId, contrib.title, contrib.repo);
+      const badges = await db.checkAndAwardBadges(discordId, contrib.title, contrib.repo);
       newBadges.push(...badges);
     }
 
@@ -270,7 +270,7 @@ const OAUTH_SESSION_COOKIE = 'qurl_oauth_session';
 const COOKIE_TTL_SECONDS = 15 * 60; // 15 minutes
 
 // Start GitHub OAuth flow
-router.get('/github', rateLimit, (req, res) => {
+router.get('/github', rateLimit, async (req, res) => {
   const { state } = req.query;
 
   if (!state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
@@ -283,7 +283,7 @@ router.get('/github', rateLimit, (req, res) => {
     }));
   }
 
-  const pending = db.getPendingLink(state);
+  const pending = await db.getPendingLink(state);
   if (!pending) {
     return res.status(400).send(renderPage({
       title: 'Link Expired',
@@ -371,7 +371,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
   // Atomic DELETE ... RETURNING closes the TOCTOU window: a second concurrent
   // request with the same state gets no row back and is rejected.
-  const pending = db.consumePendingLink(state);
+  const pending = await db.consumePendingLink(state);
   if (!pending) {
     return res.status(400).send(renderPage({
       title: 'Link Expired',
@@ -471,7 +471,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       }));
     }
 
-    db.createLink(pending.discord_id, userData.login);
+    await db.createLink(pending.discord_id, userData.login);
     // deletePendingLink already called above (TOCTOU prevention)
 
     logger.info(`Linked Discord ${pending.discord_id} to GitHub @${userData.login}`);
@@ -595,7 +595,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
           tokenHash8,
         });
         try {
-          db.recordOrphanedToken(accessToken);
+          await db.recordOrphanedToken(accessToken);
           // Error-level (not warn) so monitoring/alerting catches orphaned
           // tokens accumulating — an operator needs to notice this trend
           // before the 7-day sweeper retention window lapses. Includes the

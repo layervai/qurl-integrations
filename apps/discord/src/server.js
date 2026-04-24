@@ -85,11 +85,11 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   // Actually probe the DB — if better-sqlite3 is blocked/locked we want the
   // health check to fail so the orchestrator replaces the container.
   try {
-    db.getStats();
+    await db.getStats();
     res.status(200).json({ status: 'ok' });
   } catch (err) {
     // Log full detail internally; omit from the response so better-sqlite3
@@ -134,7 +134,7 @@ function metricsRateLimit(req, res, next) {
 }
 
 // Metrics endpoint
-app.get('/metrics', metricsRateLimit, (req, res) => {
+app.get('/metrics', metricsRateLimit, async (req, res) => {
   // Default-deny: require METRICS_TOKEN in every environment. An accidentally
   // unset NODE_ENV in staging/preview should never expose stats.
   if (!process.env.METRICS_TOKEN) {
@@ -149,7 +149,7 @@ app.get('/metrics', metricsRateLimit, (req, res) => {
   if (!crypto.timingSafeEqual(authHash, expectedHash)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  const stats = db.getStats();
+  const stats = await db.getStats();
   res.json({
     status: 'ok',
     uptime: process.uptime(),

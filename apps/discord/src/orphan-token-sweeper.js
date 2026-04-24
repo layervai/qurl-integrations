@@ -33,7 +33,7 @@ async function revokeOneDetailed(accessToken) {
 async function sweepOnce() {
   if (!config.GITHUB_CLIENT_ID || !config.GITHUB_CLIENT_SECRET) return;
   let rows;
-  try { rows = db.listOrphanedTokens(BATCH); } catch (err) {
+  try { rows = await db.listOrphanedTokens(BATCH); } catch (err) {
     logger.error('Orphan token sweep: listOrphanedTokens failed', { error: err.message });
     return;
   }
@@ -45,14 +45,14 @@ async function sweepOnce() {
     // Decrypt inside the loop so only one plaintext token is in memory at
     // a time. Whole-batch decryption would widen the memory-dump window.
     let accessToken;
-    try { accessToken = db.decryptOrphanedToken(encryptedAccessToken); } catch (err) {
+    try { accessToken = await db.decryptOrphanedToken(encryptedAccessToken); } catch (err) {
       logger.warn('Orphan token decrypt failed (will retry next sweep)', { id, error: err.message });
       continue;
     }
     try {
       const result = await revokeOneDetailed(accessToken);
       if (result.ok) {
-        db.deleteOrphanedToken(id);
+        await db.deleteOrphanedToken(id);
         revoked++;
         backoffMs = 100; // reset on any success
       } else if (result.status === 429 || result.status === 403) {
@@ -92,7 +92,7 @@ async function sweepOnce() {
   // can page oncall on a rising trend — accumulating orphans means GitHub
   // is persistently rejecting revokes, which is the signal we want alerts on.
   let remaining = 0;
-  try { remaining = db.countOrphanedTokens(); } catch { /* non-fatal */ }
+  try { remaining = await db.countOrphanedTokens(); } catch { /* non-fatal */ }
   if (remaining > 0) {
     logger.error('Orphan token queue has residual entries', {
       remaining, sweepProcessed: rows.length, sweepRevoked: revoked,
