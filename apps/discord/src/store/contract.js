@@ -3,9 +3,15 @@
 // The bot's data layer is reached through a single `Store` object that
 // every consumer gets via `require('./store')`. The contract below lists
 // every method a Store backend MUST implement. Runtime assertion at boot
-// (see `assertStoreShape`) fails fast if a backend drops a method — so
-// a missing implementation surfaces as a clear boot-time error, not as
-// `TypeError: store.xMethod is not a function` deep in a request path.
+// (see `assertStoreShape`) fails fast **in a real (non-Jest) boot** if a
+// backend drops a method — so a missing implementation surfaces as a
+// clear boot-time error, not as `TypeError: store.xMethod is not a
+// function` deep in a request path. Under Jest the boot-time assertion
+// is intentionally skipped so partial `jest.mock('../src/database', …)`
+// stubs keep working; the invariant is instead enforced at PR time by
+// `tests/store-contract.test.js`, which calls `assertStoreShape`
+// directly against both a complete fixture AND the real default
+// backend AND a `child_process.spawnSync` of the real boot path.
 //
 // Backend lifecycle: a Store may keep synchronous or asynchronous
 // implementations as long as it preserves the method names and return

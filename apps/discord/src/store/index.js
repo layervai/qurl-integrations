@@ -52,14 +52,17 @@ switch (BACKEND) {
 // trip a boot-time shape check. `JEST_WORKER_ID` is injected into
 // every jest worker process (including `--runInBand`) and is the
 // canonical "am I running inside jest?" marker. `typeof jest` is a
-// belt-and-suspenders fallback in case a future jest version (or
-// a vitest/ava migration) ever drops the env var. The explicit
-// escape hatch keeps prod's strict-assert invariant intact while
-// letting tests keep their minimal mocks. Separate contract-
-// coverage test (`tests/store-contract.test.js`) runs
-// assertStoreShape against a complete fixture AND the real default
-// backend AND a child-process spawn of the real boot path, so the
-// invariant is still enforced — just not at every test's boot time.
+// belt-and-suspenders fallback for a hypothetical jest version that
+// stops setting the env var — not a defense against a vitest/ava
+// migration, which would require `typeof vi !== 'undefined'` or
+// similar added at migration time. Keep the explicit escape hatch
+// so prod's strict-assert invariant stays intact while tests keep
+// their minimal mocks. The separate contract-coverage test
+// (`tests/store-contract.test.js`) runs assertStoreShape against a
+// complete fixture AND the real default backend AND a
+// child-process spawn of the real boot path, so the invariant is
+// still enforced at PR time — the prod-boot assertion is a
+// runtime belt on top.
 const isUnderTestRunner = !!process.env.JEST_WORKER_ID || typeof jest !== 'undefined';
 if (!isUnderTestRunner) {
   assertStoreShape(store, BACKEND);

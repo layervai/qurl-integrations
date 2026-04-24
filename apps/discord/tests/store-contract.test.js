@@ -74,15 +74,18 @@ describe('store/contract', () => {
     it('throws when a method is missing', () => {
       const incomplete = { ...completeBackend };
       delete incomplete[STORE_METHODS[0]];
-      expect(() => assertStoreShape(incomplete, 'broken-backend'))
-        .toThrow(new RegExp(`broken-backend.*${STORE_METHODS[0]}`));
+      // `.toThrow(string)` does a substring match, safer than
+      // `new RegExp(...)` if a future contract entry ever contains
+      // regex metacharacters ($, ., parens, etc.).
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow(STORE_METHODS[0]);
     });
 
     it('throws when a constant is missing', () => {
       const incomplete = { ...completeBackend };
       delete incomplete[STORE_CONSTANTS[0]];
-      expect(() => assertStoreShape(incomplete, 'broken-backend'))
-        .toThrow(new RegExp(`broken-backend.*${STORE_CONSTANTS[0]}`));
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow('broken-backend');
+      expect(() => assertStoreShape(incomplete, 'broken-backend')).toThrow(STORE_CONSTANTS[0]);
     });
 
     it('throws when the backend is not an object', () => {
@@ -102,8 +105,18 @@ describe('store/contract', () => {
         caught = err;
       }
       expect(caught).toBeDefined();
-      expect(caught.message).toMatch(new RegExp(STORE_METHODS[0]));
-      expect(caught.message).toMatch(new RegExp(STORE_CONSTANTS[0]));
+      // Substring contains — safer than regex if a future entry
+      // ever has regex metacharacters.
+      expect(caught.message).toContain(STORE_METHODS[0]);
+      expect(caught.message).toContain(STORE_CONSTANTS[0]);
+    });
+
+    it('METHODS and CONSTANTS lists are disjoint — no name can be both', () => {
+      // A name listed in both would produce a confusing shape
+      // assertion (would appear as missing/present inconsistently
+      // depending on which check runs first). Cheap guard.
+      const overlap = STORE_METHODS.filter(m => STORE_CONSTANTS.includes(m));
+      expect(overlap).toEqual([]);
     });
   });
 });
