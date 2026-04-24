@@ -600,7 +600,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
           // tokens accumulating — an operator needs to notice this trend
           // before the 7-day sweeper retention window lapses. Includes the
           // current orphan-queue depth so PagerDuty thresholds can trigger.
-          const orphanCount = db.countOrphanedTokens?.() ?? -1;
+          const orphanCount = await db.countOrphanedTokens().catch(() => -1);
           logger.error('OAuth token orphaned (revocation retries exhausted) — alert oncall', {
             tokenHash8,
             orphanQueueDepth: orphanCount,

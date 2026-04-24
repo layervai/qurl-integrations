@@ -49,6 +49,7 @@ const {
   UpdateCommand,
   QueryCommand,
   ScanCommand,
+  BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
 // aws-sdk-client-mock intercepts DocumentClient commands globally.
@@ -312,6 +313,231 @@ describe('streaks', () => {
     const result = await store.updateStreak('d');
     expect(result.current).toBe(1); // reset
     expect(result.longest).toBe(5); // preserved
+  });
+});
+
+// ── QURL sends lifecycle ──
+
+describe('qurl sends', () => {
+  test('recordQURLSend: PutItem with all required fields + default dm_status=pending', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await store.recordQURLSend({
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'rcpt',
+      resourceId: 'r1', resourceType: 'file', qurlLink: 'https://…',
+      expiresIn: '24h', channelId: 'ch1', targetType: 'user',
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item.dm_status).toBe('pending');
+    expect(item.send_id).toBe('s1');
+    expect(item.recipient_discord_id).toBe('rcpt');
+    expect(item.sender_discord_id).toBe('sender');
+  });
+
+  test('recordQURLSendBatch: chunks >25 items into multiple BatchWrite calls', async () => {
+    ddbMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
+    const sends = Array.from({ length: 30 }, (_, i) => ({
+      sendId: `s${i}`, senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
+      resourceId: 'r', resourceType: 'file', qurlLink: '…',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }));
+    await store.recordQURLSendBatch(sends);
+    const calls = ddbMock.commandCalls(BatchWriteCommand);
+    expect(calls).toHaveLength(2); // 25 + 5
+  });
+
+  test('recordQURLSendBatch: retries UnprocessedItems with backoff', async () => {
+    let attempt = 0;
+    ddbMock.on(BatchWriteCommand).callsFake((input) => {
+      attempt++;
+      // First call: return some items as unprocessed. Second: clean.
+      if (attempt === 1) {
+        return Promise.resolve({
+          UnprocessedItems: {
+            'test-prefix-qurl-sends': input.RequestItems['test-prefix-qurl-sends'].slice(0, 2),
+          },
+        });
+      }
+      return Promise.resolve({ UnprocessedItems: {} });
+    });
+    const sends = Array.from({ length: 5 }, (_, i) => ({
+      sendId: `s${i}`, senderDiscordId: 'sender', recipientDiscordId: `r${i}`,
+      resourceId: 'r', resourceType: 'file', qurlLink: '…',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }));
+    await store.recordQURLSendBatch(sends);
+    expect(attempt).toBe(2); // one retry
+  });
+
+  test('recordQURLSendBatch: throws after MAX_RETRIES when items remain unprocessed', async () => {
+    // Always return same items as unprocessed — simulate persistent throttle.
+    ddbMock.on(BatchWriteCommand).callsFake((input) => Promise.resolve({
+      UnprocessedItems: { 'test-prefix-qurl-sends': input.RequestItems['test-prefix-qurl-sends'] },
+    }));
+    const sends = [{
+      sendId: 's1', senderDiscordId: 'sender', recipientDiscordId: 'r1',
+      resourceId: 'r', resourceType: 'file', qurlLink: '…',
+      expiresIn: '24h', channelId: 'ch', targetType: 'user',
+    }];
+    await expect(store.recordQURLSendBatch(sends)).rejects.toThrow(/unprocessed items after/);
+  });
+
+  test('updateSendDMStatus: composite-key UpdateItem sets dm_status', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.updateSendDMStatus('s1', 'rcpt', 'sent');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ send_id: 's1', recipient_discord_id: 'rcpt' });
+    expect(input.ExpressionAttributeValues[':s']).toBe('sent');
+  });
+
+  test('getRecentSends: uses base-table Query per send for accurate recipient_count', async () => {
+    // GSI returns 2 unique sends. Base-table per-send queries return
+    // 3 and 5 recipients respectively. Config fetches return null (no
+    // revoke). Result should report accurate counts, not GSI-truncated.
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      const cmd = input;
+      if (cmd.IndexName === 'sender_discord_id-created_at-index') {
+        return Promise.resolve({
+          Items: [
+            { send_id: 'sA', recipient_discord_id: 'r1', dm_status: 'sent', created_at: '2026-04-20T00:00:00Z', resource_type: 'file', target_type: 'user' },
+            { send_id: 'sB', recipient_discord_id: 'r1', dm_status: 'pending', created_at: '2026-04-19T00:00:00Z', resource_type: 'file', target_type: 'user' },
+          ],
+        });
+      }
+      // Base-table queries for recipient count
+      const sendId = cmd.ExpressionAttributeValues[':sid'];
+      if (sendId === 'sA') {
+        return Promise.resolve({ Items: Array.from({ length: 3 }, (_, i) => ({ send_id: 'sA', recipient_discord_id: `r${i}`, dm_status: i < 2 ? 'sent' : 'pending' })) });
+      }
+      return Promise.resolve({ Items: Array.from({ length: 5 }, (_, i) => ({ send_id: 'sB', recipient_discord_id: `r${i}`, dm_status: 'sent' })) });
+    });
+    ddbMock.on(GetCommand).resolves({});
+    const result = await store.getRecentSends('sender', 10);
+    expect(result).toHaveLength(2);
+    const sA = result.find(r => r.send_id === 'sA');
+    const sB = result.find(r => r.send_id === 'sB');
+    expect(sA.recipient_count).toBe(3);
+    expect(sA.delivered_count).toBe(2);
+    expect(sB.recipient_count).toBe(5);
+    expect(sB.delivered_count).toBe(5);
+  });
+
+  test('getRecentSends: filters out revoked sends', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName) {
+        return Promise.resolve({
+          Items: [
+            { send_id: 'sA', recipient_discord_id: 'r1', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' },
+            { send_id: 'sB', recipient_discord_id: 'r1', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [{ send_id: input.ExpressionAttributeValues[':sid'], recipient_discord_id: 'r1', dm_status: 'sent' }] });
+    });
+    ddbMock.on(GetCommand).callsFake((input) => {
+      // sA is revoked, sB is not
+      if (input.Key.send_id === 'sA') {
+        return Promise.resolve({ Item: { send_id: 'sA', revoked_at: 'now' } });
+      }
+      return Promise.resolve({});
+    });
+    const result = await store.getRecentSends('sender', 10);
+    expect(result).toHaveLength(1);
+    expect(result[0].send_id).toBe('sB');
+  });
+
+  test('markSendRevoked: primary path includes :s in ExpressionAttributeValues (regression guard)', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', resource_type: 'file' },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    await store.markSendRevoked('s1', 'sender');
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // BOTH :t and :s must be populated — if :s is missing, DDB throws
+    // ValidationException and every non-legacy revoke fails.
+    expect(input.ExpressionAttributeValues[':t']).toBeDefined();
+    expect(input.ExpressionAttributeValues[':s']).toBe('sender');
+    expect(input.ConditionExpression).toMatch(/sender_discord_id = :s/);
+  });
+
+  test('markSendRevoked: idempotent — no-op if already revoked', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', revoked_at: 'already' },
+    });
+    await store.markSendRevoked('s1', 'sender');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: ownership check — rejects different sender', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'owner', resource_type: 'file' },
+    });
+    await store.markSendRevoked('s1', 'attacker');
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test('markSendRevoked: legacy branch — inserts minimal config when no config row exists', async () => {
+    ddbMock.on(GetCommand).resolves({}); // no config row
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '24h' }],
+    });
+    ddbMock.on(PutCommand).resolves({});
+    await store.markSendRevoked('s1', 'sender');
+    const putCall = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(putCall.Item.revoked_at).toBeDefined();
+    expect(putCall.Item.resource_type).toBe('file');
+    expect(putCall.ConditionExpression).toMatch(/attribute_not_exists/);
+  });
+
+  test('saveSendConfig: encrypts attachmentUrl, stores other fields as-is', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await store.saveSendConfig({
+      sendId: 's1', senderDiscordId: 'sender', resourceType: 'file',
+      connectorResourceId: 'conn', actualUrl: 'https://…',
+      expiresIn: '24h', personalMessage: 'hi', locationName: null,
+      attachmentName: 'doc.pdf', attachmentContentType: 'application/pdf',
+      attachmentUrl: 'https://cdn.discord/attachment/xyz',
+    });
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    expect(item.attachment_url).toMatch(/^enc:v1:/);
+    expect(item.attachment_url).not.toContain('discord/attachment/xyz');
+    expect(item.personal_message).toBe('hi'); // non-sensitive fields unchanged
+    expect(item.attachment_name).toBe('doc.pdf');
+  });
+
+  test('getSendConfig: decrypts attachment_url + ownership check', async () => {
+    const encryptedUrl = `enc:v1:IV:TAG:${Buffer.from('https://cdn.example/attachment').toString('hex')}`;
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'sender', attachment_url: encryptedUrl, personal_message: 'hi' },
+    });
+    const result = await store.getSendConfig('s1', 'sender');
+    expect(result.attachment_url).toBe('https://cdn.example/attachment');
+  });
+
+  test('getSendConfig: ownership check — returns undefined for wrong sender', async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { send_id: 's1', sender_discord_id: 'owner', personal_message: 'secret' },
+    });
+    const result = await store.getSendConfig('s1', 'attacker');
+    expect(result).toBeUndefined();
+  });
+});
+
+// ── Contribution flow resilience ──
+
+describe('recordContribution error separation', () => {
+  test('returns true even if updateStreak throws (insert succeeded, streak errored)', async () => {
+    // First PutCommand (contribution) succeeds. Next GetCommand
+    // (streak) succeeds with null. Subsequent PutCommand for streak
+    // throws — must NOT mask the contribution success.
+    let putCount = 0;
+    ddbMock.on(PutCommand).callsFake(() => {
+      putCount++;
+      if (putCount === 2) return Promise.reject(new Error('Streak table throttled'));
+      return Promise.resolve({});
+    });
+    ddbMock.on(GetCommand).resolves({}); // no existing streak
+    const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
+    expect(result).toBe(true); // contribution recorded, badge eval must still run
   });
 });
 

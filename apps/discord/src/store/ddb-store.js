@@ -277,6 +277,12 @@ async function forceLink(discordId, githubUsername) {
 
 async function recordContribution(discordId, githubUsername, prNumber, repo, prTitle = null) {
   const id = contributionId(repo, prNumber);
+  // Split into two try blocks so a streak-update failure doesn't mask
+  // a successful contribution insert. DDB's two-round-trip streak flow
+  // (Get + Put/Update) has a higher base failure rate than SQLite's
+  // same-transaction write; collapsing the catches would mean a
+  // transient streak timeout causes the caller to skip badge
+  // evaluation for a contribution that actually landed.
   try {
     await ddb.send(new PutCommand({
       TableName: TABLES.contributions,
@@ -292,9 +298,6 @@ async function recordContribution(discordId, githubUsername, prNumber, repo, prT
       ConditionExpression: 'attribute_not_exists(contribution_id)',
     }));
     logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
-    // Best-effort streak update; mirrors SqliteStore's fire-and-await.
-    await updateStreak(discordId);
-    return true;
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
       logger.debug('Contribution already exists', { pr: prNumber, repo });
@@ -303,6 +306,18 @@ async function recordContribution(discordId, githubUsername, prNumber, repo, prT
     logger.error('Failed to record contribution', { error: err.message, pr: prNumber, repo });
     return false;
   }
+
+  try {
+    await updateStreak(discordId);
+  } catch (err) {
+    // Don't fail the caller — contribution IS recorded. Log so an
+    // operator notices sustained streak failures (would indicate a
+    // streak-table IAM / capacity issue, not a correctness bug).
+    logger.error('Streak update failed after recordContribution succeeded', {
+      discordId, pr: prNumber, repo, error: err.message,
+    });
+  }
+  return true;
 }
 
 async function getContributions(discordId, limit = 50) {
@@ -685,32 +700,56 @@ async function recordQURLSend({
 
 async function recordQURLSendBatch(sends) {
   if (!sends || sends.length === 0) return;
-  // DDB BatchWriteItem caps at 25 items per request.
+  // DDB BatchWriteItem caps at 25 items per request. A batch can come
+  // back with `UnprocessedItems` populated — DDB returns items that
+  // were throttled, rejected on the 4MB payload limit, or hit a
+  // transient 5xx. The caller MUST retry those with exponential
+  // backoff; silent-drop would leak recipients (the row never lands
+  // in qurl_sends, so `updateSendDMStatus` against the missing
+  // composite key later becomes a no-op and the user sees a missing
+  // delivery). SQLite used `db.transaction` which was atomic; DDB
+  // has no equivalent so the retry loop IS the durability guarantee.
   const CHUNK = 25;
+  const MAX_RETRIES = 5;
   const now = nowIso();
   for (let i = 0; i < sends.length; i += CHUNK) {
     const slice = sends.slice(i, i + CHUNK);
-    await ddb.send(new BatchWriteCommand({
-      RequestItems: {
-        [TABLES.qurl_sends]: slice.map(s => ({
-          PutRequest: {
-            Item: {
-              send_id: s.sendId,
-              recipient_discord_id: s.recipientDiscordId,
-              sender_discord_id: s.senderDiscordId,
-              resource_id: s.resourceId,
-              resource_type: s.resourceType,
-              qurl_link: s.qurlLink,
-              expires_in: s.expiresIn,
-              channel_id: s.channelId,
-              target_type: s.targetType,
-              dm_status: 'pending',
-              created_at: now,
-            },
+    let requestItems = {
+      [TABLES.qurl_sends]: slice.map(s => ({
+        PutRequest: {
+          Item: {
+            send_id: s.sendId,
+            recipient_discord_id: s.recipientDiscordId,
+            sender_discord_id: s.senderDiscordId,
+            resource_id: s.resourceId,
+            resource_type: s.resourceType,
+            qurl_link: s.qurlLink,
+            expires_in: s.expiresIn,
+            channel_id: s.channelId,
+            target_type: s.targetType,
+            dm_status: 'pending',
+            created_at: now,
           },
-        })),
-      },
-    }));
+        },
+      })),
+    };
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const res = await ddb.send(new BatchWriteCommand({ RequestItems: requestItems }));
+      const unprocessed = res.UnprocessedItems || {};
+      const remaining = unprocessed[TABLES.qurl_sends];
+      if (!remaining || remaining.length === 0) break;
+      if (attempt === MAX_RETRIES) {
+        // All attempts exhausted — fail loud rather than silently
+        // dropping recipients. Caller's retry policy (workflow-level)
+        // decides whether to re-invoke the whole /qurl send command.
+        throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
+      }
+      // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.
+      // `.unref()`-equivalent for Promise sleep isn't needed; the
+      // await keeps the event loop moving.
+      await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+      requestItems = unprocessed;
+    }
   }
 }
 
@@ -726,56 +765,73 @@ async function updateSendDMStatus(sendId, recipientDiscordId, status) {
 async function getRecentSends(senderDiscordId, limit = 10) {
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
-  // sender's recent send_ids via the GSI, then fetch each send's
-  // config + recipient-count in parallel. N+1-ish but capped at `limit`
-  // so it's bounded Promise.all fanout at ~10 getItem + 10 query calls.
+  // sender's recent send_ids via the GSI to build the UNIQUE set of
+  // recent sends (limit*3 overfetch for revoked-filter headroom),
+  // then do a per-send Query to compute the accurate
+  // recipient_count / delivered_count (the GSI result may truncate
+  // if one send has many recipients). Then Promise.all the config
+  // fetches. Bounded fanout at ~10 queries + 10 gets.
   const sendsRes = await ddb.send(new QueryCommand({
     TableName: TABLES.qurl_sends,
     IndexName: 'sender_discord_id-created_at-index',
     KeyConditionExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':s': senderDiscordId },
     ScanIndexForward: false,
-    Limit: limit * 3, // Overfetch — we'll filter out revoked then trim to `limit`.
+    Limit: limit * 3, // Overfetch — revoked-filter headroom.
   }));
 
-  // Group by send_id (one row per recipient in the base table).
-  const bySendId = new Map();
+  // Collect unique send_ids in newest-first order. `metaBySendId`
+  // tracks the chronologically-latest row seen for each send as the
+  // metadata carrier (resource_type / target_type / channel_id /
+  // expires_in / created_at). Counts come from a per-send Query
+  // below, NOT from the GSI result — the GSI can return fewer than
+  // all recipients when any single send has more rows than
+  // remaining GSI Limit headroom.
+  const metaBySendId = new Map();
+  const sendIdOrder = [];
   for (const row of sendsRes.Items || []) {
-    const existing = bySendId.get(row.send_id);
-    if (!existing || (row.created_at || '') > (existing.created_at || '')) {
-      bySendId.set(row.send_id, row);
+    const existing = metaBySendId.get(row.send_id);
+    if (!existing) {
+      sendIdOrder.push(row.send_id);
+      metaBySendId.set(row.send_id, row);
+    } else if ((row.created_at || '') > (existing.created_at || '')) {
+      metaBySendId.set(row.send_id, row);
     }
-    const entry = bySendId.get(row.send_id);
-    entry._recipient_count = (entry._recipient_count || 0) + 1;
-    entry._delivered_count = (entry._delivered_count || 0) + (row.dm_status === 'sent' ? 1 : 0);
   }
 
-  // Fetch config for each send_id in parallel.
-  const sendIds = [...bySendId.keys()];
-  const configs = await Promise.all(
-    sendIds.map(id => ddb.send(new GetCommand({ TableName: TABLES.qurl_send_configs, Key: { send_id: id } })))
-  );
-  const configBySendId = new Map();
-  for (let i = 0; i < sendIds.length; i++) {
-    configBySendId.set(sendIds[i], configs[i].Item);
-  }
+  // Parallel fetch: per-send recipient query + per-send config
+  // getItem. Query on the BASE table (pk=send_id) returns every
+  // recipient for that send, so counts are exact.
+  const [allRecipients, allConfigs] = await Promise.all([
+    Promise.all(sendIdOrder.map(id => ddb.send(new QueryCommand({
+      TableName: TABLES.qurl_sends,
+      KeyConditionExpression: 'send_id = :sid',
+      ExpressionAttributeValues: { ':sid': id },
+    })))),
+    Promise.all(sendIdOrder.map(id => ddb.send(new GetCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: id },
+    })))),
+  ]);
 
-  // Build result matching SqliteStore shape; filter out already-revoked
-  // sends (config.revoked_at is non-null).
   const rows = [];
-  for (const sendId of sendIds) {
-    const base = bySendId.get(sendId);
-    const cfg = configBySendId.get(sendId);
+  for (let i = 0; i < sendIdOrder.length; i++) {
+    const sendId = sendIdOrder[i];
+    const meta = metaBySendId.get(sendId);
+    const recipients = allRecipients[i].Items || [];
+    const cfg = allConfigs[i].Item;
     if (cfg && cfg.revoked_at) continue;
+    const recipientCount = recipients.length;
+    const deliveredCount = recipients.filter(r => r.dm_status === 'sent').length;
     rows.push({
       send_id: sendId,
-      resource_type: base.resource_type,
-      target_type: base.target_type,
-      channel_id: base.channel_id,
-      expires_in: base.expires_in,
-      created_at: base.created_at,
-      recipient_count: base._recipient_count,
-      delivered_count: base._delivered_count,
+      resource_type: meta.resource_type,
+      target_type: meta.target_type,
+      channel_id: meta.channel_id,
+      expires_in: meta.expires_in,
+      created_at: meta.created_at,
+      recipient_count: recipientCount,
+      delivered_count: deliveredCount,
       attachment_name: cfg?.attachment_name,
       location_name: cfg?.location_name,
       personal_message: cfg?.personal_message,
@@ -801,9 +857,11 @@ async function markSendRevoked(sendId, senderDiscordId) {
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: sendId },
       UpdateExpression: 'SET revoked_at = :t',
-      ExpressionAttributeValues: { ':t': nowIso() },
+      ExpressionAttributeValues: {
+        ':t': nowIso(),
+        ':s': senderDiscordId,
+      },
       ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-      ExpressionAttributeNames: {},
     }));
     return;
   }
