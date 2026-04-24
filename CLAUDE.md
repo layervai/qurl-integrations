@@ -32,7 +32,7 @@ SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | chore | docs | test | refactor | ci
-scope: slack | teams | discord | cli | zapier | shared
+scope: slack | teams | discord | cli | zapier | shared | ci
 ```
 
 Examples:
