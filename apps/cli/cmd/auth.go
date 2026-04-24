@@ -164,7 +164,7 @@ func authLogoutCmd(opts *globalOpts) *cobra.Command {
 			if loadErr != nil {
 				return fmt.Errorf("load config: %w", loadErr)
 			}
-			if cfg == nil || cfg.APIKey == "" {
+			if cfg.APIKey == "" {
 				w.msg("Not logged in.")
 				return nil
 			}
@@ -328,12 +328,11 @@ func resolveKeyName(name string) string {
 // A malformed existing config is an error — the call site warns the user and
 // prints the key for manual recovery.
 func saveAuthConfig(profile, apiKey, keyID string) error {
+	// LoadProfile always returns a non-nil *Config on success (missing file
+	// yields an empty config, not nil), so no nil guard is needed here.
 	cfg, err := config.LoadProfile(profile)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
-	}
-	if cfg == nil {
-		cfg = &config.Config{}
 	}
 	cfg.APIKey = apiKey
 	cfg.KeyID = keyID
@@ -358,6 +357,13 @@ func (s *statusWriter) ln() {
 	_, _ = fmt.Fprintln(s.w)
 }
 
+// printLoginSuccess prints the post-login success message.
+//
+// Output split: the animated "Logged in successfully!" banner is written to
+// stderr (w.w) so that it appears on the terminal even when stdout is
+// redirected. The actionable data (API key prefix, key ID, scopes, saved path)
+// goes to stdout so that `qurl auth login > out.txt` captures the machine-
+// readable fields. This mirrors how `auth status` works.
 func printLoginSuccess(stdout io.Writer, w *statusWriter, faint *color.Color, keyResp *auth.CreateKeyResponse, scopes []string, profile string) {
 	w.ln()
 	_, _ = color.New(color.FgGreen, color.Bold).Fprintln(w.w, "  Logged in successfully!")

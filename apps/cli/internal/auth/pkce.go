@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -201,11 +202,14 @@ func (s *LoginSession) Close() {
 // All sends to codeCh are non-blocking so that a second request (e.g. browser
 // refresh, port probe) never stalls the handler goroutine — the first result
 // wins and subsequent requests receive an HTTP response without hanging.
+//
+// The success page is only shown when the result is actually delivered to
+// codeCh; duplicate or probe requests get a neutral "already completed" page.
 func callbackHandler(expectedState string, codeCh chan<- callbackResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 
-		if q.Get("state") != expectedState {
+		if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(expectedState)) != 1 {
 			select {
 			case codeCh <- callbackResult{err: errors.New("state mismatch — possible CSRF attack")}:
 			default:
@@ -233,13 +237,19 @@ func callbackHandler(expectedState string, codeCh chan<- callbackResult) http.Ha
 			return
 		}
 
+		var delivered bool
 		select {
 		case codeCh <- callbackResult{code: code}:
+			delivered = true
 		default:
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprint(w, successHTML)
+		if delivered {
+			_, _ = fmt.Fprint(w, successHTML)
+		} else {
+			_, _ = fmt.Fprint(w, alreadyDoneHTML)
+		}
 	}
 }
 
@@ -328,6 +338,19 @@ const successHTML = `<!DOCTYPE html>
 <body style="font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa;">
 <div style="text-align:center;">
 <h1>Authentication successful</h1>
+<p>You can close this window and return to the terminal.</p>
+</div>
+</body></html>`
+
+// alreadyDoneHTML is served when a second request arrives at the callback
+// endpoint (e.g. browser refresh) after the authorization code has already
+// been delivered. It avoids incorrectly showing "Authentication successful"
+// for a request that was a no-op.
+const alreadyDoneHTML = `<!DOCTYPE html>
+<html><head><title>QURL CLI</title></head>
+<body style="font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa;">
+<div style="text-align:center;">
+<h1>Already authenticated</h1>
 <p>You can close this window and return to the terminal.</p>
 </div>
 </body></html>`

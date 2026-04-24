@@ -25,10 +25,10 @@ func OpenBrowser(rawURL string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.CommandContext(ctx, "open", validated).Start() //nolint:gosec // validated as HTTPS URL from Auth0 server response
+		return exec.CommandContext(ctx, "open", validated).Start() //nolint:gosec // URL validated as https scheme above; exec uses argv (no shell) so no injection risk
 	case "windows":
-		return exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // validated as HTTPS URL from Auth0 server response
+		return exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // URL validated as https scheme above; exec uses argv (no shell) so no injection risk
 	default:
-		return exec.CommandContext(ctx, "xdg-open", validated).Start() //nolint:gosec // validated as HTTPS URL from Auth0 server response
+		return exec.CommandContext(ctx, "xdg-open", validated).Start() //nolint:gosec // URL validated as https scheme above; exec uses argv (no shell) so no injection risk
 	}
 }

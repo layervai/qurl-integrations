@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -339,7 +340,9 @@ func TestOAuthErrorMessage(t *testing.T) {
 
 // TestCallbackSecondRequestDoesNotBlock verifies that a second request to the
 // callback endpoint (e.g. browser refresh) returns without blocking even though
-// codeCh is already full from the first request.
+// codeCh is already full from the first request. It also checks that:
+//   - the first response serves successHTML (code was delivered)
+//   - the second response serves alreadyDoneHTML (code was already taken)
 func TestCallbackSecondRequestDoesNotBlock(t *testing.T) {
 	flow := testPKCEFlow("https://mock.auth0.com")
 	session, err := flow.StartLogin(context.Background())
@@ -354,16 +357,22 @@ func TestCallbackSecondRequestDoesNotBlock(t *testing.T) {
 
 	// First request: delivers the code and fills codeCh (capacity 1).
 	resp1 := httpGet(t, callbackURL)
+	body1, _ := io.ReadAll(resp1.Body)
 	_ = resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first callback: status = %d, want 200", resp1.StatusCode)
+	}
+	if !strings.Contains(string(body1), "Authentication successful") {
+		t.Errorf("first callback: expected success page, got: %s", string(body1))
 	}
 
 	// Second request (simulates browser refresh): must return promptly even though
 	// codeCh is full. Without the non-blocking select this goroutine would block.
 	done := make(chan struct{})
+	var body2 []byte
 	go func() {
 		resp2 := httpGet(t, callbackURL)
+		body2, _ = io.ReadAll(resp2.Body)
 		_ = resp2.Body.Close()
 		close(done)
 	}()
@@ -373,6 +382,10 @@ func TestCallbackSecondRequestDoesNotBlock(t *testing.T) {
 		// OK — second request completed without hanging.
 	case <-time.After(3 * time.Second):
 		t.Fatal("second callback request blocked — non-blocking select missing on codeCh send")
+	}
+
+	if !strings.Contains(string(body2), "Already authenticated") {
+		t.Errorf("second callback: expected already-done page, got: %s", string(body2))
 	}
 
 	// The code from the first request must still be readable.
