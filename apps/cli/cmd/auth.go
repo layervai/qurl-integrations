@@ -160,7 +160,10 @@ func authLogoutCmd(opts *globalOpts) *cobra.Command {
 			w := &statusWriter{w: cmd.ErrOrStderr()}
 			profile := resolveProfile(opts)
 
-			cfg, _ := config.LoadProfile(profile)
+			cfg, loadErr := config.LoadProfile(profile)
+			if loadErr != nil {
+				return fmt.Errorf("load config: %w", loadErr)
+			}
 			if cfg == nil || cfg.APIKey == "" {
 				w.msg("Not logged in.")
 				return nil
@@ -189,7 +192,10 @@ func authStatusCmd(opts *globalOpts) *cobra.Command {
 		Example: "  qurl auth status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			stdout := cmd.OutOrStdout()
-			apiKey, source := resolveAPIKeyWithSource(opts)
+			apiKey, source, cfgErr := resolveAPIKeyWithSource(opts)
+			if cfgErr != nil {
+				return cfgErr
+			}
 
 			if apiKey == "" {
 				_, _ = color.New(color.FgRed).Fprintln(stdout, "Not authenticated")
@@ -249,24 +255,29 @@ func resolveAuth0Config() (clientID, domain, audience string) {
 	return clientID, domain, audience
 }
 
-// resolveAPIKeyWithSource returns the API key and its source label.
-func resolveAPIKeyWithSource(opts *globalOpts) (key, source string) {
+// resolveAPIKeyWithSource returns the API key, its source label, and any error
+// loading the config file. A missing config file is not an error; a malformed
+// one is, so callers can distinguish "not configured" from "broken config".
+func resolveAPIKeyWithSource(opts *globalOpts) (key, source string, err error) {
 	if opts.apiKey != "" {
-		return opts.apiKey, "--api-key flag"
+		return opts.apiKey, "--api-key flag", nil
 	}
 	if v := os.Getenv("QURL_API_KEY"); v != "" {
-		return v, "QURL_API_KEY environment variable"
+		return v, "QURL_API_KEY environment variable", nil
 	}
 
 	profile := resolveProfile(opts)
-	cfg, _ := config.LoadProfile(profile)
+	cfg, loadErr := config.LoadProfile(profile)
+	if loadErr != nil {
+		return "", "", fmt.Errorf("load config: %w", loadErr)
+	}
 	if cfg != nil && cfg.APIKey != "" {
 		if profile != "" {
-			return cfg.APIKey, fmt.Sprintf("profile %q", profile)
+			return cfg.APIKey, fmt.Sprintf("profile %q", profile), nil
 		}
-		return cfg.APIKey, "config file"
+		return cfg.APIKey, "config file", nil
 	}
-	return "", ""
+	return "", "", nil
 }
 
 // resolveProfile returns the active profile name from flag or env var.
@@ -313,6 +324,8 @@ func resolveKeyName(name string) string {
 }
 
 // saveAuthConfig stores the API key and key ID in the config file.
+// A malformed existing config is silently replaced — the incoming credentials
+// are what matter and we are about to overwrite the file anyway.
 func saveAuthConfig(profile, apiKey, keyID string) error {
 	cfg, _ := config.LoadProfile(profile)
 	if cfg == nil {

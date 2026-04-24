@@ -101,10 +101,14 @@ func (o *globalOpts) newClient() (*client.Client, error) {
 		profile = os.Getenv("QURL_PROFILE")
 	}
 
-	// Load config from profile or default location.
+	// Load config from profile or default location. A missing config file is
+	// normal (user hasn't run "auth login" yet); a malformed one is an error.
 	cfg, err := config.LoadProfile(profile)
-	if err != nil && profile != "" {
-		return nil, fmt.Errorf("load profile %q: %w", profile, err)
+	if err != nil {
+		if profile != "" {
+			return nil, fmt.Errorf("load profile %q: %w", profile, err)
+		}
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 
 	key := resolveValue("QURL_API_KEY", &o.apiKey, "api_key", cfg)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -272,6 +273,9 @@ func TestAuthLoginAPIKeyCreateFails(t *testing.T) {
 }
 
 func TestAuthLoginCustomKeyName(t *testing.T) {
+	// mu guards receivedName against concurrent access from the HTTP handler
+	// goroutine (writer) and the test goroutine (reader).
+	var mu sync.Mutex
 	var receivedName string
 
 	tokenSrv := newTokenMockServer(t)
@@ -284,7 +288,9 @@ func TestAuthLoginCustomKeyName(t *testing.T) {
 				Name string `json:"name"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				mu.Lock()
 				receivedName = req.Name
+				mu.Unlock()
 			}
 			w.WriteHeader(http.StatusCreated)
 			apiEnvelope(t, w, map[string]any{
@@ -310,12 +316,18 @@ func TestAuthLoginCustomKeyName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth login: %v", err)
 	}
-	if receivedName != "my-laptop" {
-		t.Errorf("key name = %q, want %q", receivedName, "my-laptop")
+	mu.Lock()
+	name := receivedName
+	mu.Unlock()
+	if name != "my-laptop" {
+		t.Errorf("key name = %q, want %q", name, "my-laptop")
 	}
 }
 
 func TestAuthLoginCustomScopes(t *testing.T) {
+	// mu guards receivedScopes against concurrent access from the HTTP handler
+	// goroutine (writer) and the test goroutine (reader).
+	var mu sync.Mutex
 	var receivedScopes []string
 
 	tokenSrv := newTokenMockServer(t)
@@ -328,7 +340,9 @@ func TestAuthLoginCustomScopes(t *testing.T) {
 				Scopes []string `json:"scopes"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				mu.Lock()
 				receivedScopes = req.Scopes
+				mu.Unlock()
 			}
 			w.WriteHeader(http.StatusCreated)
 			apiEnvelope(t, w, map[string]any{
@@ -353,8 +367,11 @@ func TestAuthLoginCustomScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth login: %v", err)
 	}
-	if len(receivedScopes) != 1 || receivedScopes[0] != "qurl:read" {
-		t.Errorf("scopes = %v, want [qurl:read]", receivedScopes)
+	mu.Lock()
+	scopes := receivedScopes
+	mu.Unlock()
+	if len(scopes) != 1 || scopes[0] != "qurl:read" {
+		t.Errorf("scopes = %v, want [qurl:read]", scopes)
 	}
 }
 
@@ -475,5 +492,51 @@ func TestAuthStatusFromConfig(t *testing.T) {
 	}
 	if !strings.Contains(out, "config file") {
 		t.Errorf("expected source 'config file':\n%s", out)
+	}
+}
+
+func TestAuthLogoutMalformedConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("QURL_API_KEY", "")
+
+	// Write a syntactically invalid config file.
+	cfgDir := home + "/.config/qurl"
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgDir+"/config.yaml", []byte("api_key: [broken yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runAuthCmd(t, "auth", "logout")
+	if err == nil {
+		t.Fatal("expected error for malformed config")
+	}
+	if !strings.Contains(err.Error(), "load config") {
+		t.Errorf("error should mention 'load config': %v", err)
+	}
+}
+
+func TestAuthStatusMalformedConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("QURL_API_KEY", "")
+
+	// Write a syntactically invalid config file.
+	cfgDir := home + "/.config/qurl"
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgDir+"/config.yaml", []byte("api_key: [broken yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runAuthCmd(t, "auth", "status")
+	if err == nil {
+		t.Fatal("expected error for malformed config")
+	}
+	if !strings.Contains(err.Error(), "load config") {
+		t.Errorf("error should mention 'load config': %v", err)
 	}
 }
