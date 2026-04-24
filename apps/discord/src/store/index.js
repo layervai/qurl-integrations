@@ -30,7 +30,7 @@
 const logger = require('../logger');
 const { assertStoreShape } = require('./contract');
 
-const VALID_BACKENDS = Object.freeze(['sqlite']);
+const VALID_BACKENDS = Object.freeze(['sqlite', 'ddb']);
 // Treat unset, empty, and whitespace-only STORE_TYPE as "not
 // configured" — falls back to the sqlite default. Any non-empty
 // value is taken literally and must match VALID_BACKENDS.
@@ -54,6 +54,9 @@ let store;
 switch (BACKEND) {
   case 'sqlite':
     store = require('./sqlite-store');
+    break;
+  case 'ddb':
+    store = require('./ddb-store');
     break;
   default:
     // Unreachable given VALID_BACKENDS check above; defense-in-depth
