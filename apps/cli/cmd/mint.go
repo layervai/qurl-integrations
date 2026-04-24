@@ -51,8 +51,6 @@ Useful for multi-use QURLs where you want to generate additional access links.`,
 				input = &client.MintLinkInput{
 					ExpiresIn:       expiresIn,
 					Label:           label,
-					OneTimeUse:      oneTimeUse,
-					MaxSessions:     maxSessions,
 					SessionDuration: sessionDuration,
 				}
 				if cmd.Flags().Changed("expires-at") {
@@ -61,6 +59,12 @@ Useful for multi-use QURLs where you want to generate additional access links.`,
 						return fmt.Errorf("invalid --expires-at value: %w", parseErr)
 					}
 					input.ExpiresAt = &t
+				}
+				if cmd.Flags().Changed("one-time") {
+					input.OneTimeUse = oneTimeUse
+				}
+				if cmd.Flags().Changed("max-sessions") {
+					input.MaxSessions = maxSessions
 				}
 			}
 
