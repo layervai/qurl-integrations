@@ -75,7 +75,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 
 	clientID, domain, audience := resolveAuth0Config()
 	if clientID == "" {
-		return errors.New("Auth0 client ID not configured: set QURL_AUTH0_CLIENT_ID environment variable")
+		return errors.New("Auth0 client ID not configured: this build was not compiled with a default client ID; set QURL_AUTH0_CLIENT_ID to override")
 	}
 
 	if len(scopes) == 0 {

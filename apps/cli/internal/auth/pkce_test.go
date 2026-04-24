@@ -144,7 +144,7 @@ func TestCallbackStateMismatch(t *testing.T) {
 	if tokenErr == nil {
 		t.Fatal("expected error for state mismatch")
 	}
-	if !containsString(tokenErr.Error(), "state mismatch") {
+	if !strings.Contains(tokenErr.Error(), "state mismatch") {
 		t.Errorf("error = %q, want state mismatch", tokenErr.Error())
 	}
 }
@@ -280,7 +280,7 @@ func TestBuildAuthURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			flow := NewPKCEFlow(&tt.cfg)
 			got := flow.buildAuthURL("http://localhost:9999/callback", "test-state", "test-challenge")
-			if !containsString(got, tt.wantURL) {
+			if !strings.Contains(got, tt.wantURL) {
 				t.Errorf("buildAuthURL() = %q, want prefix %q", got, tt.wantURL)
 			}
 		})
@@ -411,15 +411,3 @@ func httpGet(t *testing.T, rawURL string) *http.Response {
 	return resp
 }
 
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || s != "" && searchSubstring(s, substr))
-}
-
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
