@@ -94,12 +94,19 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		return fmt.Errorf("load config: %w", cfgLoadErr)
 	}
 
+	auth0URL := os.Getenv("QURL_AUTH0_URL")
+	if auth0URL != "" &&
+		!strings.HasPrefix(auth0URL, "https://") &&
+		!strings.HasPrefix(auth0URL, "http://127.0.0.1") &&
+		!strings.HasPrefix(auth0URL, "http://localhost") {
+		return errors.New("QURL_AUTH0_URL must use https:// (or http://localhost / http://127.0.0.1 for local testing)")
+	}
 	flowCfg := &auth.PKCEConfig{
 		Domain:   domain,
 		ClientID: clientID,
 		Audience: audience,
 		Scopes:   scopes,
-		BaseURL:  os.Getenv("QURL_AUTH0_URL"), // Override for testing.
+		BaseURL:  auth0URL, // Override for testing; must be https://.
 	}
 	flow := auth.NewPKCEFlow(flowCfg)
 

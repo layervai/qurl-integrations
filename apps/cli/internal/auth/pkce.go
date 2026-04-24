@@ -194,7 +194,11 @@ func (s *LoginSession) WaitForToken(ctx context.Context) (*TokenResponse, error)
 		if result.err != nil {
 			return nil, result.err
 		}
-		return s.flow.exchangeCode(ctx, result.code, s.codeVerifier, s.RedirectURI)
+		// Use a fresh 30s context for the token exchange so a slow browser flow
+		// (ctx nearly expired) doesn't time out the network call itself.
+		exchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return s.flow.exchangeCode(exchCtx, result.code, s.codeVerifier, s.RedirectURI)
 	}
 }
 
