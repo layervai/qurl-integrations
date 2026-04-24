@@ -109,21 +109,15 @@ describe('store/contract', () => {
 });
 
 describe('store/index (default backend)', () => {
-  // Load the default-backend singleton AFTER the config + logger
-  // mocks above so :memory: SQLite is used (no real file touch).
+  // Load the default-backend singleton. The top-of-file
+  // `jest.mock(...)` calls for config + logger are hoisted and
+  // already in effect, so `:memory:` SQLite is used (no real file
+  // touch). `jest.resetModules()` ensures a fresh require of the
+  // singleton if a prior suite in the same worker already cached
+  // the store.
   let store;
   beforeAll(() => {
     jest.resetModules();
-    jest.doMock('../src/config', () => ({
-      DATABASE_PATH: ':memory:',
-      PENDING_LINK_EXPIRY_MINUTES: 30,
-    }));
-    jest.doMock('../src/logger', () => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-    }));
     store = require('../src/store');
   });
 
@@ -140,4 +134,49 @@ describe('store/index (default backend)', () => {
     const missing = STORE_CONSTANTS.filter(c => store[c] === undefined);
     expect(missing).toEqual([]);
   });
+});
+
+// Child-process tests for boot-time assertion paths. These are the
+// fail-loud invariants the Store contract relies on — we can't
+// exercise them from inside the same jest process because
+// `process.env.JEST_WORKER_ID` is set (and `typeof jest !== 'undefined'`),
+// so the assertion is intentionally skipped in-process.
+// `child_process.spawnSync('node', [...])` gives us a clean
+// non-jest boot that hits the real assertion path.
+describe('store/index boot-time assertions (via child_process)', () => {
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const appRoot = path.resolve(__dirname, '..');
+
+  it('rejects an unknown STORE_TYPE with a listing of valid backends', () => {
+    const result = spawnSync(
+      process.execPath,
+      ['-e', `require('${path.join(appRoot, 'src/store')}')`],
+      {
+        env: {
+          ...process.env,
+          STORE_TYPE: 'sqlitte', // typo — must NOT silently fall back
+          // Intentionally strip the JEST marker so the child runs
+          // the real assertion path.
+          JEST_WORKER_ID: '',
+          NODE_ENV: 'production',
+          // SQLite wouldn't get reached, but set :memory: defensively.
+          DATABASE_PATH: ':memory:',
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Unknown STORE_TYPE/);
+    expect(result.stderr).toMatch(/sqlitte/);
+    // Names the valid options so the operator knows how to fix.
+    expect(result.stderr).toMatch(/sqlite/);
+  });
+
+  // Note: exercising the "backend missing a method" throw end-to-end
+  // requires swapping out a backend module at require-time, which
+  // can't be done from a bare `node -e`. The assertStoreShape
+  // assertion itself is unit-tested above (negative cases); the
+  // boot-time integration here focuses on the env-var validation
+  // branch, which is the most likely real-world misconfiguration.
 });

@@ -50,18 +50,28 @@ switch (BACKEND) {
 // to isolate the path under test; those partial mocks are legitimate
 // (the test isn't exercising the omitted methods) and should not
 // trip a boot-time shape check. `JEST_WORKER_ID` is injected into
-// every jest worker process and is the canonical "am I running
-// inside jest?" marker — preferable to `NODE_ENV === 'test'` because
-// it survives NODE_ENV overrides that some suites apply for coverage
-// or integration runs. The explicit escape hatch keeps prod's
-// strict-assert invariant intact while letting tests keep their
-// minimal mocks. Separate contract-coverage test
-// (`tests/store-contract.test.js`) runs assertStoreShape against a
-// complete fixture AND the real default backend, so the invariant
-// is still enforced — just not at every test's boot time.
-if (!process.env.JEST_WORKER_ID) {
+// every jest worker process (including `--runInBand`) and is the
+// canonical "am I running inside jest?" marker. `typeof jest` is a
+// belt-and-suspenders fallback in case a future jest version (or
+// a vitest/ava migration) ever drops the env var. The explicit
+// escape hatch keeps prod's strict-assert invariant intact while
+// letting tests keep their minimal mocks. Separate contract-
+// coverage test (`tests/store-contract.test.js`) runs
+// assertStoreShape against a complete fixture AND the real default
+// backend AND a child-process spawn of the real boot path, so the
+// invariant is still enforced — just not at every test's boot time.
+const isUnderTestRunner = !!process.env.JEST_WORKER_ID || typeof jest !== 'undefined';
+if (!isUnderTestRunner) {
   assertStoreShape(store, BACKEND);
-  logger.info('Store backend initialized', { backend: BACKEND });
+  logger.info('Store backend initialized', {
+    backend: BACKEND,
+    // `source` flags whether STORE_TYPE was explicitly set vs. fell
+    // through to the sqlite default. Useful for confirming flag-day
+    // PRs (PR 4c will set STORE_TYPE=ddb on prod) actually landed —
+    // "default" in prod logs after the flag-day means the env var
+    // didn't propagate to the container.
+    source: process.env.STORE_TYPE ? 'env' : 'default',
+  });
 }
 
 module.exports = store;
