@@ -132,7 +132,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	w.printf("  Creating API key...")
 
 	name := resolveKeyName(keyName)
-	// Load config to honour endpoint from config file (flag/env take precedence).
+	// Load config to honor endpoint from config file (flag/env take precedence).
 	loginCfg, _ := config.LoadProfile(resolveProfile(opts))
 	endpoint := resolveEndpoint(opts, loginCfg)
 
