@@ -32,13 +32,19 @@ SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-pyth
 <type>(<scope>): <description>
 
 type:  feat | fix | chore | docs | test | refactor | ci
-scope: slack | teams | discord | cli | zapier | shared
+scope: slack | teams | discord | cli | zapier | shared | ci
 ```
 
 Examples:
 - `feat(slack): add slash command handler`
 - `fix(shared): retry on 429 in API client`
 - `ci(slack): add deploy step to workflow`
+
+> Keep this scope list aligned with the Component dropdown in
+> `.github/ISSUE_TEMPLATE/bug_report.yml`. Convention only (not CI-
+> enforced in this repo); add a new scope to both places in the same
+> PR. The dropdown's `other` option is a reporter-UX escape hatch —
+> do NOT add it here (it's not a valid commit scope).
 
 ## Code Conventions
 
