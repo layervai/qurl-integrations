@@ -164,8 +164,25 @@ describe('store/index (default backend)', () => {
 // non-jest boot that hits the real assertion path.
 describe('store/index boot-time assertions (via child_process)', () => {
   const { spawnSync } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
   const path = require('path');
   const appRoot = path.resolve(__dirname, '..');
+
+  // Per-suite tmp dir for child-process SQLite files. database.js
+  // `path.resolve(':memory:')` resolves to `{cwd}/:memory:` (a
+  // literal file), not an in-memory DB — using a real tmp path
+  // instead keeps the repo tree clean and avoids accidental
+  // commits of the stray file. Registered for cleanup in afterAll.
+  const tmpDbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-contract-test-'));
+
+  afterAll(() => {
+    try {
+      fs.rmSync(tmpDbDir, { recursive: true, force: true });
+    } catch {
+      // Non-fatal — ephemeral runner tmpdir will clean up anyway.
+    }
+  });
 
   // Helper: spawn a child `node -e` that requires the store module
   // with a specific STORE_TYPE env, forcing the real boot path
@@ -173,9 +190,14 @@ describe('store/index boot-time assertions (via child_process)', () => {
   // { status, stdout, stderr }. `JSON.stringify`-escaping the
   // require path so a workspace dir with a quote / backslash /
   // `${}` can't break out of the inline `node -e` script literal.
+  // Each child gets its own SQLite file in the per-suite tmpdir so
+  // concurrent boots (in a watch mode or a sharded test run) don't
+  // collide on the same file handle.
+  let spawnCounter = 0;
   function spawnStoreBoot(storeTypeValue) {
     const requirePath = JSON.stringify(path.join(appRoot, 'src/store'));
-    const env = { ...process.env, JEST_WORKER_ID: '', DATABASE_PATH: ':memory:' };
+    const dbPath = path.join(tmpDbDir, `boot-${spawnCounter++}.db`);
+    const env = { ...process.env, JEST_WORKER_ID: '', DATABASE_PATH: dbPath };
     // Distinguish "not set at all" (`undefined`) from "set to
     // empty/whitespace" (both should fall back to sqlite).
     if (storeTypeValue === undefined) {
