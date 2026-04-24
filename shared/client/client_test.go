@@ -50,6 +50,10 @@ func TestCreate(t *testing.T) {
 		if input.TargetURL != "https://example.com" {
 			t.Errorf("expected target_url https://example.com, got %s", input.TargetURL)
 		}
+		// Verify the Description→Label rename is wired correctly at the wire level.
+		if input.Label != "test" {
+			t.Errorf("expected label 'test', got %q (Description→Label rename may be broken)", input.Label)
+		}
 
 		apiEnvelope(t, w, map[string]any{
 			"qurl_id":     "q_abc123test",
@@ -249,6 +253,11 @@ func TestMintLink(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/qurls/"+testResourceID+"/mint_link" {
 			t.Errorf("expected mint_link path, got %s", r.URL.Path)
+		}
+		// nil input must produce a bodiless POST so the server can distinguish
+		// "mint with QURL defaults" from "mint with an explicit (empty) override".
+		if r.ContentLength != 0 {
+			t.Errorf("expected no body for nil MintLinkInput, got ContentLength=%d", r.ContentLength)
 		}
 		apiEnvelope(t, w, map[string]any{
 			"qurl_link": "https://qurl.link/at_newtoken",
@@ -719,13 +728,13 @@ func TestBatchCreateValidation(t *testing.T) {
 		t.Fatal("expected error for empty batch")
 	}
 
-	items := make([]*CreateInput, 101)
+	items := make([]*CreateInput, maxBatchSize+1)
 	for i := range items {
 		items[i] = &CreateInput{TargetURL: "https://example.com"}
 	}
 	_, err = c.BatchCreate(context.Background(), items)
 	if err == nil {
-		t.Fatal("expected error for batch > 100")
+		t.Fatalf("expected error for batch > %d", maxBatchSize)
 	}
 }
 

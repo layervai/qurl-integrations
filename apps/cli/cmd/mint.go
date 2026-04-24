@@ -40,6 +40,11 @@ Useful for multi-use QURLs where you want to generate additional access links.`,
 			}
 
 			var input *client.MintLinkInput
+			// Only build a MintLinkInput when the caller explicitly set at least one flag.
+			// Keeping input nil causes MintLink to send http.NoBody, which is a meaningful
+			// wire-level difference: the server uses a bodiless POST to mean "mint with
+			// the QURL's own defaults". Always building the struct (even with all zero
+			// values and omitempty fields) would send an empty JSON object instead.
 			hasInput := cmd.Flags().Changed("expires-in") ||
 				cmd.Flags().Changed("expires-at") ||
 				cmd.Flags().Changed("label") ||

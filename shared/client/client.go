@@ -123,7 +123,10 @@ type QURL struct {
 	Description  string     `json:"description,omitempty"`
 	Tags         []string   `json:"tags,omitempty"`
 	QURLSite     string     `json:"qurl_site,omitempty"`
-	CustomDomain *string    `json:"custom_domain,omitempty"`
+	// CustomDomain is a pointer to distinguish "not set" (nil) from "explicitly empty" on
+	// API responses. CreateInput.CustomDomain is a plain string with omitempty, which is
+	// sufficient for write requests where absence and empty mean the same thing.
+	CustomDomain *string `json:"custom_domain,omitempty"`
 }
 
 // AIAgentPolicy controls access by AI agent categories.
@@ -398,10 +401,18 @@ type BatchItemError struct {
 	Message string `json:"message"`
 }
 
+// maxBatchSize is the maximum number of items in a single batch create request.
+const maxBatchSize = 100
+
 // BatchCreate creates multiple QURLs at once (1-100 items).
 func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchCreateOutput, error) {
-	if len(items) == 0 || len(items) > 100 {
-		return nil, fmt.Errorf("batch size must be 1-100, got %d", len(items))
+	if len(items) == 0 || len(items) > maxBatchSize {
+		return nil, fmt.Errorf("batch size must be 1-%d, got %d", maxBatchSize, len(items))
+	}
+	for i, item := range items {
+		if item == nil {
+			return nil, fmt.Errorf("batch item at index %d must not be nil", i)
+		}
 	}
 
 	payload := struct {
