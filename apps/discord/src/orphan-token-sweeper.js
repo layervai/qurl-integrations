@@ -7,7 +7,7 @@
 
 const crypto = require('crypto');
 const config = require('./config');
-const db = require('./database');
+const db = require('./store');
 const logger = require('./logger');
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
