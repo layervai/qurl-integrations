@@ -314,6 +314,9 @@ func (p *PKCEFlow) exchangeCode(ctx context.Context, code, codeVerifier, redirec
 	if err := json.Unmarshal(body, &token); err != nil {
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
+	if token.AccessToken == "" {
+		return nil, errors.New("token response missing access_token")
+	}
 	return &token, nil
 }
 

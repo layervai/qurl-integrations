@@ -158,8 +158,12 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	if saveErr := saveAuthConfig(profile, keyResp.APIKey, keyResp.KeyID); saveErr != nil {
 		w.ln()
 		w.printf("  Warning: could not save config: %v\n", saveErr)
-		w.printf("  Your API key (save manually): %s\n", keyResp.APIKey)
-		w.printf("  Store this key securely — it will not be shown again.\n")
+		// Print only the key prefix — not the full secret — so it is not exposed
+		// in CI logs, shell history, or screen recordings. The full key can be
+		// retrieved or revoked at https://portal.layerv.ai/keys.
+		w.printf("  API key created (prefix): %s...\n", keyResp.KeyPrefix)
+		w.printf("  Retrieve or revoke the full key at: https://portal.layerv.ai/keys\n")
+		w.printf("  Or run: qurl config set api_key <paste-key-here>\n")
 		return saveErr
 	}
 
