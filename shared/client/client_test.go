@@ -247,7 +247,7 @@ func TestResolve(t *testing.T) {
 
 func TestMintLink(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test/mint_link" {
+		if r.URL.Path != "/v1/qurls/"+testResourceID+"/mint_link" {
 			t.Errorf("expected mint_link path, got %s", r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
@@ -297,7 +297,7 @@ func TestBatchCreate(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.BatchCreate(context.Background(), []CreateInput{
+	got, err := c.BatchCreate(context.Background(), []*CreateInput{
 		{TargetURL: "https://a.com"},
 		{TargetURL: "https://b.com"},
 	})
@@ -344,7 +344,7 @@ func TestListWithDateFilters(t *testing.T) {
 
 func TestMintLinkWithInput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test/mint_link" {
+		if r.URL.Path != "/v1/qurls/"+testResourceID+"/mint_link" {
 			t.Errorf("expected mint_link path, got %s", r.URL.Path)
 		}
 
@@ -682,7 +682,7 @@ func TestBatchCreatePartialFailure(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	got, err := c.BatchCreate(context.Background(), []CreateInput{
+	got, err := c.BatchCreate(context.Background(), []*CreateInput{
 		{TargetURL: "https://valid.com"},
 		{TargetURL: "not-a-url"},
 	})
@@ -714,14 +714,14 @@ func TestBatchCreateValidation(t *testing.T) {
 		t.Fatal("expected error for empty batch")
 	}
 
-	_, err = c.BatchCreate(context.Background(), []CreateInput{})
+	_, err = c.BatchCreate(context.Background(), []*CreateInput{})
 	if err == nil {
 		t.Fatal("expected error for empty batch")
 	}
 
-	items := make([]CreateInput, 101)
+	items := make([]*CreateInput, 101)
 	for i := range items {
-		items[i] = CreateInput{TargetURL: "https://example.com"}
+		items[i] = &CreateInput{TargetURL: "https://example.com"}
 	}
 	_, err = c.BatchCreate(context.Background(), items)
 	if err == nil {

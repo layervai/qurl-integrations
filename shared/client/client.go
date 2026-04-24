@@ -123,7 +123,7 @@ type QURL struct {
 	Description  string     `json:"description,omitempty"`
 	Tags         []string   `json:"tags,omitempty"`
 	QURLSite     string     `json:"qurl_site,omitempty"`
-	CustomDomain *string    `json:"custom_domain"`
+	CustomDomain *string    `json:"custom_domain,omitempty"`
 }
 
 // AIAgentPolicy controls access by AI agent categories.
@@ -294,10 +294,13 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 
 // UpdateInput holds input for updating a QURL.
 type UpdateInput struct {
-	ExtendBy    string     `json:"extend_by,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	Tags        *[]string  `json:"tags,omitempty"`
-	Description *string    `json:"description,omitempty"`
+	ExtendBy  string     `json:"extend_by,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Tags      *[]string  `json:"tags,omitempty"`
+	// Description updates the resource-level description. The API uses "description"
+	// for updates (not "label") per the UpdateQurlRequest schema — this is an
+	// intentional divergence from CreateInput.Label which maps to the QURL token label.
+	Description *string `json:"description,omitempty"`
 }
 
 // Extend extends a QURL's expiration.
@@ -356,6 +359,11 @@ func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) 
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	if input != nil {
+		// Defense-in-depth: set Content-Type explicitly even though do() also sets it
+		// when a body is present, so the header is visible at the call site.
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	var out MintOutput
 	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
@@ -391,13 +399,13 @@ type BatchItemError struct {
 }
 
 // BatchCreate creates multiple QURLs at once (1-100 items).
-func (c *Client) BatchCreate(ctx context.Context, items []CreateInput) (*BatchCreateOutput, error) {
+func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchCreateOutput, error) {
 	if len(items) == 0 || len(items) > 100 {
 		return nil, fmt.Errorf("batch size must be 1-100, got %d", len(items))
 	}
 
 	payload := struct {
-		Items []CreateInput `json:"items"`
+		Items []*CreateInput `json:"items"`
 	}{Items: items}
 
 	body, err := json.Marshal(payload)

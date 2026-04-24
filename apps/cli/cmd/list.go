@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,15 @@ func listCmd(opts *globalOpts) *cobra.Command {
 				default:
 					return fmt.Errorf("invalid status %q: must be active or revoked", status)
 				}
+			}
+
+			var errs []error
+			errs = append(errs, validateRFC3339("created-after", createdAfter))
+			errs = append(errs, validateRFC3339("created-before", createdBefore))
+			errs = append(errs, validateRFC3339("expires-before", expiresBefore))
+			errs = append(errs, validateRFC3339("expires-after", expiresAfter))
+			if err := errors.Join(errs...); err != nil {
+				return err
 			}
 
 			c, err := opts.newClient()
