@@ -225,10 +225,9 @@ func authStatusCmd(opts *globalOpts) *cobra.Command {
 			defer cancel()
 
 			quota, qErr := c.GetQuota(statusCtx)
-			switch {
-			case qErr == nil:
+			if qErr == nil {
 				_, _ = fmt.Fprintf(stdout, "  Plan:    %s\n", bold.Sprint(strings.ToUpper(quota.Plan)))
-			default:
+			} else {
 				_, _ = color.New(color.Faint).Fprintf(stdout, "  Plan:    (unavailable: %s)\n", qErr)
 			}
 
