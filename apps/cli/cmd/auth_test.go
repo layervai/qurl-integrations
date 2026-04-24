@@ -527,18 +527,14 @@ func TestAuthStatusFromConfig(t *testing.T) {
 }
 
 func TestAuthLoginMalformedConfig(t *testing.T) {
-	tokenSrv := newTokenMockServer(t)
-	defer tokenSrv.Close()
-	apiSrv := newAPIKeyMockServer(t)
-	defer apiSrv.Close()
-
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("QURL_API_KEY", "")
 	t.Setenv("QURL_AUTH0_CLIENT_ID", "test-client-id")
-	t.Setenv("QURL_AUTH0_URL", tokenSrv.URL)
 
-	// Write a syntactically invalid config file so saveAuthConfig fails to load.
+	// Write a syntactically invalid config file. The preflight config check in
+	// runAuthLogin should fail fast — before the OAuth flow starts — so the user
+	// gets an error immediately rather than after completing the browser flow.
 	cfgDir := home + "/.config/qurl"
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -547,9 +543,9 @@ func TestAuthLoginMalformedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := runLoginWithCallback(t, tokenSrv.URL, apiSrv.URL)
+	_, err := runAuthCmd(t, "auth", "login", "--no-browser")
 	if err == nil {
-		t.Fatal("expected error for malformed config during save")
+		t.Fatal("expected error for malformed config")
 	}
 	if !strings.Contains(err.Error(), "load config") {
 		t.Errorf("error should mention 'load config': %v", err)

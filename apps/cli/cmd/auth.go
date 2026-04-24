@@ -85,6 +85,15 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		return err
 	}
 
+	// Load config before starting the OAuth flow so a malformed config fails fast
+	// rather than after the user completes the browser flow and a server-side key
+	// has already been minted.
+	profile := resolveProfile(opts)
+	loginCfg, cfgLoadErr := config.LoadProfile(profile)
+	if cfgLoadErr != nil {
+		return fmt.Errorf("load config: %w", cfgLoadErr)
+	}
+
 	flowCfg := &auth.PKCEConfig{
 		Domain:   domain,
 		ClientID: clientID,
@@ -132,11 +141,11 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	w.printf("  Creating API key...")
 
 	name := resolveKeyName(keyName)
-	// Load config to honor endpoint from config file (flag/env take precedence).
-	loginCfg, _ := config.LoadProfile(resolveProfile(opts))
 	endpoint := resolveEndpoint(opts, loginCfg)
 
-	keyResp, err := auth.CreateAPIKey(ctx, nil, endpoint, token.AccessToken, auth.CreateKeyRequest{
+	// Use loginCtx so key creation is bounded by the same 10-minute deadline
+	// as the browser flow rather than falling through to the HTTP client's default.
+	keyResp, err := auth.CreateAPIKey(loginCtx, nil, endpoint, token.AccessToken, auth.CreateKeyRequest{
 		Name:   name,
 		Scopes: scopes,
 	})
@@ -146,7 +155,6 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	}
 	w.msg(" done")
 
-	profile := resolveProfile(opts)
 	if saveErr := saveAuthConfig(profile, keyResp.APIKey, keyResp.KeyID); saveErr != nil {
 		w.ln()
 		w.printf("  Warning: could not save config: %v\n", saveErr)
