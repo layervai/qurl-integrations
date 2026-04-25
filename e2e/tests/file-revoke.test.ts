@@ -39,6 +39,10 @@ interface UploadResponse {
  * Retries on 429 rate-limit bursts from the upstream qURL API — the connector
  * responds with `{success:true, resource_url:..., error:"QURL creation failed:
  * ... 429 ..."}` and no `resource_id`. Treat that as transient and back off.
+ *
+ * TODO(upstream-rebrand): the literal "QURL creation failed" mirrors upstream's
+ * current error text. Update this doc comment when upstream qurl-service
+ * rebrands its error strings.
  */
 async function uploadImage(
   buf: Uint8Array,

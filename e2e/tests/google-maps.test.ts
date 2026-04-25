@@ -40,6 +40,10 @@ interface UploadResponse {
  * ... 429 ..."}` without a `resource_id` when the internal mint is throttled. A
  * silent undefined resource_id breaks downstream revoke tests; surface it loudly
  * and retry with backoff instead.
+ *
+ * TODO(upstream-rebrand): the literal "QURL creation failed" mirrors upstream's
+ * current error text. Update this doc comment when upstream qurl-service
+ * rebrands its error strings.
  */
 async function uploadMapLocation(
   payload: Record<string, unknown>,
