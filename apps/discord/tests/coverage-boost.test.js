@@ -328,18 +328,20 @@ describe('buildDeliveryEmbed — location resource type', () => {
     await cmd.execute(interaction);
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
-    const dmEmbed = embedInstances.find(e => e.setAuthor.mock.calls.length > 0);
+    // PR #124 v2 mockup pivot: dropped setAuthor + Resource Type / Filename
+    // row + per-kind description text. The DM now shows "Vik opened a door
+    // for you." (universal, no file/location distinction in copy) plus a
+    // fixed body paragraph + "Portal closes in" line + Step Through button.
+    // The personal message lives in a quote-block field above the body.
+    // Find the embed by setDescription presence (setAuthor is no longer used).
+    const dmEmbed = embedInstances.find(e => e.setDescription.mock.calls.length > 0);
     expect(dmEmbed).toBeDefined();
-    // PR #124 dropped the Resource Type / Filename field row in favor of
-    // putting the resource kind in the description ("shared a location
-    // with you" / "shared a file with you"). Assert the description
-    // signals "location" instead of looking for the removed field.
     const descCalls = dmEmbed.setDescription.mock.calls;
-    expect(descCalls.length).toBeGreaterThan(0);
-    expect(descCalls[0][0]).toContain('shared a location with you');
-    const msgField = dmEmbed._fields.find(f => f.name === 'Message');
+    expect(descCalls[0][0]).toContain('opened a door for you');
+    // Personal message renders as `> *"…"*` in a no-name field (see
+    // buildDeliveryEmbed). Match the inner text rather than the wrapper.
+    const msgField = dmEmbed._fields.find(f => typeof f.value === 'string' && f.value.includes('Meet me here'));
     expect(msgField).toBeTruthy();
-    expect(msgField.value).toContain('Meet me here');
   });
 });
 

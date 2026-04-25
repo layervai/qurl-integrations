@@ -254,95 +254,102 @@ function resolveSenderAlias(interaction) {
     ?? 'Someone';
 }
 
-// --- Shared DM embed builder ---
-// `senderAlias` is the sender's friendly display name (the Discord
-// alias — guild nickname > global display name > username). Callers
-// resolve this from the interaction payload via `member.displayName`,
-// which discord.js already resolves through that fallback chain. We
-// deliberately use the alias rather than the raw @-handle so the
-// embed matches the name the recipient would see anywhere else in
-// Discord.
+// --- Shared DM delivery payload builder ---
+// Builds the {embeds, components} payload for a per-recipient DM. The
+// embed copy is intentionally evocative ("opened a door", "Portal closes",
+// "what's on the other side is invisible to … scanners, bots, crawlers,
+// strangers") rather than literal ("shared a file with you") — the brand
+// goal is to convey the qURL hidden-layer model, not just announce a
+// file transfer. The qURL link is rendered as a `Step Through →` Link
+// button rather than a bare URL field; recipients click the button to
+// open the link in their default browser.
 //
-// Example of what the recipient sees in their DM (file send, with a
-// personal message, 15-minute expiry). Location sends are identical
-// except the description reads "shared a location with you."
+// `senderAlias` is the sender's friendly display name (Discord nickname
+// > globalName > username) — same source resolveSenderAlias used at the
+// channel-announce site, so the alias shown matches across both surfaces.
+// `personalMessage` is optional caller-provided context; if present, it
+// renders as an italicized blockquote above the body paragraph.
+//
+// Returns the full Discord message options object (`embeds` + `components`)
+// rather than just the embed, since the button is not part of the embed
+// — it lives in a top-level component row alongside it. Callers pass the
+// returned payload directly to `sendDM`.
+//
+// Example of what the recipient sees:
 //
 //     ┌─────────────────────────────────────────────────────────────┐
-//     │  qURL Secure Delivery                                       │
+//     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
 //     │                                                             │
-//     │  **Vik** shared a file with you.                            │
-//     │  ──────────────────────────────                             │
+//     │  Vik opened a door for you.                                 │  (description)
 //     │                                                             │
-//     │  Message:                                                   │
-//     │    > Quarterly numbers — for your eyes only.                │
+//     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
 //     │                                                             │
-//     │  qURL Link:                                                 │
-//     │    https://qurl.link/#at_abcd1234…                          │
+//     │  This link is your portal — what's on the other side is    │  (fixed body copy)
+//     │  invisible to everyone else on the internet: scanners,     │
+//     │  bots, crawlers, strangers.                                │
 //     │                                                             │
-//     │  ──────────────────────────────                             │
-//     │  ⏳ Expires in **15 minutes**                                │
-//     │  🔒 One-time access                                          │
-//     │  ──────────────────────────────                             │
-//     │  ⚠️ Invisible before accessed                                │
-//     │  💥 Self-destructs after viewing                             │
-//     │  ──────────────────────────────                             │
+//     │  🕐 Portal closes in **15 minutes**                         │  (expiry line)
 //     │                                                             │
-//     │  🔐 qURL (Quantum URL): Invisible by default. Visible by    │
-//     │  permission.                                                │
+//     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
+//     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
+//     │                                                             │
+//     │  ┌──────────────────────────┐                               │
+//     │  │   Step Through →         │  (Link button — opens qURL)
+//     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
-// Sends without a personal message drop the Message block; everything
-// else is identical between file and location sends. The description
-// already names the resource type ("file" or "location") so a separate
-// Resource Type / Filename field row would be redundant.
-function buildDeliveryEmbed({ senderAlias, resourceType, qurlLink, expiresIn, personalMessage }) {
-  // Resource-type → user-facing label used in "shared a {kind} with you".
-  // Switch (not `isFile ? 'file' : 'location'`) so a new RESOURCE_TYPES
-  // value added without updating this branch fails loudly instead of
-  // silently rendering as "location". Lookup happens at call time, not
-  // module-load — keeps the mapping testable without forcing every
-  // commands.js consumer to mock the full RESOURCE_TYPES enum.
-  let kind;
-  switch (resourceType) {
-    case RESOURCE_TYPES.FILE: kind = 'file'; break;
-    case RESOURCE_TYPES.MAPS: kind = 'location'; break;
-    default:
-      throw new Error(`buildDeliveryEmbed: unknown resourceType '${resourceType}' (add a case)`);
-  }
-  const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
-  // sanitizeDisplayName handles NFKC + bidi/zero-width strip + markdown
-  // escape + 64-char cap + 'Someone' fallback. Same helper is used at
-  // the channel announcement site (handleSend voice/channel branch) so
-  // the spoof defense does not drift between call sites — see comment
-  // on `sanitizeDisplayName` in utils/sanitize.js for the threat model.
+// Discord's Link-style buttons are always grey/blurple; the green color
+// in the design mockup would require a Success-style button + custom_id
+// + interaction handler that redirects, which adds a click round-trip
+// for marginal aesthetic gain. Sticking with Link button for this pivot.
+function buildDeliveryEmbed({ senderAlias, qurlLink, expiresIn, personalMessage }) {
+  // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
+  // + 64-char cap + 'Someone' fallback. Same helper used at the channel
+  // announcement site so the spoof defense doesn't drift between sites.
   const safeSender = sanitizeDisplayName(senderAlias);
+
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setAuthor({ name: 'qURL Secure Delivery' })
-    .setDescription(
-      `**${safeSender}** shared a ${kind} with you.\n${divider}`,
-    );
+    .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
+    // Cap at 450 chars (Discord field limit is 1024 but we want the
+    // body paragraph to remain visible without scroll). Caller-side
+    // sanitizeMessage already escapes markdown — see commands.js
+    // input boundary. The blockquote + italic + quote chars approximate
+    // the styled quote-box from the design mockup.
     const capped = personalMessage.substring(0, 450);
-    embed.addFields({ name: 'Message', value: `> ${capped}` });
+    embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
   }
 
   embed.addFields(
-    { name: 'qURL Link', value: qurlLink },
-    { name: divider, value:
-      `\u23f3 Expires in **${expiresIn}**\n` +
-      '\ud83d\udd12 One-time access\n' +
-      `${divider}\n` +
-      '\u26a0\ufe0f Invisible before accessed\n' +
-      '\ud83d\udca5 Self-destructs after viewing\n' +
-      divider,
-    }
-  )
-  .setFooter({ text: '\ud83d\udd10 qURL (Quantum URL): Invisible by default. Visible by permission.' })
-  .setTimestamp();
+    {
+      name: '\u200B',
+      value: "This link is your portal — what's on the other side is invisible to everyone else on the internet: scanners, bots, crawlers, strangers.",
+    },
+    {
+      name: '\u200B',
+      value: `\ud83d\udd50 Portal closes in **${expiresIn}**`,
+    },
+    {
+      // Brand line lives in a regular embed field (NOT setFooter) because
+      // Discord embed footers are plain-text only and we need the markdown
+      // hyperlink on `qURL` to point at https://layerv.ai. The brand line
+      // anchors the recipient back to the qURL product page.
+      name: '\u200B',
+      value: 'Quantum URL ([qURL](https://layerv.ai)) · The internet has a hidden layer. This is how you enter.',
+    },
+  );
 
-  return embed;
+  // Link button: grey, single-click opens qurlLink in the recipient's
+  // browser. No interaction handler needed — Discord handles the redirect.
+  const stepThrough = new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setLabel('Step Through →')
+    .setURL(qurlLink);
+  const components = [new ActionRowBuilder().addComponents(stepThrough)];
+
+  return { embeds: [embed], components };
 }
 
 // --- Link status monitor ---
@@ -663,7 +670,7 @@ async function handleSend(interaction, apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
+  const expiresIn = interaction.options.getString('expiry_optional') || '15m';
   const rawMessage = interaction.options.getString('message_optional');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
   const commandAttachment = interaction.options.getAttachment('file_optional');
@@ -1093,18 +1100,17 @@ async function handleSend(interaction, apiKey) {
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
-    const embed = buildDeliveryEmbed({
+    const dmPayload = buildDeliveryEmbed({
       // member.displayName resolves to nickname || globalName || username,
       // so it works whether the sender has a per-guild nickname, only a
       // global display name, or just the legacy @-handle.
       senderAlias: resolveSenderAlias(interaction),
-      resourceType,
       qurlLink: link.qurlLink,
       expiresIn,
       personalMessage,
     });
 
-    const sent = await sendDM(link.recipientId, { embeds: [embed] });
+    const sent = await sendDM(link.recipientId, dmPayload);
     db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
@@ -1580,20 +1586,27 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
     // Today a send has exactly one resource (file XOR location), so links
-    // will have length 1. The loop builds one embed per link so a future
-    // multi-resource send doesn't silently drop extras (Discord allows
-    // up to 10 embeds per message).
-    const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
+    // will have length 1. Multiple resources would multiply embeds AND
+    // buttons; Discord caps components at 5 ActionRows × 5 buttons per
+    // message. The flatten below preserves the per-link `Step Through →`
+    // button alongside its embed; if multi-resource sends ever ship with
+    // > 5 links per recipient, the button row will need chunking.
+    const payloads = links.slice(0, 10).map(link => buildDeliveryEmbed({
       // Same alias resolution as handleSend — see comment there for
       // the nickname > globalName > username fallback rationale.
       senderAlias: resolveSenderAlias(originalInteraction),
-      resourceType: link.resType,
       qurlLink: link.qurlLink,
       expiresIn: sendConfig.expires_in,
       personalMessage: sendConfig.personal_message,
     }));
+    const allEmbeds = payloads.flatMap(p => p.embeds);
+    const allButtons = payloads.flatMap(p => p.components[0].components);
+    const allComponents = [];
+    for (let i = 0; i < allButtons.length; i += 5) {
+      allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+    }
 
-    const sent = await sendDM(recipient.id, { embeds });
+    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
@@ -2361,9 +2374,10 @@ const commands = [
               .setAutocomplete(true))
           .addStringOption(opt =>
             opt.setName('expiry_optional')
-              .setDescription('Link expiry (default: 24h)')
+              .setDescription('Link expiry (default: 15m)')
               .setRequired(false)
               .addChoices(
+                { name: '15 minutes', value: '15m' },
                 { name: '30 minutes', value: '30m' },
                 { name: '1 hour', value: '1h' },
                 { name: '6 hours', value: '6h' },

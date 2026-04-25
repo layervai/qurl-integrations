@@ -24,8 +24,8 @@ describe('utils/time', () => {
       expect(expiryToMs('999d')).toBe(30 * 86400 * 1000);
     });
 
-    it('rejects overflow / non-numeric with the 24h default', () => {
-      const DEFAULT = 86400000;
+    it('rejects overflow / non-numeric with the 15m default', () => {
+      const DEFAULT = 900000;  // 15m — matches /qurl send command default
       expect(expiryToMs('99999999999d')).toBe(DEFAULT); // regex rejects >6 digits
       expect(expiryToMs('')).toBe(DEFAULT);
       expect(expiryToMs('abc')).toBe(DEFAULT);
