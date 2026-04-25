@@ -328,12 +328,11 @@ describe('buildDeliveryEmbed — location resource type', () => {
     await cmd.execute(interaction);
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
-    // PR #124 v2 mockup pivot: dropped setAuthor + Resource Type / Filename
-    // row + per-kind description text. The DM now shows "Vik opened a door
-    // for you." (universal, no file/location distinction in copy) plus a
-    // fixed body paragraph + "Portal closes in" line + Step Through button.
-    // The personal message lives in a quote-block field above the body.
-    // Find the embed by setDescription presence (setAuthor is no longer used).
+    // The DM embed has no setAuthor, no Resource Type / Filename row,
+    // and no per-kind description. The description is universal
+    // ("opened a door for you"), the personal message lives in an
+    // unlabeled quote-block field, and the link is a Step Through button.
+    // Find the embed by setDescription presence (setAuthor is unused).
     const dmEmbed = embedInstances.find(e => e.setDescription.mock.calls.length > 0);
     expect(dmEmbed).toBeDefined();
     const descCalls = dmEmbed.setDescription.mock.calls;

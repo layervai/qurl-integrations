@@ -189,6 +189,46 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
     expect(desc).toContain('**' + 'A'.repeat(64) + '** opened a door for you.');
     expect(desc).not.toContain('**' + 'A'.repeat(65));
   });
+
+  // Regression net for: expiresIn used to render the raw choice value
+  // ('15m', '1h') instead of the human label ('15 minutes', '1 hour').
+  // Locks the formatExpiryLabel call site inside buildDeliveryEmbed.
+  it('renders the human-readable expiry label, not the raw choice value', () => {
+    buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', expiresIn: '15m' });
+    // Walk all embed fields collected by the mock and find the Portal field.
+    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
+    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
+    expect(portalField).toBeDefined();
+    expect(portalField.value).toContain('Portal closes in **15 minutes**');
+    expect(portalField.value).not.toContain('**15m**');
+  });
+
+  it('handles each known expiry choice with its proper label', () => {
+    const cases = [
+      ['15m', '15 minutes'],
+      ['30m', '30 minutes'],
+      ['1h', '1 hour'],
+      ['6h', '6 hours'],
+      ['24h', '24 hours'],
+      ['7d', '7 days'],
+    ];
+    for (const [value, label] of cases) {
+      capturedEmbeds.length = 0;
+      buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
+      const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
+      const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
+      expect(portalField.value).toContain(`Portal closes in **${label}**`);
+    }
+  });
+
+  it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
+    buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
+    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
+    const msgField = fields.find(f => typeof f.value === 'string' && f.value.includes('line one'));
+    expect(msgField).toBeDefined();
+    expect(msgField.value).toBe('> *"line one line two line three"*');
+    expect(msgField.value).not.toMatch(/\n/);
+  });
 });
 
 describe('resolveSenderAlias — fallback chain', () => {

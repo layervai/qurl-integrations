@@ -302,23 +302,49 @@ function resolveSenderAlias(interaction) {
 // in the design mockup would require a Success-style button + custom_id
 // + interaction handler that redirects, which adds a click round-trip
 // for marginal aesthetic gain. Sticking with Link button for this pivot.
+// Render an expiry-string choice value (e.g. '15m') as the human label
+// shown in the Discord choice picker (e.g. '15 minutes'). Recipients see
+// this label in the "Portal closes in **X**" embed line; rendering raw
+// '15m' would read as a UI bug.
+function formatExpiryLabel(expiresIn) {
+  const KNOWN = {
+    '15m': '15 minutes',
+    '30m': '30 minutes',
+    '1h': '1 hour',
+    '6h': '6 hours',
+    '24h': '24 hours',
+    '7d': '7 days',
+  };
+  if (KNOWN[expiresIn]) return KNOWN[expiresIn];
+  // Defensive fallback for any `(\d+)([mhd])` value outside KNOWN — the
+  // SlashCommandBuilder choices restrict input to KNOWN at the UI layer,
+  // but the Promise-stored value path could conceivably surface another.
+  const m = String(expiresIn || '').match(/^(\d+)([mhd])$/);
+  if (!m) return String(expiresIn || '');
+  const [, n, u] = m;
+  const word = u === 'm' ? 'minute' : u === 'h' ? 'hour' : 'day';
+  return `${n} ${word}${n === '1' ? '' : 's'}`;
+}
+
 function buildDeliveryEmbed({ senderAlias, qurlLink, expiresIn, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Same helper used at the channel
   // announcement site so the spoof defense doesn't drift between sites.
   const safeSender = sanitizeDisplayName(senderAlias);
+  const expiryLabel = formatExpiryLabel(expiresIn);
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
-    // Cap at 450 chars (Discord field limit is 1024 but we want the
-    // body paragraph to remain visible without scroll). Caller-side
-    // sanitizeMessage already escapes markdown — see commands.js
-    // input boundary. The blockquote + italic + quote chars approximate
-    // the styled quote-box from the design mockup.
-    const capped = personalMessage.substring(0, 450);
+    // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
+    // does not span newlines, so a multi-line message would render with
+    // only the first line styled. Flatten newlines to a space so the
+    // recipient sees one tidy quote — matches the design mockup which
+    // shows the message as a single-line styled box. 450-char cap keeps
+    // the body paragraph visible without scroll.
+    const capped = personalMessage.substring(0, 450).replace(/[\r\n]+/g, ' ').trim();
     embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
   }
 
@@ -329,7 +355,7 @@ function buildDeliveryEmbed({ senderAlias, qurlLink, expiresIn, personalMessage 
     },
     {
       name: '\u200B',
-      value: `\ud83d\udd50 Portal closes in **${expiresIn}**`,
+      value: `\ud83d\udd50 Portal closes in **${expiryLabel}**`,
     },
     {
       // Brand line lives in a regular embed field (NOT setFooter) because
@@ -1585,12 +1611,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const links = recipientLinks[recipient.id];
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
-    // Today a send has exactly one resource (file XOR location), so links
-    // will have length 1. Multiple resources would multiply embeds AND
-    // buttons; Discord caps components at 5 ActionRows × 5 buttons per
-    // message. The flatten below preserves the per-link `Step Through →`
-    // button alongside its embed; if multi-resource sends ever ship with
-    // > 5 links per recipient, the button row will need chunking.
+    // links.slice(0, 10) caps at Discord's 10-embed-per-message limit.
+    // The button-row chunking below splits buttons into ActionRows of 5
+    // (Discord's per-row cap) so an N-link DM keeps each `Step Through →`
+    // button next to its embed without exceeding the row limit.
     const payloads = links.slice(0, 10).map(link => buildDeliveryEmbed({
       // Same alias resolution as handleSend — see comment there for
       // the nickname > globalName > username fallback rationale.
