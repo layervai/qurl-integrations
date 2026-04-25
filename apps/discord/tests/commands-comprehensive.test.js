@@ -91,9 +91,13 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-  ActionRowBuilder: jest.fn().mockImplementation(() => ({
-    addComponents: jest.fn().mockReturnThis(),
-  })),
+  ActionRowBuilder: jest.fn().mockImplementation(() => {
+    const row = { components: [], addComponents: jest.fn(function (...args) {
+      row.components.push(...args.flat());
+      return row;
+    }) };
+    return row;
+  }),
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),

@@ -44,12 +44,17 @@ function escapeDiscordMarkdown(s) {
  * Returns 'Someone' if input is null/undefined/empty or becomes empty after
  * the strip (e.g. an alias composed entirely of zero-width chars).
  *
- * 64-char slice is a defensive upper bound; Discord caps display names at
- * 32 in API v10. Slice happens AFTER the strip and BEFORE the escape so a
- * trailing escape sequence (\\) cannot be truncated mid-pair into a single
- * backslash. Use this at every site that renders a Discord username /
- * display name / nickname inside markdown formatting (DM embeds, channel
- * announcements, etc.) so the spoof defense does not drift between sites.
+ * 64-char slice caps the post-strip INPUT length, not the rendered
+ * length: `escapeDiscordMarkdown` runs after the slice and may double
+ * the string (each escapable char becomes two) so the rendered alias
+ * can be up to ~128 chars. That's still well under Discord's embed
+ * field limits, so the in-input bound is what matters for the spoof
+ * defense. Slice happens AFTER the strip and BEFORE the escape so a
+ * trailing escape sequence (\\) cannot be truncated mid-pair into a
+ * single backslash. Use this at every site that renders a Discord
+ * username / display name / nickname inside markdown formatting (DM
+ * embed, channel announcement, etc.) so the spoof defense does not
+ * drift between sites.
  */
 function sanitizeDisplayName(s) {
   // `?? 'Someone'` (not `||`) — matches the `??` in resolveSenderAlias's

@@ -1,5 +1,5 @@
 /**
- * Tests for `buildDeliveryEmbed` — specifically the senderAlias
+ * Tests for `buildDeliveryPayload` — specifically the senderAlias
  * sanitization layer that strips bidi / zero-width / control / soft-
  * hyphen / line-separator / BOM characters before rendering the alias
  * inside `**...**` in the description. This is a security control: a
@@ -117,7 +117,7 @@ jest.mock('../src/qurl', () => ({
 jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
 
 const { _test } = require('../src/commands');
-const { buildDeliveryEmbed, resolveSenderAlias } = _test;
+const { buildDeliveryPayload, resolveSenderAlias } = _test;
 
 const baseArgs = {
   qurlLink: 'https://qurl.link/#at_test',
@@ -127,55 +127,55 @@ const baseArgs = {
 
 beforeEach(() => { capturedEmbeds.length = 0; });
 
-describe('buildDeliveryEmbed — senderAlias sanitization', () => {
+describe('buildDeliveryPayload — senderAlias sanitization', () => {
   it('renders a normal alias unchanged in the description', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
     expect(capturedEmbeds[0]._description).toContain('**Vik** opened a door for you.');
   });
 
   it('strips U+202E (RLO) from the alias to prevent direction-flip spoof', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\u202EAdmin' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '\u202EAdmin' });
     const desc = capturedEmbeds[0]._description;
     expect(desc.includes('\u202E')).toBe(false);
     expect(desc).toContain('**Admin** opened a door for you.');
   });
 
   it('strips zero-width spaces and bidi isolates from the alias', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\u200BVik\u2066\u2069' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '\u200BVik\u2066\u2069' });
     const desc = capturedEmbeds[0]._description;
     expect(/[\u200B\u2066\u2069]/.test(desc)).toBe(false);
     expect(desc).toContain('**Vik** opened a door for you.');
   });
 
   it('strips U+061C (Arabic Letter Mark) — completes bidi-control parity with RLM/LRM', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\u061CVik' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '\u061CVik' });
     const desc = capturedEmbeds[0]._description;
     expect(desc).not.toMatch(/\u061C/);
     expect(desc).toContain('**Vik** opened a door for you.');
   });
 
   it('strips line/paragraph separators and BOM (would otherwise break embed layout)', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\uFEFFVik\u2028\u2029' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '\uFEFFVik\u2028\u2029' });
     const desc = capturedEmbeds[0]._description;
     expect(/[\uFEFF\u2028\u2029]/.test(desc)).toBe(false);
     expect(desc).toContain('**Vik** opened a door for you.');
   });
 
   it('falls back to "Someone" when alias is entirely strip-eligible chars', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\u200B\u202E\u2066\u00AD' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '\u200B\u202E\u2066\u00AD' });
     expect(capturedEmbeds[0]._description).toContain('**Someone** opened a door for you.');
   });
 
   it('falls back to "Someone" when alias is null/undefined/empty', () => {
     for (const alias of [null, undefined, '']) {
       capturedEmbeds.length = 0;
-      buildDeliveryEmbed({ ...baseArgs, senderAlias: alias });
+      buildDeliveryPayload({ ...baseArgs, senderAlias: alias });
       expect(capturedEmbeds[0]._description).toContain('**Someone** opened a door for you.');
     }
   });
 
   it('escapes markdown chars in alias (e.g. masked-link injection)', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: '[click](https://evil.com)' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '[click](https://evil.com)' });
     const desc = capturedEmbeds[0]._description;
     // Brackets and parens must be backslash-escaped so Discord renders them
     // literally instead of as a clickable masked link.
@@ -184,7 +184,7 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
 
   it('caps long aliases at 64 chars (defensive upper bound vs Discord 32-char display-name cap)', () => {
     const long = 'A'.repeat(200);
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: long });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: long });
     const desc = capturedEmbeds[0]._description;
     expect(desc).toContain('**' + 'A'.repeat(64) + '** opened a door for you.');
     expect(desc).not.toContain('**' + 'A'.repeat(65));
@@ -192,9 +192,9 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
 
   // Regression net for: expiresIn used to render the raw choice value
   // ('15m', '1h') instead of the human label ('15 minutes', '1 hour').
-  // Locks the formatExpiryLabel call site inside buildDeliveryEmbed.
+  // Locks the formatExpiryLabel call site inside buildDeliveryPayload.
   it('renders the human-readable expiry label, not the raw choice value', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', expiresIn: '15m' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: '15m' });
     // Walk all embed fields collected by the mock and find the Portal field.
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
     const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
@@ -214,7 +214,7 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
     ];
     for (const [value, label] of cases) {
       capturedEmbeds.length = 0;
-      buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
+      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
       const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
       const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
       expect(portalField.value).toContain(`Portal closes in **${label}**`);
@@ -222,7 +222,7 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
   });
 
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
-    buildDeliveryEmbed({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
     const msgField = fields.find(f => typeof f.value === 'string' && f.value.includes('line one'));
     expect(msgField).toBeDefined();
