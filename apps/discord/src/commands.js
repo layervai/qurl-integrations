@@ -290,7 +290,7 @@ function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink
   // hard-caps display names at 32, so this is a defensive upper bound.
   const rawAlias = String(senderAlias || 'Someone').normalize('NFKC')
     // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width strip
-    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '');
   const safeSender = escapeDiscordMarkdown(rawAlias.slice(0, 64)) || 'Someone';
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
@@ -1209,8 +1209,8 @@ async function handleSend(interaction, apiKey) {
     // `safeSender` pattern at line 242.
     const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
     const notifyMsg = target === 'voice'
-      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from Qurl Bot.`;
+      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });
     } catch (err) {
@@ -2845,6 +2845,7 @@ module.exports = {
       expiryToISO,
       sendCooldowns,
       handleAddRecipients,
+      buildDeliveryEmbed,
     },
   }),
 };
