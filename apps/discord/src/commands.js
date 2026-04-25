@@ -234,17 +234,26 @@ async function batchSettled(items, fn, batchSize = 5) {
 }
 
 // --- Shared DM embed builder ---
-// Sender identity is intentionally aliased to "Someone" in the description
-// below — the recipient should not see the sender's Discord handle, since
-// in multi-tenant usage that would leak the sending workspace's social graph.
-function buildDeliveryEmbed({ resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+// `senderAlias` is the sender's friendly display name (the Discord
+// alias — guild nickname > global display name > username). Callers
+// resolve this from the interaction payload via `member.displayName`,
+// which discord.js already resolves through that fallback chain. We
+// deliberately use the alias rather than the raw @-handle so the
+// embed matches the name the recipient would see anywhere else in
+// Discord.
+function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
+  // Escape senderAlias — display names can contain markdown chars; a
+  // name like `[click](https://evil.com)` would otherwise render as a
+  // clickable phishing link inside the embed. 64-char cap matches
+  // Discord's display-name limit and keeps the description bounded.
+  const safeSender = escapeDiscordMarkdown(String(senderAlias || 'Someone').slice(0, 64));
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'qURL Secure Delivery' })
     .setDescription(
-      `**Someone** shared a file/location with you.\n${divider}`
+      `**${safeSender}** shared a file/location with you.\n${divider}`
     )
   // resourceLabel is a caller-friendly description ("File (report.pdf)" or
   // the location name). Prefer it when provided and fall back to a generic
@@ -1035,6 +1044,10 @@ async function handleSend(interaction, apiKey) {
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     const embed = buildDeliveryEmbed({
+      // member.displayName resolves to nickname || globalName || username,
+      // so it works whether the sender has a per-guild nickname, only a
+      // global display name, or just the legacy @-handle.
+      senderAlias: interaction.member?.displayName ?? interaction.user.displayName ?? interaction.user.username,
       resourceType,
       resourceLabel,
       qurlLink: link.qurlLink,
@@ -1522,6 +1535,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // multi-resource send doesn't silently drop extras (Discord allows
     // up to 10 embeds per message).
     const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
+      // Same alias resolution as handleSend — see comment there for
+      // the nickname > globalName > username fallback rationale.
+      senderAlias: originalInteraction.member?.displayName ?? originalInteraction.user.displayName ?? originalInteraction.user.username,
       resourceType: link.resType,
       resourceLabel: link.label,
       qurlLink: link.qurlLink,
