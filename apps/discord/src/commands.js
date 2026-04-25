@@ -291,8 +291,19 @@ function resolveSenderAlias(interaction) {
 // already names the resource type ("file" or "location") so a separate
 // Resource Type / Filename field row would be redundant.
 function buildDeliveryEmbed({ senderAlias, resourceType, qurlLink, expiresIn, personalMessage }) {
-  const isFile = resourceType === RESOURCE_TYPES.FILE;
-  const kind = isFile ? 'file' : 'location';
+  // Resource-type → user-facing label used in "shared a {kind} with you".
+  // Switch (not `isFile ? 'file' : 'location'`) so a new RESOURCE_TYPES
+  // value added without updating this branch fails loudly instead of
+  // silently rendering as "location". Lookup happens at call time, not
+  // module-load — keeps the mapping testable without forcing every
+  // commands.js consumer to mock the full RESOURCE_TYPES enum.
+  let kind;
+  switch (resourceType) {
+    case RESOURCE_TYPES.FILE: kind = 'file'; break;
+    case RESOURCE_TYPES.MAPS: kind = 'location'; break;
+    default:
+      throw new Error(`buildDeliveryEmbed: unknown resourceType '${resourceType}' (add a case)`);
+  }
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   // sanitizeDisplayName handles NFKC + bidi/zero-width strip + markdown
   // escape + 64-char cap + 'Someone' fallback. Same helper is used at
@@ -2531,7 +2542,7 @@ const commands = [
       if (sub === 'help') {
         // Rendered output (after Discord's markdown parser):
         //
-        //   Qurl Bot — Help
+        //   qURL Bot — Help
         //
         //   Getting started — Share resources securely via one-time links:
         //     /qurl send — send a file and/or location to users
@@ -2565,7 +2576,7 @@ const commands = [
         // started → How it works), then admin-only setup, then glossary
         // (Terms), then operational caveat (Large servers), then signup.
         return interaction.reply({
-          content: '**Qurl Bot — Help**\n\n' +
+          content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +

@@ -52,7 +52,12 @@ function escapeDiscordMarkdown(s) {
  * announcements, etc.) so the spoof defense does not drift between sites.
  */
 function sanitizeDisplayName(s) {
-  const stripped = String(s || 'Someone').normalize('NFKC')
+  // `?? 'Someone'` (not `||`) — matches the `??` in resolveSenderAlias's
+  // fallback chain, so the two halves of the same flow read consistently.
+  // Difference is academic for string inputs (empty string falls through
+  // the post-escape `|| 'Someone'` anyway), but keeps the intent
+  // unambiguous: only `null`/`undefined` should trip the fallback here.
+  const stripped = String(s ?? 'Someone').normalize('NFKC')
     // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
     .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
     .slice(0, 64);
