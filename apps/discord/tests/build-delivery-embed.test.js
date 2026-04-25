@@ -130,10 +130,10 @@ const { buildDeliveryPayload, resolveSenderAlias } = _test;
 
 const baseArgs = {
   qurlLink: 'https://qurl.link/#at_test',
-  // Use a real choice value (not the rendered label) so the test setup
-  // mirrors what production passes in. `formatExpiryLabel` will translate
-  // '24h' → '24 hours' inside buildDeliveryPayload.
-  expiresIn: '24h',
+  // Unix seconds (matches what production computes via expiryToMs at the
+  // call site). buildDeliveryPayload renders this as <t:N:R> so Discord
+  // shows the recipient a live "in 24 hours" / "in 16 hours" / etc.
+  expiresAt: 1735689600,  // arbitrary fixed timestamp; tests assert it survives into the embed
   personalMessage: null,
 };
 
@@ -202,57 +202,22 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).not.toContain('**' + 'A'.repeat(65));
   });
 
-  // Regression net for: expiresIn used to render the raw choice value
-  // ('30m', '1h') instead of the human label ('30 minutes', '1 hour').
-  // Locks the formatExpiryLabel call site inside buildDeliveryPayload.
-  it('renders the human-readable expiry label, not the raw choice value', () => {
-    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: '30m' });
+  // Regression net for the live-countdown design: the Portal-closes line
+  // must render Discord's <t:N:R> relative-time markdown so the recipient
+  // sees "in 24 hours" → "in 16 hours" → "1 hour ago" as time passes.
+  // A future refactor that goes back to baking a static label into the
+  // embed ("Portal closes in **24 hours**" forever) would silently
+  // regress this UX — the assertion below catches it.
+  it('renders Discord native relative-time <t:N:R> for the Portal-closes line', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
+    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes'));
     expect(portalField).toBeDefined();
-    expect(portalField.value).toContain('Portal closes in **30 minutes**');
-    expect(portalField.value).not.toContain('**30m**');
+    expect(portalField.value).toBe('\ud83d\udd50 Portal closes <t:1735689600:R>');
+    // Locks against accidental reversion to a static label
+    expect(portalField.value).not.toMatch(/Portal closes in \*\*\d/);
   });
 
-  it('handles each known expiry choice with its proper label', () => {
-    const cases = [
-      ['30m', '30 minutes'],
-      ['1h', '1 hour'],
-      ['6h', '6 hours'],
-      ['24h', '24 hours'],
-      ['7d', '7 days'],
-    ];
-    for (const [value, label] of cases) {
-      capturedEmbeds.length = 0;
-      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
-      const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
-      const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
-      expect(portalField.value).toContain(`Portal closes in **${label}**`);
-    }
-  });
-
-  // formatExpiryLabel has a defensive `(\d+)([mhd])` regex fallback for
-  // values not in EXPIRY_LABELS (saved-config edge cases, hand-crafted
-  // values). Lock the singular/plural + minute/hour/day expansion logic
-  // so a future tightening of the regex / inflection doesn't silently
-  // change what recipients see.
-  it('falls back to the regex formatter for non-choice expiry values', () => {
-    const cases = [
-      ['1m', '1 minute'],   // singular minute
-      ['2m', '2 minutes'],  // plural minutes
-      ['1h', '1 hour'],     // (also in EXPIRY_LABELS, but verify regex path agrees)
-      ['3h', '3 hours'],    // not in EXPIRY_LABELS — regex path
-      ['1d', '1 day'],      // singular day
-      ['14d', '14 days'],   // plural, not in EXPIRY_LABELS
-    ];
-    for (const [value, label] of cases) {
-      capturedEmbeds.length = 0;
-      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
-      const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
-      const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
-      expect(portalField.value).toContain(`Portal closes in **${label}**`);
-    }
-  });
 
   // Locks the Step Through button shape: a future refactor that drops
   // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave

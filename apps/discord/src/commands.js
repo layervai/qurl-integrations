@@ -288,7 +288,8 @@ function resolveSenderAlias(interaction) {
 //     │  invisible to everyone else on the internet: scanners,     │
 //     │  bots, crawlers, strangers.                                │
 //     │                                                             │
-//     │  🕐 Portal closes in **24 hours**                           │  (expiry line)
+//     │  🕐 Portal closes in 24 hours                               │  (Discord <t:N:R> — auto-updates client-side
+//     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
 //     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
@@ -302,14 +303,11 @@ function resolveSenderAlias(interaction) {
 // in the design mockup would require a Success-style button + custom_id
 // + interaction handler that redirects, which adds a click round-trip
 // for marginal aesthetic gain. Sticking with Link button for this pivot.
-// Single source of truth for the supported `/qurl send` expiry choices
-// and their human-readable labels. Used by:
-//   1. `formatExpiryLabel` to render the "Portal closes in X" line in
-//      the recipient DM (e.g. `'24h'` → `'24 hours'`)
-//   2. `EXPIRY_CHOICES` (built below from this map) to populate the
-//      SlashCommandBuilder `addChoices(...)` for the `expiry_optional`
-//      option, so the two cannot drift when a new choice is added.
-// Hoisted to module scope so the dictionary isn't reallocated per call.
+// Single source of truth for the SlashCommandBuilder `addChoices(...)` —
+// `EXPIRY_CHOICES` is derived from this map so dropdown labels and values
+// cannot drift. The DM embed renders expiry as a Discord native relative
+// timestamp (`<t:N:R>`, see buildDeliveryPayload) so the human label is
+// only used in the slash-command picker, not at render time.
 const EXPIRY_LABELS = {
   '30m': '30 minutes',
   '1h': '1 hour',
@@ -320,29 +318,11 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
-function formatExpiryLabel(expiresIn) {
-  // `Object.hasOwn` rather than `EXPIRY_LABELS[expiresIn]` so a value of
-  // `'__proto__'` / `'constructor'` / etc. can't trip the lookup against
-  // an inherited Object.prototype property. Practical risk is zero (input
-  // is gated by addChoices), but this is one identifier longer and removes
-  // the question entirely.
-  if (Object.hasOwn(EXPIRY_LABELS, expiresIn)) return EXPIRY_LABELS[expiresIn];
-  // Defensive fallback for any `(\d+)([mhd])` value outside EXPIRY_LABELS
-  // — the SlashCommandBuilder choices restrict input at the UI layer, but
-  // the saved-config path could conceivably surface another.
-  const m = String(expiresIn || '').match(/^(\d+)([mhd])$/);
-  if (!m) return String(expiresIn || '');
-  const [, n, u] = m;
-  const word = u === 'm' ? 'minute' : u === 'h' ? 'hour' : 'day';
-  return `${n} ${word}${n === '1' ? '' : 's'}`;
-}
-
-function buildDeliveryPayload({ senderAlias, qurlLink, expiresIn, personalMessage }) {
+function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Same helper used at the channel
   // announcement site so the spoof defense doesn't drift between sites.
   const safeSender = sanitizeDisplayName(senderAlias);
-  const expiryLabel = formatExpiryLabel(expiresIn);
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
@@ -374,8 +354,13 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresIn, personalMessag
       value: "This link is your portal — what's on the other side is invisible to everyone else on the internet: scanners, bots, crawlers, strangers.",
     },
     {
+      // Discord's native relative-time markdown: <t:UNIX:R> renders
+      // CLIENT-SIDE based on the viewer's current time, so the recipient
+      // sees "in 24 hours" at send time and "in 16 hours" 8 hours later
+      // (and "1 hour ago" once the link has expired). No bot-side editing
+      // needed — Discord handles the live update.
       name: '\u200B',
-      value: `\ud83d\udd50 Portal closes in **${expiryLabel}**`,
+      value: `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`,
     },
     {
       // Brand line lives in a regular embed field (NOT setFooter) because
@@ -1149,6 +1134,13 @@ async function handleSend(interaction, apiKey) {
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`;
+  // the few-hundred-ms drift is negligible at the 30m–7d horizon.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     const dmPayload = buildDeliveryPayload({
@@ -1157,7 +1149,7 @@ async function handleSend(interaction, apiKey) {
       // global display name, or just the legacy @-handle.
       senderAlias: resolveSenderAlias(interaction),
       qurlLink: link.qurlLink,
-      expiresIn,
+      expiresAt,
       personalMessage,
     });
 
@@ -1643,12 +1635,16 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // with their corresponding embed. Multi-link UX would benefit from
     // per-link button labels (e.g. "Step Through · report.pdf"), but
     // today links.length is always 1 so labels are uniform.
+    // Same Unix-seconds expiry computation as handleSend — see comment
+    // there. Computed once per recipient (cheap; the alternative would
+    // be threading a single timestamp through sendConfig).
+    const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
     const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
       // Same alias resolution as handleSend — see comment there for
       // the nickname > globalName > username fallback rationale.
       senderAlias: resolveSenderAlias(originalInteraction),
       qurlLink: link.qurlLink,
-      expiresIn: sendConfig.expires_in,
+      expiresAt,
       personalMessage: sendConfig.personal_message,
     }));
     // Contract with buildDeliveryPayload: each payload's `components`
