@@ -54,6 +54,22 @@ Examples:
 - **App-private code:** `apps/{name}/internal/`
 - **Shared code:** `shared/{package}/` — changes here affect ALL apps
 
+### Brand spelling
+
+The product brand is **`qURL`** (case-sensitive: lowercase `q`, uppercase `URL`). Use `qURL` in user-visible prose, log/error messages, doc comments, README content, and anything a human reads.
+
+The following stay literal — don't "finish" the rebrand:
+- Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
+- Env vars (`QURL_API_KEY`, `QURL_ENDPOINT`, `QURL_BASE_URL`, `QURL_TIMEOUT`)
+- DDB table/column names and JSON keys (`qurl_sends`, `qurl_send_configs`, `qurl_link`, `qurl_id`)
+- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
+- Slash command names (`/qurl send`, `/qurl help`) and the CLI binary `qurl`
+- OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
+- Domain literals (`qurl.link`, `qurl.site`, `q.layerv.xyz`)
+- Man-page section titles (`QURL(1)` — system-reference convention)
+
+When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
+
 ## Linting
 
 This repo uses `golangci-lint` v2.10.1 with 28+ linters enabled (see `.golangci.yml`). Key rules:
