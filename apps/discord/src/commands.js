@@ -233,6 +233,22 @@ async function batchSettled(items, fn, batchSize = 5) {
   return results;
 }
 
+// Resolve the sender's display alias from an interaction, the same way
+// Discord itself does for any rendered name in a guild. Order:
+//   1. member.displayName — guild nickname > globalName > username
+//      (discord.js already resolves the inner three; we only fall
+//      through if `member` is null, e.g. user-app DM invocation).
+//   2. user.displayName — globalName > username (no guild context).
+//   3. user.username — last-resort handle.
+// Used by both the DM embed and the channel announcement so a single
+// send always shows the same name in both places. Drift here was the
+// bug Claude review caught on commit 110d2bc.
+function resolveSenderAlias(interaction) {
+  return interaction.member?.displayName
+    ?? interaction.user.displayName
+    ?? interaction.user.username;
+}
+
 // --- Shared DM embed builder ---
 // `senderAlias` is the sender's friendly display name (the Discord
 // alias — guild nickname > global display name > username). Callers
@@ -1080,7 +1096,7 @@ async function handleSend(interaction, apiKey) {
       // member.displayName resolves to nickname || globalName || username,
       // so it works whether the sender has a per-guild nickname, only a
       // global display name, or just the legacy @-handle.
-      senderAlias: interaction.member?.displayName ?? interaction.user.displayName ?? interaction.user.username,
+      senderAlias: resolveSenderAlias(interaction),
       resourceType,
       resourceLabel,
       qurlLink: link.qurlLink,
@@ -1198,7 +1214,7 @@ async function handleSend(interaction, apiKey) {
     // fallback). Channel-post is a wider blast radius than DM, so applying
     // the same spoof defense here is critical — without it a display name
     // with a leading U+202E flips text direction in the public announcement.
-    const safeName = sanitizeDisplayName(interaction.user.displayName);
+    const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
     const notifyMsg = target === 'voice'
       ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
       : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
@@ -1571,7 +1587,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
       // Same alias resolution as handleSend — see comment there for
       // the nickname > globalName > username fallback rationale.
-      senderAlias: originalInteraction.member?.displayName ?? originalInteraction.user.displayName ?? originalInteraction.user.username,
+      senderAlias: resolveSenderAlias(originalInteraction),
       resourceType: link.resType,
       resourceLabel: link.label,
       qurlLink: link.qurlLink,
