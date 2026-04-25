@@ -1316,7 +1316,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       // Poison the sender's displayName with a leading U+202E (RLO) and
       // a U+200B (ZWSP) — the exact bidi-spoof vector sanitizeDisplayName
       // is supposed to defuse.
-      user: { id: 'user-1', username: 'TestUser', displayName: '‮​Attacker' },
+      user: { id: 'user-1', username: 'TestUser', displayName: '\u202E\u200BAttacker' },
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'send'),
@@ -1341,7 +1341,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     expect(interaction.channel.send).toHaveBeenCalledTimes(1);
     const announcement = interaction.channel.send.mock.calls[0][0].content;
     // No raw bidi/zero-width chars survive into the public announcement.
-    expect(announcement).not.toMatch(/[‮​]/);
+    expect(announcement).not.toMatch(/[\u202E\u200B]/);
     // The bare alphabetic name is preserved post-strip.
     expect(announcement).toContain('**Attacker**');
   });
