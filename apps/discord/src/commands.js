@@ -241,6 +241,38 @@ async function batchSettled(items, fn, batchSize = 5) {
 // deliberately use the alias rather than the raw @-handle so the
 // embed matches the name the recipient would see anywhere else in
 // Discord.
+//
+// Example of what the recipient sees in their DM (file send, with a
+// personal message, 15-minute expiry):
+//
+//     ┌─────────────────────────────────────────────────────────────┐
+//     │  qURL Secure Delivery                                       │
+//     │                                                             │
+//     │  **Vik** shared a file/location with you.                   │
+//     │  ──────────────────────────────                             │
+//     │                                                             │
+//     │  Resource Type:  File         Filename:  report.pdf         │
+//     │                                                             │
+//     │  Message:                                                   │
+//     │    > Quarterly numbers — for your eyes only.                │
+//     │                                                             │
+//     │  qURL Link:                                                 │
+//     │    https://qurl.link/#at_abcd1234…                          │
+//     │                                                             │
+//     │  ──────────────────────────────                             │
+//     │  ⏳ Expires in **15 minutes**                                │
+//     │  🔒 One-time access                                          │
+//     │  ──────────────────────────────                             │
+//     │  ⚠️ Invisible before accessed                                │
+//     │  💥 Self-destructs after viewing                             │
+//     │  ──────────────────────────────                             │
+//     │                                                             │
+//     │  🔐 qURL (Quantum URL): Invisible by default. Visible by    │
+//     │  permission.                                                │
+//     └─────────────────────────────────────────────────────────────┘
+//
+// Location sends drop the Filename field; sends without a personal
+// message drop the Message block. Everything else is identical.
 function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
@@ -2509,6 +2541,41 @@ const commands = [
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
+        // Rendered output (after Discord's markdown parser):
+        //
+        //   Qurl Bot — Help
+        //
+        //   Getting started — Share resources securely via one-time links:
+        //     /qurl send — send a file and/or location to users
+        //     /qurl revoke — revoke links from a previous send
+        //     /qurl help — show this message
+        //
+        //   How it works:
+        //     1. Use /qurl send and choose a target (user, channel, or voice)
+        //     2. Attach a file and/or search for a location
+        //     3. Each recipient gets a unique, single-use link by DM
+        //     4. Links self-destruct on first access, or when the expiry
+        //        elapses — whichever comes first
+        //
+        //   Setting up (for Admins):
+        //     /qurl setup — configure your API key (admin only)
+        //     /qurl status — check if qURL is configured (admin only)
+        //
+        //   Terms: a protected resource is the file or location you're
+        //   sharing. A qurl (or access link) is the single-use URL that
+        //   delivers it. You create a qurl for a protected resource each
+        //   time you run /qurl send.
+        //
+        //   Large servers (~1000+ members): when sending to a `channel` or
+        //   `voice` target, members who appear offline in Discord may be
+        //   skipped. If you need to reach a specific person for sure, use
+        //   the `user` target.
+        //
+        //   Sign up at https://layerv.ai to get your API key.
+        //
+        // Section order (post-PR #124): user-facing flow first (Getting
+        // started → How it works), then admin-only setup, then glossary
+        // (Terms), then operational caveat (Large servers), then signup.
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
