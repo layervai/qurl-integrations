@@ -202,6 +202,19 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).not.toContain('**' + 'A'.repeat(65));
   });
 
+  // The 64-char cap is codepoint-aware (Array.from + slice + join) — a
+  // surrogate pair (e.g. 🎉 / U+1F389) sitting on the boundary must not
+  // be split into a lone high surrogate, which Discord renders as tofu.
+  // Regression net: 63 ASCII chars + 1 emoji = 64 codepoints, all kept.
+  it('does not split surrogate pairs at the 64-char boundary', () => {
+    const alias = 'A'.repeat(63) + '🎉';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: alias });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toContain('**' + 'A'.repeat(63) + '🎉** opened a door for you.');
+    // No lone high surrogate (\uD83C is the high half of 🎉)
+    expect(desc).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
+  });
+
   // Regression net for the live-countdown design: the Portal-closes line
   // must render Discord's <t:N:R> relative-time markdown so the recipient
   // sees "in 24 hours" → "in 16 hours" → "1 hour ago" as time passes.
@@ -216,6 +229,17 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(portalField.value).toBe('\ud83d\udd50 Portal closes <t:1735689600:R>');
     // Locks against accidental reversion to a static label
     expect(portalField.value).not.toMatch(/Portal closes in \*\*\d/);
+  });
+
+  // Defensive guard: a future caller that drops `expiresAt` (or passes
+  // null/undefined/NaN) would otherwise render literal "<t:undefined:R>"
+  // or "<t:NaN:R>" to recipients. The fail-loud throw matches the
+  // contract guard in handleAddRecipients.
+  it('throws if expiresAt is missing or non-finite (fail-loud)', () => {
+    for (const bad of [undefined, null, NaN, Infinity, 'soon', {}]) {
+      expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
+        .toThrow(/expiresAt must be a finite Unix-seconds number/);
+    }
   });
 
 

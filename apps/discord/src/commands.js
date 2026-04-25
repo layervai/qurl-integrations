@@ -359,8 +359,18 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
       // sees "in 24 hours" at send time and "in 16 hours" 8 hours later
       // (and "1 hour ago" once the link has expired). No bot-side editing
       // needed — Discord handles the live update.
+      //
+      // Fail-loud on a missing/invalid expiresAt rather than rendering
+      // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
+      // the contract-violation throw in handleAddRecipients (same fail-
+      // loud-over-silent-degradation principle).
       name: '\u200B',
-      value: `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`,
+      value: (() => {
+        if (!Number.isFinite(expiresAt)) {
+          throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
+        }
+        return `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`;
+      })(),
     },
     {
       // Brand line lives in a regular embed field (NOT setFooter) because
@@ -1137,8 +1147,13 @@ async function handleSend(interaction, apiKey) {
   // Compute the absolute expiry instant once for this dispatch (Unix
   // seconds — Discord's <t:N:R> format requires seconds, not millis).
   // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`;
-  // the few-hundred-ms drift is negligible at the 30m–7d horizon.
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is bounded
+  // by the time between this line and the mint call (sub-second on
+  // handleSend; can be a few seconds on handleAddRecipients which
+  // re-downloads + re-uploads + re-mints first). Negligible at the
+  // 30m–7d horizon — recipients see "in 24 hours" instead of
+  // "in 23h 59m 56s" on the worst-case path.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {

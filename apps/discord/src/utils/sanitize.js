@@ -62,10 +62,16 @@ function sanitizeDisplayName(s) {
   // Difference is academic for string inputs (empty string falls through
   // the post-escape `|| 'Someone'` anyway), but keeps the intent
   // unambiguous: only `null`/`undefined` should trip the fallback here.
-  const stripped = String(s ?? 'Someone').normalize('NFKC')
+  const cleaned = String(s ?? 'Someone').normalize('NFKC')
     // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
-    .replace(/[\u0000-\u001F\u007F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
-    .slice(0, 64);
+    .replace(/[\u0000-\u001F\u007F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '');
+  // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
+  // code units, so a 64-char cap on a name like `'A'.repeat(63) + '🎉'`
+  // would split the emoji's surrogate pair and Discord would render the
+  // lone high surrogate as tofu. `Array.from(str)` iterates by codepoint,
+  // so an emoji at the boundary either fully survives (if it fits) or is
+  // fully dropped — never half-included.
+  const stripped = Array.from(cleaned).slice(0, 64).join('');
   return escapeDiscordMarkdown(stripped) || 'Someone';
 }
 
