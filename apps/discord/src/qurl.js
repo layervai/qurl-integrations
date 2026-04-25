@@ -3,7 +3,7 @@ const logger = require('./logger');
 const dns = require('dns').promises;
 
 /**
- * Lightweight QURL API client using fetch.
+ * Lightweight qURL API client using fetch.
  * Avoids ESM/CJS compatibility issues with the @layerv/qurl SDK.
  */
 
@@ -29,7 +29,7 @@ async function qurlFetch(method, path, body, apiKey) {
   if (body) baseOpts.body = JSON.stringify(body);
 
   // Up to 3 attempts total (initial + 2 retries) with exponential backoff
-  // plus jitter. A single transient 503 or network blip from QURL's infra
+  // plus jitter. A single transient 503 or network blip from qURL's infra
   // no longer fails a whole /qurl send. Non-retryable statuses + non-network
   // errors throw immediately.
   const maxAttempts = 3;
@@ -44,7 +44,7 @@ async function qurlFetch(method, path, body, apiKey) {
       lastErr = err;
       if (attempt < maxAttempts - 1) {
         const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('QURL API network error, retrying', { method, path, attempt, delay, error: err.message });
+        logger.warn('qURL API network error, retrying', { method, path, attempt, delay, error: err.message });
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
@@ -53,19 +53,19 @@ async function qurlFetch(method, path, body, apiKey) {
 
     if (!resp.ok) {
       // Log only status + body length. Including the raw body would be
-      // dangerous: the QURL API error response may echo request headers or
+      // dangerous: the qURL API error response may echo request headers or
       // tokens, and anyone flipping LOG_LEVEL=debug during an incident would
       // then tail those into logs.
       let bodyLen = 0;
       try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
-      logger.debug('QURL API error', { method, path, status: resp.status, bodyLen, attempt });
+      logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
       if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
         const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
-        logger.warn('QURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
+        logger.warn('qURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      throw new Error(`QURL API ${method} ${path} failed (${resp.status})`);
+      throw new Error(`qURL API ${method} ${path} failed (${resp.status})`);
     }
 
     if (resp.status === 204) return null;
@@ -74,13 +74,13 @@ async function qurlFetch(method, path, body, apiKey) {
   }
   // Unreachable in practice — the loop either returns or throws — but keeps
   // the control flow explicit for reviewers.
-  throw lastErr || new Error(`QURL API ${method} ${path} exhausted retries`);
+  throw lastErr || new Error(`qURL API ${method} ${path} exhausted retries`);
 }
 
 // Reject hostnames that resolve (by syntax) to loopback, link-local, or
 // RFC1918 private ranges. Defense-in-depth against a caller passing
 // `http://169.254.169.254/latest/meta-data/...` or similar; even if the
-// downstream QURL API is the one that actually fetches, we block at our
+// downstream qURL API is the one that actually fetches, we block at our
 // own input validation layer.
 function isPrivateHost(host) {
   if (!host) return true;
@@ -139,13 +139,13 @@ function isPrivateHost(host) {
 // to a private/internal range. Defense against DNS rebinding: a malicious
 // domain could answer `isPrivateHost` (which is syntactic) with a public IP
 // but then resolve to 169.254.169.254 or 127.0.0.1 at fetch time on the
-// QURL backend. We resolve up-front and pass the result to the QURL API so
+// qURL backend. We resolve up-front and pass the result to the qURL API so
 // the backend can pin to the same IPs we verified — the API has its own
 // SSRF guard but we also block here.
 //
 // DEPENDENCY: This is defense-in-depth ONLY — there is an unavoidable
 // TOCTOU window between our dns.lookup() here and the actual fetch on the
-// QURL API backend (DNS can rebind in that gap). The QURL API MUST have
+// qURL API backend (DNS can rebind in that gap). The qURL API MUST have
 // its own DNS-level SSRF guard (resolve + check in the same syscall, or
 // IP-pinned fetch). Do not remove this check assuming the API layer is
 // enough, and do not remove the API-layer check assuming this is enough.
@@ -158,7 +158,7 @@ async function assertNotPrivateAfterResolve(hostname) {
     addrs = await dns.lookup(hostname, { all: true, verbatim: true });
   } catch (err) {
     // Resolution failure is NOT a pass — reject so a typo or non-existent
-    // host fails here rather than leaking to the QURL API as an opaque error.
+    // host fails here rather than leaking to the qURL API as an opaque error.
     throw new Error(`Target URL hostname could not be resolved: ${err.code || err.message}`);
   }
   for (const { address } of addrs) {
@@ -190,7 +190,7 @@ async function createOneTimeLink(targetUrl, expiresIn, description, apiKey) {
     description,
   }, apiKey);
 
-  logger.info('Created one-time QURL', { resource_id: result.resource_id, expires_in: expiresIn });
+  logger.info('Created one-time qURL', { resource_id: result.resource_id, expires_in: expiresIn });
   return result;
 }
 
@@ -203,7 +203,7 @@ function validateResourceId(resourceId) {
 async function deleteLink(resourceId, apiKey) {
   validateResourceId(resourceId);
   await qurlFetch('DELETE', `/qurls/${resourceId}`, null, apiKey);
-  logger.info('Revoked QURL', { resource_id: resourceId });
+  logger.info('Revoked qURL', { resource_id: resourceId });
 }
 
 async function getResourceStatus(resourceId, apiKey) {

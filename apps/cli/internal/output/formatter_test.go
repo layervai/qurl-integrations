@@ -141,7 +141,7 @@ func TestTableFormatListEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FormatList: %v", err)
 	}
-	if !strings.Contains(buf.String(), "No QURLs found") {
+	if !strings.Contains(buf.String(), "No qURLs found") {
 		t.Errorf("expected empty message, got:\n%s", buf.String())
 	}
 }

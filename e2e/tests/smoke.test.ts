@@ -1,6 +1,6 @@
 /**
- * Smoke test — verifies the core QURL flow end-to-end:
- * 1. Mint a one-time link via QURL API
+ * Smoke test — verifies the core qURL flow end-to-end:
+ * 1. Mint a one-time link via qURL API
  * 2. Access it (should succeed)
  * 3. Access again (should fail — one-time)
  * 4. Mint another, revoke it, access (should fail)
@@ -43,7 +43,7 @@ describe('Smoke: Bot connectivity', () => {
   });
 });
 
-describe('Smoke: QURL link lifecycle', () => {
+describe('Smoke: qURL link lifecycle', () => {
   let qurlLink: string;
   let qurlId: string;
 
@@ -68,7 +68,7 @@ describe('Smoke: QURL link lifecycle', () => {
   });
 
   test('link status shows accessed after first open', async () => {
-    // QURL links use fragments — SPA always returns 200.
+    // qURL links use fragments — SPA always returns 200.
     // Verify via the resource status API using the resource_id from minting.
     try {
       const status = await qurl.getLinkStatus(env.MINT_API_URL, env.QURL_API_KEY, qurlId);

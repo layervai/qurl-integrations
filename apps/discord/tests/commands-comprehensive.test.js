@@ -943,7 +943,7 @@ describe('/qurl help subcommand', () => {
     expect(content).toContain('https://layerv.ai');
     // (2) self-destruct note covers both access AND expiry
     expect(content).toMatch(/self-destruct on first access.*expiry elapses/);
-    // (3) Terms block disambiguates "protected resource" from "qurl"
+    // (3) Terms block disambiguates "protected resource" from "qURL"
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
     // (4) Large-servers note uses plain language, not GUILD_PRESENCES jargon
@@ -1544,7 +1544,7 @@ describe('/qurl send — link creation failure', () => {
   it('shows quota-specific message on quota_exceeded API error (file)', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
-    // Simulate connector mint_link returning 502 wrapping a QURL API
+    // Simulate connector mint_link returning 502 wrapping a qURL API
     // 403 quota_exceeded — connector.js's throwConnectorError tags this
     // as Error.apiCode='quota_exceeded'.
     const quotaErr = new Error('Connector mint_link failed (502)');

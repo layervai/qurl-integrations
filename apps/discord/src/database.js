@@ -91,7 +91,7 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_contributions_unique ON contributions(repo, pr_number);
   CREATE INDEX IF NOT EXISTS idx_badges_discord ON badges(discord_id);
 
-  -- QURL send tracking
+  -- qURL send tracking
   CREATE TABLE IF NOT EXISTS qurl_sends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     send_id TEXT NOT NULL,
@@ -111,7 +111,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_send_id ON qurl_sends(send_id);
   CREATE INDEX IF NOT EXISTS idx_qurl_sends_created ON qurl_sends(created_at);
 
-  -- QURL send configuration (one row per send, used for "Add Recipients")
+  -- qURL send configuration (one row per send, used for "Add Recipients")
   CREATE TABLE IF NOT EXISTS qurl_send_configs (
     send_id TEXT PRIMARY KEY,
     sender_discord_id TEXT NOT NULL,
@@ -673,7 +673,7 @@ const dbModule = {
     };
   },
 
-  // --- QURL SENDS ---
+  // --- qURL SENDS ---
 
   recordQURLSend({ sendId, senderDiscordId, recipientDiscordId, resourceId, resourceType, qurlLink, expiresIn, channelId, targetType }) {
     const stmt = db.prepare(`
@@ -867,7 +867,7 @@ const dbModule = {
     return safe;
   },
 
-  // Returns the decrypted guild key. ONLY for use at the last-mile QURL
+  // Returns the decrypted guild key. ONLY for use at the last-mile qURL
   // API call — never log or render this value. Callers that need to show
   // the admin that a key is configured should use getGuildConfig + compute
   // a sha256 fingerprint (see /qurl status in commands.js).

@@ -1,5 +1,5 @@
 /**
- * Location variant tests — mint QURL links targeting various URL formats.
+ * Location variant tests — mint qURL links targeting various URL formats.
  */
 
 // TODO: Add afterAll cleanup to revoke/delete test resources

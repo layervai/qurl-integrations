@@ -1,4 +1,4 @@
-// Package auth provides authentication helpers for QURL integrations.
+// Package auth provides authentication helpers for qURL integrations.
 package auth
 
 import (
@@ -9,7 +9,7 @@ import (
 
 // Provider resolves API credentials for a given workspace.
 type Provider interface {
-	// APIKey returns the QURL API key for the given workspace ID.
+	// APIKey returns the qURL API key for the given workspace ID.
 	APIKey(ctx context.Context, workspaceID string) (string, error)
 }
 

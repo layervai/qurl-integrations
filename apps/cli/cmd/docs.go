@@ -37,6 +37,10 @@ func docsCmd() *cobra.Command {
 
 			switch mode {
 			case "man":
+				// Man-page section headers are conventionally uppercase
+				// (CURL(1), GIT(1), etc.). Keep "QURL" here even though the
+				// brand is "qURL" — system references follow the convention,
+				// not the brand-prose rule.
 				header := &doc.GenManHeader{
 					Title:   "QURL",
 					Section: "1",
