@@ -443,21 +443,21 @@ describe('Helper functions', () => {
       expect(result).toBe(expected);
     });
 
-    it('defaults to 15m for invalid input', () => {
+    it('defaults to 24h for invalid input', () => {
       const result = expiryToISO('invalid');
-      const expected = new Date('2026-01-15T00:15:00.000Z').toISOString();
+      const expected = new Date('2026-01-16T00:00:00.000Z').toISOString();
       expect(result).toBe(expected);
     });
 
-    it('defaults to 15m for empty string', () => {
+    it('defaults to 24h for empty string', () => {
       const result = expiryToISO('');
-      const expected = new Date('2026-01-15T00:15:00.000Z').toISOString();
+      const expected = new Date('2026-01-16T00:00:00.000Z').toISOString();
       expect(result).toBe(expected);
     });
 
-    it('defaults to 15m for input with wrong units', () => {
+    it('defaults to 24h for input with wrong units', () => {
       const result = expiryToISO('5w');
-      const expected = new Date('2026-01-15T00:15:00.000Z').toISOString();
+      const expected = new Date('2026-01-16T00:00:00.000Z').toISOString();
       expect(result).toBe(expected);
     });
   });

@@ -200,21 +200,19 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   });
 
   // Regression net for: expiresIn used to render the raw choice value
-  // ('15m', '1h') instead of the human label ('15 minutes', '1 hour').
+  // ('30m', '1h') instead of the human label ('30 minutes', '1 hour').
   // Locks the formatExpiryLabel call site inside buildDeliveryPayload.
   it('renders the human-readable expiry label, not the raw choice value', () => {
-    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: '15m' });
-    // Walk all embed fields collected by the mock and find the Portal field.
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: '30m' });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
     const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
     expect(portalField).toBeDefined();
-    expect(portalField.value).toContain('Portal closes in **15 minutes**');
-    expect(portalField.value).not.toContain('**15m**');
+    expect(portalField.value).toContain('Portal closes in **30 minutes**');
+    expect(portalField.value).not.toContain('**30m**');
   });
 
   it('handles each known expiry choice with its proper label', () => {
     const cases = [
-      ['15m', '15 minutes'],
       ['30m', '30 minutes'],
       ['1h', '1 hour'],
       ['6h', '6 hours'],

@@ -311,7 +311,6 @@ function resolveSenderAlias(interaction) {
 //      option, so the two cannot drift when a new choice is added.
 // Hoisted to module scope so the dictionary isn't reallocated per call.
 const EXPIRY_LABELS = {
-  '15m': '15 minutes',
   '30m': '30 minutes',
   '1h': '1 hour',
   '6h': '6 hours',
@@ -708,7 +707,7 @@ async function handleSend(interaction, apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry_optional') || '15m';
+  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
   const rawMessage = interaction.options.getString('message_optional');
   const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
   const commandAttachment = interaction.options.getAttachment('file_optional');
@@ -2428,7 +2427,7 @@ const commands = [
               .setAutocomplete(true))
           .addStringOption(opt =>
             opt.setName('expiry_optional')
-              .setDescription('Link expiry (default: 15m)')
+              .setDescription('Link expiry (default: 24h)')
               .setRequired(false)
               .addChoices(...EXPIRY_CHOICES))
           .addAttachmentOption(opt =>

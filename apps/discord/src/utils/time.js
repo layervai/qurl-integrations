@@ -5,7 +5,7 @@ const EXPIRY_UNITS = { m: 60, h: 3600, d: 86400 };
 // the expiry string (e.g. "99999999999d") would otherwise overflow Number
 // arithmetic and make `new Date(...).toISOString()` throw RangeError.
 const MAX_EXPIRY_MS = 30 * 86400 * 1000;
-const DEFAULT_EXPIRY_MS = 900000;  // 15 minutes — matches the /qurl send command default
+const DEFAULT_EXPIRY_MS = 86400000;
 
 function parseExpiryMs(expiresIn) {
   const match = String(expiresIn ?? '').match(/^(\d{1,6})([mhd])$/);
@@ -18,7 +18,7 @@ function parseExpiryMs(expiresIn) {
 function expiryToISO(expiresIn) {
   const ms = parseExpiryMs(expiresIn);
   if (ms === null) {
-    logger.warn('expiryToISO: invalid expiry format, defaulting to 15m', { expiresIn });
+    logger.warn('expiryToISO: invalid expiry format, defaulting to 24h', { expiresIn });
     return new Date(Date.now() + DEFAULT_EXPIRY_MS).toISOString();
   }
   return new Date(Date.now() + ms).toISOString();
