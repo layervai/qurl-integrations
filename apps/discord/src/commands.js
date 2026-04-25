@@ -124,7 +124,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName } = require('./utils/sanitize');
 
 function sanitizeMessage(msg) {
   // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
@@ -276,22 +276,12 @@ async function batchSettled(items, fn, batchSize = 5) {
 function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
-  // Sanitize senderAlias before rendering it inside `**…**` in the embed
-  // description. Two layers needed:
-  //   1. NFKC + strip bidi/zero-width/control chars — display names allow
-  //      U+202E (RLO), U+200B (ZWSP), bidi isolates (U+2066-69), and soft
-  //      hyphens, none of which `escapeDiscordMarkdown` touches. Without
-  //      this, an attacker named with a leading U+202E can flip
-  //      the description and visually spoof the sender identity.
-  //   2. escapeDiscordMarkdown — handles markdown injection (`*_~`backtick``
-  //      block-quote, masked links). Display names and usernames both
-  //      allow these.
-  // 64-char slice is preserved from the prior code path; Discord's API
-  // hard-caps display names at 32, so this is a defensive upper bound.
-  const rawAlias = String(senderAlias || 'Someone').normalize('NFKC')
-    // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width strip
-    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '');
-  const safeSender = escapeDiscordMarkdown(rawAlias.slice(0, 64)) || 'Someone';
+  // sanitizeDisplayName handles NFKC + bidi/zero-width strip + markdown
+  // escape + 64-char cap + 'Someone' fallback. Same helper is used at
+  // the channel announcement site (handleSend voice/channel branch) so
+  // the spoof defense does not drift between call sites — see comment
+  // on `sanitizeDisplayName` in utils/sanitize.js for the threat model.
+  const safeSender = sanitizeDisplayName(senderAlias);
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'qURL Secure Delivery' })
@@ -1203,11 +1193,12 @@ async function handleSend(interaction, apiKey) {
   // null — and `.send()` on null throws synchronously, before the
   // try/catch can see it.
   if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
-    // Wrap displayName in escapeDiscordMarkdown so a user with `**`,
-    // backticks, or `_` in their display name can't break the bold or
-    // inject a code span. Cap at 64 chars to mirror the existing
-    // `safeSender` pattern at line 242.
-    const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
+    // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
+    // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
+    // fallback). Channel-post is a wider blast radius than DM, so applying
+    // the same spoof defense here is critical — without it a display name
+    // with a leading U+202E flips text direction in the public announcement.
+    const safeName = sanitizeDisplayName(interaction.user.displayName);
     const notifyMsg = target === 'voice'
       ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
       : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;

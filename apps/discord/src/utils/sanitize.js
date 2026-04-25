@@ -28,4 +28,35 @@ function escapeDiscordMarkdown(s) {
   return String(s ?? '').replace(/[\\*_~`>|[\]()]/g, '\\$&');
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown };
+/**
+ * Sanitize a Discord display name (alias) for safe rendering inside `**...**`
+ * markdown. Two layers:
+ *   1. NFKC-normalize, then strip ASCII control / soft-hyphen / zero-width /
+ *      bidi-control / line-paragraph-separator / BOM characters. Display
+ *      names allow these and `escapeDiscordMarkdown` does not touch them.
+ *      Without this strip, an attacker named with a leading U+202E (RLO)
+ *      can flip text direction inside the rendered string and visually
+ *      spoof a different sender identity. ZWSP-padded names mimicking
+ *      another member are similarly defused.
+ *   2. escapeDiscordMarkdown — handles markdown injection (bold, italics,
+ *      backtick code, block-quote, masked-link `[text](url)`). Display
+ *      names allow these chars too.
+ * Returns 'Someone' if input is null/undefined/empty or becomes empty after
+ * the strip (e.g. an alias composed entirely of zero-width chars).
+ *
+ * 64-char slice is a defensive upper bound; Discord caps display names at
+ * 32 in API v10. Slice happens AFTER the strip and BEFORE the escape so a
+ * trailing escape sequence (\\) cannot be truncated mid-pair into a single
+ * backslash. Use this at every site that renders a Discord username /
+ * display name / nickname inside markdown formatting (DM embeds, channel
+ * announcements, etc.) so the spoof defense does not drift between sites.
+ */
+function sanitizeDisplayName(s) {
+  const stripped = String(s || 'Someone').normalize('NFKC')
+    // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
+    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
+    .slice(0, 64);
+  return escapeDiscordMarkdown(stripped) || 'Someone';
+}
+
+module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName };
