@@ -152,6 +152,13 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
     expect(desc).toContain('**Vik** shared a file with you.');
   });
 
+  it('strips U+061C (Arabic Letter Mark) — completes bidi-control parity with RLM/LRM', () => {
+    buildDeliveryEmbed({ ...baseArgs, senderAlias: '\u061CVik' });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).not.toMatch(/\u061C/);
+    expect(desc).toContain('**Vik** shared a file with you.');
+  });
+
   it('strips line/paragraph separators and BOM (would otherwise break embed layout)', () => {
     buildDeliveryEmbed({ ...baseArgs, senderAlias: '\uFEFFVik\u2028\u2029' });
     const desc = capturedEmbeds[0]._description;

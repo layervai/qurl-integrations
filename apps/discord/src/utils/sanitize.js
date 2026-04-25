@@ -59,7 +59,7 @@ function sanitizeDisplayName(s) {
   // unambiguous: only `null`/`undefined` should trip the fallback here.
   const stripped = String(s ?? 'Someone').normalize('NFKC')
     // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
-    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
+    .replace(/[\u0000-\u001F\u007F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '')
     .slice(0, 64);
   return escapeDiscordMarkdown(stripped) || 'Someone';
 }
