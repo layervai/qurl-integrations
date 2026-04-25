@@ -1,13 +1,13 @@
-# QURL Slack Integration
+# qURL Slack Integration
 
-Slack bot for creating and managing QURLs via slash commands, with link unfurling and channel notifications.
+Slack bot for creating and managing qURLs via slash commands, with link unfurling and channel notifications.
 
 ## Features
 
-- `/qurl create <url>` — Create a QURL
-- `/qurl list` — List recent QURLs
+- `/qurl create <url>` — Create a qURL
+- `/qurl list` — List recent qURLs
 - Link unfurling for `qurl.link` URLs (planned)
-- Channel notifications on QURL events (planned)
+- Channel notifications on qURL events (planned)
 
 ## Architecture
 
@@ -34,5 +34,5 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_SIGNING_SECRET` | Yes | Slack app signing secret |
-| `QURL_API_KEY` | Yes | QURL API key for this workspace |
-| `QURL_ENDPOINT` | No | QURL API base URL (default: `https://api.layerv.xyz`) |
+| `QURL_API_KEY` | Yes | qURL API key for this workspace |
+| `QURL_ENDPOINT` | No | qURL API base URL (default: `https://api.layerv.xyz`) |

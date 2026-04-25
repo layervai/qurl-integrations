@@ -20,7 +20,7 @@
 
 ## Project Overview
 
-Go monorepo for QURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
+Go monorepo for qURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
 Each integration lives in `apps/{name}/` with independent release tracks.
 Shared code lives in `shared/`.
 
@@ -113,5 +113,5 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
 
 - **Auth:** Start with workspace API keys (qurl-api-keys table exists). Per-user OAuth later.
 - **Runtime (Slack):** AWS Lambda behind API Gateway. Event-driven, scales to zero.
-- **Shared client:** `shared/client/` wraps the QURL API. Not a standalone module yet.
+- **Shared client:** `shared/client/` wraps the qURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.

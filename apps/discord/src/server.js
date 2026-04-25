@@ -81,7 +81,7 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'QURL Discord Bot',
+    service: 'qURL Discord Bot',
   });
 });
 

@@ -57,7 +57,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://layerv.ai"
-    description: "QURL CLI - manage secure links from the command line"
+    description: "qURL CLI - manage secure links from the command line"
     license: "MIT"
     install: |
       bin.install "qurl"
@@ -77,7 +77,7 @@ nfpms:
     vendor: LayerV
     homepage: "https://layerv.ai"
     maintainer: "LayerV <support@layerv.ai>"
-    description: "QURL CLI - manage secure links from the command line"
+    description: "qURL CLI - manage secure links from the command line"
     license: "MIT"
     formats:
       - deb

@@ -35,7 +35,7 @@ interface UploadResponse {
 
 /** Upload a google-map JSON payload to the connector and get back the resource URL.
  *
- * Retries transient 429 rate-limits from the upstream QURL API — the connector's
+ * Retries transient 429 rate-limits from the upstream qURL API — the connector's
  * upload returns `{success:true, resource_url:..., error:"QURL creation failed:
  * ... 429 ..."}` without a `resource_id` when the internal mint is throttled. A
  * silent undefined resource_id breaks downstream revoke tests; surface it loudly
@@ -80,7 +80,7 @@ async function uploadMapLocation(
   for (let i = 0; i < maxAttempts; i++) {
     const out = await attempt();
     if ('retry' in out) {
-      // Linear 1.5s / 3s / 6s backoff — QURL API's rate window is short enough
+      // Linear 1.5s / 3s / 6s backoff — qURL API's rate window is short enough
       // that exponential doesn't buy much on test bursts.
       await new Promise((r) => setTimeout(r, baseDelayMs * (i + 1)));
       continue;
@@ -298,14 +298,14 @@ describe('Google Maps: Edge Cases', () => {
 describe('Google Maps: Revoke', () => {
   // NOTE on revoke semantics (today vs. after infra#93/#139 ship):
   //
-  // Today: `DELETE /v1/resources/{id}` kills the QURL-layer token chain
+  // Today: `DELETE /v1/resources/{id}` kills the qURL-layer token chain
   // (qurl.link / qurl.site / resource status endpoint) but the
   // md5-addressed fileviewer URL still serves the content.
   //
   // Product decision (infra#139, accepted): revoke SHOULD also hard-kill
   // the fileviewer URL. Implementation is folded into infra#93 — on revoke,
   // the connector's new `DELETE /api/resources/:md5` fires synchronously
-  // alongside the QURL-layer delete, removing the S3 object, which makes
+  // alongside the qURL-layer delete, removing the S3 object, which makes
   // subsequent fileviewer /view/:md5 requests 404 naturally.
   //
   // These tests verify today's revoke contract via `getLinkStatus()` → 404
@@ -315,7 +315,7 @@ describe('Google Maps: Revoke', () => {
   // is preserved in the pre-revoke read so a no-API-key deploy still fails
   // these tests loudly regardless.
 
-  test('revoke location qurl → getLinkStatus returns 404', async () => {
+  test('revoke location qURL → getLinkStatus returns 404', async () => {
     const upload = await uploadMapLocation({
       type: 'google-map',
       query: 'Revoke Test, Boston',

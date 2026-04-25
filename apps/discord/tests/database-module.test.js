@@ -252,8 +252,8 @@ describe('database module', () => {
     });
   });
 
-  describe('qurl sends', () => {
-    it('records and retrieves qurl send', () => {
+  describe('qURL sends', () => {
+    it('records and retrieves qURL send', () => {
       db.recordQURLSend({ sendId: 'qs1', senderDiscordId: 'sender1', recipientDiscordId: 'rcpt1', resourceId: 'res1', resourceType: 'file', qurlLink: 'https://q.test/1', expiresIn: '24h', channelId: 'ch1', targetType: 'user' });
       const sends = db.getRecentSends('sender1');
       expect(sends.length).toBeGreaterThanOrEqual(1);

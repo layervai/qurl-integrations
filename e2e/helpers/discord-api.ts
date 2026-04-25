@@ -108,7 +108,7 @@ export async function waitForMessage(
   throw new Error(`No matching message in ${channelId} within ${timeout}ms`);
 }
 
-/** Extract QURL link from an embed */
+/** Extract qURL link from an embed */
 export function extractQurlLink(msg: DiscordMessage): string | null {
   const allText = msg.embeds.map(e =>
     [e.description, ...(e.fields?.map(f => f.value) ?? [])].join(' ')

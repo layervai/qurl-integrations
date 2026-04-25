@@ -38,7 +38,7 @@ func docsCmd() *cobra.Command {
 			switch mode {
 			case "man":
 				header := &doc.GenManHeader{
-					Title:   "QURL",
+					Title:   "qURL",
 					Section: "1",
 					Source:  "LayerV",
 				}
