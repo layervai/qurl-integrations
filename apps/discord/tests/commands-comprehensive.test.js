@@ -917,11 +917,11 @@ describe('/qurl help subcommand', () => {
     );
   });
 
-  // Positive assertions for the four copy fixes in PR #98. Without these,
-  // the only other help-text assertion is `stringContaining('qURL Bot')`,
-  // which would stay green if every fix below were reverted. Pinning them
-  // here catches accidental regressions on the next edit to this block.
-  it('includes the four copy fixes from PR #98', async () => {
+  // Positive assertions for the help-text copy. Without these, the only
+  // other help-text assertion is `stringContaining('qURL Bot')`, which
+  // would stay green if every fix below were reverted. Pinning them here
+  // catches accidental regressions on the next edit to this block.
+  it('includes the four help-text copy fixes', async () => {
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeInteraction({
       commandName: 'qurl',
