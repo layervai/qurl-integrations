@@ -1282,6 +1282,69 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       }),
     );
   });
+
+  // Locks the second site of the spoof defense: the channel announcement
+  // posted by handleSend must run sender displayName through
+  // sanitizeDisplayName, same as the DM embed. If a future refactor
+  // replaces sanitizeDisplayName with raw displayName at this site,
+  // this test fails. (build-delivery-embed.test.js covers the helper
+  // itself and the DM-side call site; this test covers the channel-
+  // side call site, which has wider blast radius — public post vs DM.)
+  it('sanitizes RLO and zero-width chars from sender displayName in channel announcement', async () => {
+    const recipients = [{ id: 'r1', username: 'Alice' }];
+    mockGetText.mockReturnValue(recipients);
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
+    mockSendDM.mockResolvedValue(true);
+
+    const attachment = {
+      name: 'doc.pdf',
+      contentType: 'application/pdf',
+      size: 1024,
+      url: 'https://cdn.discordapp.com/doc.pdf',
+    };
+    const resInteraction = {
+      customId: `qurl_res_file_${MOCK_NONCE}`,
+      deferUpdate: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    const collectorObj = { on: jest.fn() };
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      // Poison the sender's displayName with a leading U+202E (RLO) and
+      // a U+200B (ZWSP) — the exact bidi-spoof vector sanitizeDisplayName
+      // is supposed to defuse.
+      user: { id: 'user-1', username: 'TestUser', displayName: '‮​Attacker' },
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'send'),
+        getString: jest.fn((name) => {
+          if (name === 'target') return 'channel';
+          if (name === 'expiry_optional') return '1h';
+          return null;
+        }),
+        getAttachment: jest.fn(() => attachment),
+      },
+      channel: {
+        awaitMessageComponent: jest.fn().mockResolvedValue(resInteraction),
+        send: jest.fn().mockResolvedValue(undefined),
+      },
+      editReply: jest.fn().mockResolvedValue({
+        createMessageComponentCollector: jest.fn(() => collectorObj),
+      }),
+    });
+
+    await cmd.execute(interaction);
+
+    expect(interaction.channel.send).toHaveBeenCalledTimes(1);
+    const announcement = interaction.channel.send.mock.calls[0][0].content;
+    // No raw bidi/zero-width chars survive into the public announcement.
+    expect(announcement).not.toMatch(/[‮​]/);
+    // The bare alphabetic name is preserved post-strip.
+    expect(announcement).toContain('**Attacker**');
+  });
 });
 
 describe('/qurl send — location flow (channel target)', () => {
