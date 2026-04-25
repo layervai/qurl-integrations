@@ -38,6 +38,12 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Surface them as Error.apiCode so the caller can branch on a typed value
 // instead of substring-matching the human-readable message (which the
 // connector / upstream API can rephrase without notice).
+// TODO(upstream-rebrand): The "QURL" in /token limit per QURL reached/i
+// mirrors the literal string returned by upstream qurl-service today.
+// When the upstream API rebrands its error text to "qURL", update this
+// regex (and the matching test fixtures in connector-coverage.test.js
+// and commands-comprehensive.test.js) in lockstep — otherwise quota-
+// exceeded errors will silently fall through to a generic classification.
 const QUOTA_EXCEEDED_PATTERNS = [
   /quota[\s_-]?exceeded/i,
   /token limit per QURL reached/i,

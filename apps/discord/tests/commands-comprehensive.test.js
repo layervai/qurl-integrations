@@ -1480,6 +1480,9 @@ describe('/qurl send — link creation failure', () => {
     // Simulate connector mint_link returning 502 wrapping a qURL API
     // 403 quota_exceeded — connector.js's throwConnectorError tags this
     // as Error.apiCode='quota_exceeded'.
+    // TODO(upstream-rebrand): "QURL" in apiDetail mirrors upstream's
+    // current error text. Update in lockstep with the regex in
+    // connector.js when upstream qurl-service rebrands its error text.
     const quotaErr = new Error('Connector mint_link failed (502)');
     quotaErr.status = 502;
     quotaErr.apiCode = 'quota_exceeded';
