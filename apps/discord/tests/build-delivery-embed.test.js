@@ -10,6 +10,10 @@
  */
 
 const capturedEmbeds = [];
+// Capture every ButtonBuilder constructed so tests can assert what
+// `setStyle` / `setLabel` / `setURL` were called with — locks down the
+// Step Through button shape against silent regressions.
+const capturedButtons = [];
 
 jest.mock('discord.js', () => {
   const makeEmbed = () => {
@@ -40,13 +44,18 @@ jest.mock('discord.js', () => {
       toJSON: jest.fn(() => ({})),
     })),
     ActionRowBuilder: jest.fn().mockImplementation(() => ({ addComponents: jest.fn().mockReturnThis() })),
-    ButtonBuilder: jest.fn().mockImplementation(() => ({
-      setCustomId: jest.fn().mockReturnThis(),
-      setLabel: jest.fn().mockReturnThis(),
-      setStyle: jest.fn().mockReturnThis(),
-      setEmoji: jest.fn().mockReturnThis(),
-      setURL: jest.fn().mockReturnThis(),
-    })),
+    ButtonBuilder: jest.fn().mockImplementation(() => {
+      const btn = {
+        _style: null, _label: null, _url: null, _customId: null,
+        setCustomId: jest.fn(function (id) { btn._customId = id; return btn; }),
+        setLabel: jest.fn(function (l) { btn._label = l; return btn; }),
+        setStyle: jest.fn(function (s) { btn._style = s; return btn; }),
+        setEmoji: jest.fn().mockReturnThis(),
+        setURL: jest.fn(function (u) { btn._url = u; return btn; }),
+      };
+      capturedButtons.push(btn);
+      return btn;
+    }),
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
     StringSelectMenuBuilder: jest.fn().mockImplementation(() => ({})),
     UserSelectMenuBuilder: jest.fn().mockImplementation(() => ({
@@ -125,7 +134,7 @@ const baseArgs = {
   personalMessage: null,
 };
 
-beforeEach(() => { capturedEmbeds.length = 0; });
+beforeEach(() => { capturedEmbeds.length = 0; capturedButtons.length = 0; });
 
 describe('buildDeliveryPayload — senderAlias sanitization', () => {
   it('renders a normal alias unchanged in the description', () => {
@@ -219,6 +228,21 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
       const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
       expect(portalField.value).toContain(`Portal closes in **${label}**`);
     }
+  });
+
+  // Locks the Step Through button shape: a future refactor that drops
+  // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave
+  // recipients with a button that doesn't navigate anywhere. This test
+  // asserts the button is built as Link-style with the supplied qURL.
+  it('builds the Step Through button as a Link-style button with the qURL as its URL', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink: 'https://qurl.link/#at_unique_token' });
+    // Last button constructed in the buildDeliveryPayload call is the Step Through.
+    const stepThrough = capturedButtons[capturedButtons.length - 1];
+    expect(stepThrough).toBeDefined();
+    expect(stepThrough._label).toBe('Step Through →');
+    expect(stepThrough._style).toBe(5); // ButtonStyle.Link
+    expect(stepThrough._url).toBe('https://qurl.link/#at_unique_token');
+    expect(stepThrough.setURL).toHaveBeenCalledWith('https://qurl.link/#at_unique_token');
   });
 
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {

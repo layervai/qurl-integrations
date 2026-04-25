@@ -2,7 +2,7 @@
  * Additional tests to boost line coverage to 90%+ on commands.js.
  *
  * Covers:
- * - buildDeliveryEmbed (location path, personalMessage)
+ * - buildDeliveryPayload (location path, personalMessage)
  * - buildConfirmMsg truncation with > 5 recipients + expand toggle
  * - collector button handlers (revoke, expand, add recipients)
  * - collector end timeout
@@ -290,10 +290,10 @@ beforeEach(() => {
 });
 
 // =========================================================================
-// 1. buildDeliveryEmbed — location resource type
+// 1. buildDeliveryPayload — location resource type
 // =========================================================================
 
-describe('buildDeliveryEmbed — location resource type', () => {
+describe('buildDeliveryPayload — location resource type', () => {
   it('adds Location field (no filename) for maps resource with personalMessage', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);

@@ -322,7 +322,12 @@ const EXPIRY_LABELS = {
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
 function formatExpiryLabel(expiresIn) {
-  if (EXPIRY_LABELS[expiresIn]) return EXPIRY_LABELS[expiresIn];
+  // `Object.hasOwn` rather than `EXPIRY_LABELS[expiresIn]` so a value of
+  // `'__proto__'` / `'constructor'` / etc. can't trip the lookup against
+  // an inherited Object.prototype property. Practical risk is zero (input
+  // is gated by addChoices), but this is one identifier longer and removes
+  // the question entirely.
+  if (Object.hasOwn(EXPIRY_LABELS, expiresIn)) return EXPIRY_LABELS[expiresIn];
   // Defensive fallback for any `(\d+)([mhd])` value outside EXPIRY_LABELS
   // — the SlashCommandBuilder choices restrict input at the UI layer, but
   // the saved-config path could conceivably surface another.
@@ -801,11 +806,16 @@ async function handleSend(interaction, apiKey) {
   let locationName = null;
   let resourceType = null;
 
-  // Escape the recipient's username — legacy Discord accounts can have
-  // markdown chars in display names, and this label gets interpolated
-  // into the ephemeral "Sending to …" message which does render markdown.
+  // Pass the recipient's username through sanitizeDisplayName so the
+  // ephemeral "Sending to …" label gets the same NFKC + bidi/zero-
+  // width strip + markdown escape as the DM and channel-announcement
+  // sites. Without this, a recipient named with a leading U+202E
+  // would flip text direction inside the sender's confirmation reply.
+  // (Only the sender sees this string, so blast radius is tiny — but
+  // sanitizeDisplayName's docstring promises every site uses the same
+  // helper, and divergence here would silently violate that contract.)
   const targetLabel = target === 'user'
-    ? escapeDiscordMarkdown(String(recipients[0].username || '').slice(0, 64))
+    ? sanitizeDisplayName(recipients[0].username)
     : target === 'channel' ? 'this channel' : 'voice channel';
 
   if (commandAttachment) {
