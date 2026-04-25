@@ -2,7 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [qURL](https://layerv.ai) — quantum-style URLs that make protected resources invisible by default.
+Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
+
+> **Quantum URL (qURL)** · The internet has a hidden layer. This is how you enter.
 
 qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
 
