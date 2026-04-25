@@ -244,17 +244,28 @@ async function batchSettled(items, fn, batchSize = 5) {
 function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
-  // Escape senderAlias — display names can contain markdown chars; a
-  // name like `[click](https://evil.com)` would otherwise render as a
-  // clickable phishing link inside the embed. 64-char cap matches
-  // Discord's display-name limit and keeps the description bounded.
-  const safeSender = escapeDiscordMarkdown(String(senderAlias || 'Someone').slice(0, 64));
+  // Sanitize senderAlias before rendering it inside `**…**` in the embed
+  // description. Two layers needed:
+  //   1. NFKC + strip bidi/zero-width/control chars — display names allow
+  //      U+202E (RLO), U+200B (ZWSP), bidi isolates (U+2066-69), and soft
+  //      hyphens, none of which `escapeDiscordMarkdown` touches. Without
+  //      this, an attacker named with a leading U+202E can flip
+  //      the description and visually spoof the sender identity.
+  //   2. escapeDiscordMarkdown — handles markdown injection (`*_~`backtick``
+  //      block-quote, masked links). Display names and usernames both
+  //      allow these.
+  // 64-char slice is preserved from the prior code path; Discord's API
+  // hard-caps display names at 32, so this is a defensive upper bound.
+  const rawAlias = String(senderAlias || 'Someone').normalize('NFKC')
+    // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width strip
+    .replace(/[\u0000-\u001F\u007F\u00AD\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+  const safeSender = escapeDiscordMarkdown(rawAlias.slice(0, 64)) || 'Someone';
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'qURL Secure Delivery' })
     .setDescription(
-      `**${safeSender}** shared a file/location with you.\n${divider}`
-    )
+      `**${safeSender}** shared a file/location with you.\n${divider}`,
+    );
   // resourceLabel is a caller-friendly description ("File (report.pdf)" or
   // the location name). Prefer it when provided and fall back to a generic
   // type label otherwise.
