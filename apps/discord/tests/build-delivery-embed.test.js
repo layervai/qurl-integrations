@@ -116,7 +116,7 @@ jest.mock('../src/qurl', () => ({
 jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
 
 const { _test } = require('../src/commands');
-const { buildDeliveryEmbed } = _test;
+const { buildDeliveryEmbed, resolveSenderAlias } = _test;
 
 const baseArgs = {
   resourceType: 'file',
@@ -186,5 +186,43 @@ describe('buildDeliveryEmbed — senderAlias sanitization', () => {
     const desc = capturedEmbeds[0]._description;
     expect(desc).toContain('**' + 'A'.repeat(64) + '** shared a file with you.');
     expect(desc).not.toContain('**' + 'A'.repeat(65));
+  });
+
+  it('throws on unknown resourceType so a future RESOURCE_TYPES addition fails loudly', () => {
+    expect(() => buildDeliveryEmbed({ ...baseArgs, resourceType: 'snippet', senderAlias: 'Vik' }))
+      .toThrow(/unknown resourceType 'snippet'/);
+  });
+});
+
+describe('resolveSenderAlias — fallback chain', () => {
+  it('uses member.displayName first (guild nickname / globalName)', () => {
+    const interaction = {
+      member: { displayName: 'Vik (Eng)' },
+      user: { displayName: 'vikramlayerv', username: 'vikram' },
+    };
+    expect(resolveSenderAlias(interaction)).toBe('Vik (Eng)');
+  });
+
+  it('falls through to user.displayName when member is null (user-app DM context)', () => {
+    const interaction = {
+      member: null,
+      user: { displayName: 'vikramlayerv', username: 'vikram' },
+    };
+    expect(resolveSenderAlias(interaction)).toBe('vikramlayerv');
+  });
+
+  it('falls through to user.username when displayName is missing (older mocks / shapes)', () => {
+    const interaction = {
+      member: null,
+      user: { username: 'vikram' },
+    };
+    expect(resolveSenderAlias(interaction)).toBe('vikram');
+  });
+
+  it('returns "Someone" for malformed interactions instead of throwing', () => {
+    expect(resolveSenderAlias({})).toBe('Someone');
+    expect(resolveSenderAlias({ member: null, user: null })).toBe('Someone');
+    expect(resolveSenderAlias(null)).toBe('Someone');
+    expect(resolveSenderAlias(undefined)).toBe('Someone');
   });
 });

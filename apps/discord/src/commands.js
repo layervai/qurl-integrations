@@ -238,15 +238,20 @@ async function batchSettled(items, fn, batchSize = 5) {
 //   1. member.displayName — guild nickname > globalName > username
 //      (discord.js already resolves the inner three; we only fall
 //      through if `member` is null, e.g. user-app DM invocation).
-//   2. user.displayName — globalName > username (no guild context).
-//   3. user.username — last-resort handle.
+//   2. user.displayName — globalName > username (also resolved by
+//      discord.js v14.18+).
+//   3. user.username — direct username read; defends against test
+//      mocks or shapes where the v14 displayName getter is absent.
+//   4. 'Someone' — last-resort literal so callers never get null.
+// Optional chains throughout so a malformed interaction (no user, no
+// member) returns 'Someone' instead of throwing inside DM-dispatch.
 // Used by both the DM embed and the channel announcement so a single
-// send always shows the same name in both places. Drift here was the
-// bug Claude review caught on commit 110d2bc.
+// send always shows the same name in both places.
 function resolveSenderAlias(interaction) {
-  return interaction.member?.displayName
-    ?? interaction.user.displayName
-    ?? interaction.user.username;
+  return interaction?.member?.displayName
+    ?? interaction?.user?.displayName
+    ?? interaction?.user?.username
+    ?? 'Someone';
 }
 
 // --- Shared DM embed builder ---
@@ -2845,6 +2850,7 @@ module.exports = {
       sendCooldowns,
       handleAddRecipients,
       buildDeliveryEmbed,
+      resolveSenderAlias,
     },
   }),
 };
