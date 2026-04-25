@@ -259,15 +259,14 @@ function resolveSenderAlias(interaction) {
 // Discord.
 //
 // Example of what the recipient sees in their DM (file send, with a
-// personal message, 15-minute expiry):
+// personal message, 15-minute expiry). Location sends are identical
+// except the description reads "shared a location with you."
 //
 //     ┌─────────────────────────────────────────────────────────────┐
 //     │  qURL Secure Delivery                                       │
 //     │                                                             │
-//     │  **Vik** shared a file/location with you.                   │
+//     │  **Vik** shared a file with you.                            │
 //     │  ──────────────────────────────                             │
-//     │                                                             │
-//     │  Resource Type:  File         Filename:  report.pdf         │
 //     │                                                             │
 //     │  Message:                                                   │
 //     │    > Quarterly numbers — for your eyes only.                │
@@ -287,10 +286,13 @@ function resolveSenderAlias(interaction) {
 //     │  permission.                                                │
 //     └─────────────────────────────────────────────────────────────┘
 //
-// Location sends drop the Filename field; sends without a personal
-// message drop the Message block. Everything else is identical.
-function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+// Sends without a personal message drop the Message block; everything
+// else is identical between file and location sends. The description
+// already names the resource type ("file" or "location") so a separate
+// Resource Type / Filename field row would be redundant.
+function buildDeliveryEmbed({ senderAlias, resourceType, qurlLink, expiresIn, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
+  const kind = isFile ? 'file' : 'location';
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
   // sanitizeDisplayName handles NFKC + bidi/zero-width strip + markdown
   // escape + 64-char cap + 'Someone' fallback. Same helper is used at
@@ -302,22 +304,8 @@ function buildDeliveryEmbed({ senderAlias, resourceType, resourceLabel, qurlLink
     .setColor(COLORS.QURL_BRAND)
     .setAuthor({ name: 'qURL Secure Delivery' })
     .setDescription(
-      `**${safeSender}** shared a file/location with you.\n${divider}`,
+      `**${safeSender}** shared a ${kind} with you.\n${divider}`,
     );
-  // resourceLabel is a caller-friendly description ("File (report.pdf)" or
-  // the location name). Prefer it when provided and fall back to a generic
-  // type label otherwise.
-  if (isFile) {
-    embed.addFields(
-      { name: 'Resource Type', value: resourceLabel || 'File', inline: true },
-      { name: 'Filename', value: filename, inline: true },
-      { name: '\u200b', value: '\u200b', inline: true },
-    );
-  } else {
-    embed.addFields(
-      { name: 'Resource Type', value: resourceLabel || 'Location', inline: true },
-    );
-  }
 
   if (personalMessage) {
     const capped = personalMessage.substring(0, 450);
@@ -756,7 +744,6 @@ async function handleSend(interaction, apiKey) {
   let locationUrl = null;
   let locationName = null;
   let resourceType = null;
-  let resourceLabel = null;
 
   // Escape the recipient's username — legacy Discord accounts can have
   // markdown chars in display names, and this label gets interpolated
@@ -888,7 +875,6 @@ async function handleSend(interaction, apiKey) {
     // so a crafted place name can't inject **bold** / links / code blocks /
     // spoilers into the embed and phish recipients.
     if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
-    resourceLabel = locationName || 'Location';
 
   } else {
     // --- File: use attachment from slash command ---
@@ -931,7 +917,6 @@ async function handleSend(interaction, apiKey) {
         components: [],
       });
     }
-    resourceLabel = `File (${sanitizeFilename(attachment.name)})`;
   }
 
   // --- Step 3: Process and send ---
@@ -1098,10 +1083,8 @@ async function handleSend(interaction, apiKey) {
       // global display name, or just the legacy @-handle.
       senderAlias: resolveSenderAlias(interaction),
       resourceType,
-      resourceLabel,
       qurlLink: link.qurlLink,
       expiresIn,
-      filename: attachment ? sanitizeFilename(attachment.name) : null,
       personalMessage,
     });
 
@@ -1589,10 +1572,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       // the nickname > globalName > username fallback rationale.
       senderAlias: resolveSenderAlias(originalInteraction),
       resourceType: link.resType,
-      resourceLabel: link.label,
       qurlLink: link.qurlLink,
       expiresIn: sendConfig.expires_in,
-      filename: sendConfig.attachment_name ? sanitizeFilename(sendConfig.attachment_name) : null,
       personalMessage: sendConfig.personal_message,
     }));
 

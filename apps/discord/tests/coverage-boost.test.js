@@ -330,8 +330,13 @@ describe('buildDeliveryEmbed — location resource type', () => {
     expect(mockSendDM).toHaveBeenCalledTimes(1);
     const dmEmbed = embedInstances.find(e => e.setAuthor.mock.calls.length > 0);
     expect(dmEmbed).toBeDefined();
-    const locationField = dmEmbed._fields.find(f => f.name === 'Resource Type' && f.value === 'Location');
-    expect(locationField).toBeTruthy();
+    // PR #124 dropped the Resource Type / Filename field row in favor of
+    // putting the resource kind in the description ("shared a location
+    // with you" / "shared a file with you"). Assert the description
+    // signals "location" instead of looking for the removed field.
+    const descCalls = dmEmbed.setDescription.mock.calls;
+    expect(descCalls.length).toBeGreaterThan(0);
+    expect(descCalls[0][0]).toContain('shared a location with you');
     const msgField = dmEmbed._fields.find(f => f.name === 'Message');
     expect(msgField).toBeTruthy();
     expect(msgField.value).toContain('Meet me here');
