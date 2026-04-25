@@ -342,7 +342,7 @@ describe('buildDeliveryPayload — location resource type', () => {
     const descCalls = dmEmbed.setDescription.mock.calls;
     expect(descCalls[0][0]).toContain('opened a door for you');
     // Personal message renders as `> *"…"*` in a no-name field (see
-    // buildDeliveryEmbed). Match the inner text rather than the wrapper.
+    // buildDeliveryPayload). Match the inner text rather than the wrapper.
     const msgField = dmEmbed._fields.find(f => typeof f.value === 'string' && f.value.includes('Meet me here'));
     expect(msgField).toBeTruthy();
   });

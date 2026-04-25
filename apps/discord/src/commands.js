@@ -1628,9 +1628,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
     // links.slice(0, 10) caps at Discord's 10-embed-per-message limit.
-    // The button-row chunking below splits buttons into ActionRows of 5
-    // (Discord's per-row cap) so an N-link DM keeps each `Step Through →`
-    // button next to its embed without exceeding the row limit.
+    // The button-row chunking below splits all buttons into ActionRows of
+    // 5 (Discord's per-row cap). Note Discord renders all embeds first,
+    // then all component rows below — buttons are NOT visually paired
+    // with their corresponding embed. Multi-link UX would benefit from
+    // per-link button labels (e.g. "Step Through · report.pdf"), but
+    // today links.length is always 1 so labels are uniform.
     const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
       // Same alias resolution as handleSend — see comment there for
       // the nickname > globalName > username fallback rationale.

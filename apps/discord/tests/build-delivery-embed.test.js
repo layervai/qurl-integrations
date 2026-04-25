@@ -130,7 +130,10 @@ const { buildDeliveryPayload, resolveSenderAlias } = _test;
 
 const baseArgs = {
   qurlLink: 'https://qurl.link/#at_test',
-  expiresIn: '15 minutes',
+  // Use a real choice value (not the rendered label) so the test setup
+  // mirrors what production passes in. `formatExpiryLabel` will translate
+  // '24h' → '24 hours' inside buildDeliveryPayload.
+  expiresIn: '24h',
   personalMessage: null,
 };
 
@@ -218,6 +221,29 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
       ['6h', '6 hours'],
       ['24h', '24 hours'],
       ['7d', '7 days'],
+    ];
+    for (const [value, label] of cases) {
+      capturedEmbeds.length = 0;
+      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresIn: value });
+      const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
+      const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes in'));
+      expect(portalField.value).toContain(`Portal closes in **${label}**`);
+    }
+  });
+
+  // formatExpiryLabel has a defensive `(\d+)([mhd])` regex fallback for
+  // values not in EXPIRY_LABELS (saved-config edge cases, hand-crafted
+  // values). Lock the singular/plural + minute/hour/day expansion logic
+  // so a future tightening of the regex / inflection doesn't silently
+  // change what recipients see.
+  it('falls back to the regex formatter for non-choice expiry values', () => {
+    const cases = [
+      ['1m', '1 minute'],   // singular minute
+      ['2m', '2 minutes'],  // plural minutes
+      ['1h', '1 hour'],     // (also in EXPIRY_LABELS, but verify regex path agrees)
+      ['3h', '3 hours'],    // not in EXPIRY_LABELS — regex path
+      ['1d', '1 day'],      // singular day
+      ['14d', '14 days'],   // plural, not in EXPIRY_LABELS
     ];
     for (const [value, label] of cases) {
       capturedEmbeds.length = 0;
