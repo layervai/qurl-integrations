@@ -288,7 +288,7 @@ function resolveSenderAlias(interaction) {
 //     │  invisible to everyone else on the internet: scanners,     │
 //     │  bots, crawlers, strangers.                                │
 //     │                                                             │
-//     │  🕐 Portal closes in **15 minutes**                         │  (expiry line)
+//     │  🕐 Portal closes in **24 hours**                           │  (expiry line)
 //     │                                                             │
 //     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
 //     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
@@ -305,7 +305,7 @@ function resolveSenderAlias(interaction) {
 // Single source of truth for the supported `/qurl send` expiry choices
 // and their human-readable labels. Used by:
 //   1. `formatExpiryLabel` to render the "Portal closes in X" line in
-//      the recipient DM (e.g. `'15m'` → `'15 minutes'`)
+//      the recipient DM (e.g. `'24h'` → `'24 hours'`)
 //   2. `EXPIRY_CHOICES` (built below from this map) to populate the
 //      SlashCommandBuilder `addChoices(...)` for the `expiry_optional`
 //      option, so the two cannot drift when a new choice is added.
