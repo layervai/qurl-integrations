@@ -349,6 +349,15 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresIn, personalMessag
     .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
+    // CONTRACT: `personalMessage` arrives pre-sanitized — handleSend pipes
+    // raw input through `sanitizeMessage` (markdown escape + @-mention
+    // strip) before constructing this payload, and the addRecipients
+    // path reads from `sendConfig.personal_message` which was sanitized
+    // at write time. Raw interpolation into the template below is safe
+    // ONLY because of that upstream pass. A future caller that bypasses
+    // sanitizeMessage (or a DB row read that skips re-sanitize) would
+    // silently regress to markdown injection — keep the contract.
+    //
     // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
     // does not span newlines, so a multi-line message would render with
     // only the first line styled. Flatten newlines to a space so the
