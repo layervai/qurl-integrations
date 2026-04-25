@@ -234,18 +234,17 @@ async function batchSettled(items, fn, batchSize = 5) {
 }
 
 // --- Shared DM embed builder ---
-function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
+// Sender identity is intentionally aliased to "Someone" in the description
+// below — the recipient should not see the sender's Discord handle, since
+// in multi-tenant usage that would leak the sending workspace's social graph.
+function buildDeliveryEmbed({ resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
   const isFile = resourceType === RESOURCE_TYPES.FILE;
   const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
-  // Escape senderUsername — Discord usernames can contain markdown chars
-  // (legacy pre-unique-username accounts); a name like `[click](https://evil.com)`
-  // would otherwise render as a clickable phishing link inside the embed.
-  const safeSender = escapeDiscordMarkdown(String(senderUsername || 'Someone').slice(0, 64));
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setAuthor({ name: 'QURL Secure Delivery' })
+    .setAuthor({ name: 'qURL Secure Delivery' })
     .setDescription(
-      `**${safeSender}** shared a protected resource with you\n${divider}`
+      `**Someone** shared a file/location with you.\n${divider}`
     )
   // resourceLabel is a caller-friendly description ("File (report.pdf)" or
   // the location name). Prefer it when provided and fall back to a generic
@@ -268,7 +267,7 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
   }
 
   embed.addFields(
-    { name: 'QURL Link', value: qurlLink },
+    { name: 'qURL Link', value: qurlLink },
     { name: divider, value:
       `\u23f3 Expires in **${expiresIn}**\n` +
       '\ud83d\udd12 One-time access\n' +
@@ -278,7 +277,7 @@ function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlL
       divider,
     }
   )
-  .setFooter({ text: '\ud83d\udd10 QURL (Quantum URL): Invisible by default. Visible by permission.' })
+  .setFooter({ text: '\ud83d\udd10 qURL (Quantum URL): Invisible by default. Visible by permission.' })
   .setTimestamp();
 
   return embed;
@@ -599,7 +598,7 @@ async function handleSend(interaction, apiKey) {
   // Defensive: execute() should always pass an apiKey for `send`, but guard
   // in case a future code path calls handleSend directly.
   if (!apiKey) {
-    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry_optional') || '24h';
@@ -1036,7 +1035,6 @@ async function handleSend(interaction, apiKey) {
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     const embed = buildDeliveryEmbed({
-      senderUsername: interaction.user.username,
       resourceType,
       resourceLabel,
       qurlLink: link.qurlLink,
@@ -1155,8 +1153,8 @@ async function handleSend(interaction, apiKey) {
     // `safeSender` pattern at line 242.
     const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
     const notifyMsg = target === 'voice'
-      ? `📩 **${safeName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${safeName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from Qurl Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });
     } catch (err) {
@@ -1524,7 +1522,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // multi-resource send doesn't silently drop extras (Discord allows
     // up to 10 embeds per message).
     const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
-      senderUsername: originalInteraction.user.username,
       resourceType: link.resType,
       resourceLabel: link.label,
       qurlLink: link.qurlLink,
@@ -1617,7 +1614,7 @@ function formatRevokeDescription(s) {
 
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
-    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   await interaction.deferReply({ ephemeral: true });
 
@@ -2290,7 +2287,7 @@ const commands = [
     // descriptions) to catch registration regressions at deploy time.
     data: new SlashCommandBuilder()
       .setName('qurl')
-      .setDescription('Share resources securely via QURL')
+      .setDescription('Share resources securely via qURL')
       .addSubcommand(sub =>
         sub.setName('send')
           .setDescription('Send a resource to users via one-time secure link')
@@ -2325,15 +2322,15 @@ const commands = [
       )
       .addSubcommand(sub =>
         sub.setName('help')
-          .setDescription('Show QURL bot help')
+          .setDescription('Show qURL bot help')
       )
       .addSubcommand(sub =>
         sub.setName('setup')
-          .setDescription('Configure your QURL API key for this server (admin only)')
+          .setDescription('Configure your qURL API key for this server (admin only)')
       )
       .addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if QURL is configured (admin only)')
+          .setDescription('Check if qURL is configured (admin only)')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
@@ -2344,7 +2341,7 @@ const commands = [
           return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
         }
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-          return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
+          return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
         }
         // Refuse to accept a guild API key unless encryption-at-rest is
         // configured. Falling through to the crypto module's plaintext
@@ -2352,7 +2349,7 @@ const commands = [
         if (!process.env.KEY_ENCRYPTION_KEY) {
           logger.error('Refusing /qurl setup: KEY_ENCRYPTION_KEY is not set');
           return interaction.reply({
-            content: '❌ **QURL is not ready to accept API keys on this server.**\n\n' +
+            content: '❌ **qURL is not ready to accept API keys on this server.**\n\n' +
               'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
               + '/qurl setup can store keys safely. Ask them to check the deployment env.',
             ephemeral: true,
@@ -2364,10 +2361,10 @@ const commands = [
         const setupModalId = `qurl_setup_modal_${setupNonce}`;
         const modal = new ModalBuilder()
           .setCustomId(setupModalId)
-          .setTitle('Configure QURL');
+          .setTitle('Configure qURL');
         const keyInput = new TextInputBuilder()
           .setCustomId('api_key')
-          .setLabel('QURL API Key')
+          .setLabel('qURL API Key')
           .setPlaceholder('lv_live_your_key_here')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
@@ -2399,7 +2396,7 @@ const commands = [
             return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
           }
           if (!resp.ok) {
-            return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
+            return modalSubmit.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
           }
         } catch (err) {
           // Don't reflect err.message to Discord — network errors can contain
@@ -2415,9 +2412,9 @@ const commands = [
         db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
         logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
         return modalSubmit.editReply({
-          content: '✅ **QURL is now configured for this server!**\n\n' +
+          content: '✅ **qURL is now configured for this server!**\n\n' +
             'Your team can use `/qurl send` to share files and locations securely.\n' +
-            'All QURL usage will be billed to your API key.',
+            'All qURL usage will be billed to your API key.',
           ephemeral: true,
         });
       }
@@ -2428,7 +2425,7 @@ const commands = [
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
-            content: '❌ Only server administrators can view QURL configuration status.',
+            content: '❌ Only server administrators can view qURL configuration status.',
             ephemeral: true,
           });
         }
@@ -2447,7 +2444,7 @@ const commands = [
             .digest('hex')
             .slice(0, 8);
           return interaction.reply({
-            content: `✅ **QURL is configured**\n` +
+            content: `✅ **qURL is configured**\n` +
               `Key fingerprint: \`${keyFingerprint}\`\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}`,
@@ -2455,7 +2452,7 @@ const commands = [
           });
         }
         return interaction.reply({
-          content: '❌ **QURL is not configured for this server.**\n\n' +
+          content: '❌ **qURL is not configured for this server.**\n\n' +
             '1. Sign up at **https://layerv.ai** to get your API key\n' +
             '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
             'Only server administrators can run setup.',
@@ -2469,7 +2466,7 @@ const commands = [
         const guildApiKey = interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
-            content: '❌ **QURL is not configured for this server.**\n\n' +
+            content: '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first.\n' +
               'Sign up at **https://layerv.ai** to get your API key.',
             ephemeral: true,
@@ -2487,9 +2484,6 @@ const commands = [
       if (sub === 'help') {
         return interaction.reply({
           content: '**Qurl Bot — Help**\n\n' +
-            '**Setting up (for Admins):**\n' +
-            '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
@@ -2505,6 +2499,9 @@ const commands = [
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
+            '**Setting up (for Admins):**\n' +
+            '  `/qurl setup` — configure your API key (admin only)\n' +
+            '  `/qurl status` — check if qURL is configured (admin only)\n\n' +
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
