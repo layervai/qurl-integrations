@@ -1,17 +1,17 @@
-# QURL Discord Bot
+# qURL Discord Bot
 
-Discord bot for QURL-powered secure resource sharing, plus GitHub OAuth
+Discord bot for qURL-powered secure resource sharing, plus GitHub OAuth
 linking and auto Contributor-role assignment for community members.
 
 ## Features
 
-- **`/qurl send`** — share a file or Google Maps location as a one-time QURL
+- **`/qurl send`** — share a file or Google Maps location as a one-time qURL
   link, delivered to each recipient via DM. Targets: a specific user, the
   visible members of the current text channel, or your voice channel.
 - **`/qurl revoke`** — revoke all links from a previous `/qurl send`.
 - **`/qurl help`** — command reference.
 - **`/qurl setup`** / **`/qurl status`** — admin-only, configure the
-  guild's QURL API key (stored AES-256-GCM encrypted at rest).
+  guild's qURL API key (stored AES-256-GCM encrypted at rest).
 - **GitHub OAuth Linking**: `/link` verifies GitHub identity; the callback
   is session-cookie-bound to prevent leaked-URL takeover.
 - **Auto Role Assignment**: merged PRs in allowed orgs award the
@@ -25,11 +25,11 @@ linking and auto Contributor-role assignment for community members.
 
 | Command | Description |
 |---------|-------------|
-| `/qurl send` | Send a file or location as one-time QURL links to a user / channel / voice-channel |
+| `/qurl send` | Send a file or location as one-time qURL links to a user / channel / voice-channel |
 | `/qurl revoke` | Revoke links from a previous send |
 | `/qurl help` | Usage reference |
-| `/qurl setup` | *(admin)* Configure the guild's QURL API key |
-| `/qurl status` | *(admin)* Check whether QURL is configured |
+| `/qurl setup` | *(admin)* Configure the guild's qURL API key |
+| `/qurl status` | *(admin)* Check whether qURL is configured |
 | `/link` | Link your GitHub account to Discord |
 | `/unlink` | Unlink your GitHub account |
 | `/whois [@user]` | Look up a member's GitHub handle |
@@ -49,7 +49,7 @@ linking and auto Contributor-role assignment for community members.
 - A Discord bot application
 - A GitHub OAuth App
 - A hosting target with a public HTTPS URL (ECS, Railway, Fly, etc.)
-- A QURL API key from https://layerv.ai
+- A qURL API key from https://layerv.ai
 
 ### 1. Configure Discord
 
@@ -79,7 +79,7 @@ inline; the sections below call out the non-obvious ones.
 without them, see `src/index.js`):
 
 - `METRICS_TOKEN` — bearer token for `/metrics`
-- `QURL_API_KEY` — default QURL key (individual guilds can override via
+- `QURL_API_KEY` — default qURL key (individual guilds can override via
   `/qurl setup`)
 - `KEY_ENCRYPTION_KEY` — 32 random bytes, base64. Generate with:
   ```
@@ -124,7 +124,7 @@ npm start
 - `src/discord.js` — discord.js client + role/channel cache
 - `src/database.js` — SQLite (better-sqlite3, WAL) + encrypted guild keys
 - `src/connector.js` — qurl-s3-connector client (SSRF-guarded CDN fetch)
-- `src/qurl.js` — QURL API client (private-IP blocklist on target URLs)
+- `src/qurl.js` — qURL API client (private-IP blocklist on target URLs)
 - `src/routes/oauth.js` — GitHub OAuth (atomic state consumption,
   session-cookie binding, retry + background revoke sweeper)
 - `src/routes/webhooks.js` — GitHub HMAC-verified webhooks, per-IP

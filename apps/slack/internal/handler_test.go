@@ -287,7 +287,7 @@ func TestSlashCommand_Base64Body_Help(t *testing.T) {
 }
 
 // Strengthens the body-threading fence: a signed create command must
-// actually reach handleCreate (which hits the mock QURL server).
+// actually reach handleCreate (which hits the mock qURL server).
 func TestSlashCommand_Base64Body_Create(t *testing.T) {
 	var qurlCalled bool
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -323,7 +323,7 @@ func TestSlashCommand_Base64Body_Create(t *testing.T) {
 		t.Fatalf("base64 create: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
 	}
 	if !qurlCalled {
-		t.Error("QURL backend was never called — handleCreate didn't run; body threading regressed")
+		t.Error("qURL backend was never called — handleCreate didn't run; body threading regressed")
 	}
 }
 

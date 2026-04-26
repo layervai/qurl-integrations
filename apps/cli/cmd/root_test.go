@@ -162,9 +162,9 @@ func TestFormatError_WrappedAPIError(t *testing.T) {
 		StatusCode: 404,
 		Title:      "Not Found",
 	}
-	wrapped := fmt.Errorf("create QURL: %w", apiErr)
+	wrapped := fmt.Errorf("create qURL: %w", apiErr)
 	got := formatError(wrapped)
-	if !strings.Contains(got, "create QURL") {
+	if !strings.Contains(got, "create qURL") {
 		t.Errorf("expected wrapping context in output: %s", got)
 	}
 	if !strings.Contains(got, "Not Found") {

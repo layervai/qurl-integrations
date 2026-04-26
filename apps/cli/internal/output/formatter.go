@@ -52,7 +52,7 @@ func NewTableFormatter() TableFormatter {
 	}
 }
 
-// FormatQURL formats a single QURL as a key-value table.
+// FormatQURL formats a single qURL as a key-value table.
 func (f TableFormatter) FormatQURL(w io.Writer, qurl *client.QURL) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
@@ -82,7 +82,7 @@ func (f TableFormatter) FormatQURL(w io.Writer, qurl *client.QURL) error {
 func (f TableFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
-	wr.printf("%s\n\n", f.green.Sprint("QURL created"))
+	wr.printf("%s\n\n", f.green.Sprint("qURL created"))
 	wr.printf("%s\t%s\n", f.bold.Sprint("ID:"), output.ResourceID)
 	wr.printf("%s\t%s\n", f.bold.Sprint("Link:"), output.QURLLink)
 	wr.printf("%s\t%s\n", f.bold.Sprint("Site:"), output.QURLSite)
@@ -92,10 +92,10 @@ func (f TableFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) e
 	return wr.flush(tw)
 }
 
-// FormatList formats a list of QURLs as a columnar table.
+// FormatList formats a list of qURLs as a columnar table.
 func (f TableFormatter) FormatList(w io.Writer, output *client.ListOutput) error {
 	if len(output.QURLs) == 0 {
-		_, err := fmt.Fprintln(w, f.dim.Sprint("No QURLs found."))
+		_, err := fmt.Fprintln(w, f.dim.Sprint("No qURLs found."))
 		return err
 	}
 
@@ -171,10 +171,10 @@ func (f TableFormatter) FormatQuota(w io.Writer, output *client.QuotaOutput) err
 	if output.Usage != nil {
 		u := output.Usage
 		if output.RateLimits != nil && output.RateLimits.MaxActiveQURLs > 0 {
-			wr.printf("%s\t%d / %d\n", f.bold.Sprint("Active QURLs:"),
+			wr.printf("%s\t%d / %d\n", f.bold.Sprint("Active qURLs:"),
 				u.ActiveQURLs, output.RateLimits.MaxActiveQURLs)
 		} else {
-			wr.printf("%s\t%d\n", f.bold.Sprint("Active QURLs:"), u.ActiveQURLs)
+			wr.printf("%s\t%d\n", f.bold.Sprint("Active qURLs:"), u.ActiveQURLs)
 		}
 		wr.printf("%s\t%d\n", f.bold.Sprint("Created (period):"), u.QURLsCreated)
 		wr.printf("%s\t%d\n", f.bold.Sprint("Total accesses:"), u.TotalAccesses)
@@ -202,7 +202,7 @@ func (f TableFormatter) colorStatus(status string) string {
 // JSONFormatter outputs raw JSON.
 type JSONFormatter struct{}
 
-// FormatQURL formats a single QURL as JSON.
+// FormatQURL formats a single qURL as JSON.
 func (JSONFormatter) FormatQURL(w io.Writer, qurl *client.QURL) error {
 	return writeJSON(w, qurl)
 }
@@ -212,7 +212,7 @@ func (JSONFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) erro
 	return writeJSON(w, output)
 }
 
-// FormatList formats a list of QURLs as JSON.
+// FormatList formats a list of qURLs as JSON.
 func (JSONFormatter) FormatList(w io.Writer, output *client.ListOutput) error {
 	return writeJSON(w, output)
 }

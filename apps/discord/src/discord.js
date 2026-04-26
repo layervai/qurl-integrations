@@ -220,7 +220,7 @@ function setupWeeklyDigest() {
 // The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla /qurl
 // send tool only needs 4 perms (ViewChannel for target:channel/voice
 // member enumeration, SendMessages for interaction replies, EmbedLinks
-// for QURL link previews, UseApplicationCommands for slash commands).
+// for qURL link previews, UseApplicationCommands for slash commands).
 // ManageRoles/ManageChannels are OpenNHP-only — demanding them in every
 // guild would produce a confusing "missing permissions" error in guilds
 // that correctly granted only the 4 runtime perms.

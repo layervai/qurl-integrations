@@ -56,7 +56,7 @@ describe('Server', () => {
       const res = await request(app).get('/');
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
-      expect(res.body.service).toBe('QURL Discord Bot');
+      expect(res.body.service).toBe('qURL Discord Bot');
     });
   });
 

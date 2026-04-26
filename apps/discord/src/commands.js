@@ -124,7 +124,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName } = require('./utils/sanitize');
 
 function sanitizeMessage(msg) {
   // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
@@ -233,55 +233,164 @@ async function batchSettled(items, fn, batchSize = 5) {
   return results;
 }
 
-// --- Shared DM embed builder ---
-function buildDeliveryEmbed({ senderUsername, resourceType, resourceLabel, qurlLink, expiresIn, filename, personalMessage }) {
-  const isFile = resourceType === RESOURCE_TYPES.FILE;
-  const divider = '\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500';
-  // Escape senderUsername — Discord usernames can contain markdown chars
-  // (legacy pre-unique-username accounts); a name like `[click](https://evil.com)`
-  // would otherwise render as a clickable phishing link inside the embed.
-  const safeSender = escapeDiscordMarkdown(String(senderUsername || 'Someone').slice(0, 64));
+// Resolve the sender's display alias from an interaction, the same way
+// Discord itself does for any rendered name in a guild. Order:
+//   1. member.displayName — guild nickname > globalName > username
+//      (discord.js already resolves the inner three; we only fall
+//      through if `member` is null, e.g. user-app DM invocation).
+//   2. user.displayName — globalName > username (also resolved by
+//      discord.js v14.18+).
+//   3. user.username — direct username read; defends against test
+//      mocks or shapes where the v14 displayName getter is absent.
+//   4. 'Someone' — last-resort literal so callers never get null.
+// Optional chains throughout so a malformed interaction (no user, no
+// member) returns 'Someone' instead of throwing inside DM-dispatch.
+// Used by both the DM embed and the channel announcement so a single
+// send always shows the same name in both places.
+function resolveSenderAlias(interaction) {
+  return interaction?.member?.displayName
+    ?? interaction?.user?.displayName
+    ?? interaction?.user?.username
+    ?? 'Someone';
+}
+
+// --- Shared DM delivery payload builder ---
+// Builds the {embeds, components} payload for a per-recipient DM. The
+// embed copy is intentionally evocative ("opened a door", "Portal closes",
+// "what's on the other side is invisible to … scanners, bots, crawlers,
+// strangers") rather than literal ("shared a file with you") — the brand
+// goal is to convey the qURL hidden-layer model, not just announce a
+// file transfer. The qURL link is rendered as a `Step Through →` Link
+// button rather than a bare URL field; recipients click the button to
+// open the link in their default browser.
+//
+// `senderAlias` is the sender's friendly display name (Discord nickname
+// > globalName > username) — same source resolveSenderAlias used at the
+// channel-announce site, so the alias shown matches across both surfaces.
+// `personalMessage` is optional caller-provided context; if present, it
+// renders as an italicized blockquote above the body paragraph.
+//
+// Returns the full Discord message options object (`embeds` + `components`)
+// rather than just the embed, since the button is not part of the embed
+// — it lives in a top-level component row alongside it. Callers pass the
+// returned payload directly to `sendDM`.
+//
+// Example of what the recipient sees:
+//
+//     ┌─────────────────────────────────────────────────────────────┐
+//     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
+//     │                                                             │
+//     │  Vik opened a door for you.                                 │  (description)
+//     │                                                             │
+//     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
+//     │                                                             │
+//     │  This link is your portal — what's on the other side is    │  (fixed body copy)
+//     │  invisible to everyone else on the internet: scanners,     │
+//     │  bots, crawlers, strangers.                                │
+//     │                                                             │
+//     │  🕐 Portal closes in 24 hours                               │  (Discord <t:N:R> — auto-updates client-side
+//     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
+//     │                                                             │
+//     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
+//     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
+//     │                                                             │
+//     │  ┌──────────────────────────┐                               │
+//     │  │   Step Through →         │  (Link button — opens qURL)
+//     │  └──────────────────────────┘                               │
+//     └─────────────────────────────────────────────────────────────┘
+//
+// Discord's Link-style buttons are always grey/blurple; the green color
+// in the design mockup would require a Success-style button + custom_id
+// + interaction handler that redirects, which adds a click round-trip
+// for marginal aesthetic gain. Sticking with Link button for this pivot.
+// Single source of truth for the SlashCommandBuilder `addChoices(...)` —
+// `EXPIRY_CHOICES` is derived from this map so dropdown labels and values
+// cannot drift. The DM embed renders expiry as a Discord native relative
+// timestamp (`<t:N:R>`, see buildDeliveryPayload) so the human label is
+// only used in the slash-command picker, not at render time.
+const EXPIRY_LABELS = {
+  '30m': '30 minutes',
+  '1h': '1 hour',
+  '6h': '6 hours',
+  '24h': '24 hours',
+  '7d': '7 days',
+};
+
+const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
+
+function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
+  // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
+  // + 64-char cap + 'Someone' fallback. Same helper used at the channel
+  // announcement site so the spoof defense doesn't drift between sites.
+  const safeSender = sanitizeDisplayName(senderAlias);
+
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setAuthor({ name: 'QURL Secure Delivery' })
-    .setDescription(
-      `**${safeSender}** shared a protected resource with you\n${divider}`
-    )
-  // resourceLabel is a caller-friendly description ("File (report.pdf)" or
-  // the location name). Prefer it when provided and fall back to a generic
-  // type label otherwise.
-  if (isFile) {
-    embed.addFields(
-      { name: 'Resource Type', value: resourceLabel || 'File', inline: true },
-      { name: 'Filename', value: filename, inline: true },
-      { name: '\u200b', value: '\u200b', inline: true },
-    );
-  } else {
-    embed.addFields(
-      { name: 'Resource Type', value: resourceLabel || 'Location', inline: true },
-    );
-  }
+    .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
-    const capped = personalMessage.substring(0, 450);
-    embed.addFields({ name: 'Message', value: `> ${capped}` });
+    // CONTRACT: `personalMessage` arrives pre-sanitized — handleSend pipes
+    // raw input through `sanitizeMessage` (markdown escape + @-mention
+    // strip) before constructing this payload, and the addRecipients
+    // path reads from `sendConfig.personal_message` which was sanitized
+    // at write time. Raw interpolation into the template below is safe
+    // ONLY because of that upstream pass. A future caller that bypasses
+    // sanitizeMessage (or a DB row read that skips re-sanitize) would
+    // silently regress to markdown injection — keep the contract.
+    //
+    // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
+    // does not span newlines, so a multi-line message would render with
+    // only the first line styled. Flatten newlines to a space so the
+    // recipient sees one tidy quote — matches the design mockup which
+    // shows the message as a single-line styled box. 450-char cap keeps
+    // the body paragraph visible without scroll.
+    const capped = personalMessage.substring(0, 450).replace(/[\r\n]+/g, ' ').trim();
+    embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
   }
 
   embed.addFields(
-    { name: 'QURL Link', value: qurlLink },
-    { name: divider, value:
-      `\u23f3 Expires in **${expiresIn}**\n` +
-      '\ud83d\udd12 One-time access\n' +
-      `${divider}\n` +
-      '\u26a0\ufe0f Invisible before accessed\n' +
-      '\ud83d\udca5 Self-destructs after viewing\n' +
-      divider,
-    }
-  )
-  .setFooter({ text: '\ud83d\udd10 QURL (Quantum URL): Invisible by default. Visible by permission.' })
-  .setTimestamp();
+    {
+      name: '\u200B',
+      value: "This link is your portal — what's on the other side is invisible to everyone else on the internet: scanners, bots, crawlers, strangers.",
+    },
+    {
+      // Discord's native relative-time markdown: <t:UNIX:R> renders
+      // CLIENT-SIDE based on the viewer's current time, so the recipient
+      // sees "in 24 hours" at send time and "in 16 hours" 8 hours later
+      // (and "1 hour ago" once the link has expired). No bot-side editing
+      // needed — Discord handles the live update.
+      //
+      // Fail-loud on a missing/invalid expiresAt rather than rendering
+      // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
+      // the contract-violation throw in handleAddRecipients (same fail-
+      // loud-over-silent-degradation principle).
+      name: '\u200B',
+      value: (() => {
+        if (!Number.isFinite(expiresAt)) {
+          throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
+        }
+        return `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`;
+      })(),
+    },
+    {
+      // Brand line lives in a regular embed field (NOT setFooter) because
+      // Discord embed footers are plain-text only and we need the markdown
+      // hyperlink on `qURL` to point at https://layerv.ai. The brand line
+      // anchors the recipient back to the qURL product page.
+      name: '\u200B',
+      value: 'Quantum URL ([qURL](https://layerv.ai)) · The internet has a hidden layer. This is how you enter.',
+    },
+  );
 
-  return embed;
+  // Link button: grey, single-click opens qurlLink in the recipient's
+  // browser. No interaction handler needed — Discord handles the redirect.
+  const stepThrough = new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setLabel('Step Through →')
+    .setURL(qurlLink);
+  const components = [new ActionRowBuilder().addComponents(stepThrough)];
+
+  return { embeds: [embed], components };
 }
 
 // --- Link status monitor ---
@@ -599,7 +708,7 @@ async function handleSend(interaction, apiKey) {
   // Defensive: execute() should always pass an apiKey for `send`, but guard
   // in case a future code path calls handleSend directly.
   if (!apiKey) {
-    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   const target = interaction.options.getString('target');
   const expiresIn = interaction.options.getString('expiry_optional') || '24h';
@@ -699,13 +808,17 @@ async function handleSend(interaction, apiKey) {
   let locationUrl = null;
   let locationName = null;
   let resourceType = null;
-  let resourceLabel = null;
 
-  // Escape the recipient's username — legacy Discord accounts can have
-  // markdown chars in display names, and this label gets interpolated
-  // into the ephemeral "Sending to …" message which does render markdown.
+  // Pass the recipient's username through sanitizeDisplayName so the
+  // ephemeral "Sending to …" label gets the same NFKC + bidi/zero-
+  // width strip + markdown escape as the DM and channel-announcement
+  // sites. Without this, a recipient named with a leading U+202E
+  // would flip text direction inside the sender's confirmation reply.
+  // (Only the sender sees this string, so blast radius is tiny — but
+  // sanitizeDisplayName's docstring promises every site uses the same
+  // helper, and divergence here would silently violate that contract.)
   const targetLabel = target === 'user'
-    ? escapeDiscordMarkdown(String(recipients[0].username || '').slice(0, 64))
+    ? sanitizeDisplayName(recipients[0].username)
     : target === 'channel' ? 'this channel' : 'voice channel';
 
   if (commandAttachment) {
@@ -831,7 +944,6 @@ async function handleSend(interaction, apiKey) {
     // so a crafted place name can't inject **bold** / links / code blocks /
     // spoilers into the embed and phish recipients.
     if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
-    resourceLabel = locationName || 'Location';
 
   } else {
     // --- File: use attachment from slash command ---
@@ -874,7 +986,6 @@ async function handleSend(interaction, apiKey) {
         components: [],
       });
     }
-    resourceLabel = `File (${sanitizeFilename(attachment.name)})`;
   }
 
   // --- Step 3: Process and send ---
@@ -1033,19 +1144,31 @@ async function handleSend(interaction, apiKey) {
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is bounded
+  // by the time between this line and the mint call (sub-second on
+  // handleSend; can be a few seconds on handleAddRecipients which
+  // re-downloads + re-uploads + re-mints first). Negligible at the
+  // 30m–7d horizon — recipients see "in 24 hours" instead of
+  // "in 23h 59m 56s" on the worst-case path.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
-    const embed = buildDeliveryEmbed({
-      senderUsername: interaction.user.username,
-      resourceType,
-      resourceLabel,
+    const dmPayload = buildDeliveryPayload({
+      // member.displayName resolves to nickname || globalName || username,
+      // so it works whether the sender has a per-guild nickname, only a
+      // global display name, or just the legacy @-handle.
+      senderAlias: resolveSenderAlias(interaction),
       qurlLink: link.qurlLink,
-      expiresIn,
-      filename: attachment ? sanitizeFilename(attachment.name) : null,
+      expiresAt,
       personalMessage,
     });
 
-    const sent = await sendDM(link.recipientId, { embeds: [embed] });
+    const sent = await sendDM(link.recipientId, dmPayload);
     db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
@@ -1149,14 +1272,15 @@ async function handleSend(interaction, apiKey) {
   // null — and `.send()` on null throws synchronously, before the
   // try/catch can see it.
   if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
-    // Wrap displayName in escapeDiscordMarkdown so a user with `**`,
-    // backticks, or `_` in their display name can't break the bold or
-    // inject a code span. Cap at 64 chars to mirror the existing
-    // `safeSender` pattern at line 242.
-    const safeName = escapeDiscordMarkdown(String(interaction.user.displayName || 'Someone').slice(0, 64));
+    // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
+    // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
+    // fallback). Channel-post is a wider blast radius than DM, so applying
+    // the same spoof defense here is critical — without it a display name
+    // with a leading U+202E flips text direction in the public announcement.
+    const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
     const notifyMsg = target === 'voice'
-      ? `📩 **${safeName}** has shared something with users currently on voice via **QURL Bot** — if you're on voice, check your DMs from Qurl Bot.`
-      : `📩 **${safeName}** has shared something with all members of this channel via **QURL Bot** — check your DMs from Qurl Bot.`;
+      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });
     } catch (err) {
@@ -1519,21 +1643,46 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const links = recipientLinks[recipient.id];
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
-    // Today a send has exactly one resource (file XOR location), so links
-    // will have length 1. The loop builds one embed per link so a future
-    // multi-resource send doesn't silently drop extras (Discord allows
-    // up to 10 embeds per message).
-    const embeds = links.slice(0, 10).map(link => buildDeliveryEmbed({
-      senderUsername: originalInteraction.user.username,
-      resourceType: link.resType,
-      resourceLabel: link.label,
+    // links.slice(0, 10) caps at Discord's 10-embed-per-message limit.
+    // The button-row chunking below splits all buttons into ActionRows of
+    // 5 (Discord's per-row cap). Note Discord renders all embeds first,
+    // then all component rows below — buttons are NOT visually paired
+    // with their corresponding embed. Multi-link UX would benefit from
+    // per-link button labels (e.g. "Step Through · report.pdf"), but
+    // today links.length is always 1 so labels are uniform.
+    // Same Unix-seconds expiry computation as handleSend — see comment
+    // there. Computed once per recipient (cheap; the alternative would
+    // be threading a single timestamp through sendConfig).
+    const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+    const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
+      // Same alias resolution as handleSend — see comment there for
+      // the nickname > globalName > username fallback rationale.
+      senderAlias: resolveSenderAlias(originalInteraction),
       qurlLink: link.qurlLink,
-      expiresIn: sendConfig.expires_in,
-      filename: sendConfig.attachment_name ? sanitizeFilename(sendConfig.attachment_name) : null,
+      expiresAt,
       personalMessage: sendConfig.personal_message,
     }));
+    // Contract with buildDeliveryPayload: each payload's `components`
+    // array contains exactly one ActionRow whose `components` are the
+    // per-link buttons. We pull each payload's first row's children
+    // (one Step Through button per link) and re-pack into 5-per-row
+    // ActionRows since Discord caps at 5 buttons per ActionRow.
+    const allEmbeds = payloads.flatMap(p => p.embeds);
+    const allButtons = payloads.flatMap(p => {
+      // Hard fail rather than silently drop buttons if the contract
+      // ever changes — easier to catch than a button quietly missing
+      // from a recipient's DM.
+      if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
+        throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
+      }
+      return p.components[0].components;
+    });
+    const allComponents = [];
+    for (let i = 0; i < allButtons.length; i += 5) {
+      allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+    }
 
-    const sent = await sendDM(recipient.id, { embeds });
+    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
@@ -1617,7 +1766,7 @@ function formatRevokeDescription(s) {
 
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
-    return interaction.reply({ content: 'QURL API key is not configured.', ephemeral: true });
+    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
   await interaction.deferReply({ ephemeral: true });
 
@@ -2290,7 +2439,7 @@ const commands = [
     // descriptions) to catch registration regressions at deploy time.
     data: new SlashCommandBuilder()
       .setName('qurl')
-      .setDescription('Share resources securely via QURL')
+      .setDescription('Share resources securely via qURL')
       .addSubcommand(sub =>
         sub.setName('send')
           .setDescription('Send a resource to users via one-time secure link')
@@ -2303,13 +2452,7 @@ const commands = [
             opt.setName('expiry_optional')
               .setDescription('Link expiry (default: 24h)')
               .setRequired(false)
-              .addChoices(
-                { name: '30 minutes', value: '30m' },
-                { name: '1 hour', value: '1h' },
-                { name: '6 hours', value: '6h' },
-                { name: '24 hours', value: '24h' },
-                { name: '7 days', value: '7d' },
-              ))
+              .addChoices(...EXPIRY_CHOICES))
           .addAttachmentOption(opt =>
             opt.setName('file_optional')
               .setDescription('Optional — attach a file here if sharing a file')
@@ -2325,15 +2468,15 @@ const commands = [
       )
       .addSubcommand(sub =>
         sub.setName('help')
-          .setDescription('Show QURL bot help')
+          .setDescription('Show qURL bot help')
       )
       .addSubcommand(sub =>
         sub.setName('setup')
-          .setDescription('Configure your QURL API key for this server (admin only)')
+          .setDescription('Configure your qURL API key for this server (admin only)')
       )
       .addSubcommand(sub =>
         sub.setName('status')
-          .setDescription('Check if QURL is configured (admin only)')
+          .setDescription('Check if qURL is configured (admin only)')
       ),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
@@ -2344,7 +2487,7 @@ const commands = [
           return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
         }
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-          return interaction.reply({ content: 'Only server administrators can configure QURL.', ephemeral: true });
+          return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
         }
         // Refuse to accept a guild API key unless encryption-at-rest is
         // configured. Falling through to the crypto module's plaintext
@@ -2352,7 +2495,7 @@ const commands = [
         if (!process.env.KEY_ENCRYPTION_KEY) {
           logger.error('Refusing /qurl setup: KEY_ENCRYPTION_KEY is not set');
           return interaction.reply({
-            content: '❌ **QURL is not ready to accept API keys on this server.**\n\n' +
+            content: '❌ **qURL is not ready to accept API keys on this server.**\n\n' +
               'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
               + '/qurl setup can store keys safely. Ask them to check the deployment env.',
             ephemeral: true,
@@ -2364,10 +2507,10 @@ const commands = [
         const setupModalId = `qurl_setup_modal_${setupNonce}`;
         const modal = new ModalBuilder()
           .setCustomId(setupModalId)
-          .setTitle('Configure QURL');
+          .setTitle('Configure qURL');
         const keyInput = new TextInputBuilder()
           .setCustomId('api_key')
-          .setLabel('QURL API Key')
+          .setLabel('qURL API Key')
           .setPlaceholder('lv_live_your_key_here')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
@@ -2399,7 +2542,7 @@ const commands = [
             return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
           }
           if (!resp.ok) {
-            return modalSubmit.editReply({ content: `❌ **QURL API error** (${resp.status}). Try again later.` });
+            return modalSubmit.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
           }
         } catch (err) {
           // Don't reflect err.message to Discord — network errors can contain
@@ -2415,9 +2558,9 @@ const commands = [
         db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
         logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
         return modalSubmit.editReply({
-          content: '✅ **QURL is now configured for this server!**\n\n' +
+          content: '✅ **qURL is now configured for this server!**\n\n' +
             'Your team can use `/qurl send` to share files and locations securely.\n' +
-            'All QURL usage will be billed to your API key.',
+            'All qURL usage will be billed to your API key.',
           ephemeral: true,
         });
       }
@@ -2428,7 +2571,7 @@ const commands = [
       if (sub === 'status') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({
-            content: '❌ Only server administrators can view QURL configuration status.',
+            content: '❌ Only server administrators can view qURL configuration status.',
             ephemeral: true,
           });
         }
@@ -2447,7 +2590,7 @@ const commands = [
             .digest('hex')
             .slice(0, 8);
           return interaction.reply({
-            content: `✅ **QURL is configured**\n` +
+            content: `✅ **qURL is configured**\n` +
               `Key fingerprint: \`${keyFingerprint}\`\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
               `Last updated: ${guildConfig.updated_at}`,
@@ -2455,7 +2598,7 @@ const commands = [
           });
         }
         return interaction.reply({
-          content: '❌ **QURL is not configured for this server.**\n\n' +
+          content: '❌ **qURL is not configured for this server.**\n\n' +
             '1. Sign up at **https://layerv.ai** to get your API key\n' +
             '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
             'Only server administrators can run setup.',
@@ -2469,7 +2612,7 @@ const commands = [
         const guildApiKey = interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
-            content: '❌ **QURL is not configured for this server.**\n\n' +
+            content: '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first.\n' +
               'Sign up at **https://layerv.ai** to get your API key.',
             ephemeral: true,
@@ -2485,11 +2628,43 @@ const commands = [
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
+        // Rendered output (after Discord's markdown parser):
+        //
+        //   qURL Bot — Help
+        //
+        //   Getting started — Share resources securely via one-time links:
+        //     /qurl send — send a file and/or location to users
+        //     /qurl revoke — revoke links from a previous send
+        //     /qurl help — show this message
+        //
+        //   How it works:
+        //     1. Use /qurl send and choose a target (user, channel, or voice)
+        //     2. Attach a file and/or search for a location
+        //     3. Each recipient gets a unique, single-use link by DM
+        //     4. Links self-destruct on first access, or when the expiry
+        //        elapses — whichever comes first
+        //
+        //   Setting up (for Admins):
+        //     /qurl setup — configure your API key (admin only)
+        //     /qurl status — check if qURL is configured (admin only)
+        //
+        //   Terms: a protected resource is the file or location you're
+        //   sharing. A qurl (or access link) is the single-use URL that
+        //   delivers it. You create a qurl for a protected resource each
+        //   time you run /qurl send.
+        //
+        //   Large servers (~1000+ members): when sending to a `channel` or
+        //   `voice` target, members who appear offline in Discord may be
+        //   skipped. If you need to reach a specific person for sure, use
+        //   the `user` target.
+        //
+        //   Sign up at https://layerv.ai to get your API key.
+        //
+        // Section order (post-PR #124): user-facing flow first (Getting
+        // started → How it works), then admin-only setup, then glossary
+        // (Terms), then operational caveat (Large servers), then signup.
         return interaction.reply({
-          content: '**Qurl Bot — Help**\n\n' +
-            '**Setting up (for Admins):**\n' +
-            '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if QURL is configured (admin only)\n\n' +
+          content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl send` — send a file and/or location to users\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
@@ -2505,6 +2680,9 @@ const commands = [
             '  2. Attach a file and/or search for a location\n' +
             '  3. Each recipient gets a unique, single-use link by DM\n' +
             '  4. Links self-destruct on first access, or when the expiry elapses — whichever comes first\n\n' +
+            '**Setting up (for Admins):**\n' +
+            '  `/qurl setup` — configure your API key (admin only)\n' +
+            '  `/qurl status` — check if qURL is configured (admin only)\n\n' +
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
@@ -2754,6 +2932,8 @@ module.exports = {
       expiryToISO,
       sendCooldowns,
       handleAddRecipients,
+      buildDeliveryPayload,
+      resolveSenderAlias,
     },
   }),
 };

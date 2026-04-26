@@ -16,7 +16,7 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:               "delete <resource-id>",
-		Short:             "Revoke/delete a QURL",
+		Short:             "Revoke/delete a qURL",
 		Example:           "  qurl delete r_k8xqp9h2sj9 --yes",
 		Args:              cobra.ExactArgs(1),
 		Aliases:           []string{"revoke"},
@@ -29,12 +29,12 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 			}
 
 			if dryRun {
-				_, err := fmt.Fprintf(cmd.OutOrStdout(), "Would revoke QURL %s (dry run, no changes made)\n", id)
+				_, err := fmt.Fprintf(cmd.OutOrStdout(), "Would revoke qURL %s (dry run, no changes made)\n", id)
 				return err
 			}
 
 			if !yes {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Revoke QURL %s? This cannot be undone. [y/N] ", id); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Revoke qURL %s? This cannot be undone. [y/N] ", id); err != nil {
 					return err
 				}
 				scanner := bufio.NewScanner(cmd.InOrStdin())
@@ -54,10 +54,10 @@ func deleteCmd(opts *globalOpts) *cobra.Command {
 			}
 
 			if err := c.Delete(cmd.Context(), id); err != nil {
-				return fmt.Errorf("delete QURL: %w", err)
+				return fmt.Errorf("delete qURL: %w", err)
 			}
 
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "QURL %s has been revoked.\n", id)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "qURL %s has been revoked.\n", id)
 			return err
 		},
 	}

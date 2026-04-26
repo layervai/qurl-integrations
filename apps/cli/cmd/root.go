@@ -38,8 +38,8 @@ func rootCmd(version string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "qurl",
-		Short: "QURL CLI - manage secure links from the command line",
-		Long: `QURL CLI creates, resolves, and manages QURL secure links.
+		Short: "qURL CLI - manage secure links from the command line",
+		Long: `qURL CLI creates, resolves, and manages qURL secure links.
 
 Authentication (in order of precedence):
   1. --api-key flag (visible in process list — prefer env var)
@@ -48,8 +48,8 @@ Authentication (in order of precedence):
 
 Get started:
   qurl auth login                        Authenticate via browser
-  qurl create https://example.com        Create a QURL
-  qurl list                              List active QURLs
+  qurl create https://example.com        Create a qURL
+  qurl list                              List active qURLs
   qurl resolve <access-token>            Resolve a token (headless)
   qurl quota                             Check your usage
   qurl completion bash                   Generate shell completions`,
@@ -163,7 +163,7 @@ func resolveValue(envKey string, flag *string, configKey string, cfg *config.Con
 }
 
 // errorPrefix extracts the wrapping context before the APIError message
-// (e.g., "create QURL: " from "create QURL: Not Found (404)").
+// (e.g., "create qURL: " from "create qURL: Not Found (404)").
 func errorPrefix(err error, apiErr *client.APIError) string {
 	wrapper := err.Error()
 	if wrapper == apiErr.Error() {

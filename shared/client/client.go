@@ -1,4 +1,4 @@
-// Package client provides a Go client for the QURL API.
+// Package client provides a Go client for the qURL API.
 package client
 
 import (
@@ -23,16 +23,16 @@ const (
 	defaultMaxDelay   = 30 * time.Second
 )
 
-// StatusActive indicates the QURL is live and accepting access requests.
+// StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
-// StatusExpired indicates the QURL's TTL has elapsed.
+// StatusExpired indicates the qURL's TTL has elapsed.
 const StatusExpired = "expired"
 
-// StatusRevoked indicates the QURL was manually revoked (deleted).
+// StatusRevoked indicates the qURL was manually revoked (deleted).
 const StatusRevoked = "revoked"
 
-// StatusConsumed indicates a one-time QURL has been used.
+// StatusConsumed indicates a one-time qURL has been used.
 const StatusConsumed = "consumed"
 
 // Logger is an optional interface for debug logging.
@@ -40,7 +40,7 @@ type Logger interface {
 	Printf(format string, args ...any)
 }
 
-// Client is a QURL API client.
+// Client is a qURL API client.
 type Client struct {
 	baseURL    string
 	apiKey     string
@@ -76,7 +76,7 @@ func WithLogger(l Logger) Option {
 	return func(c *Client) { c.logger = l }
 }
 
-// New creates a QURL API client.
+// New creates a qURL API client.
 func New(baseURL, apiKey string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    baseURL,
@@ -103,7 +103,7 @@ func (c *Client) logf(format string, args ...any) {
 
 // --- Response envelope ---
 
-// apiResponse is the success response envelope from the QURL API.
+// apiResponse is the success response envelope from the qURL API.
 type apiResponse struct {
 	Data json.RawMessage `json:"data"`
 	Meta *ResponseMeta   `json:"meta,omitempty"`
@@ -117,9 +117,9 @@ type ResponseMeta struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
-// --- QURL types (match API schema) ---
+// --- qURL types (match API schema) ---
 
-// QURL represents a QURL resource as returned by the API.
+// QURL represents a qURL resource as returned by the API.
 type QURL struct {
 	ResourceID   string        `json:"resource_id"`
 	TargetURL    string        `json:"target_url"`
@@ -134,7 +134,7 @@ type QURL struct {
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
-// AccessPolicy defines access restrictions for a QURL.
+// AccessPolicy defines access restrictions for a qURL.
 type AccessPolicy struct {
 	IPAllowlist  []string `json:"ip_allowlist,omitempty"`
 	IPDenylist   []string `json:"ip_denylist,omitempty"`
@@ -142,7 +142,7 @@ type AccessPolicy struct {
 	GeoDenylist  []string `json:"geo_denylist,omitempty"`
 }
 
-// CreateInput is the input for creating a QURL.
+// CreateInput is the input for creating a qURL.
 type CreateInput struct {
 	TargetURL    string        `json:"target_url"`
 	Description  string        `json:"description,omitempty"`
@@ -152,7 +152,7 @@ type CreateInput struct {
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
-// CreateOutput is the response from creating a QURL.
+// CreateOutput is the response from creating a qURL.
 type CreateOutput struct {
 	ResourceID string     `json:"resource_id"`
 	QURLLink   string     `json:"qurl_link"`
@@ -160,7 +160,7 @@ type CreateOutput struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
-// Create creates a new QURL.
+// Create creates a new qURL.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -179,7 +179,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	return &out, nil
 }
 
-// Get retrieves a QURL by ID.
+// Get retrieves a qURL by ID.
 func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
@@ -193,7 +193,7 @@ func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 	return &qurl, nil
 }
 
-// ListInput is the input for listing QURLs.
+// ListInput is the input for listing qURLs.
 type ListInput struct {
 	Limit  int
 	Cursor string
@@ -202,14 +202,14 @@ type ListInput struct {
 	Sort   string
 }
 
-// ListOutput is the output of listing QURLs.
+// ListOutput is the output of listing qURLs.
 type ListOutput struct {
 	QURLs      []QURL `json:"qurls"`
 	NextCursor string `json:"next_cursor,omitempty"`
 	HasMore    bool   `json:"has_more,omitempty"`
 }
 
-// List retrieves a paginated list of QURLs.
+// List retrieves a paginated list of qURLs.
 func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error) {
 	params := url.Values{}
 	if input.Limit > 0 {
@@ -252,7 +252,7 @@ func (c *Client) List(ctx context.Context, input ListInput) (*ListOutput, error)
 	return out, nil
 }
 
-// Delete revokes a QURL by ID.
+// Delete revokes a qURL by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
@@ -262,25 +262,25 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// ExtendInput holds input for extending a QURL.
+// ExtendInput holds input for extending a qURL.
 type ExtendInput struct {
 	ExtendBy  string     `json:"extend_by,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// Extend extends a QURL's expiration.
+// Extend extends a qURL's expiration.
 // Both Extend and Update use PATCH /v1/qurls/:id — the server differentiates
 // by request body fields (extend_by/expires_at vs description).
 func (c *Client) Extend(ctx context.Context, id string, input ExtendInput) (*QURL, error) {
 	return c.patchQURL(ctx, id, input)
 }
 
-// UpdateInput holds input for updating a QURL's mutable properties.
+// UpdateInput holds input for updating a qURL's mutable properties.
 type UpdateInput struct {
 	Description *string `json:"description,omitempty"`
 }
 
-// Update updates a QURL's mutable properties.
+// Update updates a qURL's mutable properties.
 func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
 	return c.patchQURL(ctx, id, input)
 }
@@ -310,7 +310,7 @@ type MintOutput struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// MintLink mints a new access link for a QURL.
+// MintLink mints a new access link for a qURL.
 func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls/"+url.PathEscape(id)+"/mint_link", http.NoBody)
 	if err != nil {
@@ -326,7 +326,7 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 
 // --- Resolve ---
 
-// ResolveInput holds input for headless QURL resolution.
+// ResolveInput holds input for headless qURL resolution.
 type ResolveInput struct {
 	AccessToken string `json:"access_token"`
 }
@@ -345,7 +345,7 @@ type AccessGrant struct {
 	SrcIP     string `json:"src_ip"`
 }
 
-// Resolve resolves a QURL access token, triggering a network access request
+// Resolve resolves a qURL access token, triggering a network access request
 // to open the firewall for the caller's IP.
 func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
 	body, err := json.Marshal(input)
@@ -410,7 +410,7 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 
 // --- Error types (RFC 7807) ---
 
-// APIError represents an error response from the QURL API.
+// APIError represents an error response from the qURL API.
 type APIError struct {
 	StatusCode    int
 	Code          string

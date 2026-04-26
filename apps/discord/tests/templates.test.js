@@ -33,7 +33,7 @@ describe('renderPage', () => {
       showDiscordButton: true,
     });
 
-    expect(html).toContain('<title>Test Success - QURL</title>');
+    expect(html).toContain('<title>Test Success - qURL</title>');
     expect(html).toContain('All Good');
     expect(html).toContain('Everything worked.');
     expect(html).toContain('You can close this page.');

@@ -112,7 +112,7 @@ describe('Connector client — coverage boost', () => {
   });
 
   describe('throwConnectorError — quota_exceeded tagging', () => {
-    // The connector wraps upstream QURL API errors as
+    // The connector wraps upstream qURL API errors as
     //   { success: false, error: "QURL API error (403): quota exceeded: token limit per QURL reached (12/10)", links: [] }
     // throwConnectorError must surface this as Error.apiCode = 'quota_exceeded'
     // so the /qurl send catch block can show a specific user-facing message
