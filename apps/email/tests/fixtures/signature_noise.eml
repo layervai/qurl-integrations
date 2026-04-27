@@ -1,0 +1,21 @@
+From: sender@example.com
+To: qurl@layerv.ai
+Subject: Signature noise test
+Content-Type: multipart/alternative; boundary="boundary111"
+
+--boundary111
+Content-Type: text/plain; charset="utf-8"
+
+Send to:
+bob@company.com
+
+Here is the document you requested.
+
+Best,
+John
+
+--
+John Doe
+CEO, Example Corp
+john@external.com
+--boundary111--

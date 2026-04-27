@@ -1,0 +1,24 @@
+From: sender@example.com
+To: qurl@layerv.ai
+Subject: Sending PDF
+Content-Type: multipart/mixed; boundary="boundary456"
+
+--boundary456
+Content-Type: text/plain; charset="utf-8"
+
+Send to:
+bob@company.com
+
+Please review the attached report.
+
+Best regards
+
+--boundary456
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="report.pdf"
+
+%PDF-1.4
+%fake pdf content for testing
+%%EOF
+
+--boundary456--
