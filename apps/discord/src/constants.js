@@ -61,6 +61,19 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 // up to 1 hour; a burst of sends could otherwise stack dozens of timers.
 const MAX_CONCURRENT_MONITORS = 50;
 
+// Recipient-DM expiry-line tense prefixes. Both buildDeliveryPayload (the
+// render path in commands.js) and the expired-dm-label sweeper (the edit
+// path in expired-dm-label-sweeper.js) reference these literals — single
+// source of truth so a future copy edit in one place can't drift from the
+// substitution target in the other.
+//
+// Strings end with literal `<t:` so the substitution is anchored — a
+// stray "Portal closes" elsewhere in the embed (unlikely, but defensive)
+// won't trip the sweeper. Discord's relative-time markdown (`<t:N:R>`)
+// auto-renders client-side; only the verb needs rewriting.
+const EXPIRY_PREFIX_PRESENT = '🕐 Portal closes <t:';
+const EXPIRY_PREFIX_PAST = '🕐 Portal closed <t:';
+
 // GitHub event actions we care about
 const GITHUB_ACTIONS = {
   PR_MERGED: 'closed',  // with merged=true
@@ -89,4 +102,6 @@ module.exports = {
   MAX_CONCURRENT_MONITORS,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  EXPIRY_PREFIX_PRESENT,
+  EXPIRY_PREFIX_PAST,
 };

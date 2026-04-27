@@ -18,19 +18,20 @@ jest.mock('../src/discord', () => ({
   editDMToPastTense: mockEditDMToPastTense,
 }));
 
-// Stub commands.js — the sweeper imports the prefix constants from there.
-// Inline mock keeps the test fast (commands.js drags discord.js, db, etc.).
-jest.mock('../src/commands', () => ({
+// Stub constants.js for just the prefixes the sweeper consumes — keeps
+// the test self-contained even if other constants change.
+jest.mock('../src/constants', () => ({
   EXPIRY_PREFIX_PRESENT: 'PRESENT_PREFIX_',
   EXPIRY_PREFIX_PAST: 'PAST_PREFIX_',
 }));
 
-jest.mock('../src/logger', () => ({
+const mockLogger = {
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+};
+jest.mock('../src/logger', () => mockLogger);
 
 const { sweepOnce } = require('../src/expired-dm-label-sweeper');
 
@@ -131,5 +132,91 @@ describe('expired-dm-label-sweeper.sweepOnce', () => {
     // attempting any edits.
     await expect(sweepOnce()).resolves.toBeUndefined();
     expect(mockEditDMToPastTense).not.toHaveBeenCalled();
+  });
+
+  it('skips the second sweep while the first is in flight (re-entrancy guard)', async () => {
+    // First sweep: rows + a deliberately slow editDMToPastTense so we can
+    // launch a second sweepOnce() while the first is still awaiting.
+    mockListExpiredUneditedDMs.mockReturnValue([
+      { id: 1, send_id: 's1', recipient_discord_id: 'r1', dm_channel_id: 'c1', dm_message_id: 'm1' },
+    ]);
+    let resolveEdit;
+    const editPromise = new Promise(res => { resolveEdit = res; });
+    mockEditDMToPastTense.mockReturnValue(editPromise);
+
+    const first = sweepOnce();
+    const second = sweepOnce();
+    resolveEdit(true);
+    await Promise.all([first, second]);
+
+    // Only one edit should have fired — the second sweep was skipped on
+    // entry. listExpiredUneditedDMs is called exactly once because the
+    // second sweep returns before fetching rows.
+    expect(mockEditDMToPastTense).toHaveBeenCalledTimes(1);
+    expect(mockListExpiredUneditedDMs).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Expired-DM-label sweep skipped (prior sweep still in flight)'
+    );
+  });
+
+  it('after a sweep completes, the next sweep is allowed (guard releases on success)', async () => {
+    // Regression check: the `finally` block must release the `sweeping`
+    // flag, otherwise a single completed sweep would block all future
+    // sweeps for the lifetime of the process.
+    mockListExpiredUneditedDMs.mockReturnValue([]);
+    await sweepOnce();
+    await sweepOnce();
+    expect(mockListExpiredUneditedDMs).toHaveBeenCalledTimes(2);
+  });
+
+  it('after a sweep throws, the next sweep is allowed (guard releases in finally)', async () => {
+    // The list-failure branch returns inside the try; the finally block
+    // must still release `sweeping` so a permanent DB error doesn't lock
+    // the sweeper out forever.
+    mockListExpiredUneditedDMs
+      .mockImplementationOnce(() => { throw new Error('db down'); })
+      .mockReturnValueOnce([]);
+    await sweepOnce();
+    await sweepOnce();
+    expect(mockListExpiredUneditedDMs).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits saturation warn when the sweep fills the BATCH ceiling', async () => {
+    // BATCH = 50 rows ⇒ backlog signal. Build 50 unique-message-id rows.
+    const rows = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1,
+      send_id: `s${i + 1}`,
+      recipient_discord_id: `r${i + 1}`,
+      dm_channel_id: `c${i + 1}`,
+      dm_message_id: `m${i + 1}`,
+    }));
+    mockListExpiredUneditedDMs.mockReturnValue(rows);
+    mockEditDMToPastTense.mockResolvedValue(true);
+
+    await sweepOnce();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Expired-DM-label sweep hit batch ceiling — backlog likely',
+      expect.objectContaining({ processedRows: 50, batch: 50 }),
+    );
+  });
+
+  it('separates permanent-fail signal from happy-path info log', async () => {
+    // permanentFails > 0 must surface as warn, not just be folded into
+    // the info line — dashboards key on level for alerting.
+    mockListExpiredUneditedDMs.mockReturnValue([
+      { id: 1, send_id: 's1', recipient_discord_id: 'r1', dm_channel_id: 'c1', dm_message_id: 'm1' },
+    ]);
+    mockEditDMToPastTense.mockResolvedValue(false);
+
+    await sweepOnce();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Expired-DM-label sweep recorded permanent failures',
+      expect.objectContaining({ permanentFails: 1, edited: 0 }),
+    );
+    // No info-level "complete" line on the perm-fail path — the warn
+    // carries the same shape.
+    expect(mockLogger.info).not.toHaveBeenCalled();
   });
 });

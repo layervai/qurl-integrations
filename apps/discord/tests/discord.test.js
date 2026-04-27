@@ -352,10 +352,11 @@ describe('discord module', () => {
       expect(edited.embeds[0].__fromJson.fields[2].value).toBe('world');
     });
 
-    it('returns true without calling edit when prefix is absent (no-op)', async () => {
-      // E.g. embed shape changed, or already past-tense — sweeper marks
-      // these as done and moves on; we don't want to spam edits.
-      const msg = buildMessage({ fieldValues: ['hello', 'world'] });
+    it('returns true silently when the embed already has the past-tense prefix (idempotent)', async () => {
+      // Benign retry path: a prior sweep / bot crash already flipped the
+      // embed; the next sweep finds past-tense, doesn't edit again, and
+      // does NOT warn.
+      const msg = buildMessage({ fieldValues: ['hello', 'P_PAST_<t:1234:R>'] });
       const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
       mockClient.channels.fetch.mockResolvedValue(channel);
 
@@ -364,11 +365,32 @@ describe('discord module', () => {
       expect(msg.edit).not.toHaveBeenCalled();
     });
 
-    it('returns false on permanent Discord error codes (10003/10008/50001/50007)', async () => {
-      // Each code maps to a permanent failure (DM/channel gone or bot blocked).
-      // Function returns false so the sweeper marks the row edited and
-      // doesn't retry every minute forever.
-      for (const code of [10003, 10008, 50001, 50007]) {
+    it('warns when neither present nor past prefix is found (shape regression signal)', async () => {
+      // Distinct from the already-past-tense path: this is the silent-
+      // skip bug class — embed shape drifted between render and edit.
+      // Function still returns true (so the row gets marked, not retried
+      // forever) but emits a warn so a regression is observable.
+      const msg = buildMessage({ fieldValues: ['hello', 'world'] });
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1', 'P_PRESENT_', 'P_PAST_');
+      expect(ok).toBe(true);
+      expect(msg.edit).not.toHaveBeenCalled();
+      // Logger spy: dump warn calls so the assertion is unambiguous.
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('shape regression'),
+        expect.objectContaining({ channelId: 'chan-1', messageId: 'msg-1' }),
+      );
+    });
+
+    it('returns false on permanent Discord error codes (10003/10008/10013/50001/50007/50013)', async () => {
+      // Each code maps to a permanent failure (DM/channel gone, recipient
+      // account gone, or bot blocked / perm boundary changed). Function
+      // returns false so the sweeper marks the row edited and doesn't
+      // retry every minute forever.
+      for (const code of [10003, 10008, 10013, 50001, 50007, 50013]) {
         mockClient.channels.fetch.mockRejectedValueOnce(Object.assign(new Error('discord'), { code }));
         const ok = await discord.editDMToPastTense('chan-x', 'msg-x', 'P_PRESENT_', 'P_PAST_');
         expect(ok).toBe(false);

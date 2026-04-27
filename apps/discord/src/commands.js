@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, EXPIRY_PREFIX_PRESENT } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -27,18 +27,10 @@ const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isA
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
-// Recipient-DM expiry-line tense prefixes. The present-tense form is
-// rendered at send time inside buildDeliveryPayload; the
-// expired-dm-label sweeper (src/expired-dm-label-sweeper.js) flips the
-// prefix to past-tense once the link has actually expired.
-//
-// Both strings end with literal `<t:` so the substitution is anchored —
-// a stray "Portal closes" elsewhere in the embed (unlikely, but
-// defensive) won't trip the sweeper. Discord's relative-time markdown
-// (`<t:N:R>`) updates client-side automatically; only the verb needs
-// rewriting. Exported so the sweeper imports the same literals.
-const EXPIRY_PREFIX_PRESENT = '🕐 Portal closes <t:';
-const EXPIRY_PREFIX_PAST = '🕐 Portal closed <t:';
+// EXPIRY_PREFIX_PRESENT used in buildDeliveryPayload's render path; the
+// matching EXPIRY_PREFIX_PAST is consumed by the expired-dm-label
+// sweeper. Both literals live in constants.js as the single source of
+// truth — see the block-comment there for the rationale.
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
@@ -2975,11 +2967,6 @@ module.exports = {
   registerCommands,
   handleCommand,
   verifyStateBinding,
-  // Expiry-line tense prefixes shared with src/expired-dm-label-sweeper.js.
-  // Exported so the sweeper substitutes against the same literals
-  // buildDeliveryPayload renders — single source of truth for the verb.
-  EXPIRY_PREFIX_PRESENT,
-  EXPIRY_PREFIX_PAST,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.

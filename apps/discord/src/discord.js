@@ -816,13 +816,19 @@ async function editDMToPastTense(channelId, messageId, fromPrefix, toPrefix) {
     if (!msg) return false;
 
     let mutated = false;
+    let alreadyPast = false;
     const newEmbeds = msg.embeds.map(e => {
       const json = e.toJSON();
       if (Array.isArray(json.fields)) {
         json.fields = json.fields.map(f => {
-          if (typeof f.value === 'string' && f.value.includes(fromPrefix)) {
-            mutated = true;
-            return { ...f, value: f.value.replace(fromPrefix, toPrefix) };
+          if (typeof f.value === 'string') {
+            if (f.value.includes(fromPrefix)) {
+              mutated = true;
+              return { ...f, value: f.value.replace(fromPrefix, toPrefix) };
+            }
+            if (f.value.includes(toPrefix)) {
+              alreadyPast = true;
+            }
           }
           return f;
         });
@@ -830,20 +836,36 @@ async function editDMToPastTense(channelId, messageId, fromPrefix, toPrefix) {
       return EmbedBuilder.from(json);
     });
 
-    // No prefix found ⇒ either the embed shape changed or the message
-    // was already edited (e.g. an in-flight retry from a prior crash).
-    // Treat as done so the row is marked edited and we don't loop.
-    if (!mutated) return true;
+    if (!mutated) {
+      // Two distinct branches matter for triage:
+      //   - alreadyPast: a prior sweep / restart already flipped the
+      //     embed; this is the benign retry path.
+      //   - neither: the prefix shape changed (Discord embed
+      //     normalization, or buildDeliveryPayload was refactored to
+      //     emit the verb in a different field/description). That's a
+      //     silent-skip bug class — log warn so a regression is
+      //     observable instead of marking the row "edited" forever
+      //     with the embed still present-tense.
+      if (!alreadyPast) {
+        logger.warn('editDMToPastTense: neither present nor past prefix found in embed — possible shape regression', {
+          channelId, messageId,
+        });
+      }
+      return true;
+    }
 
     await msg.edit({ embeds: newEmbeds });
     return true;
   } catch (err) {
-    // Discord error codes that mean "this DM is gone, don't retry":
-    //   10003 Unknown Channel       — channel was deleted
-    //   10008 Unknown Message       — message was deleted
-    //   50001 Missing Access        — bot was blocked / removed from DM
+    // Discord error codes that mean "this DM is gone or unreachable
+    // forever, don't retry":
+    //   10003 Unknown Channel        — channel was deleted
+    //   10008 Unknown Message        — message was deleted
+    //   10013 Unknown User           — recipient deleted/disabled their account
+    //   50001 Missing Access         — bot was blocked / removed from DM
     //   50007 Cannot send DM to user — recipient blocked DMs since send
-    if ([10003, 10008, 50001, 50007].includes(err.code)) return false;
+    //   50013 Missing Permissions    — Discord-side perm boundary changed on the DM
+    if ([10003, 10008, 10013, 50001, 50007, 50013].includes(err.code)) return false;
     throw err;
   }
 }
