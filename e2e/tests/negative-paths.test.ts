@@ -38,7 +38,7 @@ describe('Negative: Invalid Mint Requests', () => {
 });
 
 describe('Negative: Invalid Access', () => {
-  test('access non-existent qurl path returns SPA (fragment-based)', async () => {
+  test('access non-existent qURL path returns SPA (fragment-based)', async () => {
     const res = await qurl.accessLink('https://qurl.link.layerv.xyz/#at_nonexistent_token_xxx');
     // SPA always loads; client-side handles invalid tokens
     expect(res.status).toBe(200);

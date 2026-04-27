@@ -2,23 +2,25 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Open-source integrations for [QURL](https://layerv.ai) — quantum-style URLs that make protected resources invisible by default.
+Open-source integrations for [qURL™](https://layerv.ai) — Quantum URLs that make protected resources invisible by default.
 
-QURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A QURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+> **Quantum URL (qURL)** · The internet has a hidden layer. This is how you enter.
 
-This monorepo contains Go-based platform integrations (Slack, Teams, Discord), a CLI tool, and shared libraries for creating and managing QURLs.
+qURL is built on [OpenNHP](https://github.com/OpenNHP/opennhp) (Network-infrastructure Hiding Protocol), a cryptography-driven protocol that makes servers, ports, and domains invisible to unauthorized users. A qURL wraps any resource behind a short-lived, policy-bound, cryptographically protected access token. When the token is resolved, an NHP knock opens temporary firewall access for the caller's IP — the resource literally does not exist on the network until that moment. Think of it like quantum observation: the resource only becomes visible when an authorized user observes it.
+
+This monorepo contains Go-based platform integrations (Slack, Teams, Discord), a CLI tool, and shared libraries for creating and managing qURLs.
 
 ## Structure
 
 ```
 apps/           Per-integration applications (independent release tracks)
   slack/        Slack bot — slash commands, link unfurling, notifications
-  cli/          CLI tool for QURL
+  cli/          CLI tool for qURL
   teams/        Microsoft Teams (planned)
   discord/      Discord bot (planned)
   zapier/       Zapier integration (planned)
 shared/         Shared libraries used by all integrations
-  client/       QURL API client
+  client/       qURL API client
   auth/         API key helpers
   events/       Webhook event parsing
   formatting/   Chat message templates
@@ -36,7 +38,7 @@ Language-specific SDKs have been extracted into standalone repositories:
 
 ## Configuration
 
-All integrations connect to the QURL API. The endpoint is configurable via the `QURL_ENDPOINT` environment variable (defaults to `https://api.layerv.xyz`). Authentication is handled via API keys set in the `QURL_API_KEY` environment variable.
+All integrations connect to the qURL API. The endpoint is configurable via the `QURL_ENDPOINT` environment variable (defaults to `https://api.layerv.xyz`). Authentication is handled via API keys set in the `QURL_API_KEY` environment variable.
 
 ## Development
 

@@ -1,5 +1,5 @@
 /**
- * Tests for /qurl send feature — helper functions, QURL client, connector client,
+ * Tests for /qurl send feature — helper functions, qURL client, connector client,
  * places client, and database methods.
  */
 
@@ -64,9 +64,13 @@ jest.mock('discord.js', () => ({
     setThumbnail: jest.fn().mockReturnThis(),
   })),
   PermissionFlagsBits: { ManageRoles: 1n },
-  ActionRowBuilder: jest.fn().mockImplementation(() => ({
-    addComponents: jest.fn().mockReturnThis(),
-  })),
+  ActionRowBuilder: jest.fn().mockImplementation(() => {
+    const row = { components: [], addComponents: jest.fn(function (...args) {
+      row.components.push(...args.flat());
+      return row;
+    }) };
+    return row;
+  }),
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
@@ -487,10 +491,10 @@ describe('Helper functions', () => {
 });
 
 // =========================================================================
-// 2. QURL Client (src/qurl.js)
+// 2. qURL Client (src/qurl.js)
 // =========================================================================
 
-describe('QURL client', () => {
+describe('qURL client', () => {
   let qurl;
 
   beforeEach(() => {
@@ -549,7 +553,7 @@ describe('QURL client', () => {
       });
 
       await expect(qurl.createOneTimeLink('https://example.com', '1h', 'desc'))
-        .rejects.toThrow(/QURL API POST.*failed.*500/);
+        .rejects.toThrow(/qURL API POST.*failed.*500/);
     });
 
     it('includes authorization header', async () => {
@@ -588,7 +592,7 @@ describe('QURL client', () => {
         text: async () => 'Not Found',
       });
 
-      await expect(qurl.deleteLink('bad-id')).rejects.toThrow(/QURL API DELETE.*failed.*404/);
+      await expect(qurl.deleteLink('bad-id')).rejects.toThrow(/qURL API DELETE.*failed.*404/);
     });
   });
 });
@@ -1305,9 +1309,13 @@ describe('handleAddRecipients', () => {
         setURL: jest.fn().mockReturnThis(),
       })),
       PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-      ActionRowBuilder: jest.fn().mockImplementation(() => ({
-        addComponents: jest.fn().mockReturnThis(),
-      })),
+      ActionRowBuilder: jest.fn().mockImplementation(() => {
+        const row = { components: [], addComponents: jest.fn(function (...args) {
+          row.components.push(...args.flat());
+          return row;
+        }) };
+        return row;
+      }),
       ButtonBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setLabel: jest.fn().mockReturnThis(),

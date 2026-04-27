@@ -135,7 +135,7 @@ describe('Discord: Guild Members', () => {
       const humans = members.filter((m: any) => !m.user?.bot);
       console.log(`Members: ${humans.length} humans + ${bots.length} bots`);
 
-      // The QURL bot should be in the list
+      // The qURL bot should be in the list
       const qurlBot = members.find((m: any) => m.user?.id === env.BOT_CLIENT_ID);
       expect(qurlBot).toBeDefined();
     } catch (e) {
@@ -177,7 +177,7 @@ describe('Discord: Send to Channel', () => {
           { name: 'Resource Type', value: 'Test', inline: true },
           { name: 'Status', value: 'Passing', inline: true },
         ],
-        footer: { text: 'QURL E2E Test Suite' },
+        footer: { text: 'qURL E2E Test Suite' },
       }],
     });
     expect(msg.embeds.length).toBe(1);

@@ -1,5 +1,5 @@
 /**
- * QURL service + connector HTTP API client for E2E testing.
+ * qURL service + connector HTTP API client for E2E testing.
  * Drives file upload, link minting, link access, and revocation.
  */
 
@@ -41,7 +41,7 @@ export async function uploadFile(
   return res.json() as Promise<{ resource_id: string; hash: string }>;
 }
 
-/** Mint a one-time QURL link for a resource */
+/** Mint a one-time qURL link for a resource */
 export async function mintLink(
   mintUrl: string,
   apiKey: string,
@@ -78,7 +78,7 @@ export async function mintLink(
   };
 }
 
-/** Access a QURL link and return the HTTP result */
+/** Access a qURL link and return the HTTP result */
 export async function accessLink(url: string): Promise<LinkAccessResult> {
   const res = await fetch(url, { redirect: 'follow' });
   return {
@@ -89,7 +89,7 @@ export async function accessLink(url: string): Promise<LinkAccessResult> {
   };
 }
 
-/** Access a QURL link without following redirects */
+/** Access a qURL link without following redirects */
 export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResult> {
   const res = await fetch(url, { redirect: 'manual' });
   return {
@@ -99,7 +99,7 @@ export async function accessLinkNoRedirect(url: string): Promise<LinkAccessResul
   };
 }
 
-/** Revoke a QURL link by resource_id (revokes entire resource) */
+/** Revoke a qURL link by resource_id (revokes entire resource) */
 export async function revokeLink(
   baseUrl: string,
   apiKey: string,

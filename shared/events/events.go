@@ -1,9 +1,9 @@
-// Package events provides webhook event parsing for QURL integrations.
+// Package events provides webhook event parsing for qURL integrations.
 package events
 
 import "time"
 
-// Type identifies a QURL webhook event type.
+// Type identifies a qURL webhook event type.
 type Type string
 
 // Webhook event types.
@@ -14,7 +14,7 @@ const (
 	TypeQURLDeleted Type = "qurl.deleted"
 )
 
-// Event is a QURL webhook event.
+// Event is a qURL webhook event.
 type Event struct {
 	Type      Type      `json:"type"`
 	ID        string    `json:"id"`

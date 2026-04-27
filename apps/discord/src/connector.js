@@ -34,7 +34,7 @@ async function cdnFetchFollowSafe(sourceUrl) {
 // Log the raw connector body at debug level and throw a body-free Error.
 // Mirrors qurl.js — connector responses may echo request headers/tokens, and
 // upstream callers log err.message into application logs.
-// QURL API error codes the connector can pass back via the `error` string.
+// qURL API error codes the connector can pass back via the `error` string.
 // Surface them as Error.apiCode so the caller can branch on a typed value
 // instead of substring-matching the human-readable message (which the
 // connector / upstream API can rephrase without notice).
@@ -217,7 +217,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
 
 /**
  * Re-register an already-downloaded file buffer with the connector.
- * Creates a new QURL resource (with a fresh token pool) without
+ * Creates a new qURL resource (with a fresh token pool) without
  * re-downloading from Discord CDN. Used when the per-resource token
  * quota (10) is exhausted and more recipients need links.
  */
@@ -305,7 +305,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   // Bound `n` defensively — callers in this codebase already cap at 10
   // (TOKENS_PER_RESOURCE) or 50 (recipient max), but mintLinks is exported
   // so validate at the API boundary. Negative or non-integer values would
-  // make the QURL backend behave unpredictably; 100 is a comfortable ceiling.
+  // make the qURL backend behave unpredictably; 100 is a comfortable ceiling.
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }

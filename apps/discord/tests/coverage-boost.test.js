@@ -2,7 +2,7 @@
  * Additional tests to boost line coverage to 90%+ on commands.js.
  *
  * Covers:
- * - buildDeliveryEmbed (location path, personalMessage)
+ * - buildDeliveryPayload (location path, personalMessage)
  * - buildConfirmMsg truncation with > 5 recipients + expand toggle
  * - collector button handlers (revoke, expand, add recipients)
  * - collector end timeout
@@ -100,9 +100,13 @@ jest.mock('discord.js', () => ({
   }),
   EmbedBuilder: jest.fn().mockImplementation(makeEmbed),
   PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
-  ActionRowBuilder: jest.fn().mockImplementation(() => ({
-    addComponents: jest.fn().mockReturnThis(),
-  })),
+  ActionRowBuilder: jest.fn().mockImplementation(() => {
+    const row = { components: [], addComponents: jest.fn(function (...args) {
+      row.components.push(...args.flat());
+      return row;
+    }) };
+    return row;
+  }),
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
@@ -286,10 +290,10 @@ beforeEach(() => {
 });
 
 // =========================================================================
-// 1. buildDeliveryEmbed — location resource type
+// 1. buildDeliveryPayload — location resource type
 // =========================================================================
 
-describe('buildDeliveryEmbed — location resource type', () => {
+describe('buildDeliveryPayload — location resource type', () => {
   it('adds Location field (no filename) for maps resource with personalMessage', async () => {
     const recipients = [{ id: 'r1', username: 'Alice' }];
     mockGetText.mockReturnValue(recipients);
@@ -328,13 +332,19 @@ describe('buildDeliveryEmbed — location resource type', () => {
     await cmd.execute(interaction);
 
     expect(mockSendDM).toHaveBeenCalledTimes(1);
-    const dmEmbed = embedInstances.find(e => e.setAuthor.mock.calls.length > 0);
+    // The DM embed has no setAuthor, no Resource Type / Filename row,
+    // and no per-kind description. The description is universal
+    // ("opened a door for you"), the personal message lives in an
+    // unlabeled quote-block field, and the link is a Step Through button.
+    // Find the embed by setDescription presence (setAuthor is unused).
+    const dmEmbed = embedInstances.find(e => e.setDescription.mock.calls.length > 0);
     expect(dmEmbed).toBeDefined();
-    const locationField = dmEmbed._fields.find(f => f.name === 'Resource Type' && f.value === 'Location');
-    expect(locationField).toBeTruthy();
-    const msgField = dmEmbed._fields.find(f => f.name === 'Message');
+    const descCalls = dmEmbed.setDescription.mock.calls;
+    expect(descCalls[0][0]).toContain('opened a door for you');
+    // Personal message renders as `> *"…"*` in a no-name field (see
+    // buildDeliveryPayload). Match the inner text rather than the wrapper.
+    const msgField = dmEmbed._fields.find(f => typeof f.value === 'string' && f.value.includes('Meet me here'));
     expect(msgField).toBeTruthy();
-    expect(msgField.value).toContain('Meet me here');
   });
 });
 

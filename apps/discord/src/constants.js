@@ -10,10 +10,10 @@ const COLORS = {
   GOLD: 0xF1C40F,         // Gold - achievements/milestones
   GITHUB_GREEN: 0x238636, // GitHub green - issues/PRs
   GITHUB_PURPLE: 0x6e5494,// GitHub purple - commits
-  QURL_BRAND: 0x00d4ff,   // Cyan - QURL delivery embeds
+  QURL_BRAND: 0x00d4ff,   // Cyan - qURL delivery embeds
 };
 
-// QURL resource types
+// qURL resource types
 const RESOURCE_TYPES = {
   FILE: 'file',
   MAPS: 'maps',

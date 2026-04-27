@@ -12,7 +12,7 @@ jest.mock('../src/logger', () => ({
 
 const originalFetch = globalThis.fetch;
 
-describe('QURL client — getResourceStatus (line 51)', () => {
+describe('qURL client — getResourceStatus (line 51)', () => {
   let qurl;
 
   beforeEach(() => {
@@ -65,7 +65,7 @@ describe('QURL client — getResourceStatus (line 51)', () => {
     });
 
     await expect(qurl.getResourceStatus('bad-id'))
-      .rejects.toThrow(/QURL API GET.*failed.*404/);
+      .rejects.toThrow(/qURL API GET.*failed.*404/);
   });
 
   it('returns null for 204 response (no content)', async () => {
@@ -91,7 +91,7 @@ describe('QURL client — getResourceStatus (line 51)', () => {
   });
 });
 
-describe('QURL client — retry logic on transient failures', () => {
+describe('qURL client — retry logic on transient failures', () => {
   let qurl;
   beforeEach(() => {
     jest.resetModules();
@@ -151,7 +151,7 @@ describe('QURL client — retry logic on transient failures', () => {
   });
 });
 
-describe('QURL client — createOneTimeLink happy path', () => {
+describe('qURL client — createOneTimeLink happy path', () => {
   let qurl;
   beforeEach(() => {
     jest.resetModules();
