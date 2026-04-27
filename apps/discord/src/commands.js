@@ -27,6 +27,19 @@ const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isA
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
+// Recipient-DM expiry-line tense prefixes. The present-tense form is
+// rendered at send time inside buildDeliveryPayload; the
+// expired-dm-label sweeper (src/expired-dm-label-sweeper.js) flips the
+// prefix to past-tense once the link has actually expired.
+//
+// Both strings end with literal `<t:` so the substitution is anchored —
+// a stray "Portal closes" elsewhere in the embed (unlikely, but
+// defensive) won't trip the sweeper. Discord's relative-time markdown
+// (`<t:N:R>`) updates client-side automatically; only the verb needs
+// rewriting. Exported so the sweeper imports the same literals.
+const EXPIRY_PREFIX_PRESENT = '🕐 Portal closes <t:';
+const EXPIRY_PREFIX_PAST = '🕐 Portal closed <t:';
+
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
@@ -369,7 +382,11 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
         if (!Number.isFinite(expiresAt)) {
           throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
         }
-        return `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`;
+        // Render present-tense at send. The expired-dm-label sweeper
+        // rewrites the prefix to past tense once the link expires \u2014
+        // see EXPIRY_PREFIX_PRESENT / EXPIRY_PREFIX_PAST and
+        // src/expired-dm-label-sweeper.js.
+        return `${EXPIRY_PREFIX_PRESENT}${expiresAt}:R>`;
       })(),
     },
     {
@@ -1169,8 +1186,29 @@ async function handleSend(interaction, apiKey) {
     });
 
     const sent = await sendDM(link.recipientId, dmPayload);
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { recipientId: link.recipientId, username: recipient?.username, sent };
+    db.updateSendDMStatus(sendId, link.recipientId, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    // Persist the recipient DM identifiers + absolute expiry so the
+    // expired-dm-label sweeper can edit "Portal closes" → "Portal closed"
+    // once the link expires. Logged-and-swallowed: if the persist fails,
+    // the recipient still has the DM (already delivered above) but the
+    // tense will stay present-tense forever for this row — acceptable
+    // degradation, not worth aborting the send.
+    if (sent.ok) {
+      try {
+        db.recordDMIdentifiers({
+          sendId,
+          recipientDiscordId: link.recipientId,
+          dmChannelId: sent.channelId,
+          dmMessageId: sent.messageId,
+          expiresAtUnix: expiresAt,
+        });
+      } catch (err) {
+        logger.warn('recordDMIdentifiers failed; expired-tense edit will be skipped for this row', {
+          sendId, recipientId: link.recipientId, error: err.message,
+        });
+      }
+    }
+    return { recipientId: link.recipientId, username: recipient?.username, sent: sent.ok };
   }, 5);
 
   for (const r of dmResults) {
@@ -1687,8 +1725,28 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
     // same update links.length times.
-    db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { sent, username: recipient.username };
+    db.updateSendDMStatus(sendId, recipient.id, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    // Persist DM identifiers on the rows just inserted (the
+    // recordDMIdentifiers SQL is scoped to dm_message_id IS NULL, so it
+    // only fills in the new add-recipients rows and won't overwrite
+    // identifiers from the original /qurl send DM if this recipient was
+    // somehow already in the send).
+    if (sent.ok) {
+      try {
+        db.recordDMIdentifiers({
+          sendId,
+          recipientDiscordId: recipient.id,
+          dmChannelId: sent.channelId,
+          dmMessageId: sent.messageId,
+          expiresAtUnix: expiresAt,
+        });
+      } catch (err) {
+        logger.warn('recordDMIdentifiers failed (add-recipients path); expired-tense edit will be skipped', {
+          sendId, recipientId: recipient.id, error: err.message,
+        });
+      }
+    }
+    return { sent: sent.ok, username: recipient.username };
   }, 5);
 
   for (const r of dmResults) {
@@ -2917,6 +2975,11 @@ module.exports = {
   registerCommands,
   handleCommand,
   verifyStateBinding,
+  // Expiry-line tense prefixes shared with src/expired-dm-label-sweeper.js.
+  // Exported so the sweeper substitutes against the same literals
+  // buildDeliveryPayload renders — single source of truth for the verb.
+  EXPIRY_PREFIX_PRESENT,
+  EXPIRY_PREFIX_PAST,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
   // NODE_ENV=test (jest's default); production deploys set NODE_ENV=production.

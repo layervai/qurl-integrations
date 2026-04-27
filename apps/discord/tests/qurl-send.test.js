@@ -99,6 +99,7 @@ jest.mock('../src/database', () => {
     recordQURLSend: jest.fn(),
     recordQURLSendBatch: jest.fn(),
     updateSendDMStatus: jest.fn(),
+    recordDMIdentifiers: jest.fn(),
     getRecentSends: jest.fn(() => []),
     getSendResourceIds: jest.fn(() => []),
     saveSendConfig: jest.fn(),
@@ -1358,13 +1359,14 @@ describe('handleAddRecipients', () => {
       recordQURLSend: jest.fn(),
       recordQURLSendBatch: jest.fn(),
       updateSendDMStatus: jest.fn(),
+      recordDMIdentifiers: jest.fn(),
       getRecentSends: jest.fn(() => []),
       getSendResourceIds: jest.fn(() => []),
     };
     jest.mock('../src/database', () => mockDb);
 
     // Mock discord helper
-    mockSendDM = jest.fn().mockResolvedValue(true);
+    mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
     jest.mock('../src/discord', () => ({
       assignContributorRole: jest.fn(),
       notifyPRMerge: jest.fn(),
@@ -1530,7 +1532,7 @@ describe('handleAddRecipients', () => {
       { qurl_link: 'https://q.test/mint-2' },
     ]);
 
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1575,7 +1577,7 @@ describe('handleAddRecipients', () => {
       hash: 'loc-hash',
     });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/otl-1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Charlie' },
@@ -1611,7 +1613,7 @@ describe('handleAddRecipients', () => {
       success: true,
     });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/maps-1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Dana' },
@@ -1648,8 +1650,8 @@ describe('handleAddRecipients', () => {
 
     // First DM succeeds, second fails
     mockSendDM
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+      .mockResolvedValueOnce({ ok: true, channelId: 'c', messageId: 'm' })
+      .mockResolvedValueOnce({ ok: false, channelId: null, messageId: null });
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1700,7 +1702,7 @@ describe('handleAddRecipients', () => {
       { qurl_link: 'https://q.test/link2' },
     ]);
 
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection([
       { id: 'rcpt-1', bot: false, username: 'Alice' },
@@ -1771,7 +1773,7 @@ describe('handleAddRecipients', () => {
       .mockResolvedValueOnce(batch1Links)
       .mockResolvedValueOnce(batch2Links);
 
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection(userList);
     const result = await handleAddRecipients('send-batch', users, mockOriginalInteraction, 'test-api-key');
@@ -1805,7 +1807,7 @@ describe('handleAddRecipients', () => {
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'new-res-C', fileBuffer: new ArrayBuffer(8) });
     const links = Array.from({ length: 8 }, (_, i) => ({ qurl_link: `https://q.test/l-${i}` }));
     mockMintLinks.mockResolvedValueOnce(links);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const users = makeUsersCollection(userList);
     const result = await handleAddRecipients('send-ok', users, mockOriginalInteraction, 'test-api-key');

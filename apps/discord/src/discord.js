@@ -777,16 +777,74 @@ async function postWeeklyDigest() {
   }
 }
 
-// Send DM to user
+// Send DM to user. Returns { ok, channelId, messageId } so callers that
+// need to edit the message later (e.g. the expired-dm-label sweeper, which
+// flips "Portal closes" → "Portal closed" once the link has expired) can
+// persist the identifiers. `ok=false` means delivery failed (user blocked
+// DMs, fetch error, etc.); channel/message IDs are null in that case.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
-    await user.send(message);
+    const sent = await user.send(message);
     logger.debug('Sent DM', { discordId });
-    return true;
+    return { ok: true, channelId: sent.channelId, messageId: sent.id };
   } catch (error) {
     logger.warn(`Failed to DM user ${discordId}`, { error: error.message });
-    return false;
+    return { ok: false, channelId: null, messageId: null };
+  }
+}
+
+// Edit a previously-sent DM to flip the present-tense expiry verb to past
+// tense. Used by the expired-dm-label sweeper once `<t:N:R>` has already
+// rolled over to "X minutes ago". Discord's relative-time markdown updates
+// client-side automatically, but the surrounding literal "closes" stays
+// present-tense unless we rewrite the embed.
+//
+// Returns:
+//   true  — edit succeeded OR the embed was already past-tense / didn't
+//           contain the expected prefix (treat as done; don't retry).
+//   false — permanent failure (channel/message gone, missing access).
+//           Caller marks the row as edited to stop the sweeper from
+//           retrying every minute forever.
+//   throw — transient failure (network, 5xx). Caller leaves row unedited
+//           so the next sweep retries.
+async function editDMToPastTense(channelId, messageId, fromPrefix, toPrefix) {
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return false;
+    const msg = await channel.messages.fetch(messageId);
+    if (!msg) return false;
+
+    let mutated = false;
+    const newEmbeds = msg.embeds.map(e => {
+      const json = e.toJSON();
+      if (Array.isArray(json.fields)) {
+        json.fields = json.fields.map(f => {
+          if (typeof f.value === 'string' && f.value.includes(fromPrefix)) {
+            mutated = true;
+            return { ...f, value: f.value.replace(fromPrefix, toPrefix) };
+          }
+          return f;
+        });
+      }
+      return EmbedBuilder.from(json);
+    });
+
+    // No prefix found ⇒ either the embed shape changed or the message
+    // was already edited (e.g. an in-flight retry from a prior crash).
+    // Treat as done so the row is marked edited and we don't loop.
+    if (!mutated) return true;
+
+    await msg.edit({ embeds: newEmbeds });
+    return true;
+  } catch (err) {
+    // Discord error codes that mean "this DM is gone, don't retry":
+    //   10003 Unknown Channel       — channel was deleted
+    //   10008 Unknown Message       — message was deleted
+    //   50001 Missing Access        — bot was blocked / removed from DM
+    //   50007 Cannot send DM to user — recipient blocked DMs since send
+    if ([10003, 10008, 50001, 50007].includes(err.code)) return false;
+    throw err;
   }
 }
 
@@ -884,6 +942,7 @@ module.exports = {
   postToGitHubFeed,
   postWeeklyDigest,
   sendDM,
+  editDMToPastTense,
   refreshCache,
   shutdown,
   getVoiceChannelMembers,

@@ -161,6 +161,15 @@ const SAFE_ALTERS = {
   // revocable. Used to hide already-revoked sends from the /qurl revoke
   // dropdown so users don't re-select a no-op and see "0/0 links revoked".
   revoked_at: 'ALTER TABLE qurl_send_configs ADD COLUMN revoked_at TEXT',
+  // Recipient-DM identifiers + absolute expiry, captured per-send so the
+  // expired-dm-label sweeper can flip "Portal closes <t:N:R>" to "Portal
+  // closed <t:N:R>" at expiry. Without these columns the sweeper has no
+  // handle on the message to edit. NULL on legacy rows predating this
+  // migration — the sweeper's IS NOT NULL guards exclude them.
+  dm_channel_id: 'ALTER TABLE qurl_sends ADD COLUMN dm_channel_id TEXT',
+  dm_message_id: 'ALTER TABLE qurl_sends ADD COLUMN dm_message_id TEXT',
+  expires_at_unix: 'ALTER TABLE qurl_sends ADD COLUMN expires_at_unix INTEGER',
+  expired_label_edited_at: 'ALTER TABLE qurl_sends ADD COLUMN expired_label_edited_at TEXT',
 };
 for (const [col, sql] of Object.entries(SAFE_ALTERS)) {
   try {
@@ -699,6 +708,66 @@ const dbModule = {
   updateSendDMStatus(sendId, recipientDiscordId, status) {
     const stmt = db.prepare('UPDATE qurl_sends SET dm_status = ? WHERE send_id = ? AND recipient_discord_id = ?');
     stmt.run(status, sendId, recipientDiscordId);
+  },
+
+  // Capture the Discord channel + message IDs of the recipient DM and the
+  // absolute expiry instant (Unix seconds) so the expired-dm-label sweeper
+  // can find this row and edit "Portal closes" → "Portal closed" once the
+  // link has actually expired. Called from commands.js right after a
+  // successful sendDM. A failure here doesn't block delivery (the recipient
+  // already has the DM); it just means the tense will stay present-tense
+  // forever for this row — logged-and-swallowed by the caller.
+  //
+  // `dm_message_id IS NULL` guard scopes the UPDATE to rows that haven't
+  // been recorded yet. This matters for /qurl add recipients: a recipient
+  // who already has rows from the original send AND the add-recipients
+  // call has rows for both, but the ADD path's qurl_sends rows are the
+  // ones with NULL identifiers right now — UPDATE without the guard
+  // would overwrite the original DM's identifiers and orphan its tense
+  // edit forever.
+  recordDMIdentifiers({ sendId, recipientDiscordId, dmChannelId, dmMessageId, expiresAtUnix }) {
+    const stmt = db.prepare(`
+      UPDATE qurl_sends
+      SET dm_channel_id = ?, dm_message_id = ?, expires_at_unix = ?
+      WHERE send_id = ? AND recipient_discord_id = ? AND dm_message_id IS NULL
+    `);
+    stmt.run(dmChannelId, dmMessageId, expiresAtUnix, sendId, recipientDiscordId);
+  },
+
+  // Sweeper input: rows whose link has expired AND we haven't yet edited the
+  // recipient DM to past-tense. `dm_status = 'sent'` excludes rows where the
+  // initial DM failed (no message exists to edit). `dm_message_id IS NOT NULL`
+  // excludes legacy rows predating the dm-identifiers migration. Ordered by
+  // expiry so the oldest unedited DMs land first if a sweep tail-truncates.
+  listExpiredUneditedDMs(batchSize = 50) {
+    const nowUnix = Math.floor(Date.now() / 1000);
+    return db.prepare(`
+      SELECT id, send_id, recipient_discord_id, dm_channel_id, dm_message_id
+      FROM qurl_sends
+      WHERE expires_at_unix IS NOT NULL
+        AND expires_at_unix < ?
+        AND expired_label_edited_at IS NULL
+        AND dm_message_id IS NOT NULL
+        AND dm_status = 'sent'
+      ORDER BY expires_at_unix ASC
+      LIMIT ?
+    `).all(nowUnix, batchSize);
+  },
+
+  // Mark every row sharing this dm_message_id as past-tense-edited. A
+  // single recipient DM from /qurl add recipients can carry up to 5 links
+  // → up to 5 qurl_sends rows pointing at the same dm_message_id. One
+  // successful (or permanent-failure) edit settles the entire group; this
+  // method does the bulk update so the sweeper doesn't re-attempt the same
+  // discord.js fetch + edit for sibling rows. NULL guard prevents
+  // double-stamping the timestamp on a re-sweep that races a manual
+  // marker.
+  markDMExpiredLabelEditedByMessageId(messageId) {
+    db.prepare(`
+      UPDATE qurl_sends
+      SET expired_label_edited_at = CURRENT_TIMESTAMP
+      WHERE dm_message_id = ? AND expired_label_edited_at IS NULL
+    `).run(messageId);
   },
 
   getRecentSends(senderDiscordId, limit = 10) {
