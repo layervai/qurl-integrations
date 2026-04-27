@@ -183,6 +183,39 @@ for (const [col, sql] of Object.entries(SAFE_ALTERS)) {
   }
 }
 
+// Partial indexes that reference SAFE_ALTERS-added columns. These MUST
+// run AFTER the ALTER block — SQLite parses column references at index
+// creation time, so an index on a not-yet-existing column would fail on
+// a fresh DB. Both indexes use partial-index WHERE clauses to keep the
+// index footprint tiny (only un-swept rows on the qurl_sends table) —
+// once a row's expired-label is edited, it drops out of the index.
+const SAFE_INDEXES = [
+  // Drives expired-dm-label-sweeper.js's listExpiredUneditedDMs every
+  // 60s. The leading column matches the sort/filter key; the partial-
+  // WHERE matches the sweeper's predicate exactly so the planner can
+  // satisfy the SELECT without touching most of qurl_sends. Without
+  // this, the sweeper does a full table scan once/minute forever.
+  "CREATE INDEX IF NOT EXISTS idx_qurl_sends_expiry_sweeper "
+    + "ON qurl_sends(expires_at_unix) "
+    + "WHERE expired_label_edited_at IS NULL "
+    + "AND dm_message_id IS NOT NULL "
+    + "AND dm_status = 'sent'",
+  // Drives markDMExpiredLabelEditedByMessageId — called once per unique
+  // message_id per sweep (up to 50× / minute). Partial form keeps it
+  // small since most legacy/failed-DM rows have NULL dm_message_id.
+  "CREATE INDEX IF NOT EXISTS idx_qurl_sends_dm_message_id "
+    + "ON qurl_sends(dm_message_id) "
+    + "WHERE dm_message_id IS NOT NULL",
+];
+for (const sql of SAFE_INDEXES) {
+  try {
+    db.exec(sql);
+  } catch (err) {
+    logger.error('SAFE_INDEXES exec failed', { sql, error: err.message });
+    throw err;
+  }
+}
+
 // Badge types (thresholds adjusted for realistic open source contribution cadence)
 const BADGE_TYPES = {
   FIRST_PR: 'first_pr',           // 🌱 First PR

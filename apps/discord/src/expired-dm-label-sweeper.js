@@ -17,10 +17,15 @@
 const db = require('./database');
 const logger = require('./logger');
 const discord = require('./discord');
-const { EXPIRY_PREFIX_PRESENT, EXPIRY_PREFIX_PAST } = require('./constants');
 
 const SWEEP_INTERVAL_MS = 60 * 1000; // 1 minute
 const BATCH = 50;
+// Edit concurrency. Discord per-channel/user edit rate limits are
+// generous (5+ req/s sustained); CONCURRENCY=5 drains a 50-row backlog
+// in ~3s instead of ~15s sequential, while leaving headroom under the
+// global rate limit. Mirrors `batchSettled` in commands.js without
+// importing it (keeps the sweeper self-contained).
+const CONCURRENCY = 5;
 
 // Re-entrancy guard. With a 60s interval and batch=50 sequential Discord
 // edits per sweep, a Discord 5xx outage can stretch a sweep past 60s; the
@@ -50,40 +55,49 @@ async function sweepOnce() {
     }
     if (rows.length === 0) return;
 
-    // Dedupe by dm_message_id so we issue one Discord API edit per unique
-    // DM. Multiple links to the same recipient via /qurl add recipients
-    // share a single message_id; we still want to mark all sibling rows
-    // edited (markDMExpiredLabelEditedByMessageId handles that bulk update).
-    const seen = new Set();
+    // Dedupe by dm_message_id BEFORE edit so a single consolidated DM
+    // (from /qurl add recipients carrying multiple links → multiple
+    // qurl_sends rows) gets exactly one Discord API edit. The bulk-mark
+    // by message_id below handles all sibling rows in one UPDATE.
+    // Computed up-front so the parallel batch below doesn't race the
+    // dedup Set.
+    const uniqueByMessageId = new Map();
+    for (const row of rows) {
+      if (!uniqueByMessageId.has(row.dm_message_id)) {
+        uniqueByMessageId.set(row.dm_message_id, row);
+      }
+    }
+    const uniqueRows = [...uniqueByMessageId.values()];
+
     let edited = 0;
     let permanentFails = 0;
-    for (const row of rows) {
-      if (seen.has(row.dm_message_id)) continue;
-      seen.add(row.dm_message_id);
-
-      try {
-        const ok = await discord.editDMToPastTense(
-          row.dm_channel_id,
-          row.dm_message_id,
-          EXPIRY_PREFIX_PRESENT,
-          EXPIRY_PREFIX_PAST,
-        );
+    for (let i = 0; i < uniqueRows.length; i += CONCURRENCY) {
+      const batch = uniqueRows.slice(i, i + CONCURRENCY);
+      const results = await Promise.allSettled(batch.map(async (row) => {
+        const ok = await discord.editDMToPastTense(row.dm_channel_id, row.dm_message_id);
         // ok === true  → edit landed (or was already past-tense). Mark all
         //                sibling rows so we don't re-attempt next sweep.
         // ok === false → permanent Discord failure (DM/channel gone, bot
         //                blocked). Same marker — there's nothing to retry.
         // throw        → transient. Don't mark; next sweep retries.
         db.markDMExpiredLabelEditedByMessageId(row.dm_message_id);
-        if (ok) edited++;
-        else permanentFails++;
-      } catch (err) {
-        logger.warn('Expired-DM-label edit failed (will retry next sweep)', {
-          sendId: row.send_id,
-          recipientId: row.recipient_discord_id,
-          channelId: row.dm_channel_id,
-          messageId: row.dm_message_id,
-          error: err.message,
-        });
+        return ok;
+      }));
+      for (let j = 0; j < results.length; j++) {
+        const r = results[j];
+        const row = batch[j];
+        if (r.status === 'fulfilled') {
+          if (r.value) edited++;
+          else permanentFails++;
+        } else {
+          logger.warn('Expired-DM-label edit failed (will retry next sweep)', {
+            sendId: row.send_id,
+            recipientId: row.recipient_discord_id,
+            channelId: row.dm_channel_id,
+            messageId: row.dm_message_id,
+            error: r.reason?.message ?? String(r.reason),
+          });
+        }
       }
     }
 
@@ -106,14 +120,14 @@ async function sweepOnce() {
     if (permanentFails > 0) {
       logger.warn('Expired-DM-label sweep recorded permanent failures', {
         processedRows: rows.length,
-        uniqueMessages: seen.size,
+        uniqueMessages: uniqueRows.length,
         edited,
         permanentFails,
       });
     } else if (edited > 0) {
       logger.info('Expired-DM-label sweep complete', {
         processedRows: rows.length,
-        uniqueMessages: seen.size,
+        uniqueMessages: uniqueRows.length,
         edited,
       });
     }

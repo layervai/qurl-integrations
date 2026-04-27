@@ -808,7 +808,15 @@ async function sendDM(discordId, message) {
 //           retrying every minute forever.
 //   throw — transient failure (network, 5xx). Caller leaves row unedited
 //           so the next sweep retries.
-async function editDMToPastTense(channelId, messageId, fromPrefix, toPrefix) {
+async function editDMToPastTense(channelId, messageId) {
+  // Prefixes are read from constants directly — single caller (the
+  // expired-dm-label sweeper) and the literals are part of the contract
+  // with buildDeliveryPayload's render output. Pulling them in via
+  // require keeps the call site clean and prevents a future caller from
+  // accidentally passing undefined (which would silently make
+  // `String#includes` always false → row marked edited forever with the
+  // embed still present-tense).
+  const { EXPIRY_PREFIX_PRESENT: fromPrefix, EXPIRY_PREFIX_PAST: toPrefix } = require('./constants');
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return false;

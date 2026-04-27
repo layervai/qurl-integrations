@@ -18,13 +18,6 @@ jest.mock('../src/discord', () => ({
   editDMToPastTense: mockEditDMToPastTense,
 }));
 
-// Stub constants.js for just the prefixes the sweeper consumes — keeps
-// the test self-contained even if other constants change.
-jest.mock('../src/constants', () => ({
-  EXPIRY_PREFIX_PRESENT: 'PRESENT_PREFIX_',
-  EXPIRY_PREFIX_PAST: 'PAST_PREFIX_',
-}));
-
 const mockLogger = {
   info: jest.fn(),
   warn: jest.fn(),
@@ -57,8 +50,8 @@ describe('expired-dm-label-sweeper.sweepOnce', () => {
     await sweepOnce();
 
     expect(mockEditDMToPastTense).toHaveBeenCalledTimes(2);
-    expect(mockEditDMToPastTense).toHaveBeenCalledWith('c1', 'm1', 'PRESENT_PREFIX_', 'PAST_PREFIX_');
-    expect(mockEditDMToPastTense).toHaveBeenCalledWith('c2', 'm2', 'PRESENT_PREFIX_', 'PAST_PREFIX_');
+    expect(mockEditDMToPastTense).toHaveBeenCalledWith('c1', 'm1');
+    expect(mockEditDMToPastTense).toHaveBeenCalledWith('c2', 'm2');
     expect(mockMarkDMExpiredLabelEditedByMessageId).toHaveBeenCalledTimes(2);
     expect(mockMarkDMExpiredLabelEditedByMessageId).toHaveBeenCalledWith('m1');
     expect(mockMarkDMExpiredLabelEditedByMessageId).toHaveBeenCalledWith('m2');

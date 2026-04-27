@@ -324,6 +324,10 @@ describe('discord module', () => {
   });
 
   describe('editDMToPastTense', () => {
+    // Use the real prefixes so this test catches a constants.js rename
+    // automatically (the function imports from constants, not args).
+    const { EXPIRY_PREFIX_PRESENT, EXPIRY_PREFIX_PAST } = require('../src/constants');
+
     function buildMessage({ fieldValues, edit = jest.fn().mockResolvedValue(undefined) }) {
       return {
         edit,
@@ -337,16 +341,16 @@ describe('discord module', () => {
       };
     }
 
-    it('rewrites "Portal closes" → "Portal closed" when present', async () => {
-      const msg = buildMessage({ fieldValues: ['hello', 'P_PRESENT_<t:1234:R>', 'world'] });
+    it('rewrites present-prefix → past-prefix when present', async () => {
+      const msg = buildMessage({ fieldValues: ['hello', `${EXPIRY_PREFIX_PRESENT}1234:R>`, 'world'] });
       const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
       mockClient.channels.fetch.mockResolvedValue(channel);
 
-      const ok = await discord.editDMToPastTense('chan-1', 'msg-1', 'P_PRESENT_', 'P_PAST_');
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
       expect(ok).toBe(true);
       expect(msg.edit).toHaveBeenCalledTimes(1);
       const edited = msg.edit.mock.calls[0][0];
-      expect(edited.embeds[0].__fromJson.fields[1].value).toBe('P_PAST_<t:1234:R>');
+      expect(edited.embeds[0].__fromJson.fields[1].value).toBe(`${EXPIRY_PREFIX_PAST}1234:R>`);
       // Untouched fields stay identical.
       expect(edited.embeds[0].__fromJson.fields[0].value).toBe('hello');
       expect(edited.embeds[0].__fromJson.fields[2].value).toBe('world');
@@ -356,11 +360,11 @@ describe('discord module', () => {
       // Benign retry path: a prior sweep / bot crash already flipped the
       // embed; the next sweep finds past-tense, doesn't edit again, and
       // does NOT warn.
-      const msg = buildMessage({ fieldValues: ['hello', 'P_PAST_<t:1234:R>'] });
+      const msg = buildMessage({ fieldValues: ['hello', `${EXPIRY_PREFIX_PAST}1234:R>`] });
       const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
       mockClient.channels.fetch.mockResolvedValue(channel);
 
-      const ok = await discord.editDMToPastTense('chan-1', 'msg-1', 'P_PRESENT_', 'P_PAST_');
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
       expect(ok).toBe(true);
       expect(msg.edit).not.toHaveBeenCalled();
     });
@@ -374,10 +378,9 @@ describe('discord module', () => {
       const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
       mockClient.channels.fetch.mockResolvedValue(channel);
 
-      const ok = await discord.editDMToPastTense('chan-1', 'msg-1', 'P_PRESENT_', 'P_PAST_');
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
       expect(ok).toBe(true);
       expect(msg.edit).not.toHaveBeenCalled();
-      // Logger spy: dump warn calls so the assertion is unambiguous.
       const logger = require('../src/logger');
       expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('shape regression'),
@@ -392,7 +395,7 @@ describe('discord module', () => {
       // retry every minute forever.
       for (const code of [10003, 10008, 10013, 50001, 50007, 50013]) {
         mockClient.channels.fetch.mockRejectedValueOnce(Object.assign(new Error('discord'), { code }));
-        const ok = await discord.editDMToPastTense('chan-x', 'msg-x', 'P_PRESENT_', 'P_PAST_');
+        const ok = await discord.editDMToPastTense('chan-x', 'msg-x');
         expect(ok).toBe(false);
       }
     });
@@ -401,7 +404,7 @@ describe('discord module', () => {
       // 5xx, network errors, etc. — caller leaves the row unmarked so the
       // sweeper retries on the next sweep.
       mockClient.channels.fetch.mockRejectedValueOnce(Object.assign(new Error('500'), { code: 500 }));
-      await expect(discord.editDMToPastTense('chan-x', 'msg-x', 'P_PRESENT_', 'P_PAST_')).rejects.toThrow('500');
+      await expect(discord.editDMToPastTense('chan-x', 'msg-x')).rejects.toThrow('500');
     });
   });
 
