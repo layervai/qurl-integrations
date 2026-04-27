@@ -222,11 +222,14 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // embed ("Portal closes in **24 hours**" forever) would silently
   // regress this UX — the assertion below catches it.
   it('renders Discord native relative-time <t:N:R> for the Portal-closes line', () => {
+    const { EXPIRY_PREFIX_PRESENT } = require('../src/constants');
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes'));
+    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes(EXPIRY_PREFIX_PRESENT));
     expect(portalField).toBeDefined();
-    expect(portalField.value).toBe('\ud83d\udd50 Portal closes <t:1735689600:R>');
+    // Use the shared constant so a prefix rename in constants.js
+    // automatically propagates here \u2014 single source of truth.
+    expect(portalField.value).toBe(`${EXPIRY_PREFIX_PRESENT}1735689600:R>`);
     // Locks against accidental reversion to a static label
     expect(portalField.value).not.toMatch(/Portal closes in \*\*\d/);
   });

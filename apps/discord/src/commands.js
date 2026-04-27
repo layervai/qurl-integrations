@@ -27,10 +27,6 @@ const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isA
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
-// EXPIRY_PREFIX_PRESENT used in buildDeliveryPayload's render path; the
-// matching EXPIRY_PREFIX_PAST is consumed by the expired-dm-label
-// sweeper. Both literals live in constants.js as the single source of
-// truth — see the block-comment there for the rationale.
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
@@ -236,6 +232,44 @@ async function batchSettled(items, fn, batchSize = 5) {
     results.push(...batchResults);
   }
   return results;
+}
+
+// Send a recipient DM and persist the resulting identifiers + absolute
+// expiry so the expired-dm-label sweeper can flip "Portal closes" →
+// "Portal closed" once the link expires. Pulled out of handleSend +
+// handleAddRecipients (the two callers) to keep the persist contract in
+// one place — both call sites used to repeat the same 14-line block,
+// which is the kind of copy-paste that drifts when one path changes
+// (e.g. a future column added to recordDMIdentifiers).
+//
+// recordDMIdentifiers failure is logged-and-swallowed: the DM was
+// already delivered, so we don't want to abort the batch — the only
+// downside is the tense stays present-tense forever for this row. The
+// `dm_message_id IS NULL` guard inside recordDMIdentifiers prevents an
+// /qurl-add-recipients call from clobbering identifiers persisted by
+// the original send.
+//
+// Returns the raw sendDM result ({ ok, channelId, messageId }) so the
+// caller can shape its own per-batch return value.
+async function sendDMAndPersist({ recipientDiscordId, payload, sendId, expiresAtUnix, contextLabel }) {
+  const sent = await sendDM(recipientDiscordId, payload);
+  db.updateSendDMStatus(sendId, recipientDiscordId, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
+  if (sent.ok) {
+    try {
+      db.recordDMIdentifiers({
+        sendId,
+        recipientDiscordId,
+        dmChannelId: sent.channelId,
+        dmMessageId: sent.messageId,
+        expiresAtUnix,
+      });
+    } catch (err) {
+      logger.warn('recordDMIdentifiers failed; expired-tense edit will be skipped for this row', {
+        sendId, recipientId: recipientDiscordId, contextLabel, error: err.message,
+      });
+    }
+  }
+  return sent;
 }
 
 // Resolve the sender's display alias from an interaction, the same way
@@ -1177,29 +1211,13 @@ async function handleSend(interaction, apiKey) {
       personalMessage,
     });
 
-    const sent = await sendDM(link.recipientId, dmPayload);
-    db.updateSendDMStatus(sendId, link.recipientId, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    // Persist the recipient DM identifiers + absolute expiry so the
-    // expired-dm-label sweeper can edit "Portal closes" → "Portal closed"
-    // once the link expires. Logged-and-swallowed: if the persist fails,
-    // the recipient still has the DM (already delivered above) but the
-    // tense will stay present-tense forever for this row — acceptable
-    // degradation, not worth aborting the send.
-    if (sent.ok) {
-      try {
-        db.recordDMIdentifiers({
-          sendId,
-          recipientDiscordId: link.recipientId,
-          dmChannelId: sent.channelId,
-          dmMessageId: sent.messageId,
-          expiresAtUnix: expiresAt,
-        });
-      } catch (err) {
-        logger.warn('recordDMIdentifiers failed; expired-tense edit will be skipped for this row', {
-          sendId, recipientId: link.recipientId, error: err.message,
-        });
-      }
-    }
+    const sent = await sendDMAndPersist({
+      recipientDiscordId: link.recipientId,
+      payload: dmPayload,
+      sendId,
+      expiresAtUnix: expiresAt,
+      contextLabel: 'handleSend',
+    });
     return { recipientId: link.recipientId, username: recipient?.username, sent: sent.ok };
   }, 5);
 
@@ -1712,32 +1730,19 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
     }
 
-    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
-    // updateSendDMStatus updates every qurl_sends row matching (sendId,
-    // recipient.id), so a single call covers all links for this recipient.
-    // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
-    // same update links.length times.
-    db.updateSendDMStatus(sendId, recipient.id, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    // Persist DM identifiers on the rows just inserted (the
-    // recordDMIdentifiers SQL is scoped to dm_message_id IS NULL, so it
-    // only fills in the new add-recipients rows and won't overwrite
-    // identifiers from the original /qurl send DM if this recipient was
-    // somehow already in the send).
-    if (sent.ok) {
-      try {
-        db.recordDMIdentifiers({
-          sendId,
-          recipientDiscordId: recipient.id,
-          dmChannelId: sent.channelId,
-          dmMessageId: sent.messageId,
-          expiresAtUnix: expiresAt,
-        });
-      } catch (err) {
-        logger.warn('recordDMIdentifiers failed (add-recipients path); expired-tense edit will be skipped', {
-          sendId, recipientId: recipient.id, error: err.message,
-        });
-      }
-    }
+    // updateSendDMStatus inside sendDMAndPersist updates every qurl_sends
+    // row matching (sendId, recipient.id), so a single call covers all
+    // links for this consolidated DM. recordDMIdentifiers is scoped to
+    // dm_message_id IS NULL inside the SQL — won't overwrite identifiers
+    // from the original /qurl send if a recipient was somehow already
+    // in the send.
+    const sent = await sendDMAndPersist({
+      recipientDiscordId: recipient.id,
+      payload: { embeds: allEmbeds, components: allComponents },
+      sendId,
+      expiresAtUnix: expiresAt,
+      contextLabel: 'handleAddRecipients',
+    });
     return { sent: sent.ok, username: recipient.username };
   }, 5);
 
