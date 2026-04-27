@@ -195,6 +195,10 @@ const SAFE_INDEXES = [
   // WHERE matches the sweeper's predicate exactly so the planner can
   // satisfy the SELECT without touching most of qurl_sends. Without
   // this, the sweeper does a full table scan once/minute forever.
+  // The `dm_status = 'sent'` literal MUST stay in sync with
+  // DM_STATUS.SENT in constants.js — see the comment on
+  // listExpiredUneditedDMs below. Renaming the constant requires
+  // updating all three call sites in the same PR.
   "CREATE INDEX IF NOT EXISTS idx_qurl_sends_expiry_sweeper "
     + "ON qurl_sends(expires_at_unix) "
     + "WHERE expired_label_edited_at IS NULL "
@@ -772,6 +776,13 @@ const dbModule = {
   // initial DM failed (no message exists to edit). `dm_message_id IS NOT NULL`
   // excludes legacy rows predating the dm-identifiers migration. Ordered by
   // expiry so the oldest unedited DMs land first if a sweep tail-truncates.
+  //
+  // The literal `'sent'` MUST stay in sync with `DM_STATUS.SENT` in
+  // constants.js AND the partial-index WHERE clause on
+  // idx_qurl_sends_expiry_sweeper (see SAFE_INDEXES above) — all three
+  // need to be the same string for the index to satisfy this query. If
+  // `DM_STATUS.SENT` is ever renamed, update all three places in the
+  // same PR or the sweeper falls back to a full table scan.
   listExpiredUneditedDMs(batchSize = 50) {
     const nowUnix = Math.floor(Date.now() / 1000);
     return db.prepare(`

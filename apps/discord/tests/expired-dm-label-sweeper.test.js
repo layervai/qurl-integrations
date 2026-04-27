@@ -194,6 +194,46 @@ describe('expired-dm-label-sweeper.sweepOnce', () => {
     );
   });
 
+  it('distinguishes "edit succeeded but mark failed" from "edit failed"', async () => {
+    // If the Discord edit lands but the DB mark then throws (transient
+    // SQLite busy/lock), the sweeper must NOT log the same line as a
+    // real edit failure — otherwise dashboards conflate self-healing
+    // mark hiccups with actual edit failures and the apparent failure
+    // rate inflates. The fix wraps the mark call in its own try/catch
+    // and logs a distinct line that names the actual failure mode.
+    mockListExpiredUneditedDMs.mockReturnValue([
+      { id: 1, send_id: 's1', recipient_discord_id: 'r1', dm_channel_id: 'c1', dm_message_id: 'm1' },
+    ]);
+    mockEditDMToPastTense.mockResolvedValue(true);
+    mockMarkDMExpiredLabelEditedByMessageId.mockImplementationOnce(() => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    });
+
+    await sweepOnce();
+
+    // Distinct warn line — the message text must NOT be the
+    // edit-failed wording (which is what callers would scan logs for
+    // if they were tracking edit failures).
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('edit succeeded but DB mark failed'),
+      expect.objectContaining({ messageId: 'm1' }),
+    );
+    // The edit-failed line must NOT have been logged for this row.
+    expect(mockLogger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('Expired-DM-label edit failed'),
+      expect.anything(),
+    );
+    // The row counts as edited because the Discord-side edit DID
+    // land — next sweep finds the embed already past-tense and
+    // idempotently re-marks via the markDMExpiredLabelEditedByMessageId
+    // call from the already-past path. Confirm the happy-path info
+    // log fires (edited=1, permanentFails=0).
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'Expired-DM-label sweep complete',
+      expect.objectContaining({ edited: 1 }),
+    );
+  });
+
   it('separates permanent-fail signal from happy-path info log', async () => {
     // permanentFails > 0 must surface as warn, not just be folded into
     // the info line — dashboards key on level for alerting.

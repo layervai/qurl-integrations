@@ -4,6 +4,7 @@ const config = require('./config');
 const logger = require('./logger');
 const db = require('./database');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
+const { EXPIRY_PREFIX_PRESENT, EXPIRY_PREFIX_PAST } = require('./constants');
 
 const client = new Client({
   intents: [
@@ -809,14 +810,12 @@ async function sendDM(discordId, message) {
 //   throw — transient failure (network, 5xx). Caller leaves row unedited
 //           so the next sweep retries.
 async function editDMToPastTense(channelId, messageId) {
-  // Prefixes are read from constants directly — single caller (the
-  // expired-dm-label sweeper) and the literals are part of the contract
-  // with buildDeliveryPayload's render output. Pulling them in via
-  // require keeps the call site clean and prevents a future caller from
-  // accidentally passing undefined (which would silently make
-  // `String#includes` always false → row marked edited forever with the
-  // embed still present-tense).
-  const { EXPIRY_PREFIX_PRESENT: fromPrefix, EXPIRY_PREFIX_PAST: toPrefix } = require('./constants');
+  // Prefixes come from the module-top require of ./constants — single
+  // source of truth shared with buildDeliveryPayload's render path so
+  // a constant rename automatically propagates to the substitution
+  // target here without a separate edit.
+  const fromPrefix = EXPIRY_PREFIX_PRESENT;
+  const toPrefix = EXPIRY_PREFIX_PAST;
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel) return false;

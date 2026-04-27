@@ -73,14 +73,30 @@ async function sweepOnce() {
     let permanentFails = 0;
     for (let i = 0; i < uniqueRows.length; i += CONCURRENCY) {
       const batch = uniqueRows.slice(i, i + CONCURRENCY);
+      // Catch the mark separately from the edit so the warn log can
+      // distinguish "edit failed" from "edit succeeded but DB mark
+      // failed" — the latter is self-healing (next sweep finds the
+      // embed already past-tense and idempotently re-marks via the
+      // already-past branch in editDMToPastTense), but lumping it into
+      // the same log line as a real edit failure inflates the
+      // apparent edit-failure rate on dashboards.
       const results = await Promise.allSettled(batch.map(async (row) => {
         const ok = await discord.editDMToPastTense(row.dm_channel_id, row.dm_message_id);
-        // ok === true  → edit landed (or was already past-tense). Mark all
-        //                sibling rows so we don't re-attempt next sweep.
-        // ok === false → permanent Discord failure (DM/channel gone, bot
-        //                blocked). Same marker — there's nothing to retry.
-        // throw        → transient. Don't mark; next sweep retries.
-        db.markDMExpiredLabelEditedByMessageId(row.dm_message_id);
+        try {
+          db.markDMExpiredLabelEditedByMessageId(row.dm_message_id);
+        } catch (markErr) {
+          logger.warn('Expired-DM-label edit succeeded but DB mark failed (will be re-swept and idempotently marked)', {
+            sendId: row.send_id,
+            recipientId: row.recipient_discord_id,
+            channelId: row.dm_channel_id,
+            messageId: row.dm_message_id,
+            error: markErr.message,
+          });
+          // Still return `ok` — the Discord edit DID land. Next sweep
+          // finds the embed already past-tense (alreadyPast branch)
+          // and re-marks. Counting this as edited keeps dashboard
+          // numbers accurate; the warn above is the operational signal.
+        }
         return ok;
       }));
       for (let j = 0; j < results.length; j++) {
@@ -90,6 +106,8 @@ async function sweepOnce() {
           if (r.value) edited++;
           else permanentFails++;
         } else {
+          // Only the editDMToPastTense throw reaches this branch — the
+          // mark-failure path above catches its own error and returns ok.
           logger.warn('Expired-DM-label edit failed (will retry next sweep)', {
             sendId: row.send_id,
             recipientId: row.recipient_discord_id,
