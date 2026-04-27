@@ -285,6 +285,116 @@ describe('database module', () => {
     });
   });
 
+  // SQLite-level coverage of the helpers consumed by the
+  // expired-dm-label sweeper (src/expired-dm-label-sweeper.js). The
+  // sweeper's own unit tests mock `db` entirely, so without these the
+  // SQL guards (dm_message_id IS NULL on update, the multi-clause WHERE
+  // on listExpiredUneditedDMs, the bulk-mark by message_id) live
+  // entirely in SQL with no real-DB exercise.
+  describe('expired-DM-label helpers', () => {
+    const NOW_UNIX = Math.floor(Date.now() / 1000);
+    const PAST = NOW_UNIX - 60;        // 1 minute ago — eligible
+    const FUTURE = NOW_UNIX + 3600;    // 1 hour from now — not yet expired
+
+    function addSend({ sendId, recipientId, status = 'sent' }) {
+      db.recordQURLSend({
+        sendId, senderDiscordId: 'sender-edm', recipientDiscordId: recipientId,
+        resourceId: `res-${sendId}-${recipientId}`, resourceType: 'file',
+        qurlLink: `https://q.test/${sendId}-${recipientId}`,
+        expiresIn: '24h', channelId: 'ch-edm', targetType: 'user',
+      });
+      // Default DM status is 'pending' from the schema; we lift to 'sent'
+      // unless the test wants the failed-DM exclusion path.
+      db.updateSendDMStatus(sendId, recipientId, status);
+    }
+
+    it('recordDMIdentifiers populates only NULL rows (overwrite-protection invariant)', () => {
+      // Original send — recipient gets identifiers.
+      addSend({ sendId: 'edm-overwrite', recipientId: 'rcpt-A' });
+      db.recordDMIdentifiers({
+        sendId: 'edm-overwrite', recipientDiscordId: 'rcpt-A',
+        dmChannelId: 'chan-original', dmMessageId: 'msg-original', expiresAtUnix: PAST,
+      });
+
+      // /qurl add recipients re-uses the same recipient (edge case): a
+      // SECOND row gets inserted for the same (sendId, recipientId).
+      addSend({ sendId: 'edm-overwrite', recipientId: 'rcpt-A' });
+      // Second recordDMIdentifiers call — SHOULD only fill the NULL row
+      // (the new one), NOT clobber the original.
+      db.recordDMIdentifiers({
+        sendId: 'edm-overwrite', recipientDiscordId: 'rcpt-A',
+        dmChannelId: 'chan-add-recipients', dmMessageId: 'msg-add-recipients', expiresAtUnix: PAST,
+      });
+
+      // Both rows should now have non-null identifiers; original is
+      // preserved, new one got the second pair.
+      const rows = db.listExpiredUneditedDMs(50);
+      const matchingRows = rows.filter(r => r.send_id === 'edm-overwrite' && r.recipient_discord_id === 'rcpt-A');
+      const messageIds = matchingRows.map(r => r.dm_message_id).sort();
+      expect(messageIds).toEqual(['msg-add-recipients', 'msg-original']);
+    });
+
+    it('listExpiredUneditedDMs excludes future-expiry rows', () => {
+      addSend({ sendId: 'edm-future', recipientId: 'rcpt-future' });
+      db.recordDMIdentifiers({
+        sendId: 'edm-future', recipientDiscordId: 'rcpt-future',
+        dmChannelId: 'c', dmMessageId: 'msg-future', expiresAtUnix: FUTURE,
+      });
+      const rows = db.listExpiredUneditedDMs(50);
+      expect(rows.find(r => r.dm_message_id === 'msg-future')).toBeUndefined();
+    });
+
+    it('listExpiredUneditedDMs excludes dm_status="failed" rows', () => {
+      addSend({ sendId: 'edm-failed', recipientId: 'rcpt-failed', status: 'failed' });
+      db.recordDMIdentifiers({
+        sendId: 'edm-failed', recipientDiscordId: 'rcpt-failed',
+        dmChannelId: 'c', dmMessageId: 'msg-failed', expiresAtUnix: PAST,
+      });
+      const rows = db.listExpiredUneditedDMs(50);
+      // Even though expiry is past and identifiers are present, dm_status='failed'
+      // means the DM never reached the recipient — there's no message to edit.
+      expect(rows.find(r => r.dm_message_id === 'msg-failed')).toBeUndefined();
+    });
+
+    it('listExpiredUneditedDMs excludes legacy rows with NULL dm_message_id', () => {
+      // recordQURLSend without recordDMIdentifiers leaves dm_message_id NULL
+      // (legacy migration path). These rows must be skipped — the sweeper has
+      // no message to edit.
+      addSend({ sendId: 'edm-legacy', recipientId: 'rcpt-legacy' });
+      const rows = db.listExpiredUneditedDMs(50);
+      expect(rows.find(r => r.send_id === 'edm-legacy')).toBeUndefined();
+    });
+
+    it('listExpiredUneditedDMs excludes already-edited rows', () => {
+      addSend({ sendId: 'edm-done', recipientId: 'rcpt-done' });
+      db.recordDMIdentifiers({
+        sendId: 'edm-done', recipientDiscordId: 'rcpt-done',
+        dmChannelId: 'c', dmMessageId: 'msg-done', expiresAtUnix: PAST,
+      });
+      db.markDMExpiredLabelEditedByMessageId('msg-done');
+      const rows = db.listExpiredUneditedDMs(50);
+      expect(rows.find(r => r.dm_message_id === 'msg-done')).toBeUndefined();
+    });
+
+    it('markDMExpiredLabelEditedByMessageId stamps every row sharing the message_id', () => {
+      // Two rows for the same consolidated DM (one message → multiple links).
+      addSend({ sendId: 'edm-bulk', recipientId: 'rcpt-bulk' });
+      addSend({ sendId: 'edm-bulk', recipientId: 'rcpt-bulk-2' });
+      db.recordDMIdentifiers({
+        sendId: 'edm-bulk', recipientDiscordId: 'rcpt-bulk',
+        dmChannelId: 'c', dmMessageId: 'msg-shared', expiresAtUnix: PAST,
+      });
+      db.recordDMIdentifiers({
+        sendId: 'edm-bulk', recipientDiscordId: 'rcpt-bulk-2',
+        dmChannelId: 'c', dmMessageId: 'msg-shared', expiresAtUnix: PAST,
+      });
+      db.markDMExpiredLabelEditedByMessageId('msg-shared');
+      // Both rows should now be excluded from the sweep.
+      const rows = db.listExpiredUneditedDMs(50);
+      expect(rows.find(r => r.dm_message_id === 'msg-shared')).toBeUndefined();
+    });
+  });
+
   describe('streak updates — consecutive months', () => {
     it('handles streak broken (gap > 1 month)', () => {
       // We can't easily control dates, but we can verify the flow

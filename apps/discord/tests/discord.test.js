@@ -93,6 +93,7 @@ const mockClient = {
   destroy: jest.fn(),
   guilds: { fetch: jest.fn().mockResolvedValue(mockGuild) },
   users: { fetch: jest.fn() },
+  channels: { fetch: jest.fn() },
   user: { tag: 'TestBot#0001' },
   application: { commands: { set: jest.fn() } },
 };
@@ -100,12 +101,18 @@ const mockClient = {
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
   GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128 },
-  EmbedBuilder: jest.fn().mockImplementation(() => ({
-    setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
-    setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),
-    setFooter: jest.fn().mockReturnThis(), setTimestamp: jest.fn().mockReturnThis(),
-    setURL: jest.fn().mockReturnThis(), setAuthor: jest.fn().mockReturnThis(),
-  })),
+  EmbedBuilder: Object.assign(
+    jest.fn().mockImplementation(() => ({
+      setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
+      setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),
+      setFooter: jest.fn().mockReturnThis(), setTimestamp: jest.fn().mockReturnThis(),
+      setURL: jest.fn().mockReturnThis(), setAuthor: jest.fn().mockReturnThis(),
+    })),
+    // EmbedBuilder.from(json) — used by editDMToPastTense to clone the
+    // embed shape with a mutated field. Test shim returns the JSON
+    // directly so assertions can read fields off it.
+    { from: jest.fn().mockImplementation(json => ({ __fromJson: json })) },
+  ),
   ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
   PermissionFlagsBits: { ViewChannel: 1024n },
 }));
@@ -300,17 +307,129 @@ describe('discord module', () => {
   });
 
   describe('sendDM', () => {
-    it('sends DM and returns true', async () => {
-      const mockUser = { send: jest.fn().mockResolvedValue(true) };
+    it('sends DM and returns identifiers on success', async () => {
+      const mockUser = {
+        send: jest.fn().mockResolvedValue({ id: 'msg-123', channelId: 'chan-456' }),
+      };
       mockClient.users.fetch.mockResolvedValue(mockUser);
       const result = await discord.sendDM('u1', 'Hello');
-      expect(result).toBe(true);
+      expect(result).toEqual({ ok: true, channelId: 'chan-456', messageId: 'msg-123' });
     });
 
-    it('returns false on error', async () => {
+    it('returns ok:false with null IDs on error', async () => {
       mockClient.users.fetch.mockRejectedValue(new Error('fail'));
       const result = await discord.sendDM('u2', 'Hello');
-      expect(result).toBe(false);
+      expect(result).toEqual({ ok: false, channelId: null, messageId: null });
+    });
+  });
+
+  describe('editDMToPastTense', () => {
+    // Use the real prefixes so this test catches a constants.js rename
+    // automatically (the function imports from constants, not args).
+    const { EXPIRY_PREFIX_PRESENT, EXPIRY_PREFIX_PAST } = require('../src/constants');
+
+    function buildMessage({ fieldValues, edit = jest.fn().mockResolvedValue(undefined) }) {
+      return {
+        edit,
+        embeds: [{
+          toJSON: () => ({
+            // Mirror Discord embed shape — fields[].value carries the
+            // expiry line; the function rewrites the matching value.
+            fields: fieldValues.map(v => ({ name: '​', value: v })),
+          }),
+        }],
+      };
+    }
+
+    it('rewrites present-prefix → past-prefix when present', async () => {
+      const msg = buildMessage({ fieldValues: ['hello', `${EXPIRY_PREFIX_PRESENT}1234:R>`, 'world'] });
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
+      expect(ok).toBe(true);
+      expect(msg.edit).toHaveBeenCalledTimes(1);
+      const edited = msg.edit.mock.calls[0][0];
+      expect(edited.embeds[0].__fromJson.fields[1].value).toBe(`${EXPIRY_PREFIX_PAST}1234:R>`);
+      // Untouched fields stay identical.
+      expect(edited.embeds[0].__fromJson.fields[0].value).toBe('hello');
+      expect(edited.embeds[0].__fromJson.fields[2].value).toBe('world');
+    });
+
+    it('returns true silently when the embed already has the past-tense prefix (idempotent)', async () => {
+      // Benign retry path: a prior sweep / bot crash already flipped the
+      // embed; the next sweep finds past-tense, doesn't edit again, and
+      // does NOT warn.
+      const msg = buildMessage({ fieldValues: ['hello', `${EXPIRY_PREFIX_PAST}1234:R>`] });
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
+      expect(ok).toBe(true);
+      expect(msg.edit).not.toHaveBeenCalled();
+    });
+
+    it('warns when the embed has no fields array at all (shape regression signal)', async () => {
+      // Edge case: a future render that emits the expiry into
+      // `description` instead of `addFields[]` (or any other shape
+      // change that drops `json.fields`) would silently cause the
+      // sweeper to mark every row "edited" without flipping the verb.
+      // The function takes the no-fields path through the Array.isArray
+      // guard, hits `if (!mutated)` with `alreadyPast === false`, and
+      // logs the shape-regression warn — confirmed below.
+      const msg = {
+        edit: jest.fn().mockResolvedValue(undefined),
+        embeds: [{ toJSON: () => ({ description: 'no-fields embed' /* no `fields` */ }) }],
+      };
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
+      expect(ok).toBe(true);
+      expect(msg.edit).not.toHaveBeenCalled();
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('shape regression'),
+        expect.objectContaining({ channelId: 'chan-1', messageId: 'msg-1' }),
+      );
+    });
+
+    it('warns when neither present nor past prefix is found (shape regression signal)', async () => {
+      // Distinct from the already-past-tense path: this is the silent-
+      // skip bug class — embed shape drifted between render and edit.
+      // Function still returns true (so the row gets marked, not retried
+      // forever) but emits a warn so a regression is observable.
+      const msg = buildMessage({ fieldValues: ['hello', 'world'] });
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
+      expect(ok).toBe(true);
+      expect(msg.edit).not.toHaveBeenCalled();
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('shape regression'),
+        expect.objectContaining({ channelId: 'chan-1', messageId: 'msg-1' }),
+      );
+    });
+
+    it('returns false on permanent Discord error codes (10003/10008/10013/50001/50007/50013)', async () => {
+      // Each code maps to a permanent failure (DM/channel gone, recipient
+      // account gone, or bot blocked / perm boundary changed). Function
+      // returns false so the sweeper marks the row edited and doesn't
+      // retry every minute forever.
+      for (const code of [10003, 10008, 10013, 50001, 50007, 50013]) {
+        mockClient.channels.fetch.mockRejectedValueOnce(Object.assign(new Error('discord'), { code }));
+        const ok = await discord.editDMToPastTense('chan-x', 'msg-x');
+        expect(ok).toBe(false);
+      }
+    });
+
+    it('throws on transient errors (so sweeper retries next interval)', async () => {
+      // 5xx, network errors, etc. — caller leaves the row unmarked so the
+      // sweeper retries on the next sweep.
+      mockClient.channels.fetch.mockRejectedValueOnce(Object.assign(new Error('500'), { code: 500 }));
+      await expect(discord.editDMToPastTense('chan-x', 'msg-x')).rejects.toThrow('500');
     });
   });
 

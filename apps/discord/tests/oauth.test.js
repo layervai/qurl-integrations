@@ -7,7 +7,7 @@ jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn().mockResolvedValue({ success: true }),
   notifyPRMerge: jest.fn(),
   notifyBadgeEarned: jest.fn(),
-  sendDM: jest.fn().mockResolvedValue(true),
+  sendDM: jest.fn().mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' }),
 }));
 
 jest.mock('../src/database', () => ({

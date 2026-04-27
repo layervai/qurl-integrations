@@ -222,13 +222,53 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // embed ("Portal closes in **24 hours**" forever) would silently
   // regress this UX — the assertion below catches it.
   it('renders Discord native relative-time <t:N:R> for the Portal-closes line', () => {
+    const { EXPIRY_PREFIX_PRESENT } = require('../src/constants');
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes'));
+    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes(EXPIRY_PREFIX_PRESENT));
     expect(portalField).toBeDefined();
-    expect(portalField.value).toBe('\ud83d\udd50 Portal closes <t:1735689600:R>');
+    // Use the shared constant so a prefix rename in constants.js
+    // automatically propagates here \u2014 single source of truth.
+    expect(portalField.value).toBe(`${EXPIRY_PREFIX_PRESENT}1735689600:R>`);
     // Locks against accidental reversion to a static label
     expect(portalField.value).not.toMatch(/Portal closes in \*\*\d/);
+  });
+
+  // Load-bearing for the expired-dm-label sweeper:
+  // editDMToPastTense walks `json.fields[].value` and substitutes the
+  // EXPIRY_PREFIX_PRESENT literal. The substitution is anchored on the
+  // shared constant exported from constants.js \u2014 if buildDeliveryPayload
+  // is refactored to use a different prefix, render the verb in
+  // setDescription instead of addFields, or split the literal across
+  // multiple field entries, the sweeper silently stops working.
+  // The assertions below pin the contract on three axes:
+  //   (1) the rendered value uses the same EXPIRY_PREFIX_PRESENT the
+  //       sweeper imports \u2014 a constant rename in one place forces an
+  //       update in the other
+  //   (2) the prefix lives inside addFields[].value, NOT setDescription
+  //   (3) it appears exactly once in that field (substitution would
+  //       only flip the first occurrence; multiple would leave the rest
+  //       present-tense forever)
+  it('emits the EXPIRY_PREFIX_PRESENT literal in addFields exactly once (sweeper-edit invariant)', () => {
+    const { EXPIRY_PREFIX_PRESENT } = require('../src/constants');
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
+
+    // (1) + (2): walk only addFields contributions; setDescription is
+    //            captured separately on the embed builder mock.
+    const fieldValues = capturedEmbeds[0].addFields.mock.calls
+      .flatMap(call => call)
+      .map(f => f.value)
+      .filter(v => typeof v === 'string');
+    const matches = fieldValues.filter(v => v.includes(EXPIRY_PREFIX_PRESENT));
+    expect(matches.length).toBe(1);
+    // (3): only one occurrence within that field.
+    const occurrences = (matches[0].match(new RegExp(EXPIRY_PREFIX_PRESENT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    expect(occurrences).toBe(1);
+    // Belt-and-braces: setDescription must not carry the prefix.
+    const descCalls = capturedEmbeds[0].setDescription.mock.calls.flatMap(call => call);
+    for (const d of descCalls) {
+      expect(typeof d === 'string' ? d : '').not.toContain(EXPIRY_PREFIX_PRESENT);
+    }
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes

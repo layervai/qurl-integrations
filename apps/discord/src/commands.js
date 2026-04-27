@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./database');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, EXPIRY_PREFIX_PRESENT } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -233,6 +233,44 @@ async function batchSettled(items, fn, batchSize = 5) {
   return results;
 }
 
+// Send a recipient DM and persist the resulting identifiers + absolute
+// expiry so the expired-dm-label sweeper can flip "Portal closes" →
+// "Portal closed" once the link expires. Pulled out of handleSend +
+// handleAddRecipients (the two callers) to keep the persist contract in
+// one place — both call sites used to repeat the same 14-line block,
+// which is the kind of copy-paste that drifts when one path changes
+// (e.g. a future column added to recordDMIdentifiers).
+//
+// recordDMIdentifiers failure is logged-and-swallowed: the DM was
+// already delivered, so we don't want to abort the batch — the only
+// downside is the tense stays present-tense forever for this row. The
+// `dm_message_id IS NULL` guard inside recordDMIdentifiers prevents an
+// /qurl-add-recipients call from clobbering identifiers persisted by
+// the original send.
+//
+// Returns the raw sendDM result ({ ok, channelId, messageId }) so the
+// caller can shape its own per-batch return value.
+async function sendDMAndPersist({ recipientDiscordId, payload, sendId, expiresAtUnix, contextLabel }) {
+  const sent = await sendDM(recipientDiscordId, payload);
+  db.updateSendDMStatus(sendId, recipientDiscordId, sent.ok ? DM_STATUS.SENT : DM_STATUS.FAILED);
+  if (sent.ok) {
+    try {
+      db.recordDMIdentifiers({
+        sendId,
+        recipientDiscordId,
+        dmChannelId: sent.channelId,
+        dmMessageId: sent.messageId,
+        expiresAtUnix,
+      });
+    } catch (err) {
+      logger.warn('recordDMIdentifiers failed; expired-tense edit will be skipped for this row', {
+        sendId, recipientId: recipientDiscordId, contextLabel, error: err.message,
+      });
+    }
+  }
+  return sent;
+}
+
 // Resolve the sender's display alias from an interaction, the same way
 // Discord itself does for any rendered name in a guild. Order:
 //   1. member.displayName — guild nickname > globalName > username
@@ -369,7 +407,11 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
         if (!Number.isFinite(expiresAt)) {
           throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
         }
-        return `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`;
+        // Render present-tense at send. The expired-dm-label sweeper
+        // rewrites the prefix to past tense once the link expires \u2014
+        // see EXPIRY_PREFIX_PRESENT / EXPIRY_PREFIX_PAST and
+        // src/expired-dm-label-sweeper.js.
+        return `${EXPIRY_PREFIX_PRESENT}${expiresAt}:R>`;
       })(),
     },
     {
@@ -1168,9 +1210,14 @@ async function handleSend(interaction, apiKey) {
       personalMessage,
     });
 
-    const sent = await sendDM(link.recipientId, dmPayload);
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { recipientId: link.recipientId, username: recipient?.username, sent };
+    const sent = await sendDMAndPersist({
+      recipientDiscordId: link.recipientId,
+      payload: dmPayload,
+      sendId,
+      expiresAtUnix: expiresAt,
+      contextLabel: 'handleSend',
+    });
+    return { recipientId: link.recipientId, username: recipient?.username, sent: sent.ok };
   }, 5);
 
   for (const r of dmResults) {
@@ -1682,13 +1729,20 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
     }
 
-    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
-    // updateSendDMStatus updates every qurl_sends row matching (sendId,
-    // recipient.id), so a single call covers all links for this recipient.
-    // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
-    // same update links.length times.
-    db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { sent, username: recipient.username };
+    // updateSendDMStatus inside sendDMAndPersist updates every qurl_sends
+    // row matching (sendId, recipient.id), so a single call covers all
+    // links for this consolidated DM. recordDMIdentifiers is scoped to
+    // dm_message_id IS NULL inside the SQL — won't overwrite identifiers
+    // from the original /qurl send if a recipient was somehow already
+    // in the send.
+    const sent = await sendDMAndPersist({
+      recipientDiscordId: recipient.id,
+      payload: { embeds: allEmbeds, components: allComponents },
+      sendId,
+      expiresAtUnix: expiresAt,
+      contextLabel: 'handleAddRecipients',
+    });
+    return { sent: sent.ok, username: recipient.username };
   }, 5);
 
   for (const r of dmResults) {

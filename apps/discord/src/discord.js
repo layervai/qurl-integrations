@@ -4,6 +4,7 @@ const config = require('./config');
 const logger = require('./logger');
 const db = require('./database');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
+const { EXPIRY_PREFIX_PRESENT, EXPIRY_PREFIX_PAST } = require('./constants');
 
 const client = new Client({
   intents: [
@@ -777,16 +778,111 @@ async function postWeeklyDigest() {
   }
 }
 
-// Send DM to user
+// Send DM to user. Returns { ok, channelId, messageId } so callers that
+// need to edit the message later (e.g. the expired-dm-label sweeper, which
+// flips "Portal closes" → "Portal closed" once the link has expired) can
+// persist the identifiers. `ok=false` means delivery failed (user blocked
+// DMs, fetch error, etc.); channel/message IDs are null in that case.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
-    await user.send(message);
+    const sent = await user.send(message);
     logger.debug('Sent DM', { discordId });
-    return true;
+    return { ok: true, channelId: sent.channelId, messageId: sent.id };
   } catch (error) {
     logger.warn(`Failed to DM user ${discordId}`, { error: error.message });
-    return false;
+    return { ok: false, channelId: null, messageId: null };
+  }
+}
+
+// Edit a previously-sent DM to flip the present-tense expiry verb to past
+// tense. Used by the expired-dm-label sweeper once `<t:N:R>` has already
+// rolled over to "X minutes ago". Discord's relative-time markdown updates
+// client-side automatically, but the surrounding literal "closes" stays
+// present-tense unless we rewrite the embed.
+//
+// Returns:
+//   true  — edit succeeded OR the embed was already past-tense / didn't
+//           contain the expected prefix (treat as done; don't retry).
+//   false — permanent failure (channel/message gone, missing access).
+//           Caller marks the row as edited to stop the sweeper from
+//           retrying every minute forever.
+//   throw — transient failure (network, 5xx). Caller leaves row unedited
+//           so the next sweep retries.
+async function editDMToPastTense(channelId, messageId) {
+  // Prefixes come from the module-top require of ./constants — single
+  // source of truth shared with buildDeliveryPayload's render path so
+  // a constant rename automatically propagates to the substitution
+  // target here without a separate edit.
+  const fromPrefix = EXPIRY_PREFIX_PRESENT;
+  const toPrefix = EXPIRY_PREFIX_PAST;
+  try {
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) return false;
+    const msg = await channel.messages.fetch(messageId);
+    if (!msg) return false;
+
+    let mutated = false;
+    let alreadyPast = false;
+    const newEmbeds = msg.embeds.map(e => {
+      const json = e.toJSON();
+      if (Array.isArray(json.fields)) {
+        json.fields = json.fields.map(f => {
+          if (typeof f.value === 'string') {
+            if (f.value.includes(fromPrefix)) {
+              mutated = true;
+              return { ...f, value: f.value.replace(fromPrefix, toPrefix) };
+            }
+            if (f.value.includes(toPrefix)) {
+              alreadyPast = true;
+            }
+          }
+          return f;
+        });
+      }
+      return EmbedBuilder.from(json);
+    });
+
+    if (!mutated) {
+      // Two distinct branches matter for triage:
+      //   - alreadyPast: a prior sweep / restart already flipped the
+      //     embed; this is the benign retry path.
+      //   - neither: the prefix shape changed (Discord embed
+      //     normalization, or buildDeliveryPayload was refactored to
+      //     emit the verb in a different field/description). That's a
+      //     silent-skip bug class — log warn so a regression is
+      //     observable instead of marking the row "edited" forever
+      //     with the embed still present-tense.
+      if (!alreadyPast) {
+        logger.warn('editDMToPastTense: neither present nor past prefix found in embed — possible shape regression', {
+          channelId, messageId,
+        });
+      }
+      return true;
+    }
+
+    await msg.edit({ embeds: newEmbeds });
+    return true;
+  } catch (err) {
+    // Discord error codes that mean "this DM is gone or unreachable
+    // forever, don't retry":
+    //   10003 Unknown Channel        — channel was deleted
+    //   10008 Unknown Message        — message was deleted
+    //   10013 Unknown User           — recipient deleted/disabled their account
+    //   50001 Missing Access         — bot was blocked / removed from DM
+    //   50007 Cannot send DM to user — recipient blocked DMs since send
+    //   50013 Missing Permissions    — Discord-side perm boundary changed on the DM
+    //
+    // Everything else (including 5xx and 429 rate-limit responses) falls
+    // through as transient — the sweeper leaves the row unmarked and the
+    // next sweep retries it. 429s in particular DO surface here when a
+    // post-outage backlog drains at concurrency=5 and bursts past Discord's
+    // route-scoped limit; deferring to the 60s sweep cadence is fine
+    // because (a) discord.js's own queue handles intra-call retry under
+    // most rate-limit shapes, and (b) the "wait one minute and try again"
+    // backoff dwarfs any Retry-After header Discord would send.
+    if ([10003, 10008, 10013, 50001, 50007, 50013].includes(err.code)) return false;
+    throw err;
   }
 }
 
@@ -884,6 +980,7 @@ module.exports = {
   postToGitHubFeed,
   postWeeklyDigest,
   sendDM,
+  editDMToPastTense,
   refreshCache,
   shutdown,
   getVoiceChannelMembers,

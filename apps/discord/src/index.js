@@ -5,6 +5,7 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./database');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
+const { startExpiredDMLabelSweeper } = require('./expired-dm-label-sweeper');
 const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
@@ -248,6 +249,12 @@ async function start() {
   // Background retry-revoke for any OAuth tokens whose initial revoke
   // failed. Runs hourly on top of the 7-day purge in database.js.
   startOrphanTokenSweeper();
+
+  // Background past-tense edit for recipient DMs once their qURL link
+  // has expired. Discord's <t:N:R> markdown auto-rolls "in 5h" → "5h
+  // ago" client-side, but the literal verb in the surrounding text
+  // doesn't change unless we rewrite the embed. 1-min sweep interval.
+  startExpiredDMLabelSweeper();
 
   // Login to Discord with a 30s deadline. client.login() doesn't expose a
   // native timeout; if the Discord API is unreachable the call can hang

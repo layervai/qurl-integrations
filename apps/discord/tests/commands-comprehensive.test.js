@@ -150,6 +150,7 @@ const mockDb = {
   recordQURLSend: jest.fn(),
   recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
+  recordDMIdentifiers: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   markSendRevoked: jest.fn(),
@@ -165,7 +166,7 @@ const mockDb = {
 };
 jest.mock('../src/database', () => mockDb);
 
-const mockSendDM = jest.fn().mockResolvedValue(true);
+const mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 const mockGetVoice = jest.fn();
 const mockGetText = jest.fn();
 jest.mock('../src/discord', () => ({
@@ -1226,7 +1227,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
       { qurl_link: 'https://q.test/l1' },
       { qurl_link: 'https://q.test/l2' },
     ]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const attachment = {
       name: 'doc.pdf',
@@ -1299,7 +1300,7 @@ describe('/qurl send — file flow (channel target, full path)', () => {
     mockGetText.mockReturnValue(recipients);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/l1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const attachment = {
       name: 'doc.pdf',
@@ -1357,7 +1358,7 @@ describe('/qurl send — location flow (channel target)', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     // The flow: channel target -> no file -> location button -> modal -> submit
     const modalSubmit = {
@@ -1410,7 +1411,7 @@ describe('/qurl send — location flow (channel target)', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const modalSubmit = {
       fields: {
@@ -1660,8 +1661,8 @@ describe('/qurl send — DM failures', () => {
     ]);
     // First DM succeeds, second fails
     mockSendDM
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+      .mockResolvedValueOnce({ ok: true, channelId: 'c', messageId: 'm' })
+      .mockResolvedValueOnce({ ok: false, channelId: null, messageId: null });
 
     const attachment = {
       name: 'doc.pdf',
@@ -2212,7 +2213,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const modalSubmit = {
       fields: {
@@ -2262,7 +2263,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const modalSubmit = {
       fields: {
@@ -2311,7 +2312,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const modalSubmit = {
       fields: {
@@ -2360,7 +2361,7 @@ describe('/qurl send — Google Maps URL patterns in location value', () => {
     mockGetText.mockReturnValue(recipients);
     mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'conn-loc-1', hash: 'h1', success: true });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/loc1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const modalSubmit = {
       fields: {
@@ -2413,7 +2414,7 @@ describe('collector button handlers — revoke and expand', () => {
     mockGetText.mockReturnValue(recipients);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-col', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/c1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
     mockDb.getSendResourceIds.mockReturnValue(['conn-col']);
     mockDeleteLink.mockResolvedValue(undefined);
 
@@ -2472,7 +2473,7 @@ describe('collector button handlers — revoke and expand', () => {
     mockGetText.mockReturnValue(recipients);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-exp', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue(recipients.map((_, i) => ({ qurl_link: `https://q.test/e${i}` })));
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 100, url: 'https://cdn.discordapp.com/doc.pdf' };
     const resInteraction = { customId: `qurl_res_file_${MOCK_NONCE}`, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -2525,7 +2526,7 @@ describe('collector button handlers — revoke and expand', () => {
     mockGetText.mockReturnValue(recipients);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-end', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/end1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
 
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 100, url: 'https://cdn.discordapp.com/doc.pdf' };
     const resInteraction = { customId: `qurl_res_file_${MOCK_NONCE}`, deferUpdate: jest.fn().mockResolvedValue(undefined) };
@@ -2579,7 +2580,7 @@ describe('monitorLinkStatus — via full send flow with fake timers', () => {
     mockGetText.mockReturnValue(recipients);
     mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-m1', fileBuffer: new ArrayBuffer(10) });
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/m1' }]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'c', messageId: 'm' });
     mockGetResourceStatus.mockResolvedValue({
       qurls: [
         { qurl_id: 'q1', use_count: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' },
