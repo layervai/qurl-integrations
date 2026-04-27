@@ -24,7 +24,7 @@ func listCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List QURLs",
+		Short: "List qURLs",
 		Example: `  qurl list
   qurl list --status active --limit 50
   qurl list --sort created_at:desc
@@ -64,14 +64,14 @@ func listCmd(opts *globalOpts) *cobra.Command {
 				ExpiresAfter:  expiresAfter,
 			})
 			if err != nil {
-				return fmt.Errorf("list QURLs: %w", err)
+				return fmt.Errorf("list qURLs: %w", err)
 			}
 
 			return opts.formatter().FormatList(cmd.OutOrStdout(), result)
 		},
 	}
 
-	cmd.Flags().IntVarP(&limit, "limit", "l", 20, "Maximum number of QURLs to return")
+	cmd.Flags().IntVarP(&limit, "limit", "l", 20, "Maximum number of qURLs to return")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Pagination cursor from a previous list response")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (active, revoked)")
 	cmd.Flags().StringVar(&query, "query", "", "Search label, description, and target URL")

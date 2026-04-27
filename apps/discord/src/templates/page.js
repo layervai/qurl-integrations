@@ -43,7 +43,7 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
-      <title>${escapeHtml(title)} - QURL</title>
+      <title>${escapeHtml(title)} - qURL</title>
       <style>
         * { box-sizing: border-box; }
         body {

@@ -20,7 +20,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "create <target-url>",
-		Short: "Create a QURL for a target URL",
+		Short: "Create a qURL for a target URL",
 		Example: `  qurl create https://api.example.com/data
   qurl create https://internal.example.com --expires 1h --one-time
   qurl create https://dashboard.example.com -l "Admin access" -e 7d`,
@@ -50,7 +50,7 @@ func createCmd(opts *globalOpts) *cobra.Command {
 
 			result, err := c.Create(cmd.Context(), &input)
 			if err != nil {
-				return fmt.Errorf("create QURL: %w", err)
+				return fmt.Errorf("create qURL: %w", err)
 			}
 
 			if opts.quiet {

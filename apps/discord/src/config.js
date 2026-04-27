@@ -184,7 +184,7 @@ module.exports = {
   // Welcome message (for new member DM)
   WELCOME_DM_ENABLED: process.env.WELCOME_DM_ENABLED !== 'false',
 
-  // QURL. In production we fall back to the real endpoints; in dev we fall
+  // qURL. In production we fall back to the real endpoints; in dev we fall
   // back to localhost so a missing .env file doesn't silently hit prod APIs.
   // index.js enforces that both env vars are set when NODE_ENV=production.
   QURL_API_KEY: process.env.QURL_API_KEY,

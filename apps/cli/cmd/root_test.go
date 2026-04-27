@@ -48,6 +48,8 @@ func TestResolveValue(t *testing.T) {
 
 func TestNewClient_MissingAPIKey(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "")
+	// Isolate from any real config file on the developer's machine.
+	t.Setenv("HOME", t.TempDir())
 	opts := &globalOpts{}
 	_, err := opts.newClient()
 	if err == nil {
@@ -162,9 +164,9 @@ func TestFormatError_WrappedAPIError(t *testing.T) {
 		StatusCode: 404,
 		Title:      "Not Found",
 	}
-	wrapped := fmt.Errorf("create QURL: %w", apiErr)
+	wrapped := fmt.Errorf("create qURL: %w", apiErr)
 	got := formatError(wrapped)
-	if !strings.Contains(got, "create QURL") {
+	if !strings.Contains(got, "create qURL") {
 		t.Errorf("expected wrapping context in output: %s", got)
 	}
 	if !strings.Contains(got, "Not Found") {

@@ -21,9 +21,9 @@ func mintCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "mint <resource-id>",
-		Short: "Mint a new access link for a QURL",
-		Long: `Creates a new access token and link for an existing QURL resource.
-Useful for multi-use QURLs where you want to generate additional access links.`,
+		Short: "Mint a new access link for a qURL",
+		Long: `Creates a new access token and link for an existing qURL resource.
+Useful for multi-use qURLs where you want to generate additional access links.`,
 		Example: `  qurl mint r_k8xqp9h2sj9
   qurl mint r_k8xqp9h2sj9 --expires-in 1h --one-time
   LINK=$(qurl mint r_k8xqp9h2sj9 -q)`,

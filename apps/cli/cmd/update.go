@@ -20,7 +20,7 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "update <resource-id>",
-		Short: "Update a QURL's properties",
+		Short: "Update a qURL's properties",
 		Example: `  qurl update r_k8xqp9h2sj9 --description "Production API access"
   qurl update r_k8xqp9h2sj9 -d ""  # clear description
   qurl update r_k8xqp9h2sj9 --tags prod,api --extend-by 24h`,
@@ -64,7 +64,7 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 
 			qurl, err := c.Update(cmd.Context(), args[0], input)
 			if err != nil {
-				return fmt.Errorf("update QURL: %w", err)
+				return fmt.Errorf("update qURL: %w", err)
 			}
 
 			return opts.formatter().FormatQURL(cmd.OutOrStdout(), qurl)

@@ -21,7 +21,7 @@ import (
 
 const methodPost = "POST"
 
-const authFailureMessage = "Failed to authenticate. Please check your QURL API key configuration."
+const authFailureMessage = "Failed to authenticate. Please check your qURL API key configuration."
 
 // sigFailureResponse is the terse body we return for every 401 from the
 // signature-verify path. Distinguishing which check failed is already
@@ -215,11 +215,11 @@ func (h *Handler) handleCreate(ctx context.Context, values url.Values) (events.A
 
 	result, err := c.Create(ctx, &client.CreateInput{TargetURL: targetURL})
 	if err != nil {
-		slog.Error("failed to create QURL", "error", err, "target_url", targetURL)
-		return respondSlack("Failed to create QURL: " + err.Error())
+		slog.Error("failed to create qURL", "error", err, "target_url", targetURL)
+		return respondSlack("Failed to create qURL: " + err.Error())
 	}
 
-	return respondSlack(fmt.Sprintf("QURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
+	return respondSlack(fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
 }
 
 func (h *Handler) handleList(ctx context.Context, values url.Values) (events.APIGatewayProxyResponse, error) {
@@ -231,12 +231,12 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 
 	result, err := c.List(ctx, &client.ListInput{Limit: 5})
 	if err != nil {
-		slog.Error("failed to list QURLs", "error", err)
-		return respondSlack("Failed to list QURLs: " + err.Error())
+		slog.Error("failed to list qURLs", "error", err)
+		return respondSlack("Failed to list qURLs: " + err.Error())
 	}
 
 	if len(result.QURLs) == 0 {
-		return respondSlack("No QURLs found.")
+		return respondSlack("No qURLs found.")
 	}
 
 	lines := make([]string, 0, len(result.QURLs))
@@ -249,7 +249,7 @@ func (h *Handler) handleList(ctx context.Context, values url.Values) (events.API
 		lines = append(lines, line)
 	}
 
-	return respondSlack("*Recent QURLs:*\n" + strings.Join(lines, "\n"))
+	return respondSlack("*Recent qURLs:*\n" + strings.Join(lines, "\n"))
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
@@ -283,11 +283,11 @@ func (h *Handler) handleInteraction(req *events.APIGatewayProxyRequest) (events.
 }
 
 func helpMessage() string {
-	return `*/qurl* — Create and manage QURLs from Slack
+	return `*/qurl* — Create and manage qURLs from Slack
 
 *Commands:*
-• ` + "`/qurl create <url>`" + ` — Create a QURL for the given URL
-• ` + "`/qurl list`" + ` — Show your 5 most recent QURLs
+• ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
+• ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
 • ` + "`/qurl help`" + ` — Show this help message`
 }
 

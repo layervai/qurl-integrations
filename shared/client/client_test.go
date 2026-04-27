@@ -105,8 +105,8 @@ func TestUserAgent(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/qurls/"+testResourceID {
+			t.Errorf("expected /v1/qurls/%s, got %s", testResourceID, r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": testResourceID,
@@ -420,8 +420,8 @@ func TestUpdate(t *testing.T) {
 		if r.Method != http.MethodPatch {
 			t.Errorf("expected PATCH, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/qurls/r_abc123test" {
-			t.Errorf("expected /v1/qurls/r_abc123test, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/qurls/"+testResourceID {
+			t.Errorf("expected /v1/qurls/%s, got %s", testResourceID, r.URL.Path)
 		}
 
 		var input UpdateInput

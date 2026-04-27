@@ -9,7 +9,7 @@ const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
 // bot treats itself as a public multi-server app. Commands register globally,
-// per-guild QURL API keys come from /qurl setup (stored encrypted in
+// per-guild qURL API keys come from /qurl setup (stored encrypted in
 // guild_configs), and OpenNHP-specific features (contributor roles, welcome
 // DMs, GitHub OAuth linking, PR webhook notifications) are dormant because
 // no single guild is being tracked.
@@ -238,7 +238,7 @@ process.on('SIGINT', () => {
 
 // Start everything
 async function start() {
-  logger.info('Starting QURL Discord Bot...');
+  logger.info('Starting qURL Discord Bot...');
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 

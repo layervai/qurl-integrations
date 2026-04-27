@@ -1,5 +1,5 @@
 #!/bin/sh
-# QURL CLI installer
+# qURL CLI installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/layervai/qurl-integrations/main/scripts/install.sh | sh
 set -e
 

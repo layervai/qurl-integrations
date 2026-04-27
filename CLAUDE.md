@@ -20,7 +20,7 @@
 
 ## Project Overview
 
-Go monorepo for QURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
+Go monorepo for qURL integrations (Slack, Teams, Discord, CLI, Zapier, etc.).
 Each integration lives in `apps/{name}/` with independent release tracks.
 Shared code lives in `shared/`.
 
@@ -53,6 +53,22 @@ Examples:
 - **App entry points:** `apps/{name}/cmd/main.go`
 - **App-private code:** `apps/{name}/internal/`
 - **Shared code:** `shared/{package}/` — changes here affect ALL apps
+
+### Brand spelling
+
+The product brand is **`qURL`** (case-sensitive: lowercase `q`, uppercase `URL`). Use `qURL` in user-visible prose, log/error messages, doc comments, README content, and anything a human reads.
+
+The following stay literal — don't "finish" the rebrand:
+- Go identifiers: types/structs/funcs (`QURL`, `QURLClient`, `Qurl`, `CreateQurlRequest`, `QURLLink`)
+- Env vars (`QURL_API_KEY`, `QURL_ENDPOINT`, `QURL_BASE_URL`, `QURL_TIMEOUT`)
+- DDB table/column names and JSON keys (`qurl_sends`, `qurl_send_configs`, `qurl_link`, `qurl_id`)
+- Wire-protocol HTTP headers (`QURL-Signature`, `X-QURL-*`) and User-Agent strings (`qurl-cli/...`, `qurl-go-client/...`, `qurl-discord-bot/1.0`)
+- Slash command names (`/qurl send`, `/qurl help`) and the CLI binary `qurl`
+- OAuth scope identifiers (`qurl:read`, `qurl:write`, `qurl:resolve`)
+- Domain literals (`qurl.link`, `qurl.site`, `q.layerv.xyz`)
+- Man-page section titles (`QURL(1)` — system-reference convention)
+
+When upstream qurl-service rebrands its API error strings, the test fixtures in this repo that mirror them (`"QURL not found"`, `"QURL API error (...)"`, `"token limit per QURL reached"` etc.) need to update in lockstep — `git grep TODO(upstream-rebrand)` finds the doc-comment markers.
 
 ## Linting
 
@@ -113,5 +129,5 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
 
 - **Auth:** Start with workspace API keys (qurl-api-keys table exists). Per-user OAuth later.
 - **Runtime (Slack):** AWS Lambda behind API Gateway. Event-driven, scales to zero.
-- **Shared client:** `shared/client/` wraps the QURL API. Not a standalone module yet.
+- **Shared client:** `shared/client/` wraps the qURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.

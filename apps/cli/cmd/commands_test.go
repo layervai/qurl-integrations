@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// apiEnvelope wraps data in the QURL API response envelope.
+// apiEnvelope wraps data in the qURL API response envelope.
 func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
 	if err := json.NewEncoder(w).Encode(map[string]any{
@@ -20,7 +20,7 @@ func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	}
 }
 
-// newMockServer creates a test server that handles QURL API routes.
+// newMockServer creates a test server that handles qURL API routes.
 func newMockServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -357,6 +357,8 @@ func TestJSONOutput(t *testing.T) {
 
 func TestMissingAPIKey(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "")
+	// Isolate from any real config file on the developer's machine.
+	t.Setenv("HOME", t.TempDir())
 	cmd := rootCmd("test")
 	cmd.SetArgs([]string{"list"})
 
@@ -553,7 +555,7 @@ func TestCreateCommandQuiet(t *testing.T) {
 	if !strings.Contains(out, "qurl.link") {
 		t.Errorf("expected link in quiet output: %s", out)
 	}
-	if strings.Contains(out, "QURL created") {
+	if strings.Contains(out, "qURL created") {
 		t.Error("quiet mode should not include table header")
 	}
 }

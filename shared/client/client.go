@@ -1,4 +1,4 @@
-// Package client provides a Go client for the QURL API.
+// Package client provides a Go client for the qURL API.
 package client
 
 import (
@@ -23,7 +23,7 @@ const (
 	defaultMaxDelay   = 30 * time.Second
 )
 
-// StatusActive indicates the QURL is live and accepting access requests.
+// StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
 // StatusRevoked indicates the QURL was manually revoked (deleted).
@@ -34,7 +34,7 @@ type Logger interface {
 	Printf(format string, args ...any)
 }
 
-// Client is a QURL API client.
+// Client is a qURL API client.
 type Client struct {
 	baseURL    string
 	apiKey     string
@@ -70,7 +70,7 @@ func WithLogger(l Logger) Option {
 	return func(c *Client) { c.logger = l }
 }
 
-// New creates a QURL API client.
+// New creates a qURL API client.
 func New(baseURL, apiKey string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    baseURL,
@@ -97,7 +97,7 @@ func (c *Client) logf(format string, args ...any) {
 
 // --- Response envelope ---
 
-// apiResponse is the success response envelope from the QURL API.
+// apiResponse is the success response envelope from the qURL API.
 type apiResponse struct {
 	Data json.RawMessage `json:"data"`
 	Meta *ResponseMeta   `json:"meta,omitempty"`
@@ -111,9 +111,9 @@ type ResponseMeta struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
-// --- QURL types (match API schema) ---
+// --- qURL types (match API schema) ---
 
-// QURL represents a QURL resource as returned by the API.
+// QURL represents a qURL resource as returned by the API.
 type QURL struct {
 	ResourceID  string     `json:"resource_id"`
 	TargetURL   string     `json:"target_url"`
@@ -136,7 +136,7 @@ type AIAgentPolicy struct {
 	AllowCategories []string `json:"allow_categories,omitempty"`
 }
 
-// AccessPolicy defines access restrictions for a QURL.
+// AccessPolicy defines access restrictions for a qURL.
 type AccessPolicy struct {
 	IPAllowlist         []string       `json:"ip_allowlist,omitempty"`
 	IPDenylist          []string       `json:"ip_denylist,omitempty"`
@@ -147,7 +147,7 @@ type AccessPolicy struct {
 	AIAgentPolicy       *AIAgentPolicy `json:"ai_agent_policy,omitempty"`
 }
 
-// CreateInput is the input for creating a QURL.
+// CreateInput is the input for creating a qURL.
 type CreateInput struct {
 	TargetURL       string        `json:"target_url"`
 	Label           string        `json:"label,omitempty"`
@@ -159,7 +159,7 @@ type CreateInput struct {
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
 }
 
-// CreateOutput is the response from creating a QURL.
+// CreateOutput is the response from creating a qURL.
 type CreateOutput struct {
 	QurlID     string     `json:"qurl_id"`
 	ResourceID string     `json:"resource_id"`
@@ -192,7 +192,7 @@ func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput,
 	return &out, nil
 }
 
-// Get retrieves a QURL by ID.
+// Get retrieves a qURL by ID.
 func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
@@ -206,7 +206,7 @@ func (c *Client) Get(ctx context.Context, id string) (*QURL, error) {
 	return &qurl, nil
 }
 
-// ListInput is the input for listing QURLs.
+// ListInput is the input for listing qURLs.
 type ListInput struct {
 	Limit         int
 	Cursor        string
@@ -219,7 +219,7 @@ type ListInput struct {
 	ExpiresAfter  string
 }
 
-// ListOutput is the output of listing QURLs.
+// ListOutput is the output of listing qURLs.
 type ListOutput struct {
 	QURLs      []QURL `json:"qurls"`
 	NextCursor string `json:"next_cursor,omitempty"`
@@ -285,7 +285,7 @@ func (c *Client) List(ctx context.Context, input *ListInput) (*ListOutput, error
 	return out, nil
 }
 
-// Delete revokes a QURL by ID.
+// Delete revokes a qURL by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/v1/qurls/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
@@ -311,7 +311,7 @@ func (c *Client) Extend(ctx context.Context, id, duration string) (*QURL, error)
 	return c.Update(ctx, id, UpdateInput{ExtendBy: duration})
 }
 
-// Update updates a QURL's mutable properties.
+// Update updates a qURL's mutable properties.
 func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QURL, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -438,7 +438,7 @@ func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchC
 
 // --- Resolve ---
 
-// ResolveInput holds input for headless QURL resolution.
+// ResolveInput holds input for headless qURL resolution.
 type ResolveInput struct {
 	AccessToken string `json:"access_token"`
 }
@@ -457,7 +457,7 @@ type AccessGrant struct {
 	SrcIP     string `json:"src_ip"`
 }
 
-// Resolve resolves a QURL access token, triggering a network access request
+// Resolve resolves a qURL access token, triggering a network access request
 // to open the firewall for the caller's IP.
 func (c *Client) Resolve(ctx context.Context, input ResolveInput) (*ResolveOutput, error) {
 	body, err := json.Marshal(input)
@@ -523,7 +523,7 @@ func (c *Client) GetQuota(ctx context.Context) (*QuotaOutput, error) {
 
 // --- Error types (RFC 7807) ---
 
-// APIError represents an error response from the QURL API.
+// APIError represents an error response from the qURL API.
 type APIError struct {
 	StatusCode    int
 	Code          string
