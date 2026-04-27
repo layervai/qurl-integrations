@@ -369,6 +369,31 @@ describe('discord module', () => {
       expect(msg.edit).not.toHaveBeenCalled();
     });
 
+    it('warns when the embed has no fields array at all (shape regression signal)', async () => {
+      // Edge case: a future render that emits the expiry into
+      // `description` instead of `addFields[]` (or any other shape
+      // change that drops `json.fields`) would silently cause the
+      // sweeper to mark every row "edited" without flipping the verb.
+      // The function takes the no-fields path through the Array.isArray
+      // guard, hits `if (!mutated)` with `alreadyPast === false`, and
+      // logs the shape-regression warn — confirmed below.
+      const msg = {
+        edit: jest.fn().mockResolvedValue(undefined),
+        embeds: [{ toJSON: () => ({ description: 'no-fields embed' /* no `fields` */ }) }],
+      };
+      const channel = { messages: { fetch: jest.fn().mockResolvedValue(msg) } };
+      mockClient.channels.fetch.mockResolvedValue(channel);
+
+      const ok = await discord.editDMToPastTense('chan-1', 'msg-1');
+      expect(ok).toBe(true);
+      expect(msg.edit).not.toHaveBeenCalled();
+      const logger = require('../src/logger');
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('shape regression'),
+        expect.objectContaining({ channelId: 'chan-1', messageId: 'msg-1' }),
+      );
+    });
+
     it('warns when neither present nor past prefix is found (shape regression signal)', async () => {
       // Distinct from the already-past-tense path: this is the silent-
       // skip bug class — embed shape drifted between render and edit.

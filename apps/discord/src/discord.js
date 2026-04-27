@@ -873,6 +873,15 @@ async function editDMToPastTense(channelId, messageId) {
     //   50001 Missing Access         — bot was blocked / removed from DM
     //   50007 Cannot send DM to user — recipient blocked DMs since send
     //   50013 Missing Permissions    — Discord-side perm boundary changed on the DM
+    //
+    // Everything else (including 5xx and 429 rate-limit responses) falls
+    // through as transient — the sweeper leaves the row unmarked and the
+    // next sweep retries it. 429s in particular DO surface here when a
+    // post-outage backlog drains at concurrency=5 and bursts past Discord's
+    // route-scoped limit; deferring to the 60s sweep cadence is fine
+    // because (a) discord.js's own queue handles intra-call retry under
+    // most rate-limit shapes, and (b) the "wait one minute and try again"
+    // backoff dwarfs any Retry-After header Discord would send.
     if ([10003, 10008, 10013, 50001, 50007, 50013].includes(err.code)) return false;
     throw err;
   }

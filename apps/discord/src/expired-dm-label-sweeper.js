@@ -137,16 +137,28 @@ async function sweepOnce() {
 }
 
 function startExpiredDMLabelSweeper() {
-  // First sweep 30s after boot — short delay so a bot restart still
-  // closes the tense gap quickly without colliding with Discord login
-  // and the initial guild-cache hydration.
+  // First sweep 60s after boot — covers the worst case where
+  // `client.login(...)` itself burns its full 30s deadline before the
+  // Discord client is ready. A 30s kick that races a 30s login window
+  // would have the first sweep fire against an unready client; the
+  // edits would throw and re-sweep next minute (self-healing) but it's
+  // a footgun. 60s clears the login deadline + leaves headroom for
+  // initial guild-cache hydration. Cost: at most 30s of "Portal closes
+  // X seconds ago" tense lag on the very first sweep after boot.
+  //
+  // Idempotency note: if `editDMToPastTense` lands the Discord edit but
+  // `markDMExpiredLabelEditedByMessageId` then throws (DB transient),
+  // the row stays unmarked → re-swept → editDMToPastTense finds the
+  // embed already past-tense → returns true silently → marked. The
+  // already-past branch in editDMToPastTense is the explicit safety
+  // net for this gap.
   const kick = setTimeout(() => {
     sweepOnce().catch(err => logger.error('Expired-DM-label sweep crash', { error: err.message }));
     const interval = setInterval(() => {
       sweepOnce().catch(err => logger.error('Expired-DM-label sweep crash', { error: err.message }));
     }, SWEEP_INTERVAL_MS);
     interval.unref();
-  }, 30 * 1000);
+  }, 60 * 1000);
   kick.unref();
 }
 

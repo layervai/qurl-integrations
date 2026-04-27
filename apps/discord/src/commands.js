@@ -27,7 +27,6 @@ const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isA
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
-
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
