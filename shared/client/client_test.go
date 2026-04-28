@@ -283,7 +283,7 @@ func TestMintLinkContentType(t *testing.T) {
 			}
 			apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
 		}))
-		defer srv.Close()
+		t.Cleanup(srv.Close)
 
 		c := testClient(srv.URL, "test-key")
 		if _, err := c.MintLink(context.Background(), testResourceID, nil); err != nil {
@@ -298,7 +298,7 @@ func TestMintLinkContentType(t *testing.T) {
 			}
 			apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
 		}))
-		defer srv.Close()
+		t.Cleanup(srv.Close)
 
 		c := testClient(srv.URL, "test-key")
 		if _, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{Label: "x"}); err != nil {
@@ -530,7 +530,7 @@ func TestUpdateTags(t *testing.T) {
 					"status":      "active",
 				})
 			}))
-			defer srv.Close()
+			t.Cleanup(srv.Close)
 
 			c := testClient(srv.URL, "test-key")
 			_, err := c.Update(context.Background(), testResourceID, UpdateInput{Tags: tt.tags})
