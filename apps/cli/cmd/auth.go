@@ -120,7 +120,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 
 	if !noBrowser {
 		w.printf("  Opening browser to authenticate...\n")
-		if browserErr := auth.OpenBrowser(session.AuthURL); browserErr != nil {
+		if browserErr := auth.OpenBrowser(ctx, session.AuthURL); browserErr != nil {
 			w.printf("  Could not open browser (%s). Visit this URL:\n", browserErr)
 			w.printf("  %s\n", session.AuthURL)
 		}

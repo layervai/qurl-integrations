@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -13,7 +14,7 @@ import (
 // The loopback allowlist matches what QURL_AUTH0_URL permits, so local-dev
 // flows don't need --no-browser.
 // Returns an error if the URL is invalid or the browser could not be launched.
-func OpenBrowser(rawURL string) error {
+func OpenBrowser(ctx context.Context, rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -26,11 +27,11 @@ func OpenBrowser(rawURL string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.CommandContext(ctx, "open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	default:
-		return exec.Command("xdg-open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.CommandContext(ctx, "xdg-open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	}
 }
 
