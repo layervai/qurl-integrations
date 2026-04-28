@@ -298,7 +298,7 @@ describe('streaks', () => {
     expect(putCall.ConditionExpression).toMatch(/attribute_not_exists\(discord_id\)/);
   });
 
-  test('updateStreak: handles insert-branch race (CCFE) by recursing into update path', async () => {
+  test('updateStreak: handles insert-branch race (CCFE) by recursing into update path with ConsistentRead', async () => {
     const thisMonth = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
     // First Get: no existing row (we're the second writer reading
     // before the race). Second Get (after recurse): row IS present,
@@ -327,7 +327,30 @@ describe('streaks', () => {
     expect(result).toEqual({ current: 1, longest: 1, isNew: false });
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1); // only our (failed) attempt
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0); // same-month: no update
-    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(2); // initial + recurse
+    const getCalls = ddbMock.commandCalls(GetCommand);
+    expect(getCalls).toHaveLength(2); // initial + recurse
+    // Critical consistency guard: the recurse-after-CCFE Get MUST
+    // be strongly-consistent. Without ConsistentRead, the second
+    // call could still return Item: undefined for a few ms after
+    // the concurrent winner's PutItem committed, re-entering the
+    // insert branch and throwing a second CCFE with nowhere to
+    // recover. The first call stays eventually-consistent (cheaper
+    // by half a request unit + lower latency on the happy path).
+    expect(getCalls[0].args[0].input.ConsistentRead).toBeUndefined();
+    expect(getCalls[1].args[0].input.ConsistentRead).toBe(true);
+  });
+
+  test('updateStreak: throws loud if ConsistentRead-after-CCFE STILL sees no row (DDB invariant violation)', async () => {
+    // Pathological case: CCFE proves the row exists, but a
+    // strongly-consistent GetItem still returns undefined. Per DDB
+    // contract this can't happen — but rather than infinite-recurse
+    // if it ever does (or if a caller passes _afterRace=true
+    // incorrectly), the function throws with a diagnostic message.
+    ddbMock.on(GetCommand).resolves({}); // both reads return empty
+    const ccfe = new Error('exists');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(PutCommand).rejects(ccfe);
+    await expect(store.updateStreak('d')).rejects.toThrow(/consistency violation/);
   });
 
   test('updateStreak: non-CCFE insert errors propagate to caller', async () => {

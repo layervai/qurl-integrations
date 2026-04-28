@@ -629,17 +629,30 @@ async function awardFirstIssueBadge(discordId) {
 
 // ── Streaks ──
 
-async function getStreak(discordId) {
+async function getStreak(discordId, { consistent = false } = {}) {
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.streaks,
     Key: { discord_id: discordId },
+    // Default eventually-consistent. Callers that just lost a
+    // conditional write race on this same key (see updateStreak's
+    // CCFE recurse) MUST pass `consistent: true` — without it the
+    // GetItem can still return undefined for a few ms after the
+    // concurrent winner's PutItem committed, which would re-enter
+    // the insert branch and throw a second CCFE that has nowhere
+    // sensible to fall through to.
+    ...(consistent ? { ConsistentRead: true } : {}),
   }));
   return res.Item;
 }
 
-async function updateStreak(discordId) {
+async function updateStreak(discordId, { _afterRace = false } = {}) {
   const currentMonth = getMonthString();
-  const existing = await getStreak(discordId);
+  // Eventually-consistent on the first call (cheaper, and any
+  // staleness here just means we'll attempt the conditional Put
+  // and either succeed or take the CCFE → recurse path with
+  // ConsistentRead). Strongly-consistent only on the recurse
+  // re-entry where we KNOW a concurrent writer just committed.
+  const existing = await getStreak(discordId, { consistent: _afterRace });
 
   if (!existing) {
     // First-write race: two concurrent recordContribution calls for
@@ -648,10 +661,18 @@ async function updateStreak(discordId) {
     // (still streak=1 here, so the data outcome matches; but the
     // second writer's attribution race-loses silently). Guard with
     // attribute_not_exists; on CCFE fall through to the update path
-    // — by definition a streak row now exists, so re-reading it and
-    // running the same-month / consecutive-month / break logic
+    // — by definition a streak row now exists, so re-reading it
+    // (ConsistentRead, since the concurrent winner JUST committed)
+    // and running the same-month / consecutive-month / break logic
     // produces the correct end state. Cheap fix that closes the
     // insert-branch race without TransactWriteItems.
+    if (_afterRace) {
+      // Defense-in-depth: a ConsistentRead after CCFE that STILL
+      // returns undefined would mean DDB lost the concurrent
+      // winner's write, which violates DDB's strong-consistency
+      // contract. Rather than infinite-recurse, throw loud.
+      throw new Error(`updateStreak: streak row for ${discordId} still missing after CCFE + ConsistentRead — DDB consistency violation or a bug above this layer.`);
+    }
     try {
       await ddb.send(new PutCommand({
         TableName: TABLES.streaks,
@@ -667,11 +688,12 @@ async function updateStreak(discordId) {
       return { current: 1, longest: 1, isNew: true };
     } catch (err) {
       if (err.name !== 'ConditionalCheckFailedException') throw err;
-      // Concurrent writer beat us to the insert. Recurse — the row
-      // is now present, so the second call hits the update branch
-      // and reconciles correctly. One-level recursion bounded by
-      // the existence check above.
-      return updateStreak(discordId);
+      // Concurrent writer beat us to the insert. Recurse with
+      // _afterRace=true so getStreak does a ConsistentRead — the
+      // row is durably present per CCFE, so eventual consistency
+      // could still return undefined for a few ms and re-enter
+      // this branch. ConsistentRead closes that hole.
+      return updateStreak(discordId, { _afterRace: true });
     }
   }
 
