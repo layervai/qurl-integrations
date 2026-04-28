@@ -1,11 +1,12 @@
 const config = require('./config');
 const logger = require('./logger');
-const { client, shutdown: discordShutdown } = require('./discord');
+const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
+const { initHttpOnly } = require('./http-only-init');
 
 // Process role — selects which subset of the bot runs in this
 // container. Three modes:
@@ -35,12 +36,19 @@ const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 // routes import), but `client.login()` is gated on `isGateway`.
 // Creating a Client without login() does NOT open a WebSocket —
 // the WS only opens on login. HTTP-only replicas therefore never
-// collide with the gateway singleton. Routes that currently call
-// gateway-backed helpers (routes/oauth.js, routes/webhooks.js
-// imports from `./discord`) should progressively migrate to
-// `discord-rest.js` so the gateway client can eventually be
-// moved entirely behind a role check — tracked as a follow-up
-// once the split is in prod and patterns stabilize.
+// collide with the gateway singleton.
+//
+// http-only mode (`PROCESS_ROLE=http`) needs two things login()
+// would otherwise do for free: (1) a token on `client.rest` so
+// REST helpers (sendDM, channels.X.send, member.roles.add) can
+// authenticate, and (2) an initial `refreshCache()` so the
+// route handlers find a populated guild/roles/channels cache on
+// the first OAuth callback or webhook. Both are seeded
+// explicitly in start() below — see the `else if (isHttp)`
+// branch. Migration to `discord-rest.js` (lighter, no Client
+// object needed at all) remains a follow-up; today's helpers
+// already work in either role once the token + cache are in
+// place.
 const PROCESS_ROLE = (process.env.PROCESS_ROLE || 'combined').trim();
 const VALID_ROLES = ['combined', 'gateway', 'http'];
 if (!VALID_ROLES.includes(PROCESS_ROLE)) {
@@ -329,6 +337,13 @@ async function start() {
         t.unref();
       }),
     ]);
+  } else if (isHttp) {
+    // Pure http-only mode: seed the REST token + warm the cache without
+    // a Gateway login. See src/http-only-init.js for the rationale.
+    // Failures are fatal — propagated through start().catch() into
+    // gracefulShutdown(1) so a Discord-unreachable replica crash-loops
+    // instead of silently serving 5xx.
+    await initHttpOnly({ client, config, refreshCache });
   }
 }
 
