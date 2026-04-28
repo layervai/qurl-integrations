@@ -214,6 +214,35 @@ describe('badges', () => {
     const result = await store.hasBadge('d', 'first_pr');
     expect(result).toBe(true);
   });
+
+  test('checkAndAwardBadges: FIRST_PR awards on count>=1 + !hasBadge (idempotent — survives GSI lag count jumping 0→2)', async () => {
+    // Simulates the exact race the round-5 review flagged: GSI lag
+    // means the first getContributionCount call for a brand-new
+    // contributor returns count=2 instead of count=1 (because by
+    // the time the GSI has propagated, a SECOND legitimate
+    // contribution has already landed). Strict count===1 would
+    // permanently miss FIRST_PR; idempotent count>=1 + !hasBadge
+    // still awards it.
+    ddbMock.on(QueryCommand).resolves({ Count: 2, Items: [] }); // GSI returns 2
+    ddbMock.on(GetCommand).resolves({}); // hasBadge returns false for everything
+    ddbMock.on(PutCommand).resolves({}); // every awardBadge succeeds
+
+    const awarded = await store.checkAndAwardBadges('d', 'Add new feature', 'owner/repo');
+    expect(awarded).toContain('first_pr');
+  });
+
+  test('checkAndAwardBadges: FIRST_PR not re-awarded when hasBadge already true', async () => {
+    // Idempotence guard: even if count is huge, we don't double-award.
+    ddbMock.on(QueryCommand).resolves({ Count: 47, Items: [] });
+    // GetCommand for hasBadge(FIRST_PR) returns truthy; subsequent
+    // hasBadge calls (DOCS_HERO, BUG_HUNTER, etc.) also return truthy
+    // — irrelevant for this assertion.
+    ddbMock.on(GetCommand).resolves({ Item: { discord_id: 'd', badge_type: 'first_pr' } });
+    ddbMock.on(PutCommand).resolves({});
+
+    const awarded = await store.checkAndAwardBadges('d', 'Add feature', 'owner/repo');
+    expect(awarded).not.toContain('first_pr');
+  });
 });
 
 // ── Guild configs (encryption path) ──
@@ -497,6 +526,22 @@ describe('qurl sends', () => {
     expect(sB.delivered_count).toBe(5);
   });
 
+  test('getRecentSends: GSI Query carries Limit so a fat send doesn\'t blow up RCU', async () => {
+    // Regression guard: a sender whose latest send fanned out to
+    // 1000 recipients would, without a per-page Limit, read all
+    // 1000 rows on every /qurl history call to extract one unique
+    // send_id. Limit pins the worst-case RCU per page; pagination
+    // handles "didn't get enough unique send_ids in one page."
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    ddbMock.on(GetCommand).resolves({});
+    await store.getRecentSends('sender', 10);
+    const gsiCall = ddbMock.commandCalls(QueryCommand).find(c =>
+      c.args[0].input.IndexName === 'sender_discord_id-created_at-index'
+    );
+    expect(gsiCall).toBeDefined();
+    expect(gsiCall.args[0].input.Limit).toBe(100);
+  });
+
   test('getRecentSends: filters out revoked sends', async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName) {
@@ -762,5 +807,21 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
     // deprecation warning doesn't flake this test — the contract
     // here is "validation didn't fire", not "stderr is silent".
     expect(result.stderr).not.toMatch(/DDB_TABLE_PREFIX/);
+  });
+
+  test('throws when DDB_TABLE_PREFIX is missing the trailing dash', () => {
+    // Without the trailing '-', concat with kebab table suffixes
+    // produces malformed names like 'qurl-bot-discord-sandboxgithub-links'.
+    // First DDB call would return ResourceNotFoundException — clear at
+    // the call site but confusing in CloudWatch (looks like a perms or
+    // schema problem, not a config typo). Boot-time check points
+    // directly at the env var.
+    const result = spawnDdbStoreBoot('qurl-bot-discord-sandbox');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/must end with '-'/);
+    // Names the offending value AND the example malformed table the
+    // operator would've otherwise hit — concrete next action.
+    expect(result.stderr).toMatch(/qurl-bot-discord-sandbox/);
+    expect(result.stderr).toMatch(/github-links/);
   });
 });

@@ -100,6 +100,17 @@ const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
   throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
+// Trailing-dash check. The prefix is concatenated directly with each
+// table's kebab-case suffix (`${TABLE_PREFIX}github-links`), so a
+// missing trailing dash silently produces malformed names like
+// `qurl-bot-discord-prodgithub-links` and the bot's first DDB call
+// returns ResourceNotFoundException — clear at the first call but
+// confusing in CloudWatch logs (looks like a permission or naming
+// issue, not a config typo). Catch it at boot so the failure points
+// directly at the env var.
+if (!TABLE_PREFIX.endsWith('-')) {
+  throw new Error(`DDB_TABLE_PREFIX must end with '-' (got '${TABLE_PREFIX}'). The prefix is concatenated with kebab-case table suffixes; a missing dash produces malformed names like '${TABLE_PREFIX}github-links'. Add the trailing '-' in the deployment template.`);
+}
 const TABLES = Object.freeze({
   github_links: `${TABLE_PREFIX}github-links`,
   pending_links: `${TABLE_PREFIX}pending-links`,
@@ -588,8 +599,26 @@ async function checkAndAwardBadges(discordId, prTitle, repo) {
   const awarded = [];
   const count = await getContributionCount(discordId);
 
-  if (count === 1 && await awardBadge(discordId, BADGE_TYPES.FIRST_PR)) {
-    awarded.push(BADGE_TYPES.FIRST_PR);
+  // FIRST_PR award: idempotent on `count >= 1 && !hasBadge(FIRST_PR)`
+  // rather than `count === 1`. Two reasons the strict-equality check
+  // could permanently miss the badge on DDB:
+  //   1. Webhook redelivery: GitHub re-sends a PR-merged webhook
+  //      after 4xx/5xx; recordContribution dedups via CCFE on the
+  //      base table, but if a SECOND legitimate PR landed in the
+  //      same window the GSI may already show count=2 for the
+  //      first user's first-ever contribution.
+  //   2. GSI lag inversion: the retry loop in getContributionCount
+  //      papers over count=0, but if writes for two contributions
+  //      hit the GSI between the retry's reads, count can jump
+  //      directly from 0 → 2 and skip count=1.
+  // Idempotent form: hasBadge is the source of truth (badge table
+  // has its own composite-PK dedup), so awardBadge can fire on any
+  // count≥1 and the condition self-clears after the first award.
+  // SQLite has the same race window in theory but a much narrower
+  // one — flagging here so a future SQLite cleanup follows the
+  // same shape.
+  if (count >= 1 && !(await hasBadge(discordId, BADGE_TYPES.FIRST_PR))) {
+    if (await awardBadge(discordId, BADGE_TYPES.FIRST_PR)) awarded.push(BADGE_TYPES.FIRST_PR);
   }
 
   const isDocsPR = /doc|readme|guide|tutorial|example/i.test(prTitle) || /doc|example|demo/i.test(repo);
@@ -904,6 +933,17 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   let ExclusiveStartKey;
   const MAX_GSI_PAGES = 10;
   const TARGET_UNIQUE_SENDS = limit * 2;
+  // Per-page GSI Limit: caps RCU on the hot path. Without it, a
+  // sender whose latest send fanned out to 1000 recipients reads
+  // ALL 1000 rows (1MB / 8KB-ish per row → up to ~125 RCU
+  // amortized per page) every time the user runs /qurl history,
+  // even though the function only needs `TARGET_UNIQUE_SENDS`
+  // distinct send_ids. 100 is a comfortable upper bound on
+  // recipients-per-typical-send while still letting up-to-100
+  // distinct sends land in a single page on senders who use the
+  // command for many small sends. Pagination already handles the
+  // case where one page isn't enough.
+  const GSI_PAGE_LIMIT = 100;
   for (let page = 0; page < MAX_GSI_PAGES && sendIdOrder.length < TARGET_UNIQUE_SENDS; page++) {
     const sendsRes = await ddb.send(new QueryCommand({
       TableName: TABLES.qurl_sends,
@@ -911,6 +951,7 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       KeyConditionExpression: 'sender_discord_id = :s',
       ExpressionAttributeValues: { ':s': senderDiscordId },
       ScanIndexForward: false,
+      Limit: GSI_PAGE_LIMIT,
       ExclusiveStartKey,
     }));
     for (const row of sendsRes.Items || []) {
