@@ -93,7 +93,7 @@ func WithHTTPClient(c *http.Client) PKCEFlowOption {
 func NewPKCEFlow(cfg *PKCEConfig, opts ...PKCEFlowOption) *PKCEFlow {
 	p := &PKCEFlow{
 		config:     *cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 	}
 	for _, opt := range opts {
 		opt(p)

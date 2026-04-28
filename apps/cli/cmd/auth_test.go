@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -535,11 +536,11 @@ func TestAuthLoginMalformedConfig(t *testing.T) {
 	// Write a syntactically invalid config file. The preflight config check in
 	// runAuthLogin should fail fast — before the OAuth flow starts — so the user
 	// gets an error immediately rather than after completing the browser flow.
-	cfgDir := home + "/.config/qurl"
+	cfgDir := filepath.Join(home, ".config", "qurl")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgDir+"/config.yaml", []byte("api_key: [broken yaml\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("api_key: [broken yaml\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -558,11 +559,11 @@ func TestAuthLogoutMalformedConfig(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "")
 
 	// Write a syntactically invalid config file.
-	cfgDir := home + "/.config/qurl"
+	cfgDir := filepath.Join(home, ".config", "qurl")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgDir+"/config.yaml", []byte("api_key: [broken yaml\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("api_key: [broken yaml\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -581,11 +582,11 @@ func TestAuthStatusMalformedConfig(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "")
 
 	// Write a syntactically invalid config file.
-	cfgDir := home + "/.config/qurl"
+	cfgDir := filepath.Join(home, ".config", "qurl")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgDir+"/config.yaml", []byte("api_key: [broken yaml\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("api_key: [broken yaml\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
