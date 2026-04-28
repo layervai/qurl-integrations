@@ -1,4 +1,10 @@
 // Package client provides a Go client for the qURL API.
+//
+// Nil-input conventions:
+//   - Create requires non-nil input (TargetURL is mandatory) and returns an error if nil.
+//   - List treats nil as &ListInput{} (no required fields, so nil is always safe).
+//   - MintLink(ctx, id, nil) sends a bodiless POST — the server mints with the qURL's own
+//     defaults. MintLink(ctx, id, &MintLinkInput{…}) sends a JSON body with per-link overrides.
 package client
 
 import (
@@ -340,12 +346,19 @@ func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QUR
 }
 
 // MintLinkInput holds optional input for minting an access link.
+//
+// OneTimeUse and MaxSessions use pointer types so callers can explicitly override a
+// qURL's defaults to false/0 (e.g., "allow multiple sessions on a normally one-time
+// qURL"). A nil pointer omits the field from the JSON body, letting the server apply the
+// qURL-level default. The same logic applies to MintLink(ctx, id, nil): a nil
+// MintLinkInput sends a bodiless POST (server uses qURL defaults), while a non-nil
+// MintLinkInput (even &MintLinkInput{}) sends a JSON body.
 type MintLinkInput struct {
 	ExpiresIn       string        `json:"expires_in,omitempty"`
 	ExpiresAt       *time.Time    `json:"expires_at,omitempty"`
 	Label           string        `json:"label,omitempty"`
-	OneTimeUse      bool          `json:"one_time_use,omitempty"`
-	MaxSessions     int           `json:"max_sessions,omitempty"`
+	OneTimeUse      *bool         `json:"one_time_use,omitempty"`
+	MaxSessions     *int          `json:"max_sessions,omitempty"`
 	SessionDuration string        `json:"session_duration,omitempty"`
 	AccessPolicy    *AccessPolicy `json:"access_policy,omitempty"`
 }
@@ -409,13 +422,13 @@ type BatchItemError struct {
 	Message string `json:"message"`
 }
 
-// maxBatchSize is the maximum number of items in a single batch create request.
-const maxBatchSize = 100
+// MaxBatchSize is the maximum number of items in a single batch create request.
+const MaxBatchSize = 100
 
 // BatchCreate creates multiple qURLs at once (1-100 items).
 func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchCreateOutput, error) {
-	if len(items) == 0 || len(items) > maxBatchSize {
-		return nil, fmt.Errorf("batch size must be 1-%d, got %d", maxBatchSize, len(items))
+	if len(items) == 0 || len(items) > MaxBatchSize {
+		return nil, fmt.Errorf("batch size must be 1-%d, got %d", MaxBatchSize, len(items))
 	}
 	for i, item := range items {
 		if item == nil {

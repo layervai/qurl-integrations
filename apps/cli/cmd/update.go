@@ -21,6 +21,11 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update <resource-id>",
 		Short: "Update a qURL's properties",
+		Long: `Updates mutable properties of a qURL.
+
+Note: The --description flag updates the resource-level description (maps to the API's
+"description" field on UpdateQurlRequest). This is intentionally different from
+"qurl create --label", which sets the qURL token label on creation.`,
 		Example: `  qurl update r_k8xqp9h2sj9 --description "Production API access"
   qurl update r_k8xqp9h2sj9 -d ""  # clear description
   qurl update r_k8xqp9h2sj9 --tags prod,api --extend-by 24h`,
@@ -41,7 +46,7 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 				cmd.Flags().Changed("extend-by") ||
 				cmd.Flags().Changed("expires-at")
 			if !hasChange {
-				return errors.New("at least one flag must be set (e.g., --description, --tags, --extend-by, --expires-at)")
+				return errors.New("must set at least one of: --description, --tags, --extend-by, --expires-at")
 			}
 
 			c, err := opts.newClient()

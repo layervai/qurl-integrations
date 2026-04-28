@@ -309,10 +309,10 @@ func TestMintLinkContentType(t *testing.T) {
 	})
 }
 
-// TestMintLinkOmitEmpty verifies that MintLinkInput fields with zero values are
-// stripped by omitempty, so &MintLinkInput{} marshals to {} rather than a struct
-// with false/0/null fields. This locks the contract mint.go relies on when
-// omitting the Changed() gate for bool/int flags.
+// TestMintLinkOmitEmpty verifies that &MintLinkInput{} marshals to {} at the wire
+// level. Pointer fields (OneTimeUse *bool, MaxSessions *int) are nil in the zero value
+// and are correctly omitted by omitempty. This test pairs with TestMintLinkOverrideToFalse,
+// which asserts that non-nil pointers (even false/0) are included.
 func TestMintLinkOmitEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -416,21 +416,24 @@ func TestListWithDateFilters(t *testing.T) {
 	}
 }
 
+func boolPtr(b bool) *bool { return &b }
+func intPtr(n int) *int   { return &n }
+
 func TestMintLinkWithInput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/qurls/"+testResourceID+"/mint_link" {
 			t.Errorf("expected mint_link path, got %s", r.URL.Path)
 		}
 
-		var input MintLinkInput
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if input.Label != "test-link" {
-			t.Errorf("expected label 'test-link', got %q", input.Label)
+		if string(body["label"]) != `"test-link"` {
+			t.Errorf("expected label 'test-link', got %s", body["label"])
 		}
-		if !input.OneTimeUse {
-			t.Error("expected one_time_use=true")
+		if string(body["one_time_use"]) != "true" {
+			t.Errorf("expected one_time_use=true, got %s", body["one_time_use"])
 		}
 
 		apiEnvelope(t, w, map[string]any{
@@ -443,13 +446,47 @@ func TestMintLinkWithInput(t *testing.T) {
 	c := testClient(srv.URL, "test-key")
 	got, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{
 		Label:      "test-link",
-		OneTimeUse: true,
+		OneTimeUse: boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("MintLink: %v", err)
 	}
 	if got.QURLLink != "https://qurl.link/at_minted" {
 		t.Errorf("got QURLLink %q", got.QURLLink)
+	}
+}
+
+// TestMintLinkOverrideToFalse verifies that explicitly setting OneTimeUse=false or
+// MaxSessions=0 sends the field on the wire (not silently omitted), allowing callers to
+// override a qURL's server-side default back to the zero value.
+func TestMintLinkOverrideToFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := body["one_time_use"]; !ok {
+			t.Error("expected one_time_use field in body (should not be omitted when explicitly set to false)")
+		}
+		if string(body["one_time_use"]) != "false" {
+			t.Errorf("expected one_time_use=false, got %s", body["one_time_use"])
+		}
+		if _, ok := body["max_sessions"]; !ok {
+			t.Error("expected max_sessions field in body (should not be omitted when explicitly set to 0)")
+		}
+		if string(body["max_sessions"]) != "0" {
+			t.Errorf("expected max_sessions=0, got %s", body["max_sessions"])
+		}
+		apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{
+		OneTimeUse:  boolPtr(false),
+		MaxSessions: intPtr(0),
+	}); err != nil {
+		t.Fatalf("MintLink: %v", err)
 	}
 }
 
@@ -842,13 +879,26 @@ func TestBatchCreateValidation(t *testing.T) {
 		t.Fatal("expected error for empty batch")
 	}
 
-	items := make([]*CreateInput, maxBatchSize+1)
+	items := make([]*CreateInput, MaxBatchSize+1)
 	for i := range items {
 		items[i] = &CreateInput{TargetURL: "https://example.com"}
 	}
 	_, err = c.BatchCreate(context.Background(), items)
 	if err == nil {
-		t.Fatalf("expected error for batch > %d", maxBatchSize)
+		t.Fatalf("expected error for batch > %d", MaxBatchSize)
+	}
+}
+
+func TestBatchCreateNilItem(t *testing.T) {
+	c := testClient("http://unused", "test-key")
+
+	_, err := c.BatchCreate(context.Background(), []*CreateInput{
+		{TargetURL: "https://example.com"},
+		nil,
+		{TargetURL: "https://example2.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for nil item in batch")
 	}
 }
 

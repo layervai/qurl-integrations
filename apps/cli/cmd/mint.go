@@ -62,17 +62,21 @@ via the SDK or API; the CLI exposes the common per-link flags only.`,
 				cmd.Flags().Changed("session-duration")
 
 			if hasInput {
-				// All fields are assigned unconditionally. omitempty on bool/int fields
-				// strips false/0 from the JSON payload, so zero-value flags are naturally
-				// omitted — identical to what a Changed() gate would do, without the
-				// asymmetry. ExpiresAt is pointer-typed and requires parsing, so it is
-				// still gated on Changed().
+				// String and duration fields are assigned unconditionally: omitempty strips
+				// empty strings cleanly. Bool/int fields use pointer types (*bool/*int) so
+				// an explicit --one-time=false or --max-sessions=0 can be sent to the server
+				// as an explicit override rather than being silently dropped. Only build the
+				// pointer when the flag was actually set; a nil pointer omits the field.
 				input = &client.MintLinkInput{
 					ExpiresIn:       expiresIn,
 					Label:           label,
-					OneTimeUse:      oneTimeUse,
-					MaxSessions:     maxSessions,
 					SessionDuration: sessionDuration,
+				}
+				if cmd.Flags().Changed("one-time") {
+					input.OneTimeUse = &oneTimeUse
+				}
+				if cmd.Flags().Changed("max-sessions") {
+					input.MaxSessions = &maxSessions
 				}
 				if cmd.Flags().Changed("expires-at") {
 					t, parseErr := time.Parse(time.RFC3339, expiresAt)
