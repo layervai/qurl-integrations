@@ -35,9 +35,26 @@ func OpenBrowser(ctx context.Context, rawURL string) error {
 	}
 }
 
+// IsAllowedOriginURL reports whether rawURL is a permitted OAuth origin:
+// https:// for production, or loopback http:// (127.0.0.1 / localhost)
+// for local development. Rejects invalid URLs and all other schemes.
+func IsAllowedOriginURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return isAllowedBrowserURL(u)
+}
+
 // isAllowedBrowserURL reports whether u is safe to open in a browser.
 // Accepts https:// and loopback http:// (127.0.0.1 and localhost) only.
+// URLs with userinfo (e.g. https://user@host) are rejected — the
+// credentials would be passed on the command line to the OS browser
+// launcher, potentially leaking them via process inspection.
 func isAllowedBrowserURL(u *url.URL) bool {
+	if u.User != nil {
+		return false
+	}
 	if u.Scheme == "https" {
 		return true
 	}

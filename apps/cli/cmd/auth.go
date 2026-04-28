@@ -95,10 +95,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	}
 
 	auth0URL := os.Getenv("QURL_AUTH0_URL")
-	if auth0URL != "" &&
-		!strings.HasPrefix(auth0URL, "https://") &&
-		!strings.HasPrefix(auth0URL, "http://127.0.0.1") &&
-		!strings.HasPrefix(auth0URL, "http://localhost") {
+	if auth0URL != "" && !auth.IsAllowedOriginURL(auth0URL) {
 		return errors.New("invalid QURL_AUTH0_URL: must use https:// (or http://localhost / http://127.0.0.1 for local testing)")
 	}
 	flowCfg := &auth.PKCEConfig{
