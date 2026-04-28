@@ -1054,12 +1054,22 @@ async function markSendRevoked(sendId, senderDiscordId) {
   }
 
   // Legacy — look up qurl_sends row, insert minimal config with revoked_at.
+  // No `Limit: 1`: DDB applies Limit BEFORE FilterExpression, so the
+  // first server-side row gets read and the filter on
+  // sender_discord_id is then applied to that single row. Today every
+  // recipient row of a given send_id shares one sender_discord_id (per
+  // recordQURLSend / recordQURLSendBatch invariants), so a Limit:1
+  // would be safe — but a future migration / manual repair / partial
+  // write that violated the invariant would silently miss the
+  // matching row and the revoke would no-op. Dropping the Limit makes
+  // the lookup robust regardless of the partition layout: the
+  // partition is bounded by recipient count anyway, and the match-
+  // first-then-stop happens client-side via the .find() below.
   const legacyRes = await ddb.send(new QueryCommand({
     TableName: TABLES.qurl_sends,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-    Limit: 1,
   }));
   if (!legacyRes.Items || legacyRes.Items.length === 0) return;
   const legacy = legacyRes.Items[0];
@@ -1202,15 +1212,30 @@ async function getGuildConfigWithApiKey(guildId) {
 async function recordOrphanedToken(accessToken) {
   const ttlDays = parseInt(process.env.ORPHAN_TOKEN_RETENTION_DAYS, 10) || (process.env.NODE_ENV === 'production' ? 7 : 1);
   const expiresAt = Math.floor((Date.now() + ttlDays * 24 * 60 * 60 * 1000) / 1000);
-  await ddb.send(new PutCommand({
-    TableName: TABLES.orphaned_oauth_tokens,
-    Item: {
-      token_hash: sha256Hex(accessToken),
-      access_token: encrypt(accessToken),
-      recorded_at: nowIso(),
-      expires_at: expiresAt,
-    },
-  }));
+  // Dedup on token_hash. A retry / replay of the same plaintext
+  // (e.g. a flaky revoke path that re-enqueues) would otherwise
+  // overwrite the existing row and push expires_at 7 days
+  // further out — silently extending the credential's lifetime
+  // in the queue beyond the operator-stated retention. CCFE on
+  // the second insert is the correct shape: same row already
+  // exists, no-op. Mirrors the createLink / setGuildApiKey
+  // first-write-wins pattern.
+  try {
+    await ddb.send(new PutCommand({
+      TableName: TABLES.orphaned_oauth_tokens,
+      Item: {
+        token_hash: sha256Hex(accessToken),
+        access_token: encrypt(accessToken),
+        recorded_at: nowIso(),
+        expires_at: expiresAt,
+      },
+      ConditionExpression: 'attribute_not_exists(token_hash)',
+    }));
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // Token already in queue; original recorded_at + expires_at
+    // are preserved. Idempotent caller-visible behavior.
+  }
 }
 
 async function countOrphanedTokens() {

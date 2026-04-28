@@ -330,10 +330,11 @@ describe('guild configs', () => {
 // ── Orphaned OAuth tokens (encryption + hash path) ──
 
 describe('orphaned tokens', () => {
-  test('recordOrphanedToken: hashes plaintext as PK, encrypts ciphertext as access_token, sets TTL', async () => {
+  test('recordOrphanedToken: hashes plaintext as PK, encrypts ciphertext as access_token, sets TTL, dedups on token_hash', async () => {
     ddbMock.on(PutCommand).resolves({});
     await store.recordOrphanedToken('ghp_abc123');
-    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    const call = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    const item = call.Item;
     // Hash is deterministic sha-256 hex
     expect(item.token_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(item.token_hash).not.toContain('ghp_'); // plaintext never in PK
@@ -341,6 +342,28 @@ describe('orphaned tokens', () => {
     expect(item.access_token).toMatch(/^enc:v1:/);
     // TTL epoch-seconds
     expect(typeof item.expires_at).toBe('number');
+    // Dedup guard: a retry / replay of the same plaintext would
+    // otherwise overwrite the existing row and push expires_at out
+    // — silently extending the credential's queue lifetime past
+    // the operator-stated retention. attribute_not_exists makes
+    // the second insert a no-op (CCFE swallowed below).
+    expect(call.ConditionExpression).toMatch(/attribute_not_exists\(token_hash\)/);
+  });
+
+  test('recordOrphanedToken: idempotent on duplicate plaintext (CCFE swallowed, no throw)', async () => {
+    const ccfe = new Error('exists');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(PutCommand).rejects(ccfe);
+    // Must NOT throw — the original row's expires_at is preserved,
+    // matching the operator-stated retention contract.
+    await expect(store.recordOrphanedToken('ghp_abc123')).resolves.toBeUndefined();
+  });
+
+  test('recordOrphanedToken: non-CCFE errors propagate (so caller can retry / alert)', async () => {
+    const err = new Error('throttled');
+    err.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(PutCommand).rejects(err);
+    await expect(store.recordOrphanedToken('ghp_abc123')).rejects.toThrow(/throttled/);
   });
 
   test('decryptOrphanedToken: unwraps via crypto util (now async for contract parity)', async () => {
@@ -705,6 +728,16 @@ describe('qurl sends', () => {
     expect(putCall.Item.revoked_at).toBeDefined();
     expect(putCall.Item.resource_type).toBe('file');
     expect(putCall.ConditionExpression).toMatch(/attribute_not_exists/);
+    // Hardening: legacy lookup must NOT carry Limit:1 — DDB applies
+    // Limit before FilterExpression, so a partition where the first
+    // server-side row doesn't pass the sender filter would silently
+    // miss. Today's invariant (all rows of one send share a sender)
+    // makes Limit:1 safe but also unnecessary; dropping it keeps
+    // the lookup robust to future migrations / manual repairs that
+    // could break the invariant.
+    const queryCall = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(queryCall.Limit).toBeUndefined();
+    expect(queryCall.FilterExpression).toMatch(/sender_discord_id = :s/);
   });
 
   test('saveSendConfig: encrypts attachmentUrl, stores other fields as-is', async () => {
