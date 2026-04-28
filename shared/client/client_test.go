@@ -417,7 +417,7 @@ func TestListWithDateFilters(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
-func intPtr(n int) *int   { return &n }
+func intPtr(n int) *int    { return &n }
 
 func TestMintLinkWithInput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
