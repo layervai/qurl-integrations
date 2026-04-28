@@ -16,12 +16,6 @@
  * Routes.channelMessages would fail this suite at PR time.
  */
 
-jest.mock('../src/config', () => ({
-  DISCORD_TOKEN: 'fake-test-token',
-  PENDING_LINK_EXPIRY_MINUTES: 10,
-  DATABASE_PATH: ':memory:',
-}));
-
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -96,17 +90,20 @@ describe('sendDM via REST', () => {
     expect(result.status).toBe(503);
   });
 
-  it('short-circuits when DISCORD_TOKEN is not configured', async () => {
-    // Re-mock config to return empty token, re-require module.
-    jest.resetModules();
-    jest.doMock('../src/config', () => ({ DISCORD_TOKEN: '', PENDING_LINK_EXPIRY_MINUTES: 10 }));
-    const freshRest = { post: jest.fn(), put: jest.fn(), delete: jest.fn() };
-    jest.doMock('../src/discord', () => ({ client: { rest: freshRest } }));
-    const fresh = require('../src/discord-rest');
-    const result = await fresh.sendDM('user-1', { content: 'hi' });
+  it('returns ok:false on partial-failure (channel created, message-post failed)', async () => {
+    // Documented two-call flow: a successful channel create followed by a
+    // failed message-post must surface the post failure rather than
+    // silently masking it as success. Locks in the {ok:false, status,
+    // error} shape for the second-call branch so a refactor swapping the
+    // try-block boundary can't regress it.
+    restMock.post
+      .mockResolvedValueOnce({ id: 'channel-1' }) // create channel succeeds
+      .mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429 }));
+    const result = await sendDM('user-1', { content: 'hi' });
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/DISCORD_TOKEN/);
-    expect(freshRest.post).not.toHaveBeenCalled();
+    expect(result.status).toBe(429);
+    expect(result.error).toBe('rate limited');
+    expect(restMock.post).toHaveBeenCalledTimes(2);
   });
 });
 

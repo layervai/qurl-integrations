@@ -258,6 +258,7 @@ process.on('uncaughtException', error => {
 
 // Graceful shutdown
 let httpServer = null;
+let httpRefreshTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -283,6 +284,14 @@ async function gracefulShutdown(code = 0) {
       });
     }
     stopServerIntervals();
+    // Periodic REST refreshCache in http-only mode is .unref()ed so it
+    // wouldn't block exit on its own, but clearing explicitly keeps
+    // shutdown symmetric with the other intervals (server.js, oauth.js
+    // rateLimitStore sweep, webhooks.js badSig sweep) and avoids one
+    // last refresh firing mid-teardown.
+    if (httpRefreshTimer) {
+      clearInterval(httpRefreshTimer);
+    }
     // Discord client shutdown only meaningful when we're the gateway
     // role. HTTP-only replicas never called login(), so there's no
     // WebSocket to close — discordShutdown() on an un-logged-in
@@ -321,15 +330,22 @@ async function start() {
   // ALB can route OAuth callbacks / webhooks to a replica whose
   // `client.rest` has no token and whose channel/role cache is cold —
   // the request would 401 inside sendDM / assignContributorRole.
-  // See src/http-only-init.js for the full rationale. Failures are
-  // fatal — propagated through start().catch() into gracefulShutdown(1)
-  // so a Discord-unreachable replica crash-loops instead of silently
-  // serving 5xx. Combined mode keeps the legacy ordering (login() runs
-  // last, after the listener) — that race exists pre-PR and isn't a
-  // regression here; the steady-state cold-start risk that justified
-  // the swap is specific to ALB-fronted http replicas.
+  // See src/http-only-init.js for the full rationale (token + cache
+  // + periodic-REST-refresh that compensates for missing roleDelete /
+  // channelDelete events). Failures are fatal — propagated through
+  // start().catch() into gracefulShutdown(1) so a Discord-unreachable
+  // replica crash-loops instead of silently serving 5xx.
+  //
+  // Combined mode keeps the legacy listener-then-login ordering. The
+  // same cold-start race window exists every restart there
+  // (listener up, client.rest token unset), but ECS health-check
+  // gating typically dominates: traffic doesn't route to the task
+  // until /health passes, and /health doesn't depend on Discord.
+  // Not a regression here (matches pre-PR); follow-up to apply the
+  // init-before-listen pattern to combined mode if the health-gate
+  // assumption ever weakens.
   if (isHttp && !isGateway) {
-    await initHttpOnly({ client, config, refreshCache });
+    httpRefreshTimer = await initHttpOnly({ client, config, refreshCache, logger });
   }
 
   // HTTP listener — OAuth callback, webhooks, health, metrics.
