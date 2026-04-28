@@ -1,0 +1,114 @@
+name: "qurl-bot-discord: Sandbox auto-deploy dispatcher"
+
+# Fires `repository_dispatch types: [discord-bot-deploy]` against
+# layervai/qurl-integrations-infra on every push to this repo's main
+# that touches the bot's code surface. The receiver workflow there
+# (`qurl-bot-discord-deploy.yml`) consumes the dispatch payload's
+# `client_payload.sha` so the deployed image bundles the exact app-
+# code commit — no main-HEAD drift between dispatcher and receiver.
+#
+# Companion to qurl-integrations-infra PR #255 (which added the
+# receiver-side dispatcher contract docs to that workflow's header).
+#
+# Path filter MUST stay aligned with the receiver's `changes` filter
+# — anything that affects the bot's image contents should fire this.
+# Mirroring discord.yml:
+#   - apps/discord/**          (bot source + Dockerfile)
+#   - shared/**                (libs imported by the bot)
+#   - this workflow file       (so changes to dispatcher logic re-test)
+# Adding a new bot dependency outside these paths means widening
+# this filter at the same time, or the next bot deploy silently lags.
+#
+# Why repository_dispatch instead of `workflow_run` against a sibling
+# repo's workflow: GH Actions doesn't support cross-repo workflow_run.
+# repository_dispatch is the canonical mechanism for "push event in
+# repo A triggers workflow in repo B" — and is what the receiver's
+# header docs document as the contract.
+#
+# Auth: needs a PAT or GitHub App token with `repo` scope (specifically
+# `actions:write`) on layervai/qurl-integrations-infra. The default
+# GITHUB_TOKEN cannot fire repository_dispatch on a sibling repo —
+# fail-fast guard below catches the missing-secret case with an
+# actionable error message rather than a confusing 401.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/discord/**'
+      - 'shared/**'
+      - '.github/workflows/sandbox-deploy-dispatcher.yml'
+
+  # Manual escape hatch: lets an operator re-fire the dispatch for
+  # the latest main HEAD without producing a no-op commit. Useful
+  # when the secret was missing on the original push and got
+  # configured after, or when the receiver run was wiped/cancelled.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize per-ref so back-to-back main pushes queue rather than
+# race the dispatch API. cancel-in-progress: false because cancelling
+# mid-dispatch could land an inconsistent state on the receiver side.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch sandbox deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # Fail-fast on missing secret. `secrets.*` cannot be referenced
+      # in `if:` conditions, so the check has to happen in `run:` —
+      # which means the job runner spins up before the failure. ~30s
+      # of wasted runner time vs. a confusing 401 from `gh api` is the
+      # right trade.
+      - name: Verify DEPLOY_PAT is configured
+        env:
+          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+        run: |
+          if [ -z "${DEPLOY_PAT}" ]; then
+            echo "::error::secrets.DEPLOY_PAT is not configured on this repo. The dispatcher needs a PAT or GitHub App token with actions:write on layervai/qurl-integrations-infra to fire repository_dispatch. Configure it under Settings → Secrets and variables → Actions → New repository secret named DEPLOY_PAT, then re-run via workflow_dispatch."
+            exit 1
+          fi
+
+      - name: Fire repository_dispatch on infra repo
+        env:
+          # GH_TOKEN is what `gh` reads. Use the cross-repo PAT here
+          # (NOT GITHUB_TOKEN, which is repo-scoped to this one).
+          GH_TOKEN: ${{ secrets.DEPLOY_PAT }}
+          # The qurl-integrations sha being deployed. The receiver's
+          # `Validate repository_dispatch payload` step rejects runs
+          # without a non-empty sha — this contract is documented in
+          # qurl-bot-discord-deploy.yml's header on the infra side.
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Dispatching qurl-bot-discord-deploy with sha=${DISPATCH_SHA:0:7}"
+
+          # `gh api` returns 204 No Content on success. On failure it
+          # exits non-zero and prints the API error body to stderr,
+          # which `set -euo pipefail` propagates. No retry: a transient
+          # GitHub-side failure is rare enough that the manual
+          # workflow_dispatch escape hatch above is the right recovery
+          # path. Auto-retry would mask a misconfigured PAT.
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/layervai/qurl-integrations-infra/dispatches" \
+            -f "event_type=discord-bot-deploy" \
+            -F "client_payload[sha]=${DISPATCH_SHA}"
+
+          {
+            echo "## Sandbox auto-deploy dispatched"
+            echo
+            echo "- Target repo: \`layervai/qurl-integrations-infra\`"
+            echo "- Event type:  \`discord-bot-deploy\`"
+            echo "- Payload sha: \`${DISPATCH_SHA}\`"
+            echo
+            echo "Watch the receiver run: https://github.com/layervai/qurl-integrations-infra/actions/workflows/qurl-bot-discord-deploy.yml"
+          } >> "$GITHUB_STEP_SUMMARY"
