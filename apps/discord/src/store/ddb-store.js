@@ -323,6 +323,14 @@ async function recordContribution(discordId, githubUsername, prNumber, repo, prT
     logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException') {
+      // Dedup: a webhook redelivery for the same (repo, pr_number)
+      // hits this branch. Streak update is intentionally NOT
+      // attempted on this path — if the streak failed during the
+      // ORIGINAL recordContribution call, it logged loudly there
+      // and the next contribution will pick the streak back up via
+      // updateStreak's reconciliation. Retrying streak on every
+      // dedup'd redelivery would amplify load with no correctness
+      // win.
       logger.debug('Contribution already exists', { pr: prNumber, repo });
       return false;
     }
@@ -383,6 +391,16 @@ async function getContributionCount(discordId) {
   // re-issues on count=0 to avoid noise for users with established
   // histories (where count=0 is the correct answer for a
   // never-contributor).
+  //
+  // Caller contract: this is intended to be called RIGHT AFTER a
+  // contribution insert (the checkAndAwardBadges chain), where
+  // count=0 is almost always GSI lag rather than ground truth. A
+  // future caller probing "does this user have any history?" for
+  // an unlinked Discord user pays the full ~350ms before getting
+  // back the correct 0. If you add a "true zero is expected"
+  // caller, take the retry loop out for that call site (or push
+  // it behind a `justWrote` flag) — don't make every legitimate-
+  // zero query eat the GSI-lag budget.
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const res = await ddb.send(new QueryCommand({
@@ -751,6 +769,15 @@ async function recordQURLSendBatch(sends) {
   // has no equivalent so the retry loop IS the durability guarantee.
   const CHUNK = 25;
   const MAX_RETRIES = 5;
+  // Single `now` shared across every chunk + every retry of this
+  // batch. INTENTIONAL parity with SQLite's transactional insert —
+  // every recipient of one send shares one `created_at`, and
+  // downstream queries (getRecentSends groups by send_id and uses
+  // created_at as the GSI sort key) rely on that. Don't "fix" this
+  // to nowIso()-per-chunk: a slow batch under throttle/retry would
+  // produce a 100-recipient send with a 2s spread of created_at
+  // values, fragmenting the GSI ordering and making a single send
+  // look like several distinct events to consumers.
   const now = nowIso();
   for (let i = 0; i < sends.length; i += CHUNK) {
     const slice = sends.slice(i, i + CHUNK);
@@ -819,6 +846,17 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // until `limit * 2` unique send_ids collected avoids that
   // starvation. Capped at 10 pagination rounds to bound worst-case
   // cost when a sender has hundreds of recent sends.
+  // GSI projection requirement: this Query reads `resource_type`,
+  // `target_type`, `channel_id`, `expires_in`, `created_at` directly
+  // off the returned rows (see metaBySendId usage below). That only
+  // works because `sender_discord_id-created_at-index` is declared
+  // with `projection_type = "ALL"` in the qurl-bot-ddb terraform
+  // module (modules/qurl-bot-ddb/main.tf — search for the GSI block
+  // on the `qurl_sends` table). If that ever narrows to KEYS_ONLY
+  // or INCLUDE without these attrs, those fields silently become
+  // `undefined` at runtime — unit tests won't catch it because the
+  // mock returns full rows. Cross-repo invariant; flag both sides
+  // if you change either.
   const metaBySendId = new Map();
   const sendIdOrder = [];
   let ExclusiveStartKey;
