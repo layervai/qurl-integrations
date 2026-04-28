@@ -430,6 +430,59 @@ describe('orphaned tokens', () => {
       expect(prev <= curr).toBe(true);
     }
   });
+
+  test('countOrphanedTokens: paginates Select=COUNT scans (does NOT undercount past one page)', async () => {
+    // Regression guard against the silent-cliff bug: DDB Scan with
+    // Select=COUNT is STILL subject to the 1MB cap. A naive
+    // single-call ScanCommand returns Count for ONE page only,
+    // with LastEvaluatedKey set when more pages exist —
+    // dashboards / metrics would silently undercount once the
+    // table size pushes past ~1MB. countAll must accumulate
+    // Count across pages until LEK is undefined.
+    ddbMock
+      .on(ScanCommand)
+      .resolvesOnce({ Count: 60, LastEvaluatedKey: { token_hash: 'page1-end' } })
+      .resolvesOnce({ Count: 40, LastEvaluatedKey: { token_hash: 'page2-end' } })
+      .resolves({ Count: 25 }); // last page, no LEK
+    const total = await store.countOrphanedTokens();
+    expect(total).toBe(125);
+    // Three ScanCommands total — first page, follow-up, terminal page.
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(3);
+    // Pagination correctness: each follow-up must carry the prior
+    // page's LEK as ExclusiveStartKey.
+    const calls = ddbMock.commandCalls(ScanCommand).map(c => c.args[0].input);
+    expect(calls[0].ExclusiveStartKey).toBeUndefined();
+    expect(calls[1].ExclusiveStartKey).toEqual({ token_hash: 'page1-end' });
+    expect(calls[2].ExclusiveStartKey).toEqual({ token_hash: 'page2-end' });
+  });
+});
+
+// ── Stats (paginated COUNT) ──
+
+describe('stats', () => {
+  test('getStats: linkedUsers paginates Select=COUNT (regression guard for silent-cliff bug)', async () => {
+    // Two scans run in parallel: one Select=COUNT against
+    // github_links (paginated via countAll), one full scanAll
+    // against contributions. github_links count test asserts the
+    // pagination loop accumulates correctly; contributions array
+    // is mocked empty for this test (its aggregation logic is
+    // exercised separately in other tests).
+    let scanIdx = 0;
+    ddbMock.on(ScanCommand).callsFake((input) => {
+      // The contributions scanAll call has no Select option;
+      // distinguish by table name.
+      if (input.TableName === 'test-prefix-github-links') {
+        scanIdx++;
+        if (scanIdx === 1) return Promise.resolve({ Count: 75, LastEvaluatedKey: { discord_id: 'p1' } });
+        if (scanIdx === 2) return Promise.resolve({ Count: 50 }); // last page
+      }
+      // contributions scanAll
+      return Promise.resolve({ Items: [] });
+    });
+    const stats = await store.getStats();
+    expect(stats.linkedUsers).toBe(125); // 75 + 50, NOT 75 (single-page bug)
+    expect(stats.totalContributions).toBe(0);
+  });
 });
 
 // ── Streaks ──
@@ -954,5 +1007,55 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
     // operator would've otherwise hit — concrete next action.
     expect(result.stderr).toMatch(/qurl-bot-discord-sandbox/);
     expect(result.stderr).toMatch(/github-links/);
+  });
+});
+
+describe('ddb-store boot-time AWS_REGION validation', () => {
+  // Same shape of footgun the DDB_TABLE_PREFIX guard closes: a dev
+  // with stray AWS creds + DDB_TABLE_PREFIX set to a real value
+  // (sandbox or prod) but unset AWS_REGION would silently land in
+  // whichever region the SDK defaults to. Catch at boot.
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const requirePath = JSON.stringify(path.resolve(__dirname, '..', 'src/store/ddb-store'));
+
+  function spawnDdbStoreBootWithRegion(regionValue) {
+    const env = {
+      ...process.env,
+      JEST_WORKER_ID: '',
+      DDB_TABLE_PREFIX: 'qurl-bot-discord-sandbox-', // unrelated guard must pass
+    };
+    if (regionValue === undefined) {
+      delete env.AWS_REGION;
+    } else {
+      env.AWS_REGION = regionValue;
+    }
+    return spawnSync(process.execPath, ['-e', `require(${requirePath})`], { env, encoding: 'utf8' });
+  }
+
+  test('throws when AWS_REGION is unset', () => {
+    const result = spawnDdbStoreBootWithRegion(undefined);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/AWS_REGION is required/);
+    // Names a concrete next action.
+    expect(result.stderr).toMatch(/us-east-2/);
+  });
+
+  test('throws when AWS_REGION is empty-string', () => {
+    const result = spawnDdbStoreBootWithRegion('');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/AWS_REGION is required/);
+  });
+
+  test('throws when AWS_REGION is whitespace-only', () => {
+    const result = spawnDdbStoreBootWithRegion('   ');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/AWS_REGION is required/);
+  });
+
+  test('boots cleanly when AWS_REGION is set', () => {
+    const result = spawnDdbStoreBootWithRegion('us-west-2');
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toMatch(/AWS_REGION/);
   });
 });

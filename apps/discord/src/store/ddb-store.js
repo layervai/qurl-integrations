@@ -125,12 +125,24 @@ const TABLES = Object.freeze({
   guild_configs: `${TABLE_PREFIX}guild-configs`,
 });
 
+// AWS_REGION is required (no fallback). Same shape of footgun the
+// DDB_TABLE_PREFIX guard above closes: a developer with stray AWS
+// creds + DDB_TABLE_PREFIX=qurl-bot-discord-prod- + unset
+// AWS_REGION would silently land in whichever region the SDK
+// defaults to (us-east-2 today via the prior `|| 'us-east-2'`
+// fallback), which is presumably the prod region. Catch at boot.
+// Whitespace-only treated as unset, mirroring the prefix guard.
+const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
+if (!AWS_REGION) {
+  throw new Error('AWS_REGION is required when STORE_TYPE=ddb. Set it to the env-specific region (e.g. `us-east-2` for sandbox, the matching prod region for prod) in the deployment template.');
+}
+
 // Allow tests to inject a pre-configured mock client via
 // `process.env.DDB_TEST_ENDPOINT` (used by integration tests against
 // a local DynamoDB) or a stubbed DocumentClient. Production path
 // constructs the real client once at module load.
 const rawClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || 'us-east-2',
+  region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
 });
 const ddb = DynamoDBDocumentClient.from(rawClient, {
@@ -512,8 +524,8 @@ async function getNewContributorsThisWeek() {
 // ── Aggregate stats and leaderboard ──
 
 async function getStats() {
-  const [links, contribs] = await Promise.all([
-    ddb.send(new ScanCommand({ TableName: TABLES.github_links, Select: 'COUNT' })),
+  const [linkedUsers, contribs] = await Promise.all([
+    countAll(TABLES.github_links),
     scanAll(TABLES.contributions),
   ]);
   const contributors = new Set();
@@ -526,7 +538,7 @@ async function getStats() {
     .map(([repo, count]) => ({ repo, count }))
     .sort((a, b) => b.count - a.count);
   return {
-    linkedUsers: links.Count || 0,
+    linkedUsers,
     totalContributions: contribs.length,
     uniqueContributors: contributors.size,
     byRepo,
@@ -541,6 +553,23 @@ async function getTopContributors(limit = 10) {
     .map(([discord_id, count]) => ({ discord_id, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
+}
+
+// Paginated `Select: COUNT` scan. DDB Scan with Select=COUNT is
+// STILL subject to the 1MB read cap — `res.Count` is the count for
+// the current page only, with `LastEvaluatedKey` set when more
+// pages exist. A naive single-call ScanCommand silently undercounts
+// once the table size pushes past ~1MB worth of items, with no
+// error signal. Accumulate Count across pages until LEK is empty.
+async function countAll(TableName) {
+  let total = 0;
+  let ExclusiveStartKey;
+  do {
+    const res = await ddb.send(new ScanCommand({ TableName, Select: 'COUNT', ExclusiveStartKey }));
+    total += res.Count || 0;
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return total;
 }
 
 async function scanAll(TableName) {
@@ -1239,11 +1268,7 @@ async function recordOrphanedToken(accessToken) {
 }
 
 async function countOrphanedTokens() {
-  const res = await ddb.send(new ScanCommand({
-    TableName: TABLES.orphaned_oauth_tokens,
-    Select: 'COUNT',
-  }));
-  return res.Count || 0;
+  return countAll(TABLES.orphaned_oauth_tokens);
 }
 
 async function listOrphanedTokens(limit = 50) {
