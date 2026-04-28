@@ -26,7 +26,7 @@ const (
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
-// StatusRevoked indicates the QURL was manually revoked (deleted).
+// StatusRevoked indicates the qURL was manually revoked (deleted).
 const StatusRevoked = "revoked"
 
 // Logger is an optional interface for debug logging.
@@ -161,7 +161,7 @@ type CreateInput struct {
 
 // CreateOutput is the response from creating a qURL.
 type CreateOutput struct {
-	QurlID     string     `json:"qurl_id"`
+	QURLID     string     `json:"qurl_id"`
 	ResourceID string     `json:"resource_id"`
 	QURLLink   string     `json:"qurl_link"`
 	QURLSite   string     `json:"qurl_site"`
@@ -169,7 +169,7 @@ type CreateOutput struct {
 	Label      string     `json:"label,omitempty"`
 }
 
-// Create creates a new QURL. input must not be nil.
+// Create creates a new qURL. input must not be nil.
 func (c *Client) Create(ctx context.Context, input *CreateInput) (*CreateOutput, error) {
 	if input == nil {
 		return nil, errors.New("create input must not be nil")
@@ -226,7 +226,7 @@ type ListOutput struct {
 	HasMore    bool   `json:"has_more,omitempty"`
 }
 
-// List retrieves a paginated list of QURLs.
+// List retrieves a paginated list of qURLs.
 func (c *Client) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
 	if input == nil {
 		input = &ListInput{}
@@ -299,14 +299,19 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 type UpdateInput struct {
 	ExtendBy  string     `json:"extend_by,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	Tags      *[]string  `json:"tags,omitempty"`
+	// Tags uses a pointer-to-slice to encode three states:
+	//   nil           → omitted from PATCH (leave tags unchanged)
+	//   &[]string{}   → sends "tags":[] (clear all tags)
+	//   &[]string{…}  → sends "tags":[…] (replace tags with this set)
+	Tags *[]string `json:"tags,omitempty"`
 	// Description updates the resource-level description. The API uses "description"
 	// for updates (not "label") per the UpdateQurlRequest schema — this is an
 	// intentional divergence from CreateInput.Label which maps to the QURL token label.
 	Description *string `json:"description,omitempty"`
 }
 
-// Extend extends a QURL's expiration.
+// Extend extends a qURL's expiration. It is a convenience wrapper around Update
+// with ExtendBy set; callers who need combined updates should use Update directly.
 func (c *Client) Extend(ctx context.Context, id, duration string) (*QURL, error) {
 	return c.Update(ctx, id, UpdateInput{ExtendBy: duration})
 }
@@ -347,7 +352,7 @@ type MintOutput struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// MintLink mints a new access link for a QURL.
+// MintLink mints a new access link for a qURL.
 func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) (*MintOutput, error) {
 	var bodyReader io.Reader = http.NoBody
 	if input != nil {
@@ -362,11 +367,8 @@ func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) 
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	if input != nil {
-		// Defense-in-depth: set Content-Type explicitly even though do() also sets it
-		// when a body is present, so the header is visible at the call site.
-		req.Header.Set("Content-Type", "application/json")
-	}
+	// Content-Type is managed centrally by do(): set when body is present, omitted
+	// for bodiless requests (input==nil path). See TestMintLink* for wire-level coverage.
 
 	var out MintOutput
 	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
@@ -377,7 +379,7 @@ func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) 
 
 // --- Batch ---
 
-// BatchCreateOutput holds the response from batch creating QURLs.
+// BatchCreateOutput holds the response from batch creating qURLs.
 type BatchCreateOutput struct {
 	Succeeded int               `json:"succeeded"`
 	Failed    int               `json:"failed"`
@@ -404,7 +406,7 @@ type BatchItemError struct {
 // maxBatchSize is the maximum number of items in a single batch create request.
 const maxBatchSize = 100
 
-// BatchCreate creates multiple QURLs at once (1-100 items).
+// BatchCreate creates multiple qURLs at once (1-100 items).
 func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchCreateOutput, error) {
 	if len(items) == 0 || len(items) > maxBatchSize {
 		return nil, fmt.Errorf("batch size must be 1-%d, got %d", maxBatchSize, len(items))
@@ -503,7 +505,7 @@ type RateLimits struct {
 type UsageInfo struct {
 	QURLsCreated       int      `json:"qurls_created"`
 	ActiveQURLs        int      `json:"active_qurls"`
-	ActiveQURLsPercent *float64 `json:"active_qurls_percent"`
+	ActiveQURLsPercent *float64 `json:"active_qurls_percent,omitempty"`
 	TotalAccesses      int      `json:"total_accesses"`
 }
 

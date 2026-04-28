@@ -87,7 +87,7 @@ func TestTableFormatQURL(t *testing.T) {
 
 func TestTableFormatCreate(t *testing.T) {
 	result := &client.CreateOutput{
-		QurlID:     "q_abc123test",
+		QURLID:     "q_abc123test",
 		ResourceID: "r_abc123test",
 		QURLLink:   "https://qurl.link/at_abc123",
 		QURLSite:   "https://r_abc123test.qurl.site",

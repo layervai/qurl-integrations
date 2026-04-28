@@ -76,10 +76,10 @@ func listCmd(opts *globalOpts) *cobra.Command {
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (active, revoked)")
 	cmd.Flags().StringVar(&query, "query", "", "Search label, description, and target URL")
 	cmd.Flags().StringVar(&sort, "sort", "", "Sort field:direction (e.g., created_at:desc)")
-	cmd.Flags().StringVar(&createdAfter, "created-after", "", "Filter QURLs created after this date (RFC3339)")
-	cmd.Flags().StringVar(&createdBefore, "created-before", "", "Filter QURLs created before this date (RFC3339)")
-	cmd.Flags().StringVar(&expiresBefore, "expires-before", "", "Filter QURLs expiring before this date (RFC3339)")
-	cmd.Flags().StringVar(&expiresAfter, "expires-after", "", "Filter QURLs expiring after this date (RFC3339)")
+	cmd.Flags().StringVar(&createdAfter, "created-after", "", "Filter qURLs created after this date (RFC3339)")
+	cmd.Flags().StringVar(&createdBefore, "created-before", "", "Filter qURLs created before this date (RFC3339)")
+	cmd.Flags().StringVar(&expiresBefore, "expires-before", "", "Filter qURLs expiring before this date (RFC3339)")
+	cmd.Flags().StringVar(&expiresAfter, "expires-after", "", "Filter qURLs expiring after this date (RFC3339)")
 
 	return cmd
 }

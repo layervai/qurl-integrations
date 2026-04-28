@@ -53,9 +53,16 @@ Useful for multi-use qURLs where you want to generate additional access links.`,
 				cmd.Flags().Changed("session-duration")
 
 			if hasInput {
+				// All fields are assigned unconditionally. omitempty on bool/int fields
+				// strips false/0 from the JSON payload, so zero-value flags are naturally
+				// omitted — identical to what a Changed() gate would do, without the
+				// asymmetry. ExpiresAt is pointer-typed and requires parsing, so it is
+				// still gated on Changed().
 				input = &client.MintLinkInput{
 					ExpiresIn:       expiresIn,
 					Label:           label,
+					OneTimeUse:      oneTimeUse,
+					MaxSessions:     maxSessions,
 					SessionDuration: sessionDuration,
 				}
 				if cmd.Flags().Changed("expires-at") {
@@ -64,12 +71,6 @@ Useful for multi-use qURLs where you want to generate additional access links.`,
 						return fmt.Errorf("invalid --expires-at value: %w", parseErr)
 					}
 					input.ExpiresAt = &t
-				}
-				if cmd.Flags().Changed("one-time") {
-					input.OneTimeUse = oneTimeUse
-				}
-				if cmd.Flags().Changed("max-sessions") {
-					input.MaxSessions = maxSessions
 				}
 			}
 

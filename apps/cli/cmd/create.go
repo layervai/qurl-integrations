@@ -62,12 +62,12 @@ func createCmd(opts *globalOpts) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&label, "label", "l", "", "Label for the QURL")
+	cmd.Flags().StringVarP(&label, "label", "l", "", "Label for the qURL")
 	cmd.Flags().StringVarP(&expiresIn, "expires", "e", "", "Expiration duration (e.g., 1h, 24h, 7d)")
 	cmd.Flags().BoolVar(&oneTimeUse, "one-time", false, "Single-use token (consumed after first access)")
 	cmd.Flags().IntVar(&maxSessions, "max-sessions", 0, "Maximum concurrent sessions (0 = unlimited)")
 	cmd.Flags().StringVar(&sessionDuration, "session-duration", "", "Session duration (e.g., 30m, 1h)")
-	cmd.Flags().StringVar(&customDomain, "custom-domain", "", "Custom domain for the QURL")
+	cmd.Flags().StringVar(&customDomain, "custom-domain", "", "Custom domain for the qURL")
 
 	return cmd
 }

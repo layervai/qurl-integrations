@@ -83,8 +83,8 @@ func (f TableFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) e
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("qURL created"))
-	if output.QurlID != "" {
-		wr.printf("%s\t%s\n", f.bold.Sprint("QURL ID:"), output.QurlID)
+	if output.QURLID != "" {
+		wr.printf("%s\t%s\n", f.bold.Sprint("QURL ID:"), output.QURLID)
 	}
 	wr.printf("%s\t%s\n", f.bold.Sprint("ID:"), output.ResourceID)
 	wr.printf("%s\t%s\n", f.bold.Sprint("Link:"), output.QURLLink)

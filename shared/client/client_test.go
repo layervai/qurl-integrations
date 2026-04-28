@@ -77,8 +77,8 @@ func TestCreate(t *testing.T) {
 	if got.QURLLink != "https://qurl.link/at_abc123" {
 		t.Errorf("got QURLLink %q, want %q", got.QURLLink, "https://qurl.link/at_abc123")
 	}
-	if got.QurlID != "q_abc123test" {
-		t.Errorf("got QurlID %q, want %q", got.QurlID, "q_abc123test")
+	if got.QURLID != "q_abc123test" {
+		t.Errorf("got QURLID %q, want %q", got.QURLID, "q_abc123test")
 	}
 }
 
@@ -275,6 +275,38 @@ func TestMintLink(t *testing.T) {
 	}
 }
 
+func TestMintLinkContentType(t *testing.T) {
+	t.Run("nil input has no Content-Type", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ct := r.Header.Get("Content-Type"); ct != "" {
+				t.Errorf("expected no Content-Type header for bodiless POST, got %q", ct)
+			}
+			apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
+		}))
+		defer srv.Close()
+
+		c := testClient(srv.URL, "test-key")
+		if _, err := c.MintLink(context.Background(), testResourceID, nil); err != nil {
+			t.Fatalf("MintLink: %v", err)
+		}
+	})
+
+	t.Run("non-nil input has Content-Type application/json", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("expected Content-Type application/json, got %q", ct)
+			}
+			apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
+		}))
+		defer srv.Close()
+
+		c := testClient(srv.URL, "test-key")
+		if _, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{Label: "x"}); err != nil {
+			t.Fatalf("MintLink: %v", err)
+		}
+	})
+}
+
 func TestBatchCreate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -326,8 +358,14 @@ func TestListWithDateFilters(t *testing.T) {
 		if r.URL.Query().Get("created_after") != "2026-01-01T00:00:00Z" {
 			t.Errorf("expected created_after, got %q", r.URL.Query().Get("created_after"))
 		}
+		if r.URL.Query().Get("created_before") != "2026-06-01T00:00:00Z" {
+			t.Errorf("expected created_before, got %q", r.URL.Query().Get("created_before"))
+		}
 		if r.URL.Query().Get("expires_before") != "2026-12-31T23:59:59Z" {
 			t.Errorf("expected expires_before, got %q", r.URL.Query().Get("expires_before"))
+		}
+		if r.URL.Query().Get("expires_after") != "2026-07-01T00:00:00Z" {
+			t.Errorf("expected expires_after, got %q", r.URL.Query().Get("expires_after"))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -344,7 +382,9 @@ func TestListWithDateFilters(t *testing.T) {
 	c := testClient(srv.URL, "test-key")
 	_, err := c.List(context.Background(), &ListInput{
 		CreatedAfter:  "2026-01-01T00:00:00Z",
+		CreatedBefore: "2026-06-01T00:00:00Z",
 		ExpiresBefore: "2026-12-31T23:59:59Z",
+		ExpiresAfter:  "2026-07-01T00:00:00Z",
 	})
 	if err != nil {
 		t.Fatalf("List with date filters: %v", err)
@@ -449,6 +489,55 @@ func TestUpdate(t *testing.T) {
 	}
 	if got.Description != testDescription {
 		t.Errorf("got Description %q, want %q", got.Description, testDescription)
+	}
+}
+
+func TestUpdateTags(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     *[]string
+		wantJSON string
+	}{
+		{
+			name:     "set tags",
+			tags:     &[]string{"prod", "api"},
+			wantJSON: `["prod","api"]`,
+		},
+		{
+			name:     "clear tags",
+			tags:     &[]string{},
+			wantJSON: `[]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				gotTags, ok := body["tags"]
+				if !ok {
+					t.Errorf("expected tags field in body, got %v", body)
+				} else if string(gotTags) != tt.wantJSON {
+					t.Errorf("got tags %s, want %s", gotTags, tt.wantJSON)
+				}
+
+				apiEnvelope(t, w, map[string]any{
+					"resource_id": testResourceID,
+					"target_url":  "https://example.com",
+					"status":      "active",
+				})
+			}))
+			defer srv.Close()
+
+			c := testClient(srv.URL, "test-key")
+			_, err := c.Update(context.Background(), testResourceID, UpdateInput{Tags: tt.tags})
+			if err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+		})
 	}
 }
 
