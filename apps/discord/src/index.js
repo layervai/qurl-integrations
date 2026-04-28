@@ -65,6 +65,12 @@ try {
   ({ role: PROCESS_ROLE, isGateway, isHttp } = resolveProcessRole(process.env.PROCESS_ROLE));
 } catch (err) {
   logger.error(err.message);
+  // Direct process.exit (not gracefulShutdown) is intentional: this
+  // runs at module-top-level, before gracefulShutdown is even defined,
+  // and there's no state to tear down — no DB open, no HTTP listener,
+  // no WebSocket. A future "fix" routing this through gracefulShutdown
+  // would either fail (undefined reference) or block on shutdown
+  // teardown that has nothing to do.
   process.exit(1);
 }
 logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });

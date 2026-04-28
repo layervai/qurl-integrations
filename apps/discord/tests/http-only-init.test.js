@@ -174,3 +174,54 @@ describe('initHttpOnly', () => {
     expect(REFRESH_INTERVAL_MS).toBeLessThanOrEqual(30 * 60 * 1000);
   });
 });
+
+describe('HTTP_ONLY_REFRESH_INTERVAL_MS env override', () => {
+  // Re-loads the module under different env values to verify the
+  // module-load-time validation. Each case isolates its env mutation
+  // and module cache so the canonical export above stays intact.
+  const originalEnv = process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
+  let warnSpy;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
+    else process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = originalEnv;
+    warnSpy.mockRestore();
+    jest.resetModules();
+  });
+
+  it('accepts a valid override and uses it instead of the default', () => {
+    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = '60000';
+    jest.isolateModules(() => {
+      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
+      expect(overridden).toBe(60_000);
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects sub-30s values with a console.warn naming the bad input', () => {
+    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = '15000';
+    jest.isolateModules(() => {
+      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
+      // Falls back to default — silent fall-through would leave operators
+      // wondering why their `=15000` ask isn't taking effect.
+      expect(overridden).toBe(10 * 60 * 1000);
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/HTTP_ONLY_REFRESH_INTERVAL_MS=/);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/15000/);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/rejected/);
+  });
+
+  it('rejects non-numeric values with a console.warn', () => {
+    process.env.HTTP_ONLY_REFRESH_INTERVAL_MS = 'soon';
+    jest.isolateModules(() => {
+      const { REFRESH_INTERVAL_MS: overridden } = require('../src/http-only-init');
+      expect(overridden).toBe(10 * 60 * 1000);
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toMatch(/"soon"/);
+  });
+});

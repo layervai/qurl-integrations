@@ -120,6 +120,10 @@ async function removeRoleFromMember(guildId, userId, roleId) {
   }
 }
 
+// TODO(pr-4d): migrate routes/oauth.js + routes/webhooks.js to call
+// these helpers instead of the gateway-cache helpers in src/discord.js.
+// Today the helpers below are unused production code — they're the
+// landing pads for the route migration after this PR ships.
 module.exports = {
   rest,
   sendDM,

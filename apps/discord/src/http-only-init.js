@@ -34,15 +34,42 @@
 // guild.channels.fetch) is rounding error against the bot's normal
 // REST budget. Tunable via env var if a future operator needs more
 // or less aggressive invalidation.
+const DEFAULT_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const MIN_REFRESH_INTERVAL_MS = 30_000;
 const REFRESH_INTERVAL_MS = (() => {
   const raw = process.env.HTTP_ONLY_REFRESH_INTERVAL_MS;
-  if (!raw) return 10 * 60 * 1000;
+  if (!raw) return DEFAULT_REFRESH_INTERVAL_MS;
   const parsed = parseInt(raw, 10);
-  // Reject non-positive / NaN. Bare-minimum 30s floor so a misconfigured
-  // 1ms doesn't hammer the Discord REST API.
-  if (!Number.isFinite(parsed) || parsed < 30_000) return 10 * 60 * 1000;
+  // Reject non-positive / NaN / sub-30s. The 30s floor exists so a
+  // misconfigured 1ms doesn't hammer the Discord REST API. Surface the
+  // rejection at boot — a silent fall-through to the default would
+  // leave operators wondering why their `HTTP_ONLY_REFRESH_INTERVAL_MS=
+  // 15000` ask isn't taking effect.
+  if (!Number.isFinite(parsed) || parsed < MIN_REFRESH_INTERVAL_MS) {
+    // Use console.warn — logger isn't loaded this early in module init
+    // (logger.js itself is required at module load and may not yet be
+    // ready depending on require order).
+    console.warn(
+      `[http-only-init] HTTP_ONLY_REFRESH_INTERVAL_MS=${JSON.stringify(raw)} rejected ` +
+      `(must be a positive integer >= ${MIN_REFRESH_INTERVAL_MS}ms); ` +
+      `using default ${DEFAULT_REFRESH_INTERVAL_MS}ms.`
+    );
+    return DEFAULT_REFRESH_INTERVAL_MS;
+  }
   return parsed;
 })();
+
+// Pretty-print an interval for log output: "10 minute(s)" when the
+// interval is a clean multiple of a minute, "<n>ms" otherwise. Avoids
+// the "every 1 minute(s)" rounding artifact when REFRESH_INTERVAL_MS
+// is set to e.g. 45_000 via env override.
+function formatInterval(ms) {
+  if (ms >= 60_000 && ms % 60_000 === 0) {
+    const minutes = ms / 60_000;
+    return `${minutes} minute(s)`;
+  }
+  return `${ms}ms`;
+}
 
 /**
  * Initialize a process running under `PROCESS_ROLE=http` so its
@@ -81,7 +108,7 @@ async function initHttpOnly({ client, config, refreshCache, logger }) {
   await refreshCache();
   logger.warn(
     'http-only mode: Gateway-driven cache invalidation (roleDelete/channelDelete) is unavailable. ' +
-    `Periodic REST refreshCache compensates every ${Math.round(REFRESH_INTERVAL_MS / 60_000)} minute(s). ` +
+    `Periodic REST refreshCache compensates every ${formatInterval(REFRESH_INTERVAL_MS)}. ` +
     'See src/http-only-init.js for rationale; tune via HTTP_ONLY_REFRESH_INTERVAL_MS env var.'
   );
   const timer = setInterval(() => {
