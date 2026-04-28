@@ -42,6 +42,11 @@ via the SDK or API; the CLI exposes the common per-link flags only.`,
 			if err := validateDuration(sessionDuration); err != nil {
 				return err
 			}
+			if cmd.Flags().Changed("expires-at") {
+				if err := validateRFC3339("expires-at", expiresAt); err != nil {
+					return err
+				}
+			}
 
 			c, err := opts.newClient()
 			if err != nil {
@@ -79,10 +84,7 @@ via the SDK or API; the CLI exposes the common per-link flags only.`,
 					input.MaxSessions = &maxSessions
 				}
 				if cmd.Flags().Changed("expires-at") {
-					t, parseErr := time.Parse(time.RFC3339, expiresAt)
-					if parseErr != nil {
-						return fmt.Errorf("invalid --expires-at value: %w", parseErr)
-					}
+					t, _ := time.Parse(time.RFC3339, expiresAt) // already validated above
 					input.ExpiresAt = &t
 				}
 			}

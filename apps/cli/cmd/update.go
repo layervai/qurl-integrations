@@ -40,6 +40,11 @@ Note: The --description flag updates the resource-level description (maps to the
 					return err
 				}
 			}
+			if cmd.Flags().Changed("expires-at") {
+				if err := validateRFC3339("expires-at", expiresAt); err != nil {
+					return err
+				}
+			}
 
 			hasChange := cmd.Flags().Changed("description") ||
 				cmd.Flags().Changed("tags") ||
@@ -65,10 +70,7 @@ Note: The --description flag updates the resource-level description (maps to the
 				input.ExtendBy = extendBy
 			}
 			if cmd.Flags().Changed("expires-at") {
-				t, parseErr := time.Parse(time.RFC3339, expiresAt)
-				if parseErr != nil {
-					return fmt.Errorf("invalid --expires-at value: %w", parseErr)
-				}
+				t, _ := time.Parse(time.RFC3339, expiresAt) // already validated above
 				input.ExpiresAt = &t
 			}
 
