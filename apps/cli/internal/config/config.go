@@ -13,7 +13,11 @@ import (
 
 // Config holds CLI configuration.
 type Config struct {
-	APIKey   string `yaml:"api_key,omitempty"`
+	APIKey string `yaml:"api_key,omitempty"`
+	// KeyID is the server-assigned ID of the API key created by auth login.
+	// It is managed exclusively by auth login/logout and is intentionally
+	// excluded from validKeys so that "qurl config set key_id" is rejected.
+	KeyID    string `yaml:"key_id,omitempty"`
 	Endpoint string `yaml:"endpoint,omitempty"`
 	Output   string `yaml:"output,omitempty"`
 }

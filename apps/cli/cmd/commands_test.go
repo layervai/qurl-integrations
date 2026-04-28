@@ -90,7 +90,7 @@ func newMockServer(t *testing.T) *httptest.Server {
 				"expires_at": "2026-04-01T00:00:00Z",
 			})
 
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/quota":
+		case r.Method == http.MethodGet && r.URL.Path == quotaPath:
 			apiEnvelope(t, w, map[string]any{
 				"plan":         "pro",
 				"period_start": "2026-03-01T00:00:00Z",
@@ -355,6 +355,7 @@ func TestJSONOutput(t *testing.T) {
 }
 
 func TestMissingAPIKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	cmd := rootCmd("test")
 	cmd.SetArgs([]string{"list"})
