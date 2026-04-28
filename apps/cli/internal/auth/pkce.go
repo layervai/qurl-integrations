@@ -120,7 +120,7 @@ type callbackResult struct {
 // LoginSession is not safe for concurrent use. The caller MUST eventually call
 // Close (or WaitForToken, which calls it via defer) to release the callback
 // server. StartLogin registers a goroutine that calls Close when ctx is
-// cancelled, so callers that abandon a session without calling WaitForToken
+// canceled, so callers that abandon a session without calling WaitForToken
 // will still have the server cleaned up when the parent context expires.
 type LoginSession struct {
 	// AuthURL is the authorization URL to open in the browser.
@@ -190,7 +190,7 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 	}
 
 	// Ensure the callback server is torn down when the parent context is
-	// cancelled (e.g. Ctrl-C), even if WaitForToken is never called.
+	// canceled (e.g. Ctrl-C), even if WaitForToken is never called.
 	go func() {
 		<-ctx.Done()
 		session.Close()
