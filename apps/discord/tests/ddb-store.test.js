@@ -660,6 +660,9 @@ describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
   test('boots cleanly when DDB_TABLE_PREFIX is set to a real value', () => {
     const result = spawnDdbStoreBoot('qurl-bot-discord-sandbox-');
     expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
+    // Negative-match instead of strict-empty so a future Node
+    // deprecation warning doesn't flake this test — the contract
+    // here is "validation didn't fire", not "stderr is silent".
+    expect(result.stderr).not.toMatch(/DDB_TABLE_PREFIX/);
   });
 });

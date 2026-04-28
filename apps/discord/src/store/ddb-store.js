@@ -96,8 +96,7 @@ const BADGE_INFO = {
 // unset to defend against buggy container templating that emits
 // `DDB_TABLE_PREFIX=` with no value — same shape as the STORE_TYPE
 // normalization in `store/index.js`.
-const rawTablePrefix = process.env.DDB_TABLE_PREFIX;
-const TABLE_PREFIX = rawTablePrefix && rawTablePrefix.trim();
+const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
   throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
 }
