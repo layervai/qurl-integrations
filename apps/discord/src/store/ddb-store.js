@@ -422,7 +422,7 @@ async function getAllContributions(limit = 100) {
   return items.slice(0, limit);
 }
 
-async function getContributionCount(discordId) {
+async function getContributionCount(discordId, { justWrote = false } = {}) {
   // GSI queries are eventually consistent — ConsistentRead isn't
   // supported on GSIs. A `Query` issued immediately after a base-
   // table `PutItem` (see recordContribution → checkAndAwardBadges
@@ -431,21 +431,28 @@ async function getContributionCount(discordId) {
   // miss for the FIRST_PR badge — on the next contribution the
   // count is 2 and the `count === 1` check never fires again.
   //
-  // Mitigation: short retry loop. DDB GSI lag under normal load is
-  // typically <50ms; retry with backoff covers the tail. Only
-  // re-issues on count=0 to avoid noise for users with established
-  // histories (where count=0 is the correct answer for a
-  // never-contributor).
+  // Mitigation, opt-in via `{ justWrote: true }`: short retry loop.
+  // DDB GSI lag under normal load is typically <50ms; retry with
+  // backoff covers the tail. Only re-issues on count=0 to avoid
+  // noise for users with established histories.
   //
-  // Caller contract: this is intended to be called RIGHT AFTER a
-  // contribution insert (the checkAndAwardBadges chain), where
-  // count=0 is almost always GSI lag rather than ground truth. A
-  // future caller probing "does this user have any history?" for
-  // an unlinked Discord user pays the full ~350ms before getting
-  // back the correct 0. If you add a "true zero is expected"
-  // caller, take the retry loop out for that call site (or push
-  // it behind a `justWrote` flag) — don't make every legitimate-
-  // zero query eat the GSI-lag budget.
+  // Why opt-in: a caller asking "does this user have any
+  // contribution history?" for a genuinely-zero user (e.g.
+  // unlinked Discord account) would otherwise eat the full ~350ms
+  // budget on every query. Default no-retry keeps the legitimate-
+  // zero path at single-digit ms; the post-write call site
+  // (checkAndAwardBadges) explicitly opts in.
+  if (!justWrote) {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TABLES.contributions,
+      IndexName: 'discord_id-merged_at-index',
+      KeyConditionExpression: 'discord_id = :d',
+      ExpressionAttributeValues: { ':d': discordId },
+      Select: 'COUNT',
+    }));
+    return res.Count || 0;
+  }
+
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const res = await ddb.send(new QueryCommand({
@@ -694,7 +701,12 @@ async function hasBadge(discordId, badgeType) {
 
 async function checkAndAwardBadges(discordId, prTitle, repo) {
   const awarded = [];
-  const count = await getContributionCount(discordId);
+  // justWrote: this function is invoked from recordContribution
+  // RIGHT AFTER a base-table PutItem, so a GSI count=0 here is
+  // almost-always replication lag. Opt into the bounded retry
+  // loop. Other callers asking "is this user a contributor?"
+  // shouldn't pay that latency for a legitimate zero.
+  const count = await getContributionCount(discordId, { justWrote: true });
 
   // FIRST_PR award: idempotent on `count >= 1 && !hasBadge(FIRST_PR)`
   // rather than `count === 1`. Two reasons the strict-equality check
@@ -1061,12 +1073,17 @@ async function getRecentSends(senderDiscordId, limit = 10) {
       Limit: GSI_PAGE_LIMIT,
       ExclusiveStartKey,
     }));
+    // Why first-seen-wins (no overwrite branch): the GSI is queried
+    // with ScanIndexForward: false, so DDB returns rows in
+    // descending created_at order. The first row we see for a given
+    // send_id IS the newest, and any later row in the same send is
+    // strictly older. An overwrite-on-newer branch would be dead
+    // code under that ordering. If a future change ever flips
+    // ScanIndexForward to true, revisit this — first-seen would
+    // become oldest-wins which isn't what we want.
     for (const row of sendsRes.Items || []) {
-      const existing = metaBySendId.get(row.send_id);
-      if (!existing) {
+      if (!metaBySendId.has(row.send_id)) {
         sendIdOrder.push(row.send_id);
-        metaBySendId.set(row.send_id, row);
-      } else if ((row.created_at || '') > (existing.created_at || '')) {
         metaBySendId.set(row.send_id, row);
       }
     }

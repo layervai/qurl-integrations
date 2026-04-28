@@ -218,11 +218,47 @@ describe('contributions', () => {
     expect(call.Limit).toBe(5);
   });
 
-  test('getContributionCount: uses Select=COUNT on GSI', async () => {
+  test('getContributionCount: default (no justWrote) issues exactly one Query, NO retry on count=0', async () => {
+    // Default behavior: legitimate-zero callers (e.g. "is this user
+    // a contributor at all?") must NOT pay the ~350ms GSI-lag
+    // retry budget. Mock returns Count:0 — function should issue
+    // ONE Query and return 0 immediately.
+    ddbMock.on(QueryCommand).resolves({ Count: 0 });
+    const count = await store.getContributionCount('d');
+    expect(count).toBe(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.Select).toBe('COUNT');
+  });
+
+  test('getContributionCount: positive count returns immediately (no retry needed)', async () => {
     ddbMock.on(QueryCommand).resolves({ Count: 42 });
     const count = await store.getContributionCount('d');
     expect(count).toBe(42);
-    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.Select).toBe('COUNT');
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
+  });
+
+  test('getContributionCount: { justWrote: true } retries on count=0 (GSI-lag mitigation)', async () => {
+    // Post-write call sites (checkAndAwardBadges) opt into the
+    // bounded retry loop because count=0 here is almost-always
+    // GSI replication lag rather than ground truth.
+    ddbMock
+      .on(QueryCommand)
+      .resolvesOnce({ Count: 0 })
+      .resolvesOnce({ Count: 0 })
+      .resolves({ Count: 1 });
+    const count = await store.getContributionCount('d', { justWrote: true });
+    expect(count).toBe(1);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(3);
+  });
+
+  test('getContributionCount: { justWrote: true } gives up at MAX_RETRIES + 1 attempts and returns 0', async () => {
+    // Bounded retry: 4 total attempts (initial + 3 retries) with
+    // 50/100/200ms backoff. After all attempts exhausted, return 0
+    // — caller sees "no contributions" rather than hanging.
+    ddbMock.on(QueryCommand).resolves({ Count: 0 });
+    const count = await store.getContributionCount('d', { justWrote: true });
+    expect(count).toBe(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(4);
   });
 
   test('getUniqueRepos: paginates Query + projects only `repo` (regression guard for 1MB silent truncation)', async () => {

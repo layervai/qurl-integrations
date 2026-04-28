@@ -400,7 +400,12 @@ const dbModule = {
     return stmt.all(limit);
   },
 
-  getContributionCount(discordId) {
+  // Second arg accepted for contract parity with the DDB backend
+  // (which uses `{ justWrote: true }` to opt into a GSI-lag retry
+  // loop). SQLite reads are immediately consistent so the option
+  // is a no-op here — kept on the signature so call sites work
+  // identically against both backends.
+  getContributionCount(discordId /* , _opts */) {
     const stmt = db.prepare('SELECT COUNT(*) as count FROM contributions WHERE discord_id = ?');
     return stmt.get(discordId).count;
   },
