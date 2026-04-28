@@ -6,10 +6,15 @@
 //
 // Table naming: tables carry the env in their name
 // (`qurl-bot-discord-<env>-<kebab-name>`). The env prefix is
-// supplied via `DDB_TABLE_PREFIX` (default `qurl-bot-discord-prod-`).
-// The bot task role's IAM policy must allow data-plane verbs on the
-// specific table ARNs + GSI ARNs — scoping happens infra-side, not
-// here.
+// supplied via `DDB_TABLE_PREFIX` and is REQUIRED — there is no
+// default. A previous version defaulted to `qurl-bot-discord-prod-`,
+// which meant a developer running the bot locally with `STORE_TYPE=
+// ddb` and any AWS creds in their shell would silently hit prod
+// tables. Failing fast on unset prefix is a one-time onboarding
+// inconvenience (set the env in the deployment template) traded for
+// eliminating that footgun. The bot task role's IAM policy must
+// allow data-plane verbs on the specific table ARNs + GSI ARNs —
+// scoping happens infra-side, not here.
 //
 // Encryption parity with SqliteStore: the three sensitive fields
 // (`guild_configs.qurl_api_key`, `orphaned_oauth_tokens.access_token`,
@@ -85,7 +90,17 @@ const BADGE_INFO = {
 // Table name mapping. Map keys (SQL-era snake_case names) match the
 // outputs.tf `table_names` shape in `modules/qurl-bot-ddb/` so
 // consumers look up by the same semantic key.
-const TABLE_PREFIX = process.env.DDB_TABLE_PREFIX || 'qurl-bot-discord-prod-';
+//
+// DDB_TABLE_PREFIX is required (no default). See header comment for
+// the prod-footgun rationale. Whitespace-only values are treated as
+// unset to defend against buggy container templating that emits
+// `DDB_TABLE_PREFIX=` with no value — same shape as the STORE_TYPE
+// normalization in `store/index.js`.
+const rawTablePrefix = process.env.DDB_TABLE_PREFIX;
+const TABLE_PREFIX = rawTablePrefix && rawTablePrefix.trim();
+if (!TABLE_PREFIX) {
+  throw new Error('DDB_TABLE_PREFIX is required when STORE_TYPE=ddb. Set it to the env-specific prefix (e.g. `qurl-bot-discord-sandbox-` for sandbox, `qurl-bot-discord-prod-` for prod) in the deployment template.');
+}
 const TABLES = Object.freeze({
   github_links: `${TABLE_PREFIX}github-links`,
   pending_links: `${TABLE_PREFIX}pending-links`,

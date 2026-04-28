@@ -610,3 +610,56 @@ describe('Store contract adherence', () => {
     });
   });
 });
+
+// ── DDB_TABLE_PREFIX boot-time validation ──
+//
+// The test file at top sets DDB_TABLE_PREFIX='test-prefix-' before
+// requiring the store, so the in-process module already passed
+// validation. Exercising the failure paths needs a clean require, so
+// each case spawns a child `node -e` that requires ddb-store directly
+// with a controlled env. The whole point of the validation is to keep
+// a developer's local shell with stray AWS creds from hitting prod
+// tables, so coverage on every "treat as unset" branch is worth the
+// child-process cost.
+describe('ddb-store boot-time DDB_TABLE_PREFIX validation', () => {
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const requirePath = JSON.stringify(path.resolve(__dirname, '..', 'src/store/ddb-store'));
+
+  function spawnDdbStoreBoot(prefixValue) {
+    const env = { ...process.env, JEST_WORKER_ID: '' };
+    if (prefixValue === undefined) {
+      delete env.DDB_TABLE_PREFIX;
+    } else {
+      env.DDB_TABLE_PREFIX = prefixValue;
+    }
+    return spawnSync(process.execPath, ['-e', `require(${requirePath})`], { env, encoding: 'utf8' });
+  }
+
+  test('throws when DDB_TABLE_PREFIX is unset', () => {
+    const result = spawnDdbStoreBoot(undefined);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/DDB_TABLE_PREFIX is required/);
+    // Names the concrete next action so the operator knows how to fix.
+    expect(result.stderr).toMatch(/sandbox/);
+    expect(result.stderr).toMatch(/prod/);
+  });
+
+  test('throws when DDB_TABLE_PREFIX is empty-string (container-templating bug)', () => {
+    const result = spawnDdbStoreBoot('');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/DDB_TABLE_PREFIX is required/);
+  });
+
+  test('throws when DDB_TABLE_PREFIX is whitespace-only (container-templating bug)', () => {
+    const result = spawnDdbStoreBoot('   ');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/DDB_TABLE_PREFIX is required/);
+  });
+
+  test('boots cleanly when DDB_TABLE_PREFIX is set to a real value', () => {
+    const result = spawnDdbStoreBoot('qurl-bot-discord-sandbox-');
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+});
