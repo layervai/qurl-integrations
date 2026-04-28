@@ -355,8 +355,12 @@ func (c *Client) Update(ctx context.Context, id string, input UpdateInput) (*QUR
 // MintLinkInput sends a bodiless POST (server uses qURL defaults), while a non-nil
 // MintLinkInput (even &MintLinkInput{}) sends a JSON body.
 type MintLinkInput struct {
-	ExpiresIn       string        `json:"expires_in,omitempty"`
-	ExpiresAt       *time.Time    `json:"expires_at,omitempty"`
+	ExpiresIn string     `json:"expires_in,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Label is a plain string with omitempty — passing "" omits the field, which is
+	// the right behavior for an optional per-link label (there's no "clear label"
+	// concept on minting, unlike UpdateInput.Description which uses *string to support
+	// explicit clear via empty string).
 	Label           string        `json:"label,omitempty"`
 	OneTimeUse      *bool         `json:"one_time_use,omitempty"`
 	MaxSessions     *int          `json:"max_sessions,omitempty"`
