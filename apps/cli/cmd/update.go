@@ -30,6 +30,11 @@ func updateCmd(opts *globalOpts) *cobra.Command {
 			if err := validateResourceID(args[0]); err != nil {
 				return err
 			}
+			if cmd.Flags().Changed("extend-by") {
+				if err := validateDuration(extendBy); err != nil {
+					return err
+				}
+			}
 
 			hasChange := cmd.Flags().Changed("description") ||
 				cmd.Flags().Changed("tags") ||

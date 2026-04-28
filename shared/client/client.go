@@ -227,6 +227,8 @@ type ListOutput struct {
 }
 
 // List retrieves a paginated list of qURLs.
+// A nil input is treated as &ListInput{} (all fields at defaults). Unlike Create,
+// List has no required fields so nil is silently accepted.
 func (c *Client) List(ctx context.Context, input *ListInput) (*ListOutput, error) {
 	if input == nil {
 		input = &ListInput{}
@@ -295,7 +297,9 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return err
 }
 
-// UpdateInput holds input for updating a QURL.
+// UpdateInput holds input for updating a qURL.
+// Note: session_duration and one_time_use are intentionally absent — the
+// UpdateQurlRequest schema in the API spec does not include them.
 type UpdateInput struct {
 	ExtendBy  string     `json:"extend_by,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
@@ -353,6 +357,8 @@ type MintOutput struct {
 }
 
 // MintLink mints a new access link for a qURL.
+// Pass nil to mint with the qURL's own defaults (server uses bodiless POST).
+// Pass a non-nil MintLinkInput to override expiry, one-time-use, and other per-link settings.
 func (c *Client) MintLink(ctx context.Context, id string, input *MintLinkInput) (*MintOutput, error) {
 	var bodyReader io.Reader = http.NoBody
 	if input != nil {

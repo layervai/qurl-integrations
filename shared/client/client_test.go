@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -305,6 +307,29 @@ func TestMintLinkContentType(t *testing.T) {
 			t.Fatalf("MintLink: %v", err)
 		}
 	})
+}
+
+// TestMintLinkOmitEmpty verifies that MintLinkInput fields with zero values are
+// stripped by omitempty, so &MintLinkInput{} marshals to {} rather than a struct
+// with false/0/null fields. This locks the contract mint.go relies on when
+// omitting the Changed() gate for bool/int flags.
+func TestMintLinkOmitEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if got := strings.TrimSpace(string(body)); got != "{}" {
+			t.Errorf("expected body {}, got %q", got)
+		}
+		apiEnvelope(t, w, map[string]any{"qurl_link": "https://qurl.link/at_test"})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.MintLink(context.Background(), testResourceID, &MintLinkInput{}); err != nil {
+		t.Fatalf("MintLink: %v", err)
+	}
 }
 
 func TestBatchCreate(t *testing.T) {

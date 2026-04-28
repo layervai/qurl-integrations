@@ -197,6 +197,8 @@ func (f TableFormatter) colorStatus(status string) string {
 	case client.StatusActive:
 		return f.green.Sprint(status)
 	case client.StatusRevoked:
+		// "expired" and "consumed" are removed from the API spec as of this version;
+		// unknown statuses fall through to the default (uncolored) to stay readable.
 		return f.red.Sprint(status)
 	default:
 		return status

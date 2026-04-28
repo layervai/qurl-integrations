@@ -23,7 +23,10 @@ func mintCmd(opts *globalOpts) *cobra.Command {
 		Use:   "mint <resource-id>",
 		Short: "Mint a new access link for a qURL",
 		Long: `Creates a new access token and link for an existing qURL resource.
-Useful for multi-use qURLs where you want to generate additional access links.`,
+Useful for multi-use qURLs where you want to generate additional access links.
+
+Note: AccessPolicy overrides (geo-fencing, IP restrictions) are only available
+via the SDK or API; the CLI exposes the common per-link flags only.`,
 		Example: `  qurl mint r_k8xqp9h2sj9
   qurl mint r_k8xqp9h2sj9 --expires-in 1h --one-time
   LINK=$(qurl mint r_k8xqp9h2sj9 -q)`,
@@ -31,6 +34,12 @@ Useful for multi-use qURLs where you want to generate additional access links.`,
 		ValidArgsFunction: resourceIDCompletion(opts),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateResourceID(args[0]); err != nil {
+				return err
+			}
+			if err := validateDuration(expiresIn); err != nil {
+				return err
+			}
+			if err := validateDuration(sessionDuration); err != nil {
 				return err
 			}
 

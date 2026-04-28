@@ -32,6 +32,9 @@ func createCmd(opts *globalOpts) *cobra.Command {
 			if err := validateDuration(expiresIn); err != nil {
 				return err
 			}
+			if err := validateDuration(sessionDuration); err != nil {
+				return err
+			}
 
 			c, err := opts.newClient()
 			if err != nil {
