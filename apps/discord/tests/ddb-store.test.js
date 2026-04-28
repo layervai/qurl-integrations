@@ -290,8 +290,52 @@ describe('streaks', () => {
     ddbMock.on(PutCommand).resolves({});
     const result = await store.updateStreak('d');
     expect(result).toEqual({ current: 1, longest: 1, isNew: true });
-    const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-    expect(putItem.current_streak).toBe(1);
+    const putCall = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(putCall.Item.current_streak).toBe(1);
+    // Insert-branch race guard: the Put MUST carry
+    // attribute_not_exists(discord_id) so a concurrent first-write
+    // for the same user can't clobber the first writer silently.
+    expect(putCall.ConditionExpression).toMatch(/attribute_not_exists\(discord_id\)/);
+  });
+
+  test('updateStreak: handles insert-branch race (CCFE) by recursing into update path', async () => {
+    const thisMonth = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, '0')}`;
+    // First Get: no existing row (we're the second writer reading
+    // before the race). Second Get (after recurse): row IS present,
+    // same month, so the function returns { isNew: false } without
+    // an UpdateCommand. Order matters because aws-sdk-client-mock
+    // resolves all GetCommands with the same mock; we use the
+    // sequential `.resolvesOnce` API for branch-specific responses.
+    ddbMock
+      .on(GetCommand)
+      .resolvesOnce({}) // first call: no existing
+      .resolves({
+        Item: {
+          discord_id: 'd',
+          current_streak: 1,
+          longest_streak: 1,
+          last_contribution_week: thisMonth,
+        },
+      });
+    const ccfe = new Error('exists');
+    ccfe.name = 'ConditionalCheckFailedException';
+    ddbMock.on(PutCommand).rejects(ccfe);
+
+    const result = await store.updateStreak('d');
+    // Concurrent writer's row was the one we found on recurse;
+    // same-month branch returns isNew: false without an update.
+    expect(result).toEqual({ current: 1, longest: 1, isNew: false });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1); // only our (failed) attempt
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0); // same-month: no update
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(2); // initial + recurse
+  });
+
+  test('updateStreak: non-CCFE insert errors propagate to caller', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    const err = new Error('throttled');
+    err.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(PutCommand).rejects(err);
+    await expect(store.updateStreak('d')).rejects.toThrow(/throttled/);
   });
 
   test('updateStreak: preserves streak when contribution is in the same month', async () => {
@@ -573,6 +617,37 @@ describe('milestones', () => {
     ddbMock.on(PutCommand).rejects(err);
     const result = await store.recordMilestone('star', 100, 'r');
     expect(result).toBe(false);
+  });
+});
+
+// ── Health check ──
+
+describe('healthCheck', () => {
+  test('issues a single GetItem against pending_links sentinel key', async () => {
+    ddbMock.on(GetCommand).resolves({}); // sentinel key never exists
+    const result = await store.healthCheck();
+    expect(result).toEqual({ ok: true });
+    const calls = ddbMock.commandCalls(GetCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input.TableName).toBe('test-prefix-pending-links');
+    expect(calls[0].args[0].input.Key).toEqual({ state: '__healthcheck__' });
+  });
+
+  test('does NOT touch any user-data table (no Scan, no leaderboard read)', async () => {
+    ddbMock.on(GetCommand).resolves({});
+    await store.healthCheck();
+    // Critical contract for /health-cadence callers: zero ScanCommands.
+    // If a future contributor "improves" healthCheck by adding a
+    // getStats() call, this test fires.
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test('throws when DDB is unreachable (so /health returns 503)', async () => {
+    const netErr = new Error('ENOTFOUND dynamodb.us-east-2.amazonaws.com');
+    netErr.name = 'NetworkingError';
+    ddbMock.on(GetCommand).rejects(netErr);
+    await expect(store.healthCheck()).rejects.toThrow(/ENOTFOUND/);
   });
 });
 

@@ -878,6 +878,17 @@ const dbModule = {
     return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
   },
 
+  // Cheap data-layer probe for /health. Throws if the underlying
+  // db handle is closed/blocked so the orchestrator replaces the
+  // container; succeeds with an `{ ok: true }` shape that callers
+  // can JSON-serialize. Uses sqlite_master (in-memory metadata, no
+  // user-table read) so the cost stays O(1) even as user tables
+  // grow.
+  healthCheck() {
+    db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
+    return { ok: true };
+  },
+
   // Close database (for graceful shutdown)
   close() {
     clearInterval(cleanupInterval);

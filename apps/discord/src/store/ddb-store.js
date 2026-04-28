@@ -642,17 +642,37 @@ async function updateStreak(discordId) {
   const existing = await getStreak(discordId);
 
   if (!existing) {
-    await ddb.send(new PutCommand({
-      TableName: TABLES.streaks,
-      Item: {
-        discord_id: discordId,
-        current_streak: 1,
-        longest_streak: 1,
-        last_contribution_week: currentMonth,
-        updated_at: nowIso(),
-      },
-    }));
-    return { current: 1, longest: 1, isNew: true };
+    // First-write race: two concurrent recordContribution calls for
+    // a brand-new contributor BOTH see existing == null and BOTH
+    // PutItem. Without a condition the second clobbers the first
+    // (still streak=1 here, so the data outcome matches; but the
+    // second writer's attribution race-loses silently). Guard with
+    // attribute_not_exists; on CCFE fall through to the update path
+    // — by definition a streak row now exists, so re-reading it and
+    // running the same-month / consecutive-month / break logic
+    // produces the correct end state. Cheap fix that closes the
+    // insert-branch race without TransactWriteItems.
+    try {
+      await ddb.send(new PutCommand({
+        TableName: TABLES.streaks,
+        Item: {
+          discord_id: discordId,
+          current_streak: 1,
+          longest_streak: 1,
+          last_contribution_week: currentMonth,
+          updated_at: nowIso(),
+        },
+        ConditionExpression: 'attribute_not_exists(discord_id)',
+      }));
+      return { current: 1, longest: 1, isNew: true };
+    } catch (err) {
+      if (err.name !== 'ConditionalCheckFailedException') throw err;
+      // Concurrent writer beat us to the insert. Recurse — the row
+      // is now present, so the second call hits the update branch
+      // and reconciles correctly. One-level recursion bounded by
+      // the existence check above.
+      return updateStreak(discordId);
+    }
   }
 
   if (existing.last_contribution_week === currentMonth) {
@@ -1149,6 +1169,28 @@ async function deleteOrphanedToken(id) {
 
 // ── Lifecycle ──
 
+// Cheap "is the data layer functional" probe for /health. Single
+// GetItem against a sentinel key on the smallest table (pending_links
+// — short TTL, low cardinality) verifies SDK init, network path,
+// IAM, and that the table exists, in one ~1-RCU round-trip. Throws
+// if any of those are broken so the orchestrator replaces the
+// container.
+//
+// Why not Scan/getStats(): /health is hit at LB cadence (10–30s).
+// SqliteStore's old getStats() probe was constant-time aggregation
+// against indexed COUNT(*); the DDB equivalent would be a paginated
+// full-table Scan. Using getStats() at health-check cadence would
+// scale RCU cost with table size and amplify cost-per-instance in
+// any fleet. /metrics keeps the full aggregation — that's the right
+// home for it.
+async function healthCheck() {
+  await ddb.send(new GetCommand({
+    TableName: TABLES.pending_links,
+    Key: { state: '__healthcheck__' },
+  }));
+  return { ok: true };
+}
+
 async function close() {
   // DDB client has no persistent connection to close; AWS SDK v3
   // manages sockets internally via keep-alive. The method exists
@@ -1186,5 +1228,5 @@ module.exports = {
   recordOrphanedToken, countOrphanedTokens, listOrphanedTokens,
   decryptOrphanedToken, deleteOrphanedToken,
   // Lifecycle
-  close,
+  close, healthCheck,
 };

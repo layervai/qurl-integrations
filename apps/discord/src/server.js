@@ -86,14 +86,21 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', async (req, res) => {
-  // Actually probe the DB — if better-sqlite3 is blocked/locked we want the
-  // health check to fail so the orchestrator replaces the container.
+  // Cheap data-layer probe — fails the check if the backend is
+  // blocked/locked so the orchestrator replaces the container.
+  // Uses db.healthCheck() (constant cost) instead of db.getStats()
+  // (scan + aggregation). On the SQLite backend the historical
+  // getStats() probe was indexed COUNT(*) and constant-time, but on
+  // the DDB backend getStats() is a full-table Scan — at LB
+  // health-check cadence (10–30s) that's real RCU and grows with
+  // table size. healthCheck() is O(1) on every backend.
   try {
-    await db.getStats();
+    await db.healthCheck();
     res.status(200).json({ status: 'ok' });
   } catch (err) {
-    // Log full detail internally; omit from the response so better-sqlite3
-    // error messages (paths, schema) don't leak to an unauthenticated probe.
+    // Log full detail internally; omit from the response so backend
+    // error messages (paths, schema, AWS internals) don't leak to
+    // an unauthenticated probe.
     logger.warn('Health check failed', { error: err.message });
     res.status(503).json({ status: 'unhealthy' });
   }
