@@ -44,11 +44,20 @@ const { initHttpOnly } = require('./http-only-init');
 // authenticate, and (2) an initial `refreshCache()` so the
 // route handlers find a populated guild/roles/channels cache on
 // the first OAuth callback or webhook. Both are seeded
-// explicitly in start() below — see the `else if (isHttp)`
-// branch. Migration to `discord-rest.js` (lighter, no Client
-// object needed at all) remains a follow-up; today's helpers
-// already work in either role once the token + cache are in
-// place.
+// explicitly in start() below — see the `if (isHttp && !isGateway)`
+// branch (runs BEFORE startServer so the ALB can't route a
+// request through a half-initialized replica).
+//
+// Known gap (acceptable for now): cache invalidation in http-only
+// mode. The `client.on('roleDelete' / 'channelDelete')` handlers
+// in src/discord.js only fire when the Gateway is connected, so
+// deletions made on the OpenNHP guild stay cached as stale
+// references until the replica restarts. The lazy refresh in
+// each helper checks `if (!channels.X)` — non-null but stale
+// doesn't trigger a refresh. OpenNHP guild admins rarely delete
+// tracked channels; if this becomes load-bearing, a periodic
+// REST-driven `refreshCache()` would close the gap without
+// needing a Gateway connection.
 const PROCESS_ROLE = (process.env.PROCESS_ROLE || 'combined').trim();
 const VALID_ROLES = ['combined', 'gateway', 'http'];
 if (!VALID_ROLES.includes(PROCESS_ROLE)) {
@@ -306,6 +315,22 @@ async function start() {
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
+  // Pure http-only mode: seed the REST token + warm the cache BEFORE
+  // opening the listener. Otherwise there's a race window where the
+  // ALB can route OAuth callbacks / webhooks to a replica whose
+  // `client.rest` has no token and whose channel/role cache is cold —
+  // the request would 401 inside sendDM / assignContributorRole.
+  // See src/http-only-init.js for the full rationale. Failures are
+  // fatal — propagated through start().catch() into gracefulShutdown(1)
+  // so a Discord-unreachable replica crash-loops instead of silently
+  // serving 5xx. Combined mode keeps the legacy ordering (login() runs
+  // last, after the listener) — that race exists pre-PR and isn't a
+  // regression here; the steady-state cold-start risk that justified
+  // the swap is specific to ALB-fronted http replicas.
+  if (isHttp && !isGateway) {
+    await initHttpOnly({ client, config, refreshCache });
+  }
+
   // HTTP listener — OAuth callback, webhooks, health, metrics.
   // Skipped in `gateway`-only mode; the ALB targets HTTP replicas
   // only. `combined` keeps the legacy single-process behavior.
@@ -314,10 +339,15 @@ async function start() {
   }
 
   // Background retry-revoke for any OAuth tokens whose initial
-  // revoke failed. Only on the gateway side — the sweeper calls
-  // into Discord via the gateway client (`user.send()` etc.) and
-  // would need to be refactored to `discord-rest.js` before
-  // running in `http`-only mode. Tracked as a follow-up.
+  // revoke failed. Pinned to `isGateway` not because of any Discord
+  // dependency (the sweeper only calls api.github.com — no Discord
+  // client / REST calls anywhere in src/orphan-token-sweeper.js) but
+  // to keep the sweeper a singleton: N HTTP replicas racing on the
+  // same orphaned-tokens table would each claim and re-revoke every
+  // row. Pinning to the single gateway process avoids that without
+  // a distributed work queue. If this ever needs to scale beyond one
+  // worker, replace with SQS / a Redis lock — not by spreading the
+  // sweeper across HTTP replicas.
   if (isGateway) {
     startOrphanTokenSweeper();
   }
@@ -337,13 +367,6 @@ async function start() {
         t.unref();
       }),
     ]);
-  } else if (isHttp) {
-    // Pure http-only mode: seed the REST token + warm the cache without
-    // a Gateway login. See src/http-only-init.js for the rationale.
-    // Failures are fatal — propagated through start().catch() into
-    // gracefulShutdown(1) so a Discord-unreachable replica crash-loops
-    // instead of silently serving 5xx.
-    await initHttpOnly({ client, config, refreshCache });
   }
 }
 

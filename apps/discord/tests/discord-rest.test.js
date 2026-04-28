@@ -2,10 +2,18 @@
  * Unit tests for src/discord-rest.js — the REST-only Discord
  * helpers used by the HTTP-process role in the gateway/http split.
  *
- * Mocks `@discordjs/rest` at the module level so tests don't hit
- * the Discord API. Asserts both the happy path AND the expected
- * graceful-failure shape (`{ ok: false, status, error }`) so
- * callers can branch without catching exceptions.
+ * Mocks `../src/discord` to inject a fake `client.rest` so tests
+ * don't hit the Discord API. The shared-bucket invariant (one REST
+ * instance per process, reused across legacy gateway-cache helpers
+ * and these REST-only helpers) means the test must mock at the
+ * discord.js Client boundary rather than `@discordjs/rest`.
+ *
+ * Asserts both the happy path AND the expected graceful-failure
+ * shape (`{ ok: false, status, error }`) so callers can branch
+ * without catching exceptions. Also asserts the exact REST routes
+ * (POST /users/@me/channels, PUT /guilds/:guild/members/:user/roles/:role,
+ * etc.) so a future refactor that swaps Routes.userChannels for
+ * Routes.channelMessages would fail this suite at PR time.
  */
 
 jest.mock('../src/config', () => ({
@@ -21,32 +29,37 @@ jest.mock('../src/logger', () => ({
   debug: jest.fn(),
 }));
 
-// Mock the REST class before discord-rest imports it. jest.mock's
-// factory runs before any other module code, so the mock object
-// must be created inside the factory (naming it `mockRest` or
-// similar with the `mock` prefix lets jest hoist it). Expose the
-// instance via a module-level accessor so tests can interact with it.
-jest.mock('@discordjs/rest', () => {
+// Mock ../src/discord to expose a controllable client.rest. discord-rest
+// reads `client.rest` at module load and reuses it for every REST call,
+// so the mock object created here doubles as the spy surface for tests.
+jest.mock('../src/discord', () => {
   const mockRestInstance = {
-    setToken: jest.fn().mockReturnThis(),
     post: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
   };
   return {
-    REST: jest.fn().mockImplementation(() => mockRestInstance),
+    client: { rest: mockRestInstance },
     __mockRestInstance: mockRestInstance,
   };
 });
 
-const restMock = require('@discordjs/rest').__mockRestInstance;
+const restMock = require('../src/discord').__mockRestInstance;
 
-const { sendDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { rest: exportedRest, sendDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
 
 beforeEach(() => {
   restMock.post.mockReset();
   restMock.put.mockReset();
   restMock.delete.mockReset();
+});
+
+describe('module wiring', () => {
+  it('re-exports the shared client.rest instance (not a new one)', () => {
+    // Sharing the rate-limit bucket state is the whole reason this module
+    // imports client.rest instead of constructing its own REST().
+    expect(exportedRest).toBe(restMock);
+  });
 });
 
 describe('sendDM via REST', () => {
@@ -57,13 +70,15 @@ describe('sendDM via REST', () => {
     const result = await sendDM('user-1', { content: 'hi' });
     expect(result).toEqual({ ok: true, channelId: 'channel-1' });
     expect(restMock.post).toHaveBeenCalledTimes(2);
-    // First call: create DM channel with recipient_id
+    // First call: create DM channel — POST /users/@me/channels.
+    expect(restMock.post.mock.calls[0][0]).toBe('/users/@me/channels');
     expect(restMock.post.mock.calls[0][1]).toEqual({ body: { recipient_id: 'user-1' } });
-    // Second call: post message body to that channel
+    // Second call: post message body to that channel.
+    expect(restMock.post.mock.calls[1][0]).toBe('/channels/channel-1/messages');
     expect(restMock.post.mock.calls[1][1]).toEqual({ body: { content: 'hi' } });
   });
 
-  it('returns ok:false on 403 (DM disabled / blocked) — expected operational error', async () => {
+  it('returns ok:false on 403 (DM disabled / blocked / Missing Access) — expected operational error', async () => {
     const err = new Error('Cannot send messages to this user');
     err.status = 403;
     restMock.post.mockRejectedValueOnce(err);
@@ -85,13 +100,13 @@ describe('sendDM via REST', () => {
     // Re-mock config to return empty token, re-require module.
     jest.resetModules();
     jest.doMock('../src/config', () => ({ DISCORD_TOKEN: '', PENDING_LINK_EXPIRY_MINUTES: 10 }));
-    const freshMock = { setToken: jest.fn().mockReturnThis(), post: jest.fn() };
-    jest.doMock('@discordjs/rest', () => ({ REST: jest.fn().mockImplementation(() => freshMock) }));
+    const freshRest = { post: jest.fn(), put: jest.fn(), delete: jest.fn() };
+    jest.doMock('../src/discord', () => ({ client: { rest: freshRest } }));
     const fresh = require('../src/discord-rest');
     const result = await fresh.sendDM('user-1', { content: 'hi' });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/DISCORD_TOKEN/);
-    expect(freshMock.post).not.toHaveBeenCalled();
+    expect(freshRest.post).not.toHaveBeenCalled();
   });
 });
 
@@ -101,6 +116,8 @@ describe('addRoleToMember via REST', () => {
     const result = await addRoleToMember('guild-1', 'user-1', 'role-1');
     expect(result).toEqual({ ok: true });
     expect(restMock.put).toHaveBeenCalledTimes(1);
+    // PUT /guilds/:guild/members/:user/roles/:role — verbatim route.
+    expect(restMock.put.mock.calls[0][0]).toBe('/guilds/guild-1/members/user-1/roles/role-1');
   });
 
   it('returns ok:false + status on error', async () => {
@@ -119,5 +136,7 @@ describe('removeRoleFromMember via REST', () => {
     const result = await removeRoleFromMember('guild-1', 'user-1', 'role-1');
     expect(result).toEqual({ ok: true });
     expect(restMock.delete).toHaveBeenCalledTimes(1);
+    // DELETE /guilds/:guild/members/:user/roles/:role — same path shape as PUT.
+    expect(restMock.delete.mock.calls[0][0]).toBe('/guilds/guild-1/members/user-1/roles/role-1');
   });
 });
