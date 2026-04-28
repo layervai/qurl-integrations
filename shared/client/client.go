@@ -304,8 +304,9 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 }
 
 // UpdateInput holds input for updating a qURL.
-// Note: session_duration and one_time_use are intentionally absent — the
-// UpdateQurlRequest schema in the API spec does not include them.
+// The UpdateQurlRequest schema defines exactly four mutable fields: extend_by, expires_at,
+// tags, and description. session_duration, one_time_use, access_policy, and custom_domain
+// are intentionally absent — the API does not support updating them after creation.
 type UpdateInput struct {
 	ExtendBy  string     `json:"extend_by,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
@@ -423,6 +424,7 @@ type BatchItemError struct {
 }
 
 // MaxBatchSize is the maximum number of items in a single batch create request.
+// Matches the BatchCreateRequest schema constraint (api/openapi.yaml: items.maxItems=100).
 const MaxBatchSize = 100
 
 // BatchCreate creates multiple qURLs at once (1-100 items).
@@ -433,6 +435,9 @@ func (c *Client) BatchCreate(ctx context.Context, items []*CreateInput) (*BatchC
 	for i, item := range items {
 		if item == nil {
 			return nil, fmt.Errorf("batch item at index %d must not be nil", i)
+		}
+		if item.TargetURL == "" {
+			return nil, fmt.Errorf("batch item at index %d has empty target_url", i)
 		}
 	}
 

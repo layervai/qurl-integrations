@@ -902,6 +902,19 @@ func TestBatchCreateNilItem(t *testing.T) {
 	}
 }
 
+func TestBatchCreateEmptyTargetURL(t *testing.T) {
+	c := testClient("http://unused", "test-key")
+
+	_, err := c.BatchCreate(context.Background(), []*CreateInput{
+		{TargetURL: "https://example.com"},
+		{TargetURL: ""},
+		{TargetURL: "https://example2.com"},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty target_url in batch item")
+	}
+}
+
 func TestCreateNilInput(t *testing.T) {
 	c := testClient("http://unused", "test-key")
 	_, err := c.Create(context.Background(), nil)

@@ -21,6 +21,10 @@ func createCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <target-url>",
 		Short: "Create a qURL for a target URL",
+		Long: `Creates a new qURL for the given target URL.
+
+Note: AccessPolicy overrides (geo-fencing, IP restrictions) are only available
+via the SDK or API; the CLI exposes the common creation flags only.`,
 		Example: `  qurl create https://api.example.com/data
   qurl create https://internal.example.com --expires 1h --one-time
   qurl create https://dashboard.example.com -l "Admin access" -e 7d`,
