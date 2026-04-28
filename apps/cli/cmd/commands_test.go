@@ -355,6 +355,7 @@ func TestJSONOutput(t *testing.T) {
 }
 
 func TestMissingAPIKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("QURL_API_KEY", "")
 	cmd := rootCmd("test")
 	cmd.SetArgs([]string{"list"})

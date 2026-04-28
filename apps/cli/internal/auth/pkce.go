@@ -1,4 +1,4 @@
-// Package auth provides authentication helpers for the QURL CLI,
+// Package auth provides authentication helpers for the qURL CLI,
 // including the OAuth 2.0 Authorization Code flow with PKCE (RFC 7636).
 package auth
 
@@ -16,11 +16,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	// DefaultDomain is the Auth0 tenant domain for QURL.
+	// DefaultDomain is the Auth0 tenant domain for qURL.
 	DefaultDomain = "auth.layerv.ai"
 
 	// DefaultAudience is the API audience identifier.
@@ -115,6 +116,12 @@ type callbackResult struct {
 
 // LoginSession represents an in-progress PKCE login. It holds the authorization
 // URL to open in the browser and provides WaitForToken to complete the exchange.
+//
+// LoginSession is not safe for concurrent use. The caller MUST eventually call
+// Close (or WaitForToken, which calls it via defer) to release the callback
+// server. StartLogin registers a goroutine that calls Close when ctx is
+// cancelled, so callers that abandon a session without calling WaitForToken
+// will still have the server cleaned up when the parent context expires.
 type LoginSession struct {
 	// AuthURL is the authorization URL to open in the browser.
 	AuthURL string
@@ -124,6 +131,7 @@ type LoginSession struct {
 
 	codeCh       chan callbackResult
 	server       *http.Server
+	closeOnce    sync.Once
 	codeVerifier string
 	state        string
 	flow         *PKCEFlow
@@ -171,7 +179,7 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 
 	authURL := p.buildAuthURL(redirectURI, state, challenge)
 
-	return &LoginSession{
+	session := &LoginSession{
 		AuthURL:      authURL,
 		RedirectURI:  redirectURI,
 		codeCh:       codeCh,
@@ -179,7 +187,16 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 		codeVerifier: verifier,
 		state:        state,
 		flow:         p,
-	}, nil
+	}
+
+	// Ensure the callback server is torn down when the parent context is
+	// cancelled (e.g. Ctrl-C), even if WaitForToken is never called.
+	go func() {
+		<-ctx.Done()
+		session.Close()
+	}()
+
+	return session, nil
 }
 
 // WaitForToken waits for the user to complete authentication in the browser,
@@ -203,11 +220,15 @@ func (s *LoginSession) WaitForToken(ctx context.Context) (*TokenResponse, error)
 	}
 }
 
-// Close shuts down the callback server.
+// Close shuts down the callback server. It is idempotent and safe to call
+// multiple times (e.g. from WaitForToken's defer and from the context-
+// cancellation goroutine started by StartLogin).
 func (s *LoginSession) Close() {
-	ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
-	defer cancel()
-	_ = s.server.Shutdown(ctx)
+	s.closeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+		defer cancel()
+		_ = s.server.Shutdown(ctx)
+	})
 }
 
 // callbackHandler returns an HTTP handler that processes the OAuth callback.
@@ -349,7 +370,7 @@ func generateState() (string, error) {
 }
 
 const successHTML = `<!DOCTYPE html>
-<html><head><title>QURL CLI</title></head>
+<html><head><title>qURL CLI</title></head>
 <body style="font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa;">
 <div style="text-align:center;">
 <h1>Authentication successful</h1>
@@ -362,7 +383,7 @@ const successHTML = `<!DOCTYPE html>
 // been delivered. It avoids incorrectly showing "Authentication successful"
 // for a request that was a no-op.
 const alreadyDoneHTML = `<!DOCTYPE html>
-<html><head><title>QURL CLI</title></head>
+<html><head><title>qURL CLI</title></head>
 <body style="font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa;">
 <div style="text-align:center;">
 <h1>Already authenticated</h1>

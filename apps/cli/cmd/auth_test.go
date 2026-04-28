@@ -70,7 +70,7 @@ func newTokenMockServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-// newAPIKeyMockServer creates a mock QURL API server that handles
+// newAPIKeyMockServer creates a mock qURL API server that handles
 // POST /v1/api-keys and GET /v1/quota.
 func newAPIKeyMockServer(t *testing.T) *httptest.Server {
 	t.Helper()

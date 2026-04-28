@@ -22,8 +22,8 @@ var allScopes = []string{"qurl:read", "qurl:write", "qurl:resolve"}
 func authCmd(opts *globalOpts) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Authenticate with the QURL API",
-		Long: `Manage authentication for the QURL CLI.
+		Short: "Authenticate with the qURL API",
+		Long: `Manage authentication for the qURL CLI.
 
 Use "auth login" to authenticate via your browser.
 Use "auth status" to check your current authentication.
@@ -46,8 +46,8 @@ func authLoginCmd(opts *globalOpts) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Log in to QURL via browser-based authentication",
-		Long: `Authenticate with QURL using the OAuth 2.0 Authorization Code flow with PKCE.
+		Short: "Log in to qURL via browser-based authentication",
+		Long: `Authenticate with qURL using the OAuth 2.0 Authorization Code flow with PKCE.
 
 This opens your browser to complete authentication, then creates an API key
 and stores it in your local config. The API key persists across sessions until
@@ -106,7 +106,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		ClientID: clientID,
 		Audience: audience,
 		Scopes:   scopes,
-		BaseURL:  auth0URL, // Override for testing; must be https://.
+		BaseURL:  auth0URL, // Override via QURL_AUTH0_URL; validated above.
 	}
 	flow := auth.NewPKCEFlow(flowCfg)
 
@@ -121,7 +121,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	if !noBrowser {
 		w.printf("  Opening browser to authenticate...\n")
 		if browserErr := auth.OpenBrowser(session.AuthURL); browserErr != nil {
-			w.printf("  Could not open browser. Visit this URL:\n")
+			w.printf("  Could not open browser (%s). Visit this URL:\n", browserErr)
 			w.printf("  %s\n", session.AuthURL)
 		}
 	} else {
