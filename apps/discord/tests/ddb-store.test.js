@@ -284,12 +284,29 @@ describe('badges', () => {
 // ── Guild configs (encryption path) ──
 
 describe('guild configs', () => {
-  test('setGuildApiKey: encrypts apiKey before PutItem', async () => {
-    ddbMock.on(PutCommand).resolves({});
+  test('setGuildApiKey: encrypts apiKey before write, preserves configured_at on re-key', async () => {
+    ddbMock.on(UpdateCommand).resolves({});
     await store.setGuildApiKey('g-1', 'plain-key', 'configurer');
-    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-    expect(item.qurl_api_key).toMatch(/^enc:v1:/);
-    expect(item.qurl_api_key).not.toContain('plain-key'); // raw plaintext not stored
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ guild_id: 'g-1' });
+    // Encryption: ciphertext stored, never the plaintext.
+    expect(input.ExpressionAttributeValues[':k']).toMatch(/^enc:v1:/);
+    expect(input.ExpressionAttributeValues[':k']).not.toContain('plain-key');
+    // configured_by + updated_at unconditionally set.
+    expect(input.ExpressionAttributeValues[':b']).toBe('configurer');
+    expect(input.ExpressionAttributeValues[':u']).toBeDefined();
+    // Critical parity-with-SQLite invariant: re-key must NOT
+    // reset configured_at. SQLite's ON CONFLICT only touched
+    // qurl_api_key / configured_by / updated_at; the DDB
+    // equivalent is `if_not_exists(configured_at, :u)` so the
+    // first-ever-configured timestamp survives subsequent rotations.
+    expect(input.UpdateExpression).toMatch(/if_not_exists\(configured_at, :u\)/);
+    // Defensive: the bare 'configured_at = :u' shape (which would
+    // clobber on every re-key) MUST NOT appear as a SET assignment.
+    // Only acceptable form is the `if_not_exists(configured_at, :u)`
+    // wrapper above.
+    expect(input.UpdateExpression).not.toMatch(/, configured_at = :u\b/);
+    expect(input.UpdateExpression).not.toMatch(/^SET configured_at = :u\b/);
   });
 
   test('getGuildApiKey: decrypts round-trip', async () => {
@@ -344,6 +361,51 @@ describe('orphaned tokens', () => {
     expect(result[0]).toHaveProperty('encryptedAccessToken');
     // Oldest-first ordering
     expect(result[0].id).toBe('def');
+  });
+
+  test('listOrphanedTokens: returns the actually-oldest N when total > limit (regression guard)', async () => {
+    // Critical sweeper invariant: when the orphan queue exceeds
+    // `limit`, the returned slice MUST be the oldest-by-recorded_at
+    // entries — those are the ones closest to the 7-day TTL purge
+    // and most urgent to retry. A naive `ScanCommand({ Limit })`
+    // returns the FIRST `limit` items in DDB internal-hash order
+    // and then sorts THAT subset; the actually-oldest tokens may
+    // never appear in it. scanAll + sort + slice gives true
+    // oldest-N, matching SqliteStore's `ORDER BY recorded_at ASC
+    // LIMIT ?` shape.
+    //
+    // Fixture: 100 items with `recorded_at` decreasing by index.
+    // The 50 oldest are indices 50..99 (newest sort key = '2026-01-50',
+    // oldest = '2026-01-99'). DDB returns them in arbitrary order;
+    // the function must surface the bottom 50 regardless of the
+    // input ordering.
+    const items = Array.from({ length: 100 }, (_, i) => ({
+      token_hash: `t${String(i).padStart(3, '0')}`,
+      access_token: `enc:v1:...${i}`,
+      // Pad with leading zeros so lex sort matches numeric sort
+      recorded_at: `2026-01-${String(i).padStart(3, '0')}`,
+    }));
+    // Shuffle to simulate DDB's hash-key order (not chronological)
+    const shuffled = items.slice().sort(() => Math.random() - 0.5);
+    ddbMock.on(ScanCommand).resolves({ Items: shuffled });
+
+    const result = await store.listOrphanedTokens(50);
+    expect(result).toHaveLength(50);
+    // First returned item should be the absolute oldest (index 0
+    // in original `items`, recorded_at='2026-01-000').
+    expect(result[0].id).toBe('t000');
+    // Last returned item should be the 49th-oldest (index 49,
+    // recorded_at='2026-01-049').
+    expect(result[49].id).toBe('t049');
+    // Verify monotonic: every entry must be older-or-equal than
+    // the next one.
+    for (let i = 1; i < result.length; i++) {
+      // Reach into the original shape via the id (token_hash) to
+      // recover recorded_at for the comparison.
+      const prev = items.find(x => x.token_hash === result[i - 1].id).recorded_at;
+      const curr = items.find(x => x.token_hash === result[i].id).recorded_at;
+      expect(prev <= curr).toBe(true);
+    }
   });
 });
 

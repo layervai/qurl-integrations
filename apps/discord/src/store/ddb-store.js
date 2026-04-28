@@ -658,30 +658,40 @@ async function awardFirstIssueBadge(discordId) {
 
 // ── Streaks ──
 
-async function getStreak(discordId, { consistent = false } = {}) {
+async function getStreak(discordId) {
+  // Public Store contract: eventually-consistent GetItem, matching
+  // SqliteStore's signature. updateStreak's CCFE-recurse path needs
+  // a ConsistentRead but issues that GetCommand inline (see comment
+  // there) so this function stays uniform across backends — no
+  // backend-specific options leaking onto the contract.
   const res = await ddb.send(new GetCommand({
     TableName: TABLES.streaks,
     Key: { discord_id: discordId },
-    // Default eventually-consistent. Callers that just lost a
-    // conditional write race on this same key (see updateStreak's
-    // CCFE recurse) MUST pass `consistent: true` — without it the
-    // GetItem can still return undefined for a few ms after the
-    // concurrent winner's PutItem committed, which would re-enter
-    // the insert branch and throw a second CCFE that has nowhere
-    // sensible to fall through to.
-    ...(consistent ? { ConsistentRead: true } : {}),
   }));
   return res.Item;
 }
 
 async function updateStreak(discordId, { _afterRace = false } = {}) {
   const currentMonth = getMonthString();
-  // Eventually-consistent on the first call (cheaper, and any
-  // staleness here just means we'll attempt the conditional Put
-  // and either succeed or take the CCFE → recurse path with
-  // ConsistentRead). Strongly-consistent only on the recurse
-  // re-entry where we KNOW a concurrent writer just committed.
-  const existing = await getStreak(discordId, { consistent: _afterRace });
+  // First call: eventually-consistent via getStreak (cheaper, and
+  // any staleness here just means we'll attempt the conditional
+  // Put and either succeed or take the CCFE → recurse path).
+  // Recurse re-entry: ConsistentRead inline so we KNOW the
+  // concurrent winner's row is visible. We don't widen getStreak's
+  // signature for this backend-specific concern; the inline
+  // GetCommand keeps the post-race reconciliation visible at its
+  // call site.
+  let existing;
+  if (_afterRace) {
+    const res = await ddb.send(new GetCommand({
+      TableName: TABLES.streaks,
+      Key: { discord_id: discordId },
+      ConsistentRead: true,
+    }));
+    existing = res.Item;
+  } else {
+    existing = await getStreak(discordId);
+  }
 
   if (!existing) {
     // First-write race: two concurrent recordContribution calls for
@@ -1132,16 +1142,22 @@ async function getGuildApiKey(guildId) {
 
 async function setGuildApiKey(guildId, apiKey, configuredBy) {
   const now = nowIso();
-  // PutItem replaces the item atomically. SQL did ON CONFLICT upsert;
-  // DDB PutItem without ConditionExpression is upsert semantics.
-  await ddb.send(new PutCommand({
+  // SQLite's `ON CONFLICT(guild_id) DO UPDATE SET qurl_api_key=…,
+  // configured_by=…, updated_at=…` deliberately preserved
+  // `configured_at` across re-keys — the field tracks "when was
+  // this guild FIRST configured" and downstream cohort analytics
+  // depend on that semantic. A naive PutItem rewrites the whole
+  // row, including resetting configured_at. Mirror createLink's
+  // shape: UpdateCommand with `if_not_exists(configured_at, :u)`
+  // so first-write sets it and re-keys leave it alone.
+  await ddb.send(new UpdateCommand({
     TableName: TABLES.guild_configs,
-    Item: {
-      guild_id: guildId,
-      qurl_api_key: encrypt(apiKey),
-      configured_by: configuredBy,
-      configured_at: now,
-      updated_at: now,
+    Key: { guild_id: guildId },
+    UpdateExpression: 'SET qurl_api_key = :k, configured_by = :b, updated_at = :u, configured_at = if_not_exists(configured_at, :u)',
+    ExpressionAttributeValues: {
+      ':k': encrypt(apiKey),
+      ':b': configuredBy,
+      ':u': now,
     },
   }));
 }
@@ -1206,13 +1222,21 @@ async function countOrphanedTokens() {
 }
 
 async function listOrphanedTokens(limit = 50) {
-  const res = await ddb.send(new ScanCommand({
-    TableName: TABLES.orphaned_oauth_tokens,
-    Limit: limit,
-  }));
-  return (res.Items || [])
-    .sort((a, b) => (a.recorded_at || '').localeCompare(b.recorded_at || ''))
-    .map(r => ({ id: r.token_hash, encryptedAccessToken: r.access_token }));
+  // Why scanAll instead of `ScanCommand({ Limit })`: DDB applies
+  // Scan's Limit BEFORE returning items, so a `Limit: 50` Scan
+  // returns the first 50 items in DDB internal-hash order, then
+  // we sort those 50. The actually-oldest tokens may never appear
+  // in that arbitrary subset — and the sweeper depends on
+  // oldest-first to retry tokens before the 7-day TTL purges
+  // them. SqliteStore returns true oldest-N via
+  // `ORDER BY recorded_at ASC LIMIT ?`; matching that requires a
+  // full-table read here. Bounded by ORPHAN_TOKEN_RETENTION_DAYS
+  // × write rate; per the module-header projection this stays
+  // small. If the queue ever grows past a few thousand, swap in a
+  // `pk='__all__', sk=recorded_at` GSI and Query it.
+  const items = await scanAll(TABLES.orphaned_oauth_tokens);
+  items.sort((a, b) => (a.recorded_at || '').localeCompare(b.recorded_at || ''));
+  return items.slice(0, limit).map(r => ({ id: r.token_hash, encryptedAccessToken: r.access_token }));
 }
 
 // Caller passes the encrypted blob from listOrphanedTokens; we
