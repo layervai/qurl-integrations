@@ -369,7 +369,7 @@ async function handleStar(payload) {
   // Iterate in descending order to find the highest applicable milestone
   const milestonesDesc = [...config.STAR_MILESTONES].sort((a, b) => b - a);
   for (const milestone of milestonesDesc) {
-    if (stars >= milestone && !await db.hasMilestoneBeenAnnounced('stars', milestone, repo)) {
+    if (stars >= milestone && !(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
       if (await db.recordMilestone('stars', milestone, repo)) {
         await postStarMilestone(repo, milestone, repoUrl);
         break;

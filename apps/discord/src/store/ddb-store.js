@@ -468,32 +468,39 @@ async function getContributionCount(discordId, { justWrote = false } = {}) {
     // giving up and returning 0.
     await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
   }
-  return 0;
 }
 
 async function getWeeklyContributions(discordId) {
+  // queryAll: a contributor with many PRs in the 7-day window can
+  // hit the 1MB Query page cap, silently truncating the count.
+  // Same shape as the getUniqueRepos fix (and matches SQLite's
+  // unlimited SELECT).
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const res = await ddb.send(new QueryCommand({
+  return queryAll({
     TableName: TABLES.contributions,
     IndexName: 'discord_id-merged_at-index',
     KeyConditionExpression: 'discord_id = :d AND merged_at >= :t',
     ExpressionAttributeValues: { ':d': discordId, ':t': sevenDaysAgo },
     ScanIndexForward: false,
-  }));
-  return res.Items || [];
+  });
 }
 
 async function getMonthlyContributions(discordId) {
+  // queryAll for the same 1MB-truncate-silently reason as
+  // getWeeklyContributions. ON_FIRE badge gates on monthlyPRs.length
+  // >= 2 — truncation here could miss the badge, but only for users
+  // with >>2 PRs in a month so unlikely to bite. Pagination is
+  // cheap and matches SQLite's `SELECT ... WHERE merged_at >= ?`
+  // shape.
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
-  const res = await ddb.send(new QueryCommand({
+  return queryAll({
     TableName: TABLES.contributions,
     IndexName: 'discord_id-merged_at-index',
     KeyConditionExpression: 'discord_id = :d AND merged_at >= :t',
     ExpressionAttributeValues: { ':d': discordId, ':t': monthStart },
     ScanIndexForward: false,
-  }));
-  return res.Items || [];
+  });
 }
 
 async function getUniqueRepos(discordId) {

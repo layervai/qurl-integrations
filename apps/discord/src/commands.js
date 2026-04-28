@@ -2346,7 +2346,7 @@ const commands = [
 
       for (const milestone of config.STAR_MILESTONES) {
         if (stars >= milestone) {
-          if (!await db.hasMilestoneBeenAnnounced('stars', milestone, repo)) {
+          if (!(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
             if (await db.recordMilestone('stars', milestone, repo)) {
               backfilled++;
             }
