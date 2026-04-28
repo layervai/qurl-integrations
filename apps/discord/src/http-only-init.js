@@ -102,6 +102,12 @@ function formatInterval(ms) {
  */
 async function initHttpOnly({ client, config, refreshCache, logger }) {
   client.rest.setToken(config.DISCORD_TOKEN);
+  // Falsy check is intentional and aligned with config.js's GUILD_ID
+  // normalization: anything that isn't a 17-20 digit Discord snowflake
+  // (unset env, "PLACEHOLDER", whitespace-only, etc.) lands as `null`
+  // there, so we treat all falsy values uniformly as multi-tenant mode.
+  // '0' is technically truthy in JS but isn't a valid snowflake anyway —
+  // config.js's regex check would have rejected it upstream.
   if (!config.GUILD_ID) {
     return null;
   }

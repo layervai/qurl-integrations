@@ -71,6 +71,12 @@ try {
   // no WebSocket. A future "fix" routing this through gracefulShutdown
   // would either fail (undefined reference) or block on shutdown
   // teardown that has nothing to do.
+  //
+  // The logger.error above is guaranteed-flushed because src/logger.js
+  // writes synchronously via console.error → process.stderr.write
+  // (no winston/pino async transport). If logger.js ever moves to an
+  // async transport, this boot-fail path needs an explicit flush or a
+  // direct console.error fallback so the message survives the exit.
   process.exit(1);
 }
 logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
@@ -351,7 +357,18 @@ async function start() {
   // init-before-listen pattern to combined mode if the health-gate
   // assumption ever weakens.
   if (isHttp && !isGateway) {
-    httpRefreshTimer = await initHttpOnly({ client, config, refreshCache, logger });
+    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    // Tight race: SIGTERM during the await above runs gracefulShutdown,
+    // which clears `httpRefreshTimer` (still null) and proceeds. The
+    // setInterval inside initHttpOnly then registers AFTER the
+    // clearInterval already happened. Guard against that here so a stray
+    // refreshCache() doesn't fire mid-teardown. (.unref() means it can't
+    // block exit either way; this just keeps the log noise clean.)
+    if (isShuttingDown && timer) {
+      clearInterval(timer);
+    } else {
+      httpRefreshTimer = timer;
+    }
   }
 
   // HTTP listener — OAuth callback, webhooks, health, metrics.
