@@ -192,10 +192,21 @@ function getPreviousMonthString(date = new Date()) {
   return getMonthString(d);
 }
 
+// Validated at module load. config.PENDING_LINK_EXPIRY_MINUTES is
+// fed into createPendingLink as the TTL — if it's missing or non-
+// numeric, `Math.trunc(Number(undefined))` yields NaN, and DDB
+// throws ValidationException at every PutItem rather than at boot.
+// Same fail-fast philosophy as the DDB_TABLE_PREFIX / AWS_REGION
+// guards above.
+const PENDING_LINK_EXPIRY_MS = Math.trunc(Number(config.PENDING_LINK_EXPIRY_MINUTES)) * 60 * 1000;
+if (!Number.isFinite(PENDING_LINK_EXPIRY_MS) || PENDING_LINK_EXPIRY_MS <= 0) {
+  throw new Error(`config.PENDING_LINK_EXPIRY_MINUTES is required to be a positive number when STORE_TYPE=ddb (got '${config.PENDING_LINK_EXPIRY_MINUTES}'). Set it in the deployment template alongside DDB_TABLE_PREFIX / AWS_REGION.`);
+}
+
 // ── Pending OAuth state tokens ──
 
 async function createPendingLink(state, discordId) {
-  const minsMs = Math.trunc(Number(config.PENDING_LINK_EXPIRY_MINUTES)) * 60 * 1000;
+  const minsMs = PENDING_LINK_EXPIRY_MS;
   const expiresAt = Math.floor((Date.now() + minsMs) / 1000); // epoch seconds for DDB TTL
   await ddb.send(new PutCommand({
     TableName: TABLES.pending_links,
@@ -605,6 +616,28 @@ async function countAll(TableName) {
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
   return total;
+}
+
+// Paginated Query helper. Same shape rationale as scanAll/countAll
+// — DDB Query response is capped at 1MB per page regardless of any
+// requested Limit, with LastEvaluatedKey set when more pages exist.
+// Callers iterating via `Items` directly silently truncate at the
+// first page boundary. This helper accumulates all matching items
+// across pages.
+//
+// Pass any QueryCommand input shape; ExclusiveStartKey is threaded
+// for you. Don't hand it a Limit unless you also want the per-page
+// cap (we use it on the GSI hot path in getRecentSends; the per-
+// send recipient queries below intentionally don't set one).
+async function queryAll(input) {
+  const items = [];
+  let ExclusiveStartKey;
+  do {
+    const res = await ddb.send(new QueryCommand({ ...input, ExclusiveStartKey }));
+    items.push(...(res.Items || []));
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return items;
 }
 
 async function scanAll(TableName) {
@@ -1044,12 +1077,19 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   // Parallel fetch: per-send recipient query + per-send config
   // getItem. Query on the BASE table (pk=send_id) returns every
   // recipient for that send, so counts are exact.
+  //
+  // Pagination matters here: a single send fanning out to thousands
+  // of recipients (or shorter rows but >1MB total) would silently
+  // truncate at one DDB page if we used a bare QueryCommand, and
+  // recipient_count / delivered_count would under-report. queryAll
+  // threads LastEvaluatedKey across pages so the count is exact
+  // regardless of fan-out size.
   const [allRecipients, allConfigs] = await Promise.all([
-    Promise.all(sendIdOrder.map(id => ddb.send(new QueryCommand({
+    Promise.all(sendIdOrder.map(id => queryAll({
       TableName: TABLES.qurl_sends,
       KeyConditionExpression: 'send_id = :sid',
       ExpressionAttributeValues: { ':sid': id },
-    })))),
+    }))),
     Promise.all(sendIdOrder.map(id => ddb.send(new GetCommand({
       TableName: TABLES.qurl_send_configs,
       Key: { send_id: id },
@@ -1060,7 +1100,7 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   for (let i = 0; i < sendIdOrder.length; i++) {
     const sendId = sendIdOrder[i];
     const meta = metaBySendId.get(sendId);
-    const recipients = allRecipients[i].Items || [];
+    const recipients = allRecipients[i] || [];
     const cfg = allConfigs[i].Item;
     if (cfg && cfg.revoked_at) continue;
     const recipientCount = recipients.length;
@@ -1083,6 +1123,31 @@ async function getRecentSends(senderDiscordId, limit = 10) {
   return rows.slice(0, limit);
 }
 
+async function flipRevokedAt(sendId, senderDiscordId) {
+  // Sets revoked_at on an existing config row, owner-scoped, with
+  // idempotent CCFE swallow. Used by both the normal markSendRevoked
+  // path AND the legacy-CCFE recovery path (when a non-revoke writer
+  // raced us into inserting a config row mid-flight).
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLES.qurl_send_configs,
+      Key: { send_id: sendId },
+      UpdateExpression: 'SET revoked_at = :t',
+      ExpressionAttributeValues: {
+        ':t': nowIso(),
+        ':s': senderDiscordId,
+      },
+      ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
+    }));
+  } catch (err) {
+    // Swallow CCFE — either revoked_at is already set (idempotent
+    // success) or sender_discord_id doesn't match (ownership reject,
+    // matching the SQL `WHERE sender_discord_id = ?` filter). Any
+    // other error propagates.
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+  }
+}
+
 async function markSendRevoked(sendId, senderDiscordId) {
   // Mirror SqliteStore's two-branch logic:
   // (a) Normal path: config row exists — flip revoked_at.
@@ -1095,25 +1160,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
   if (cfgRes.Item) {
     if (cfgRes.Item.sender_discord_id !== senderDiscordId) return; // ownership check
     if (cfgRes.Item.revoked_at) return; // idempotent
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: TABLES.qurl_send_configs,
-        Key: { send_id: sendId },
-        UpdateExpression: 'SET revoked_at = :t',
-        ExpressionAttributeValues: {
-          ':t': nowIso(),
-          ':s': senderDiscordId,
-        },
-        ConditionExpression: 'sender_discord_id = :s AND attribute_not_exists(revoked_at)',
-      }));
-    } catch (err) {
-      // Swallow CCFE — a concurrent revoke already flipped
-      // revoked_at (or a racing caller raced ownership swapping,
-      // which the condition also rejects). Either way the end
-      // state is "send is revoked" so no action needed. Any other
-      // error propagates.
-      if (err.name !== 'ConditionalCheckFailedException') throw err;
-    }
+    await flipRevokedAt(sendId, senderDiscordId);
     return;
   }
 
@@ -1137,21 +1184,38 @@ async function markSendRevoked(sendId, senderDiscordId) {
   }));
   if (!legacyRes.Items || legacyRes.Items.length === 0) return;
   const legacy = legacyRes.Items[0];
-  await ddb.send(new PutCommand({
-    TableName: TABLES.qurl_send_configs,
-    Item: {
-      send_id: sendId,
-      sender_discord_id: senderDiscordId,
-      resource_type: legacy.resource_type,
-      expires_in: legacy.expires_in || '24h',
-      revoked_at: nowIso(),
-      created_at: nowIso(),
-    },
-    ConditionExpression: 'attribute_not_exists(send_id)',
-  })).catch(err => {
-    if (err.name === 'ConditionalCheckFailedException') return; // raced with a concurrent markSendRevoked
-    throw err;
-  });
+  try {
+    await ddb.send(new PutCommand({
+      TableName: TABLES.qurl_send_configs,
+      Item: {
+        send_id: sendId,
+        sender_discord_id: senderDiscordId,
+        resource_type: legacy.resource_type,
+        expires_in: legacy.expires_in || '24h',
+        revoked_at: nowIso(),
+        created_at: nowIso(),
+      },
+      ConditionExpression: 'attribute_not_exists(send_id)',
+    }));
+  } catch (err) {
+    if (err.name !== 'ConditionalCheckFailedException') throw err;
+    // Race: between the GetCommand at the top of this function
+    // (which saw no config row) and this Put, SOMEONE inserted a
+    // config row. Three possibilities:
+    //   - Another markSendRevoked beat us — the row is revoked,
+    //     no action needed.
+    //   - saveSendConfig (or any non-revoke writer) inserted a
+    //     config without revoked_at. The previous version
+    //     swallowed the CCFE and returned, silently losing this
+    //     revoke intent. Now we fall through to flipRevokedAt
+    //     which Updates revoked_at on the existing row (with the
+    //     same owner-scoped + attribute_not_exists guard the
+    //     primary path uses).
+    //   - A racing markSendRevoked AND a non-revoke writer
+    //     interleave: flipRevokedAt's CCFE-swallow handles the
+    //     "already revoked" case idempotently.
+    await flipRevokedAt(sendId, senderDiscordId);
+  }
 }
 
 async function saveSendConfig({
@@ -1193,14 +1257,18 @@ async function getSendConfig(sendId, senderDiscordId) {
 }
 
 async function getSendResourceIds(sendId, senderDiscordId) {
-  const res = await ddb.send(new QueryCommand({
+  // Pagination required: a single send fanning out to thousands of
+  // recipients can exceed the 1MB Query page cap. Without queryAll,
+  // resource_ids on later pages would silently drop and the revoke
+  // path would skip them. Caller relies on the full set for cleanup.
+  const items = await queryAll({
     TableName: TABLES.qurl_sends,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
-  }));
+  });
   const ids = new Set();
-  for (const item of res.Items || []) ids.add(item.resource_id);
+  for (const item of items) ids.add(item.resource_id);
   return [...ids];
 }
 

@@ -732,6 +732,40 @@ describe('qurl sends', () => {
     expect(sB.delivered_count).toBe(5);
   });
 
+  test('getRecentSends: per-send recipient Query paginates (LEK threading) so a >1MB fanout doesn\'t silently undercount', async () => {
+    // Regression guard: a single send fanning out to thousands of
+    // recipients can exceed the 1MB Query response cap. Without
+    // queryAll's LEK threading, recipient_count would silently
+    // truncate at the first page. Mock returns 60 rows on page 1,
+    // 40 on page 2 (no more LEK) for send 'big' — assert the
+    // function reports recipient_count = 100, not 60.
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === 'sender_discord_id-created_at-index') {
+        return Promise.resolve({
+          Items: [{ send_id: 'big', recipient_discord_id: 'r0', dm_status: 'sent', created_at: 'now', resource_type: 'file', target_type: 'user' }],
+        });
+      }
+      // Per-send recipient queries on the base table — paginated.
+      // Distinguish first call (no ExclusiveStartKey) from second
+      // (has it) to simulate LEK threading.
+      if (!input.ExclusiveStartKey) {
+        return Promise.resolve({
+          Items: Array.from({ length: 60 }, (_, i) => ({ send_id: 'big', recipient_discord_id: `r${i}`, dm_status: 'sent' })),
+          LastEvaluatedKey: { send_id: 'big', recipient_discord_id: 'r59' },
+        });
+      }
+      return Promise.resolve({
+        Items: Array.from({ length: 40 }, (_, i) => ({ send_id: 'big', recipient_discord_id: `r${60 + i}`, dm_status: 'sent' })),
+      });
+    });
+    ddbMock.on(GetCommand).resolves({}); // no revoke
+    const result = await store.getRecentSends('sender', 10);
+    expect(result).toHaveLength(1);
+    expect(result[0].send_id).toBe('big');
+    expect(result[0].recipient_count).toBe(100); // NOT 60 (single-page bug)
+    expect(result[0].delivered_count).toBe(100);
+  });
+
   test('getRecentSends: GSI Query carries Limit so a fat send doesn\'t blow up RCU', async () => {
     // Regression guard: a sender whose latest send fanned out to
     // 1000 recipients would, without a per-page Limit, read all
@@ -823,6 +857,37 @@ describe('qurl sends', () => {
     const queryCall = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
     expect(queryCall.Limit).toBeUndefined();
     expect(queryCall.FilterExpression).toMatch(/sender_discord_id = :s/);
+  });
+
+  test('markSendRevoked: legacy CCFE recovers via Update (race vs non-revoke writer no longer loses revoke intent)', async () => {
+    // Race scenario:
+    //   T0: markSendRevoked GETs config_configs — no row, enters legacy branch.
+    //   T1: saveSendConfig (or any non-revoke writer) inserts a config
+    //       WITHOUT revoked_at.
+    //   T2: legacy Put hits attribute_not_exists(send_id) → CCFE.
+    // Old code swallowed the CCFE and returned — silent loss of
+    // revoke intent (config exists, send is NOT revoked, user thinks
+    // it was). New code falls through to flipRevokedAt which Updates
+    // the existing config row's revoked_at with the same owner-scoped
+    // + attribute_not_exists guard the primary path uses.
+    const ccfe = new Error('exists');
+    ccfe.name = 'ConditionalCheckFailedException';
+
+    ddbMock.on(GetCommand).resolves({}); // T0: no config row
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ send_id: 's1', sender_discord_id: 'sender', resource_type: 'file', expires_in: '24h' }],
+    });
+    ddbMock.on(PutCommand).rejects(ccfe); // T2: T1 inserted a row, our Put CCFEs
+    ddbMock.on(UpdateCommand).resolves({}); // recovery: Update revoked_at
+
+    await store.markSendRevoked('s1', 'sender');
+
+    // Critical: an UpdateCommand MUST fire after the failed Put.
+    // Without flipRevokedAt the Update count would be 0 (silent loss).
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].args[0].input.UpdateExpression).toMatch(/SET revoked_at/);
+    expect(updateCalls[0].args[0].input.ConditionExpression).toMatch(/sender_discord_id = :s/);
   });
 
   test('saveSendConfig: encrypts attachmentUrl, stores other fields as-is', async () => {
@@ -1089,5 +1154,86 @@ describe('ddb-store boot-time AWS_REGION validation', () => {
     const result = spawnDdbStoreBootWithRegion('us-west-2');
     expect(result.status).toBe(0);
     expect(result.stderr).not.toMatch(/AWS_REGION/);
+  });
+});
+
+describe('ddb-store boot-time PENDING_LINK_EXPIRY_MINUTES validation', () => {
+  // Defends against a future config.js regression where
+  // PENDING_LINK_EXPIRY_MINUTES somehow comes through as
+  // missing / non-numeric. Today intEnv() provides a default so
+  // this is theoretical; if it ever isn't, we want the failure at
+  // module load (clear stack trace, easy to fix) rather than at
+  // every PutItem (DDB ValidationException, harder to root-cause).
+  //
+  // Uses the same spawnSync + Module._load patch pattern as the
+  // other boot tests rather than jest.isolateModules — the latter
+  // doesn't reliably intercept the relative `require('../config')`
+  // path from inside ddb-store.js.
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const storePath = path.resolve(__dirname, '..', 'src/store/ddb-store');
+  const configPath = path.resolve(__dirname, '..', 'src/config');
+  const loggerPath = path.resolve(__dirname, '..', 'src/logger');
+  const cryptoPath = path.resolve(__dirname, '..', 'src/utils/crypto');
+
+  function bootWithExpiry(expiryValue) {
+    // The child uses Module._load patching to swap the config
+    // module's PENDING_LINK_EXPIRY_MINUTES without touching the
+    // rest. Real config / logger / crypto stay loaded for
+    // everything else; only the field we're stress-testing is
+    // overridden.
+    const script = `
+      const Module = require('module');
+      const origLoad = Module._load;
+      const configP = ${JSON.stringify(configPath)};
+      const loggerP = ${JSON.stringify(loggerPath)};
+      const cryptoP = ${JSON.stringify(cryptoPath)};
+      const expiry = ${JSON.stringify(expiryValue)};
+      Module._load = function(request, parent, isMain) {
+        const resolved = Module._resolveFilename(request, parent, isMain);
+        if (resolved === configP + '.js' || resolved === configP) {
+          return { PENDING_LINK_EXPIRY_MINUTES: expiry };
+        }
+        if (resolved === loggerP + '.js' || resolved === loggerP) {
+          return { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+        }
+        if (resolved === cryptoP + '.js' || resolved === cryptoP) {
+          return { encrypt: v => v, decrypt: v => v };
+        }
+        return origLoad.apply(this, arguments);
+      };
+      require(${JSON.stringify(storePath)});
+    `;
+    const env = {
+      ...process.env,
+      JEST_WORKER_ID: '',
+      DDB_TABLE_PREFIX: 'qurl-bot-discord-sandbox-',
+      AWS_REGION: 'us-east-2',
+    };
+    return spawnSync(process.execPath, ['-e', script], { env, encoding: 'utf8' });
+  }
+
+  test('throws when PENDING_LINK_EXPIRY_MINUTES is undefined', () => {
+    const result = bootWithExpiry(undefined);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/PENDING_LINK_EXPIRY_MINUTES/);
+    expect(result.stderr).toMatch(/positive number/);
+  });
+
+  test('throws when PENDING_LINK_EXPIRY_MINUTES is non-numeric (NaN)', () => {
+    const result = bootWithExpiry('abc');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/PENDING_LINK_EXPIRY_MINUTES/);
+  });
+
+  test('throws when PENDING_LINK_EXPIRY_MINUTES is zero or negative', () => {
+    expect(bootWithExpiry(0).status).not.toBe(0);
+    expect(bootWithExpiry(-1).status).not.toBe(0);
+  });
+
+  test('boots cleanly when PENDING_LINK_EXPIRY_MINUTES is a positive number', () => {
+    const result = bootWithExpiry(10);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toMatch(/PENDING_LINK_EXPIRY_MINUTES/);
   });
 });
