@@ -16,7 +16,7 @@ jest.mock('../src/database', () => ({
   consumePendingLink: jest.fn(),
   createLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  recordContribution: jest.fn(() => true),
+  recordContribution: jest.fn(() => 'recorded'),
   checkAndAwardBadges: jest.fn(() => []),
   getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
 }));
@@ -161,7 +161,7 @@ describe('OAuth routes', () => {
 
     it('completes OAuth flow with historical contributions', async () => {
       db.consumePendingLink.mockReturnValue({ discord_id: '456' });
-      db.recordContribution.mockReturnValue(true);
+      db.recordContribution.mockReturnValue('recorded');
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'token456' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ login: 'contributor' }) })

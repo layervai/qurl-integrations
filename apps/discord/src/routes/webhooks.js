@@ -249,13 +249,26 @@ async function handlePullRequest(payload) {
     // Record the contribution BEFORE assignContributorRole — the role-assign
     // path reads getContributionCount, so if we called it first a first-time
     // contributor would still read a count of 0 and never get the role.
-    // recordContribution returns false on transient DB error; if the row
-    // didn't land we skip the role-assign + badge flow so the user gets a
-    // consistent state (role assigned ↔ contribution recorded) instead of
-    // a dangling role with no persisted credit.
-    const recorded = await db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
-    if (!recorded) {
-      logger.error('recordContribution failed — skipping role assign + badges', {
+    //
+    // Tri-state status: 'recorded' | 'duplicate' | 'failed'.
+    //   'recorded' — first-write success → run role+badges normally.
+    //   'duplicate' — webhook redelivery; the original delivery already
+    //                 ran role+badges, skip to keep this idempotent.
+    //                 Steady state for at-least-once webhook delivery,
+    //                 not an error condition.
+    //   'failed'   — transient DB error (throttle / 5xx). GitHub will
+    //                redeliver, so skip role+badges to preserve the
+    //                "role assigned ↔ contribution recorded" invariant
+    //                AND log loud so a sustained failure is visible.
+    const status = await db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+    if (status === 'duplicate') {
+      logger.debug('Webhook redelivery — contribution already recorded, skipping role+badges', {
+        discord_id: link.discord_id, githubUsername, prNumber, repo,
+      });
+      return;
+    }
+    if (status === 'failed') {
+      logger.error('recordContribution failed — skipping role assign + badges (GitHub will redeliver)', {
         discord_id: link.discord_id, githubUsername, prNumber, repo,
       });
       return;

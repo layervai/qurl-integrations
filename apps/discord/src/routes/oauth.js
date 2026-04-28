@@ -94,17 +94,31 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
 
     logger.info(`Found ${contributions.length} historical contribution(s) for @${githubUsername}`);
 
-    // Record each contribution (db handles duplicates)
+    // Record each contribution. Tri-state status:
+    //   'recorded'  — counts toward the user-facing newCount
+    //   'duplicate' — already linked, expected during repeat onboarding
+    //   'failed'    — transient DB error during backfill; log loud so
+    //                 ops can see if onboarding is undercounting before
+    //                 the user notices. We don't retry inline (the
+    //                 onboarding flow has a wall-clock budget); the
+    //                 user can re-link to re-run.
     let newCount = 0;
+    let failedCount = 0;
     for (const contrib of contributions) {
-      const recorded = await db.recordContribution(
+      const status = await db.recordContribution(
         discordId,
         githubUsername,
         contrib.prNumber,
         contrib.repo,
         contrib.title
       );
-      if (recorded) newCount++;
+      if (status === 'recorded') newCount++;
+      else if (status === 'failed') failedCount++;
+    }
+    if (failedCount > 0) {
+      logger.warn('Historical backfill had transient failures; user-visible count under-reports', {
+        discordId, githubUsername, failedCount, totalAttempted: contributions.length,
+      });
     }
 
     // Assign contributor role

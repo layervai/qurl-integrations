@@ -323,12 +323,23 @@ async function forceLink(discordId, githubUsername) {
 
 async function recordContribution(discordId, githubUsername, prNumber, repo, prTitle = null) {
   const id = contributionId(repo, prNumber);
-  // Split into two try blocks so a streak-update failure doesn't mask
-  // a successful contribution insert. DDB's two-round-trip streak flow
-  // (Get + Put/Update) has a higher base failure rate than SQLite's
-  // same-transaction write; collapsing the catches would mean a
-  // transient streak timeout causes the caller to skip badge
-  // evaluation for a contribution that actually landed.
+  // Tri-state return: 'recorded' | 'duplicate' | 'failed'.
+  // Why three states instead of boolean: callers want to act
+  // differently on each. Webhook handler skips role+badges on both
+  // dup AND failure (preserves the "no role without persisted
+  // credit" invariant — but failure is the case where GitHub will
+  // re-deliver, dup is steady-state). Historical-backfill loop in
+  // routes/oauth.js wants to count NEW contributions only, AND
+  // surface transient failures so the user-visible message doesn't
+  // silently undercount during onboarding. The boolean shape
+  // collapsed the second case into "no-op."
+  //
+  // Split into two try blocks so a streak-update failure doesn't
+  // mask a successful contribution insert. DDB's two-round-trip
+  // streak flow (Get + Put/Update) has a higher base failure rate
+  // than SQLite's same-transaction write; collapsing the catches
+  // would mean a transient streak timeout causes the caller to
+  // skip badge evaluation for a contribution that actually landed.
   try {
     await ddb.send(new PutCommand({
       TableName: TABLES.contributions,
@@ -355,10 +366,10 @@ async function recordContribution(discordId, githubUsername, prNumber, repo, prT
       // dedup'd redelivery would amplify load with no correctness
       // win.
       logger.debug('Contribution already exists', { pr: prNumber, repo });
-      return false;
+      return 'duplicate';
     }
     logger.error('Failed to record contribution', { error: err.message, pr: prNumber, repo });
-    return false;
+    return 'failed';
   }
 
   try {
@@ -371,7 +382,7 @@ async function recordContribution(discordId, githubUsername, prNumber, repo, prT
       discordId, pr: prNumber, repo, error: err.message,
     });
   }
-  return true;
+  return 'recorded';
 }
 
 async function getContributions(discordId, limit = 50) {
@@ -468,8 +479,32 @@ async function getMonthlyContributions(discordId) {
 }
 
 async function getUniqueRepos(discordId) {
-  const items = await getContributions(discordId, 10000);
-  return [...new Set(items.map(r => r.repo))];
+  // Pagination + projection. Why not getContributions(discordId, 10000)?
+  //   1. DDB Query response is capped at 1MB per page regardless of
+  //      the requested Limit, with LastEvaluatedKey set when more
+  //      pages exist. A user with many contributions (or longer
+  //      pr_title / repo strings) hits the cap before 10k rows and
+  //      getContributions silently truncates — getUniqueRepos
+  //      would then miss MULTI_REPO badge eligibility.
+  //   2. We only need `repo` to dedup; pulling the full row is
+  //      wasted RCU + bytes. ProjectionExpression cuts the read
+  //      cost on a path that fires from checkAndAwardBadges on
+  //      every contribution insert.
+  const repos = new Set();
+  let ExclusiveStartKey;
+  do {
+    const res = await ddb.send(new QueryCommand({
+      TableName: TABLES.contributions,
+      IndexName: 'discord_id-merged_at-index',
+      KeyConditionExpression: 'discord_id = :d',
+      ExpressionAttributeValues: { ':d': discordId },
+      ProjectionExpression: 'repo',
+      ExclusiveStartKey,
+    }));
+    for (const item of res.Items || []) repos.add(item.repo);
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return [...repos];
 }
 
 async function getLastWeekContributions() {

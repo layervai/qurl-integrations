@@ -77,19 +77,18 @@ describe('database module', () => {
   describe('contributions', () => {
     it('records and retrieves contributions', () => {
       db.createLink('c1', 'contrib1');
-      const recorded = db.recordContribution('c1', 'contrib1', 100, 'OpenNHP/opennhp', 'Test PR');
-      expect(recorded).toBe(true);
+      const status = db.recordContribution('c1', 'contrib1', 100, 'OpenNHP/opennhp', 'Test PR');
+      expect(status).toBe('recorded');
 
       const contribs = db.getContributions('c1');
       expect(contribs.length).toBeGreaterThanOrEqual(1);
       expect(contribs[0].pr_number).toBe(100);
     });
 
-    it('ignores duplicate contribution', () => {
+    it('returns "duplicate" on dedup (NOT "failed" — kept distinguishable so backfill can detect transient blips)', () => {
       db.recordContribution('c1', 'contrib1', 200, 'OpenNHP/opennhp', 'Dup');
-      const first = db.recordContribution('c1', 'contrib1', 200, 'OpenNHP/opennhp', 'Dup');
-      // Second attempt should return false (already exists)
-      expect(first).toBe(false);
+      const status = db.recordContribution('c1', 'contrib1', 200, 'OpenNHP/opennhp', 'Dup');
+      expect(status).toBe('duplicate');
     });
 
     it('gets contribution count', () => {
@@ -350,13 +349,13 @@ describe('database module', () => {
   });
 
   describe('contribution error handling', () => {
-    it('handles database errors in recordContribution', () => {
+    it('handles database errors in recordContribution (dup → "duplicate", not throw)', () => {
       // Record a contribution that would violate a constraint
       // First, record one
       db.recordContribution('err-user', 'errgh', 5000, 'OpenNHP/opennhp', 'First');
-      // Duplicate should return false (not throw)
+      // Duplicate should return "duplicate" (not throw, not "failed")
       const result = db.recordContribution('err-user', 'errgh', 5000, 'OpenNHP/opennhp', 'Dup');
-      expect(result).toBe(false);
+      expect(result).toBe('duplicate');
     });
   });
 

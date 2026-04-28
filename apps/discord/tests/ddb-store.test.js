@@ -169,38 +169,38 @@ describe('github links', () => {
 // ── Contributions ──
 
 describe('contributions', () => {
-  test('recordContribution: composite PK as <repo>#<pr>, condition attribute_not_exists', async () => {
+  test('recordContribution: composite PK as <repo>#<pr>, condition attribute_not_exists, returns "recorded" on success', async () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(GetCommand).resolves({ Item: null }); // streak doesn't exist yet
     ddbMock.on(PutCommand).resolves({}); // streak insert
     const result = await store.recordContribution('d', 'g', 42, 'owner/repo', 'Title');
-    expect(result).toBe(true);
+    expect(result).toBe('recorded');
     const putCalls = ddbMock.commandCalls(PutCommand);
     const contribPut = putCalls.find(c => c.args[0].input.Item && c.args[0].input.Item.contribution_id);
     expect(contribPut.args[0].input.Item.contribution_id).toBe('owner/repo#42');
     expect(contribPut.args[0].input.ConditionExpression).toMatch(/attribute_not_exists/);
   });
 
-  test('recordContribution: returns false on ConditionalCheckFailedException (dup)', async () => {
+  test('recordContribution: returns "duplicate" on ConditionalCheckFailedException (dedup, NOT a failure)', async () => {
     const err = new Error('dup');
     err.name = 'ConditionalCheckFailedException';
     ddbMock.on(PutCommand).rejects(err);
     const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
-    expect(result).toBe(false);
+    expect(result).toBe('duplicate');
   });
 
-  test('recordContribution: returns false on transient errors AND skips streak update (parity with SQLite)', async () => {
-    // Throttling / network / IAM denial all funnel into the same
-    // false-return as dedup today (caller-side parity with SQLite's
-    // INSERT OR IGNORE swallow). The two cases ARE indistinguishable
-    // to the caller — flagged in the review as a follow-up for a
-    // tri-state return — but the contract here is that the streak
-    // update is skipped and the function doesn't throw.
+  test('recordContribution: returns "failed" on transient errors AND skips streak update', async () => {
+    // Tri-state: dedup ('duplicate') and transient failure ('failed')
+    // are now distinguishable. The historical-backfill loop in
+    // routes/oauth.js increments newCount only on 'recorded', and
+    // logs a loud warn when 'failed' count is non-zero so a
+    // sustained transient blip during onboarding is visible to ops
+    // instead of silently undercounting.
     const err = new Error('throttled');
     err.name = 'ProvisionedThroughputExceededException';
     ddbMock.on(PutCommand).rejects(err);
     const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
-    expect(result).toBe(false);
+    expect(result).toBe('failed');
     // Streak update would fire a second PutCommand if attempted —
     // pinning that it doesn't run when the contribution Put failed
     // protects against the silent "streak rolls forward without an
@@ -223,6 +223,38 @@ describe('contributions', () => {
     const count = await store.getContributionCount('d');
     expect(count).toBe(42);
     expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.Select).toBe('COUNT');
+  });
+
+  test('getUniqueRepos: paginates Query + projects only `repo` (regression guard for 1MB silent truncation)', async () => {
+    // The naive shape — getContributions(discordId, 10000) — issues a
+    // single Query with Limit:10000 but DDB still caps response
+    // payload at 1MB per page. A heavy contributor would have the
+    // Query truncate at 1MB and getUniqueRepos would silently miss
+    // MULTI_REPO eligibility. Pagination via LastEvaluatedKey + a
+    // ProjectionExpression on `repo` keeps the read cost minimal AND
+    // sees every row regardless of payload size.
+    ddbMock
+      .on(QueryCommand)
+      .resolvesOnce({
+        Items: [{ repo: 'owner/repo-a' }, { repo: 'owner/repo-b' }, { repo: 'owner/repo-a' }],
+        LastEvaluatedKey: { contribution_id: 'page1-end' },
+      })
+      .resolvesOnce({
+        Items: [{ repo: 'owner/repo-c' }, { repo: 'owner/repo-b' }],
+        LastEvaluatedKey: { contribution_id: 'page2-end' },
+      })
+      .resolves({ Items: [{ repo: 'owner/repo-d' }] }); // last page, no LEK
+
+    const repos = await store.getUniqueRepos('d');
+    expect(new Set(repos)).toEqual(new Set(['owner/repo-a', 'owner/repo-b', 'owner/repo-c', 'owner/repo-d']));
+    const calls = ddbMock.commandCalls(QueryCommand);
+    expect(calls).toHaveLength(3);
+    // Pagination correctness: LEK fed back as ExclusiveStartKey.
+    expect(calls[0].args[0].input.ExclusiveStartKey).toBeUndefined();
+    expect(calls[1].args[0].input.ExclusiveStartKey).toEqual({ contribution_id: 'page1-end' });
+    expect(calls[2].args[0].input.ExclusiveStartKey).toEqual({ contribution_id: 'page2-end' });
+    // ProjectionExpression cuts read cost to just the repo column.
+    expect(calls[0].args[0].input.ProjectionExpression).toBe('repo');
   });
 });
 
@@ -842,7 +874,7 @@ describe('recordContribution error separation', () => {
     });
     ddbMock.on(GetCommand).resolves({}); // no existing streak
     const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
-    expect(result).toBe(true); // contribution recorded, badge eval must still run
+    expect(result).toBe('recorded'); // contribution recorded, badge eval must still run
   });
 });
 

@@ -363,6 +363,11 @@ const dbModule = {
   },
 
   // Contributions
+  // Tri-state return: 'recorded' | 'duplicate' | 'failed'. See
+  // ddb-store's recordContribution for the rationale — callers
+  // (webhooks.js, oauth.js historical-backfill) need to distinguish
+  // dedup from transient failure to avoid silently undercounting
+  // during onboarding. Keep parity with the DDB backend.
   recordContribution(discordId, githubUsername, prNumber, repo, prTitle = null) {
     try {
       const stmt = db.prepare(
@@ -374,14 +379,14 @@ const dbModule = {
         logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
         // Update streak only for new contributions
         dbModule.updateStreak(discordId);
-        return true;
+        return 'recorded';
       } else {
         logger.debug('Contribution already exists', { pr: prNumber, repo });
-        return false;
+        return 'duplicate';
       }
     } catch (error) {
       logger.error('Failed to record contribution', { error: error.message, pr: prNumber, repo });
-      return false;
+      return 'failed';
     }
   },
 
