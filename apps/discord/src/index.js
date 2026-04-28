@@ -5,7 +5,7 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
+const { missingBootKeys, missingProdKeys, resolveProcessRole } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 
 // Process role — selects which subset of the bot runs in this
@@ -58,14 +58,15 @@ const { initHttpOnly } = require('./http-only-init');
 // tracked channels; if this becomes load-bearing, a periodic
 // REST-driven `refreshCache()` would close the gap without
 // needing a Gateway connection.
-const PROCESS_ROLE = (process.env.PROCESS_ROLE || 'combined').trim();
-const VALID_ROLES = ['combined', 'gateway', 'http'];
-if (!VALID_ROLES.includes(PROCESS_ROLE)) {
-  logger.error(`Invalid PROCESS_ROLE: '${PROCESS_ROLE}'. Valid values: ${VALID_ROLES.join(', ')}. Set PROCESS_ROLE to one of these, or leave unset to default to 'combined'.`);
+// Resolve PROCESS_ROLE via the helper in boot-requirements.js so the
+// invalid-value path is unit-testable without a child-process spawn.
+let PROCESS_ROLE, isGateway, isHttp;
+try {
+  ({ role: PROCESS_ROLE, isGateway, isHttp } = resolveProcessRole(process.env.PROCESS_ROLE));
+} catch (err) {
+  logger.error(err.message);
   process.exit(1);
 }
-const isGateway = PROCESS_ROLE === 'gateway' || PROCESS_ROLE === 'combined';
-const isHttp = PROCESS_ROLE === 'http' || PROCESS_ROLE === 'combined';
 logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
