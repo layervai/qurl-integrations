@@ -245,7 +245,7 @@ func TestAuthLoginMissingClientID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing client ID")
 	}
-	if !strings.Contains(err.Error(), "Auth0 client ID") {
+	if !strings.Contains(err.Error(), "auth0 client ID") {
 		t.Errorf("error should mention client ID: %v", err)
 	}
 }

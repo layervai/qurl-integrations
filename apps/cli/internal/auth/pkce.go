@@ -175,6 +175,7 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
 	}
 	go func() { _ = server.Serve(listener) }()
 

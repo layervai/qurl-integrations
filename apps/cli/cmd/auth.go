@@ -75,7 +75,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 
 	clientID, domain, audience := resolveAuth0Config()
 	if clientID == "" {
-		return errors.New("Auth0 client ID not configured: this build was not compiled with a default client ID; set QURL_AUTH0_CLIENT_ID to override")
+		return errors.New("auth0 client ID not configured: this build was not compiled with a default client ID; set QURL_AUTH0_CLIENT_ID to override")
 	}
 
 	if len(scopes) == 0 {
@@ -99,7 +99,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 		!strings.HasPrefix(auth0URL, "https://") &&
 		!strings.HasPrefix(auth0URL, "http://127.0.0.1") &&
 		!strings.HasPrefix(auth0URL, "http://localhost") {
-		return errors.New("QURL_AUTH0_URL must use https:// (or http://localhost / http://127.0.0.1 for local testing)")
+		return errors.New("invalid QURL_AUTH0_URL: must use https:// (or http://localhost / http://127.0.0.1 for local testing)")
 	}
 	flowCfg := &auth.PKCEConfig{
 		Domain:   domain,
