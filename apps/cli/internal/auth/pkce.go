@@ -119,9 +119,9 @@ type callbackResult struct {
 //
 // LoginSession is not safe for concurrent use. The caller MUST eventually call
 // Close (or WaitForToken, which calls it via defer) to release the callback
-// server. StartLogin registers a goroutine that calls Close when ctx is
-// canceled, so callers that abandon a session without calling WaitForToken
-// will still have the server cleaned up when the parent context expires.
+// server. StartLogin registers a goroutine that tears down the callback server
+// when either the parent context is canceled (e.g. Ctrl-C) or Close is called
+// directly — whichever comes first.
 type LoginSession struct {
 	// AuthURL is the authorization URL to open in the browser.
 	AuthURL string
@@ -132,6 +132,7 @@ type LoginSession struct {
 	codeCh       chan callbackResult
 	server       *http.Server
 	closeOnce    sync.Once
+	done         chan struct{} // closed by Close; lets the ctx-cancel goroutine exit early
 	codeVerifier string
 	state        string
 	flow         *PKCEFlow
@@ -184,6 +185,7 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 		RedirectURI:  redirectURI,
 		codeCh:       codeCh,
 		server:       server,
+		done:         make(chan struct{}),
 		codeVerifier: verifier,
 		state:        state,
 		flow:         p,
@@ -191,9 +193,15 @@ func (p *PKCEFlow) StartLogin(ctx context.Context) (*LoginSession, error) {
 
 	// Ensure the callback server is torn down when the parent context is
 	// canceled (e.g. Ctrl-C), even if WaitForToken is never called.
+	// Selecting on session.done lets the goroutine exit promptly when Close
+	// is called directly (e.g. by WaitForToken's defer) rather than blocking
+	// until ctx is canceled.
 	go func() {
-		<-ctx.Done()
-		session.Close()
+		select {
+		case <-ctx.Done():
+			session.Close()
+		case <-session.done:
+		}
 	}()
 
 	return session, nil
@@ -222,9 +230,11 @@ func (s *LoginSession) WaitForToken(ctx context.Context) (*TokenResponse, error)
 
 // Close shuts down the callback server. It is idempotent and safe to call
 // multiple times (e.g. from WaitForToken's defer and from the context-
-// cancellation goroutine started by StartLogin).
+// cancellation goroutine started by StartLogin). Closing session.done inside
+// the sync.Once body signals the goroutine to exit without a double-close race.
 func (s *LoginSession) Close() {
 	s.closeOnce.Do(func() {
+		close(s.done)
 		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 		defer cancel()
 		_ = s.server.Shutdown(ctx)
