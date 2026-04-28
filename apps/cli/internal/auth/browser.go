@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -24,15 +23,14 @@ func OpenBrowser(rawURL string) error {
 	}
 
 	validated := u.String()
-	ctx := context.Background()
 
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.CommandContext(ctx, "open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.Command("open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	case "windows":
-		return exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	default:
-		return exec.CommandContext(ctx, "xdg-open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
+		return exec.Command("xdg-open", validated).Start() //nolint:gosec // URL validated above (https or loopback http); exec uses argv (no shell) so no injection risk
 	}
 }
 

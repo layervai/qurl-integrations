@@ -75,7 +75,7 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 
 	clientID, domain, audience := resolveAuth0Config()
 	if clientID == "" {
-		return errors.New("auth0 client ID not configured: this build was not compiled with a default client ID; set QURL_AUTH0_CLIENT_ID to override")
+		return errors.New("missing Auth0 client ID: this build was not compiled with a default client ID; set QURL_AUTH0_CLIENT_ID to override")
 	}
 
 	if len(scopes) == 0 {
@@ -163,19 +163,18 @@ func runAuthLogin(cmd *cobra.Command, opts *globalOpts, keyName string, scopes [
 	})
 	if err != nil {
 		w.ln()
-		return fmt.Errorf("create API key: %w", err)
+		return err
 	}
 	w.msg(" done")
 
 	if saveErr := saveAuthConfig(profile, keyResp.APIKey, keyResp.KeyID); saveErr != nil {
 		w.ln()
 		w.printf("  Warning: could not save config: %v\n", saveErr)
-		// Print only the key prefix — not the full secret — so it is not exposed
-		// in CI logs, shell history, or screen recordings. The full key can be
-		// retrieved or revoked at https://portal.layerv.ai/keys.
-		w.printf("  API key created (prefix): %s...\n", keyResp.KeyPrefix)
-		w.printf("  Retrieve or revoke the full key at: https://portal.layerv.ai/keys\n")
-		w.printf("  Or run: qurl config set api_key <paste-key-here>\n")
+		// The config save failed, so print the full key here — it won't be
+		// stored anywhere else. The user can copy it now and set it manually.
+		w.printf("  API key created: %s\n", keyResp.APIKey)
+		w.printf("  Copy this key now — it cannot be retrieved again.\n")
+		w.printf("  Once the config issue is fixed, run: qurl config set api_key <key>\n")
 		return saveErr
 	}
 
