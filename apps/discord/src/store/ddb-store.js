@@ -1163,9 +1163,11 @@ async function getGuildConfig(guildId) {
   const row = res.Item;
   if (!row) return row;
   // Strip the api key before returning — callers that need it use
-  // getGuildConfigWithApiKey explicitly.
-  const { qurl_api_key, ...safe } = row;
-  void qurl_api_key;
+  // getGuildConfigWithApiKey explicitly. Underscore-prefix on the
+  // dropped field is the idiomatic "intentionally unused" marker
+  // for eslint's no-unused-vars rule (configured to allow leading
+  // `_`); avoids the `void` workaround.
+  const { qurl_api_key: _drop, ...safe } = row;
   return safe;
 }
 

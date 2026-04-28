@@ -81,10 +81,16 @@ describe('pending links', () => {
     expect(calls[0].args[0].input.TableName).toBe('test-prefix-pending-links');
     expect(calls[0].args[0].input.Item.state).toBe('state-abc');
     expect(calls[0].args[0].input.Item.discord_id).toBe('disc-1');
-    // Number type, epoch seconds, ~10 min out
+    // Number type, epoch seconds, ~10 min out. Upper bound catches
+    // the unit-confusion bug where someone writes ms instead of
+    // seconds — without the cap that bug passes the lower bound
+    // (ms-since-epoch is "much greater than" seconds-since-epoch)
+    // but DDB silently ignores TTL values too far in the future.
     const ttl = calls[0].args[0].input.Item.expires_at;
     expect(typeof ttl).toBe('number');
-    expect(ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    const nowSec = Math.floor(Date.now() / 1000);
+    expect(ttl).toBeGreaterThan(nowSec);
+    expect(ttl).toBeLessThan(nowSec + 11 * 60); // PENDING_LINK_EXPIRY_MINUTES = 10 + 1m slack
   });
 
   test('getPendingLink: GetItem by state, returns shape with discord_id', async () => {
@@ -104,6 +110,17 @@ describe('pending links', () => {
     const result = await store.consumePendingLink('s');
     expect(result).toEqual({ discord_id: 'd' });
     expect(ddbMock.commandCalls(DeleteCommand)[0].args[0].input.ReturnValues).toBe('ALL_OLD');
+  });
+
+  test('consumePendingLink: returns undefined when state already deleted (concurrent caller race)', async () => {
+    // Two callers race on the same state; the second sees no
+    // Attributes back. Caller in routes/oauth.js treats undefined
+    // as "this state was already consumed" — the OAuth callback
+    // then fails with the standard "invalid state" error rather
+    // than crashing on a missing field.
+    ddbMock.on(DeleteCommand).resolves({}); // no Attributes
+    const result = await store.consumePendingLink('already-gone');
+    expect(result).toBeUndefined();
   });
 });
 
@@ -170,6 +187,25 @@ describe('contributions', () => {
     ddbMock.on(PutCommand).rejects(err);
     const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
     expect(result).toBe(false);
+  });
+
+  test('recordContribution: returns false on transient errors AND skips streak update (parity with SQLite)', async () => {
+    // Throttling / network / IAM denial all funnel into the same
+    // false-return as dedup today (caller-side parity with SQLite's
+    // INSERT OR IGNORE swallow). The two cases ARE indistinguishable
+    // to the caller — flagged in the review as a follow-up for a
+    // tri-state return — but the contract here is that the streak
+    // update is skipped and the function doesn't throw.
+    const err = new Error('throttled');
+    err.name = 'ProvisionedThroughputExceededException';
+    ddbMock.on(PutCommand).rejects(err);
+    const result = await store.recordContribution('d', 'g', 42, 'owner/repo');
+    expect(result).toBe(false);
+    // Streak update would fire a second PutCommand if attempted —
+    // pinning that it doesn't run when the contribution Put failed
+    // protects against the silent "streak rolls forward without an
+    // anchored contribution" bug.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
 
   test('getContributions: queries GSI with ScanIndexForward=false', async () => {
