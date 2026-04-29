@@ -10,6 +10,13 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildVoiceStates,
+    // Needed for the /qurl send file path's DM-pivot: when the user
+    // clicks Send File from a guild channel, the bot DMs them and
+    // awaitMessages on that DM channel for the file drop. Without
+    // this intent the bot never sees DM messages and the awaitMessages
+    // call times out at 60s — even though the user dropped the file.
+    // Attachment metadata does NOT require MessageContent intent.
+    GatewayIntentBits.DirectMessages,
   ],
 });
 
