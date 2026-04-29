@@ -710,11 +710,6 @@ async function handleSend(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
   }
-  const target = interaction.options.getString('target');
-  const expiresIn = interaction.options.getString('expiry_optional') || '24h';
-  const rawMessage = interaction.options.getString('message_optional');
-  const personalMessage = rawMessage ? sanitizeMessage(rawMessage) : null;
-  const commandAttachment = interaction.options.getAttachment('file_optional');
 
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
@@ -724,145 +719,109 @@ async function handleSend(interaction, apiKey) {
 
   const sendNonce = crypto.randomBytes(8).toString('hex');
 
-  // --- Step 1: Collect user (if specific user target) ---
-  let recipients = [];
+  // ── Step 1: Initial 2-button reply (Send File / Send Location) ──
+  // Replaces the previous 4-options-on-the-slash-command shape per
+  // April 2026 customer feedback (the slash popup was confusing —
+  // users had to pre-decide file-vs-location AND fill in target
+  // before seeing the actual flow). Now: zero options, button-driven
+  // wizard. After the button click, the OTHER button disappears
+  // because the message is `update`d into the next stage.
+  const initRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`qurl_init_file_${sendNonce}`)
+      .setLabel('\u{1F4C1} Send File')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`qurl_init_loc_${sendNonce}`)
+      .setLabel('\u{1F5FA}\u{FE0F} Send Location')
+      .setStyle(ButtonStyle.Primary),
+  );
 
-  if (target === 'user') {
-    const userSelectRow = new ActionRowBuilder().addComponents(
-      new UserSelectMenuBuilder()
-        .setCustomId(`qurl_user_${sendNonce}`)
-        .setPlaceholder('Select a user to send to')
-        .setMinValues(1)
-        .setMaxValues(1)
-    );
+  await interaction.reply({
+    content: 'What would you like to send?',
+    components: [initRow],
+    ephemeral: true,
+  });
 
-    await interaction.reply({ content: '**Select the user to send to:**', components: [userSelectRow], ephemeral: true });
-
-    try {
-      const selectInteraction = await interaction.channel.awaitMessageComponent({
-        filter: (i) => i.customId === `qurl_user_${sendNonce}` && i.user.id === interaction.user.id,
-        componentType: ComponentType.UserSelect,
-        time: 60000,
-      });
-
-      const selectedUser = selectInteraction.users.first();
-      if (!selectedUser) {
-        clearCooldown(interaction.user.id);
-        return selectInteraction.update({ content: 'No user selected. Send cancelled.', components: [] });
-      }
-      if (selectedUser.bot) {
-        clearCooldown(interaction.user.id);
-        return selectInteraction.update({ content: 'Cannot send to a bot.', components: [] });
-      }
-      if (selectedUser.id === interaction.user.id) {
-        clearCooldown(interaction.user.id);
-        return selectInteraction.update({ content: 'Cannot send to yourself.', components: [] });
-      }
-      recipients = [selectedUser];
-      await selectInteraction.deferUpdate();
-    } catch {
-      // Timeout: release the cooldown so the user isn't blocked for 30s
-      // after simply letting the select menu expire.
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No user selected. Send cancelled.', components: [] });
-    }
-  } else if (target === 'channel') {
-    await interaction.deferReply({ ephemeral: true });
-    try {
-      await fetchGuildMembers(interaction.guild);
-    } catch (err) {
-      logger.error('Failed to fetch guild members', { error: err.message });
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'Failed to load channel members. Please try again.' });
-    }
-    recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
-    if (recipients.length === 0) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No other members in this channel.' });
-    }
-  } else if (target === 'voice') {
-    await interaction.deferReply({ ephemeral: true });
-    const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
-    if (result.error === 'not_in_voice') {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'You must be in a voice channel to use this target.' });
-    }
-    if (result.members.length === 0) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No other users in your voice channel.' });
-    }
-    recipients = result.members;
-  }
-
-  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    clearCooldown(interaction.user.id);
-    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
-    return interaction.editReply({
-      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
-      components: [],
-    });
-  }
-
-  // --- Step 2: Resource — auto-detect from file attachment ---
-  let attachment = null;
-  let locationUrl = null;
-  let locationName = null;
-  let resourceType = null;
-
-  // Pass the recipient's username through sanitizeDisplayName so the
-  // ephemeral "Sending to …" label gets the same NFKC + bidi/zero-
-  // width strip + markdown escape as the DM and channel-announcement
-  // sites. Without this, a recipient named with a leading U+202E
-  // would flip text direction inside the sender's confirmation reply.
-  // (Only the sender sees this string, so blast radius is tiny — but
-  // sanitizeDisplayName's docstring promises every site uses the same
-  // helper, and divergence here would silently violate that contract.)
-  const targetLabel = target === 'user'
-    ? sanitizeDisplayName(recipients[0].username)
-    : target === 'channel' ? 'this channel' : 'voice channel';
-
-  if (commandAttachment) {
-    // File attached — show only Send File button
-    const fileRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`qurl_res_file_${sendNonce}`)
-        .setLabel('\ud83d\udcc1 Send File')
-        .setStyle(ButtonStyle.Primary),
-    );
-
-    await interaction.editReply({
-      content: `**Sending to ${targetLabel}** — file detected: **${commandAttachment.name}**`,
-      components: [fileRow],
-    });
-  } else {
-    // No file — show only Send Location button
-    const locRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`qurl_res_loc_${sendNonce}`)
-        .setLabel('\ud83d\uddfa\ufe0f Send Location')
-        .setStyle(ButtonStyle.Primary),
-    );
-
-    await interaction.editReply({
-      content: `**Sending to ${targetLabel}** — share a location:`,
-      components: [locRow],
-    });
-  }
-
-  let resInteraction;
+  let initBtn;
   try {
-    resInteraction = await interaction.channel.awaitMessageComponent({
+    initBtn = await interaction.channel.awaitMessageComponent({
       filter: (i) => i.user.id === interaction.user.id &&
-        (i.customId === `qurl_res_file_${sendNonce}` || i.customId === `qurl_res_loc_${sendNonce}`),
+        (i.customId === `qurl_init_file_${sendNonce}` || i.customId === `qurl_init_loc_${sendNonce}`),
       time: 60000,
     });
   } catch {
     clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] });
+    return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
   }
 
-  if (resInteraction.customId === `qurl_res_loc_${sendNonce}`) {
-    // --- Location: show modal ---
+  // ── Step 2: Resource collection ──
+  // FILE: prompt the user to drop a file in the channel; capture via
+  //   awaitMessages with attachment filter. There is no Discord
+  //   component that accepts a file upload post-dispatch — only the
+  //   slash-command attachment option (which we removed) or this
+  //   drop-into-chat pattern can pull a file from the user.
+  // LOCATION: open a modal with a single URL/place text input
+  //   (modals can ONLY hold TextInput components, so the older shape
+  //   stays — minus the optional message and expiry inputs, which
+  //   moved to the common final step per the redesign).
+  let resourceType;
+  let attachment = null;
+  let locationUrl = null;
+  let locationName = null;
+
+  if (initBtn.customId === `qurl_init_file_${sendNonce}`) {
+    resourceType = RESOURCE_TYPES.FILE;
+
+    await initBtn.update({
+      content: '\u{1F4C1} **Drop your file in this channel** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.',
+      components: [],
+    });
+
+    // awaitMessages — attachments aren't gated by MessageContent intent,
+    // and the filter restricts to the invoking user's NEXT message
+    // bearing an attachment. Not perfect (the user could attach a file
+    // in a different channel and we'd miss it), but it matches the
+    // existing user mental model of "drag a file into chat."
+    let fileMessage;
+    try {
+      const messages = await interaction.channel.awaitMessages({
+        filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
+        max: 1,
+        time: 60000,
+        errors: ['time'],
+      });
+      fileMessage = messages.first();
+    } catch {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
+    }
+
+    attachment = fileMessage.attachments.first();
+
+    if (!isAllowedFileType(attachment.contentType)) {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({
+        content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
+        components: [],
+      });
+    }
+    if (attachment.size > MAX_FILE_SIZE) {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({
+        content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
+        components: [],
+      });
+    }
+    if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+      clearCooldown(interaction.user.id);
+      logger.warn('File send rejected: concurrency cap reached', { activeFileSends });
+      return interaction.editReply({
+        content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+        components: [],
+      });
+    }
+  } else {
     resourceType = RESOURCE_TYPES.MAPS;
 
     const modal = new ModalBuilder()
@@ -878,17 +837,15 @@ async function handleSend(interaction, apiKey) {
       .setRequired(true);
 
     modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
-    await resInteraction.showModal(modal);
+    await initBtn.showModal(modal);
 
     let modalSubmit;
     try {
-      modalSubmit = await resInteraction.awaitModalSubmit({
+      modalSubmit = await initBtn.awaitModalSubmit({
         filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
         time: 120000,
       });
     } catch (err) {
-      // Distinguish timeout from other errors (permissions, API failures);
-      // non-timeout errors land in logs with their real detail.
       const isTimeout = err?.code === 'InteractionCollectorError' || /time/.test(err?.message || '');
       if (!isTimeout) {
         logger.error('Modal submit failed unexpectedly', { sendNonce, error: err?.message });
@@ -897,19 +854,15 @@ async function handleSend(interaction, apiKey) {
       return interaction.editReply({
         content: isTimeout ? 'Location input timed out. Send cancelled.' : 'Could not collect location input. Send cancelled.',
         components: [],
-      });
+      }).catch(logIgnoredDiscordErr);
     }
 
-    // Hard-cap input length BEFORE regex matching. The Maps regexes have
-    // unbounded character classes that can backtrack on pathological input;
-    // trimming to 2000 chars prevents a ReDoS while still accepting every
-    // legitimate Google Maps URL (real-world max is ~300 chars).
+    // Hard-cap input length BEFORE regex matching to prevent ReDoS on
+    // pathological strings against the unbounded character classes
+    // below. Real Google Maps URLs peak around ~300 chars.
     const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
     await modalSubmit.deferUpdate();
 
-    // Bounded repetitions so even the locationValue.slice(0, 2000) cap above
-    // can't feed a ReDoS-pathological string to an unbounded `+` over
-    // overlapping classes. Real Google Maps URLs peak around ~300 chars.
     const mapsPatterns = [
       /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
       /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
@@ -933,60 +886,243 @@ async function handleSend(interaction, apiKey) {
       if (queryMatch) locationName = safeDecode(queryMatch[1].replace(/\+/g, ' '));
       else if (placeMatch) locationName = safeDecode(placeMatch[1].replace(/\+/g, ' '));
     } else if (detectedUrl) {
-      // Regex matched but isGoogleMapsURL() rejected — treat as text search
       locationName = locationValue;
       locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     } else {
       locationName = locationValue;
       locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
     }
-    // Cap for embed-field safety (Discord 1024-char limit) and escape markdown
-    // so a crafted place name can't inject **bold** / links / code blocks /
-    // spoilers into the embed and phish recipients.
+    // Cap + escape markdown so a crafted place name can't inject
+    // **bold** / links / code / spoilers into the recipient embed.
     if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
+  }
 
-  } else {
-    // --- File: use attachment from slash command ---
-    resourceType = RESOURCE_TYPES.FILE;
-    attachment = commandAttachment;
+  // ── Step 3: Common final step ──
+  // Single component message that gathers: target type → recipient
+  // (UserSelect or auto-resolved channel/voice members) → optional
+  // message (modal-driven button) → expiry (default 24h) → Send/Cancel.
+  // Loop on component interactions until the user clicks Send or Cancel
+  // (or the 5-min component timeout fires). State is held in closure
+  // vars and re-rendered via `compInt.update(...)` on each change.
+  let target = null;
+  let recipients = [];
+  let personalMessage = null;
+  let expiresIn = '24h';
 
-    if (!attachment) {
-      clearCooldown(interaction.user.id);
-      await resInteraction.update({
-        content: 'No file attached. Please rerun `/qurl send` with a file in the `file` option.',
-        components: [],
+  const formId = `qurl_form_${sendNonce}`;
+  const ids = {
+    targetSelect: `${formId}_target`,
+    userSelect: `${formId}_user`,
+    messageBtn: `${formId}_msg_btn`,
+    messageModal: `${formId}_msg_modal`,
+    messageInput: 'message_value',
+    expirySelect: `${formId}_expiry`,
+    sendBtn: `${formId}_send`,
+    cancelBtn: `${formId}_cancel`,
+  };
+
+  const formContent = () => {
+    let content = '✅ ';
+    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${attachment.name}**.`;
+    else content += `Got **${locationName || 'location'}**.`;
+    content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
+    if (personalMessage) {
+      const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
+      content += `\n\n_Personal message:_ "${preview}"`;
+    }
+    return content;
+  };
+
+  const formRows = () => {
+    const rows = [];
+
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(ids.targetSelect)
+        .setPlaceholder('Recipient(s) — choose type')
+        .addOptions(
+          { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
+          { label: 'Everyone in this channel', value: 'channel', description: 'All members of this text channel (excl. bots and you)', default: target === 'channel' },
+          { label: 'Everyone in your voice channel', value: 'voice', description: 'You must be in a voice channel', default: target === 'voice' },
+        )
+    ));
+
+    if (target === 'user') {
+      rows.push(new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder()
+          .setCustomId(ids.userSelect)
+          .setPlaceholder('Pick a user')
+          .setMinValues(1)
+          .setMaxValues(1)
+      ));
+    }
+
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(ids.messageBtn)
+        .setLabel(personalMessage ? '✏\u{FE0F} Edit personal message' : '+ Add personal message (optional)')
+        .setStyle(ButtonStyle.Secondary)
+    ));
+
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(ids.expirySelect)
+        .setPlaceholder('Link expiry')
+        .addOptions(
+          ...EXPIRY_CHOICES.map(c => ({ label: c.name, value: c.value, default: c.value === expiresIn }))
+        )
+    ));
+
+    const recipientsResolved = (target === 'user' && recipients.length === 1)
+      || ((target === 'channel' || target === 'voice') && recipients.length > 0);
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(ids.sendBtn)
+        .setLabel('\u{1F4E4} Send')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(!recipientsResolved),
+      new ButtonBuilder()
+        .setCustomId(ids.cancelBtn)
+        .setLabel('Cancel')
+        .setStyle(ButtonStyle.Secondary)
+    ));
+
+    return rows;
+  };
+
+  await interaction.editReply({ content: formContent(), components: formRows() });
+
+  let sendApproved = false;
+  while (!sendApproved) {
+    let compInt;
+    try {
+      compInt = await interaction.channel.awaitMessageComponent({
+        filter: (i) => i.user.id === interaction.user.id && Object.values(ids).includes(i.customId),
+        time: 5 * 60000,
       });
+    } catch {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({ content: 'Send timed out (5 min). Cancelled.', components: [] }).catch(logIgnoredDiscordErr);
+    }
+
+    if (compInt.customId === ids.cancelBtn) {
+      clearCooldown(interaction.user.id);
+      await compInt.update({ content: 'Send cancelled.', components: [] });
       return;
     }
 
-    await resInteraction.deferUpdate();
+    if (compInt.customId === ids.sendBtn) {
+      await compInt.update({ content: 'Preparing send…', components: [] });
+      sendApproved = true;
+      break;
+    }
 
-    if (!isAllowedFileType(attachment.contentType)) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
-        components: [],
-      });
+    if (compInt.customId === ids.targetSelect) {
+      const newTarget = compInt.values[0];
+      if (newTarget !== target) {
+        target = newTarget;
+        recipients = [];
+        if (target === 'channel') {
+          try {
+            await fetchGuildMembers(interaction.guild);
+          } catch (err) {
+            logger.error('Failed to fetch guild members', { error: err.message });
+            clearCooldown(interaction.user.id);
+            await compInt.update({ content: 'Failed to load channel members. Send cancelled.', components: [] });
+            return;
+          }
+          recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
+          if (recipients.length === 0) {
+            target = null;
+            await compInt.update({ content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
+            continue;
+          }
+        } else if (target === 'voice') {
+          const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
+          if (result.error === 'not_in_voice') {
+            target = null;
+            await compInt.update({ content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
+            continue;
+          }
+          if (result.members.length === 0) {
+            target = null;
+            await compInt.update({ content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
+            continue;
+          }
+          recipients = result.members;
+        }
+      }
+      await compInt.update({ content: formContent(), components: formRows() });
+      continue;
     }
-    if (attachment.size > MAX_FILE_SIZE) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
-        components: [],
-      });
+
+    if (compInt.customId === ids.userSelect) {
+      const selectedUser = compInt.users.first();
+      if (!selectedUser) {
+        await compInt.deferUpdate();
+        continue;
+      }
+      if (selectedUser.bot) {
+        await compInt.update({ content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
+        continue;
+      }
+      if (selectedUser.id === interaction.user.id) {
+        await compInt.update({ content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
+        continue;
+      }
+      recipients = [selectedUser];
+      await compInt.update({ content: formContent(), components: formRows() });
+      continue;
     }
-    // Cap concurrent in-flight file sends. Each holds its 25 MB buffer
-    // through the mint-batches re-upload cycle; without this cap, N
-    // simultaneous /qurl send calls × 25 MB can exhaust process memory.
-    if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
-      clearCooldown(interaction.user.id);
-      logger.warn('File send rejected: concurrency cap reached', { activeFileSends });
-      return interaction.editReply({
-        content: `The bot is processing too many file sends right now. Please try again in a moment.`,
-        components: [],
-      });
+
+    if (compInt.customId === ids.messageBtn) {
+      const msgModal = new ModalBuilder()
+        .setCustomId(ids.messageModal)
+        .setTitle('Personal message');
+      msgModal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(ids.messageInput)
+          .setLabel('Optional note (leave blank to clear)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(450)
+          .setRequired(false)
+          .setValue(personalMessage || '')
+      ));
+      await compInt.showModal(msgModal);
+
+      let msgSubmit;
+      try {
+        msgSubmit = await compInt.awaitModalSubmit({
+          filter: (i) => i.customId === ids.messageModal && i.user.id === interaction.user.id,
+          time: 120000,
+        });
+      } catch {
+        // Modal timed out — leave message as-is, no re-render needed.
+        continue;
+      }
+
+      const raw = msgSubmit.fields.getTextInputValue(ids.messageInput).trim();
+      personalMessage = raw ? sanitizeMessage(raw) : null;
+      await msgSubmit.update({ content: formContent(), components: formRows() });
+      continue;
+    }
+
+    if (compInt.customId === ids.expirySelect) {
+      expiresIn = compInt.values[0];
+      await compInt.update({ content: formContent(), components: formRows() });
+      continue;
     }
   }
+
+  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    clearCooldown(interaction.user.id);
+    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
+    return interaction.editReply({
+      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
+      components: [],
+    });
+  }
+
 
   // --- Step 3: Process and send ---
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] });
@@ -2442,25 +2578,19 @@ const commands = [
       .setDescription('Share resources securely via qURL')
       .addSubcommand(sub =>
         sub.setName('send')
-          .setDescription('Send a resource to users via one-time secure link')
-          .addStringOption(opt =>
-            opt.setName('target')
-              .setDescription('Who receives this')
-              .setRequired(true)
-              .setAutocomplete(true))
-          .addStringOption(opt =>
-            opt.setName('expiry_optional')
-              .setDescription('Link expiry (default: 24h)')
-              .setRequired(false)
-              .addChoices(...EXPIRY_CHOICES))
-          .addAttachmentOption(opt =>
-            opt.setName('file_optional')
-              .setDescription('Optional — attach a file here if sharing a file')
-              .setRequired(false))
-          .addStringOption(opt =>
-            opt.setName('message_optional')
-              .setDescription('Optional note sent alongside the link')
-              .setRequired(false))
+          .setDescription('Send a file or location to users via one-time secure link')
+          // No options — the redesigned flow is button-driven. Customer
+          // feedback (April 2026): the prior 4-option shape (target,
+          // expiry_optional, file_optional, message_optional) confused
+          // users at the slash-command-popup stage because they had to
+          // pre-decide file-vs-location AND fill in target before
+          // seeing the actual flow. New flow: `/qurl send` opens a
+          // 2-button reply (Send File / Send Location); each path
+          // collects its specific resource (drop-file in chat for
+          // file via awaitMessages, modal text input for location)
+          // then converges on a shared final step that gathers
+          // recipient(s), optional message, and expiry before
+          // committing the send.
       )
       .addSubcommand(sub =>
         sub.setName('revoke')
