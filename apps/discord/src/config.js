@@ -198,6 +198,16 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
+  // Canary HMAC shared secret. When unset, the /canary/exec endpoint
+  // returns 503 (canary_disabled) — keeps the surface inert in dev and
+  // on the bot's first deploy before the canary runner exists. The
+  // matching value lives in the runner's SSM under the same key name.
+  // Hex-encoded random 32 bytes recommended. Rotation is online: write
+  // the new value to both SSMs, then restart bot + runner in either
+  // order (each side falls back to 401 on signature mismatch until
+  // rolled).
+  CANARY_SHARED_SECRET: process.env.CANARY_SHARED_SECRET,
+
   // /qurl send limits — both must be > 0. A cooldown of 0 would silently
   // disable the rate limit; a recipients cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
