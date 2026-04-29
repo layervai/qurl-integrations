@@ -15,7 +15,7 @@ const {
 } = require('discord.js');
 const crypto = require('crypto');
 const config = require('./config');
-const db = require('./database');
+const db = require('./store');
 const logger = require('./logger');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');

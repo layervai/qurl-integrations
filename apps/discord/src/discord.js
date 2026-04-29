@@ -2,7 +2,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBit
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
-const db = require('./database');
+const db = require('./store');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
 const client = new Client({

@@ -3,7 +3,7 @@ const logger = require('./logger');
 const { client, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
-const db = require('./database');
+const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
 

@@ -1,7 +1,7 @@
 // GitHub OAuth routes
 const express = require('express');
 const config = require('../config');
-const db = require('../database');
+const db = require('../store');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { sendDM, assignContributorRole, notifyBadgeEarned } = require('../discord');
