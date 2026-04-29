@@ -942,15 +942,46 @@ describe('handleSend — additional branch coverage', () => {
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
-  // C5 — re-selecting the same target is a no-op (no second member fetch).
-  it('does not re-fetch members when target is re-selected to the same value', async () => {
+  // C5 — re-selecting channel ALWAYS re-resolves (members may join/leave
+  // during the up-to-5-min form-loop window). Regression test for the
+  // ghost-recipients bug Claude bot review flagged.
+  it('re-resolves channel members on every channel re-select (no stale recipients)', async () => {
     mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(1);
+    expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(2);
+  });
+
+  // C5b — voice re-select also re-resolves (same staleness concern).
+  it('re-resolves voice members on every voice re-select', async () => {
+    mockGetVoiceChannelMembers.mockReturnValue({ members: [{ id: 'u2', username: 'Alice' }] });
+    const target1 = makeCompInt(ids.targetSelect, { values: ['voice'] });
+    const target2 = makeCompInt(ids.targetSelect, { values: ['voice'] });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
+    await cmd.execute(interaction);
+    expect(mockGetVoiceChannelMembers).toHaveBeenCalledTimes(2);
+  });
+
+  // C5c — user re-select is still a no-op (UserSelect drives recipients).
+  it('user re-select preserves the picked recipient (no recipients reset)', async () => {
+    const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userPick = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const target2 = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), target1, userPick, target2, sendBtn],
+    });
+    await cmd.execute(interaction);
+    // Send should have proceeded — i.e., the user re-select didn't blow
+    // away the picked recipient.
+    expect(mockMintLinks).toHaveBeenCalled();
+    expect(mockSendDM).toHaveBeenCalled();
   });
 
   // C6 — UserSelect with empty selection just defers and continues.

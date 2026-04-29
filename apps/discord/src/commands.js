@@ -809,19 +809,24 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
+    // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
+    // for parity with the timeout/cancel paths. Up to 5 minutes can pass between
+    // the user dropping the file and these guards firing on a slow form-loop, and
+    // an `editReply` against a stale interaction can reject with "Unknown
+    // Interaction" — swallow + log instead of surfacing as an unhandled rejection.
     if (!isAllowedFileType(attachment.contentType)) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
         components: [],
-      });
+      }).catch(logIgnoredDiscordErr);
     }
     if (attachment.size > MAX_FILE_SIZE) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
         components: [],
-      });
+      }).catch(logIgnoredDiscordErr);
     }
     // Defense in depth — connector's downloadAndUpload validates this URL
     // again, but mirroring handleAddRecipients (line ~1676) keeps the SSRF
@@ -837,7 +842,7 @@ async function handleSend(interaction, apiKey) {
       return interaction.editReply({
         content: 'The attached file URL is not from a recognized Discord CDN. Cancelled.',
         components: [],
-      });
+      }).catch(logIgnoredDiscordErr);
     }
     if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
       clearCooldown(interaction.user.id);
@@ -845,7 +850,7 @@ async function handleSend(interaction, apiKey) {
       return interaction.editReply({
         content: 'The bot is processing too many file sends right now. Please try again in a moment.',
         components: [],
-      });
+      }).catch(logIgnoredDiscordErr);
     }
   } else {
     resourceType = RESOURCE_TYPES.MAPS;
@@ -1056,7 +1061,12 @@ async function handleSend(interaction, apiKey) {
 
     if (compInt.customId === ids.targetSelect) {
       const newTarget = compInt.values[0];
-      if (newTarget !== target) {
+      // For user-target, re-selecting 'user' is a no-op (UserSelect drives
+      // the actual recipient pick). For channel and voice, ALWAYS re-resolve
+      // — members can join or leave during the up-to-5-minute form-loop
+      // window, and a stale recipients array would mint links for ghosts.
+      const requiresFreshResolve = newTarget === 'channel' || newTarget === 'voice';
+      if (newTarget !== target || requiresFreshResolve) {
         target = newTarget;
         recipients = [];
         if (target === 'channel') {
@@ -1152,7 +1162,12 @@ async function handleSend(interaction, apiKey) {
           time: 120000,
         });
       } catch {
-        // Modal timed out — leave message as-is, no re-render needed.
+        // Intentional silent no-op on modal timeout: the form state is
+        // unchanged (personalMessage holds whatever it was before the
+        // user opened the modal), so re-rendering would just redraw the
+        // same form. We deliberately skip a "modal closed" toast here
+        // because it would also fire on the legitimate close-without-
+        // typing case, which is normal user behavior.
         continue;
       }
 
