@@ -10,6 +10,7 @@ const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
+const canaryRouter = require('./routes/canary');
 
 const app = express();
 
@@ -85,6 +86,18 @@ if (config.isOpenNHPActive) {
     }
   }));
 }
+
+// /canary/* needs req.rawBody for HMAC verification, same as /webhook.
+// Canary payloads are tiny (a few hundred bytes — just a probe envelope)
+// so the 4 KB cap rejects malformed/oversized requests early. Mounted
+// even when CANARY_SHARED_SECRET is unset; the route handler returns
+// 503 in that case (no parsing waste either way — limit is small).
+app.use('/canary', express.json({
+  limit: '4kb',
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -233,6 +246,17 @@ if (!config.isQurlOAuthConfigured) {
 app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
+}
+
+// /canary mounts unconditionally — the route handler itself returns 503
+// canary_disabled when CANARY_SHARED_SECRET is unset, so there's nothing
+// useful to gate at mount time. (Mounting the router doesn't bind the
+// secret; the handler reads config at request time.)
+app.use('/canary', canaryRouter);
+if (config.CANARY_SHARED_SECRET) {
+  logger.info('Canary endpoint mounted at /canary/exec (HMAC-authenticated, returns 503 without the shared secret)');
+} else {
+  logger.info('Canary endpoint mounted at /canary/exec but CANARY_SHARED_SECRET is unset — endpoint will return 503');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
