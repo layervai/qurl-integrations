@@ -7,7 +7,8 @@ jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
-  debug: jest.fn(), audit: jest.fn(),
+  debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 const originalFetch = globalThis.fetch;
@@ -25,7 +26,8 @@ describe('qURL client — getResourceStatus (line 51)', () => {
       info: jest.fn(),
       warn: jest.fn(),
       error: jest.fn(),
-      debug: jest.fn(), audit: jest.fn(),
+      debug: jest.fn(),
+      audit: jest.fn(),
     }));
     qurl = require('../src/qurl');
   });
