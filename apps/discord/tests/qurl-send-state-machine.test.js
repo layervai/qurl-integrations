@@ -1,8 +1,9 @@
 /**
  * /qurl send button-driven state-machine tests.
  *
- * Replaces the slash-options-shape coverage that landed in coverage-boost
- * and commands-comprehensive (now describe.skip'd). Walks the new
+ * Replaces the slash-options-shape coverage that lived in coverage-boost
+ * and commands-comprehensive — those describes were pinned to the dead
+ * 4-options shape and were removed in the redesign. Walks the new
  * 3-step flow:
  *   Step 1: ephemeral 2-button reply (Send File / Send Location)
  *   Step 2: file via awaitMessages OR location via single-input modal
@@ -181,7 +182,21 @@ crypto.randomBytes = jest.fn((size) => (size === 8 ? Buffer.from(NONCE, 'hex') :
 crypto.randomUUID = jest.fn(() => 'mock-send-uuid');
 
 const { commands, _test } = require('../src/commands');
-const { sendCooldowns, setCooldown } = _test;
+const logger = require('../src/logger');
+const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache } = _test;
+
+afterAll(() => {
+  // Restore the singleton crypto.randomBytes so subsequent test files in
+  // the same Jest worker (or future shared-runner mode) see the real impl.
+  crypto.randomBytes = originalRandomBytes;
+});
+
+afterEach(() => {
+  // Drain any slot the prior test left claimed (e.g., a happy-path file
+  // send mocked downloadAndUpload but the back-half release path is
+  // exercised via test-time setActiveFileSends in some cases).
+  if (typeof setActiveFileSends === 'function') setActiveFileSends(0);
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -273,6 +288,8 @@ function makeAttachmentMessage(attachment) {
 beforeEach(() => {
   jest.clearAllMocks();
   sendCooldowns.clear();
+  if (memberFetchCache) memberFetchCache.clear();
+  if (typeof setActiveFileSends === 'function') setActiveFileSends(0);
   // Default happy-path mints / uploads — individual tests override.
   mockDownloadAndUpload.mockResolvedValue({
     resource_id: 'res-file', fileBuffer: new ArrayBuffer(10),
@@ -841,5 +858,263 @@ describe('handleSend — end-to-end happy paths', () => {
       content: expect.stringMatching(/Only \d+ of \d+ links could be created/),
     }));
     expect(mockSendDM).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// 8. Additional coverage targeted at branches the review flagged
+// ===========================================================================
+
+describe('handleSend — additional branch coverage', () => {
+  function locInitBtn(value = 'Test Place') {
+    return makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => value) },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+  }
+  function fileInitBtn() {
+    return makeCompInt(ids.initFile, { update: jest.fn().mockResolvedValue(undefined) });
+  }
+
+  // C1 — concurrency cap fires both at file-acceptance and at slot-claim.
+  it('rejects file send up-front when concurrency cap is already reached', async () => {
+    setActiveFileSends(5);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({ awaitQueue: [fileInitBtn()], awaitMessages });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('processing too many file sends'),
+    }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('concurrency cap reached'),
+      expect.objectContaining({ activeFileSends: 5 }),
+    );
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
+  // C2 — fetchGuildMembers failure on target=channel.
+  it('aborts with a friendly error when fetchGuildMembers throws', async () => {
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel],
+      guild: { id: 'guild-1', members: { fetch: jest.fn().mockRejectedValue(new Error('rate limited')) } },
+    });
+    await cmd.execute(interaction);
+    expect(targetChannel.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Failed to load channel members'),
+    }));
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to fetch guild members',
+      expect.objectContaining({ error: 'rate limited' }),
+    );
+    expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
+  // C3 — location modal unexpected error path (vs. timeout path which is tested).
+  it('surfaces "Could not collect location input" on a non-timeout modal error', async () => {
+    const initBtn = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockRejectedValue(new Error('Discord 500')),
+    });
+    const interaction = makeInteraction({ awaitQueue: [initBtn] });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Could not collect location input'),
+    }));
+    expect(logger.error).toHaveBeenCalledWith(
+      'Modal submit failed unexpectedly',
+      expect.objectContaining({ error: 'Discord 500' }),
+    );
+  });
+
+  // C4 — Step-3 form-loop 5-min component timeout (no further queue items).
+  it('cancels with a 5-min message when the form loop times out waiting for clicks', async () => {
+    const interaction = makeInteraction({ awaitQueue: [locInitBtn()] });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Send timed out (5 min)'),
+    }));
+    expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
+  // C5 — re-selecting the same target is a no-op (no second member fetch).
+  it('does not re-fetch members when target is re-selected to the same value', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const target1 = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
+    await cmd.execute(interaction);
+    expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(1);
+  });
+
+  // C6 — UserSelect with empty selection just defers and continues.
+  it('defers and continues when UserSelect resolves with no user', async () => {
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelectEmpty = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => null) },
+    });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelectEmpty, cancel],
+    });
+    await cmd.execute(interaction);
+    expect(userSelectEmpty.deferUpdate).toHaveBeenCalled();
+    expect(userSelectEmpty.update).not.toHaveBeenCalled();
+  });
+
+  // C7 — submitting the message modal with whitespace-only clears the field.
+  it('clearing the personal message via whitespace-only modal submission removes the preview', async () => {
+    const setMsg = {
+      fields: { getTextInputValue: jest.fn(() => 'first message') },
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    const clearMsg = {
+      fields: { getTextInputValue: jest.fn(() => '   ') },
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    const msgBtn1 = makeCompInt(ids.msgBtn, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue(setMsg),
+    });
+    const msgBtn2 = makeCompInt(ids.msgBtn, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue(clearMsg),
+    });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), msgBtn1, msgBtn2, cancel],
+    });
+    await cmd.execute(interaction);
+    // After the second submit, the form preview should NOT contain
+    // "Personal message:" — assert against the LATEST update.
+    const lastUpdateContent = clearMsg.update.mock.calls[0][0].content;
+    expect(lastUpdateContent).not.toContain('Personal message:');
+  });
+
+  // C9 — saveSendConfig failure is logged-and-swallowed; DMs still go out.
+  it('logs but does not abort when saveSendConfig fails after delivery', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    mockDb.saveSendConfig.mockImplementationOnce(() => { throw new Error('disk full'); });
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(mockSendDM).toHaveBeenCalled(); // delivery proceeded
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('saveSendConfig failed'),
+      expect.objectContaining({ error: 'disk full' }),
+    );
+  });
+
+  // C10 — file-path mintLinks underdelivery (mirror of the location-path test).
+  it('returns a friendly message when mintLinks underdelivers on the file path', async () => {
+    mockGetTextChannelMembers.mockReturnValue([
+      { id: 'u2', username: 'Alice' },
+      { id: 'u3', username: 'Bob' },
+    ]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/only-one' }]); // 1 < 2 needed
+    const fileInit = makeCompInt(ids.initFile);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetChannel, sendBtn],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Only 1 of 2 links could be created/),
+    }));
+  });
+
+  // C14 — quota_exceeded on the file path uses the "re-upload" copy.
+  it('quota_exceeded on the file path tells the user to re-upload', async () => {
+    const err = new Error('upstream quota');
+    err.apiCode = 'quota_exceeded';
+    mockDownloadAndUpload.mockRejectedValueOnce(err);
+    const fileInit = makeCompInt(ids.initFile);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetChannel, sendBtn],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('re-upload the file'),
+    }));
+  });
+
+  // A2 — isAllowedSourceUrl rejection on the file path (defense in depth).
+  it('rejects file send when attachment.url fails isAllowedSourceUrl', async () => {
+    const fileInit = makeCompInt(ids.initFile);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://evil.example.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({ awaitQueue: [fileInit], awaitMessages });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('not from a recognized Discord CDN'),
+    }));
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+  });
+
+  // A3 — empty-recipients spoof. Drive Send button without resolving recipients.
+  it('rejects spoofed Send button when recipients are unresolved', async () => {
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({ awaitQueue: [locInitBtn(), sendBtn] });
+    await cmd.execute(interaction);
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('No recipients selected'),
+    }));
+    expect(mockMintLinks).not.toHaveBeenCalled();
+  });
+
+  // A15 — the form-loop filter rejects clicks from a different user.
+  it('the form-loop filter excludes other users\' clicks', async () => {
+    // Capture the filter function passed to channel.awaitMessageComponent
+    // and exercise it with a non-matching user.id; the handler must
+    // reject the spoofed event so the filter is what protects the loop.
+    let formFilter = null;
+    let callIdx = 0;
+    const channelAwaitMC = jest.fn().mockImplementation(({ filter }) => {
+      callIdx++;
+      if (callIdx === 1) {
+        // First call is Step-1 (init buttons). Return loc-init.
+        return Promise.resolve(makeCompInt(ids.initLoc, {
+          showModal: jest.fn().mockResolvedValue(undefined),
+          awaitModalSubmit: jest.fn().mockResolvedValue({
+            fields: { getTextInputValue: jest.fn(() => 'Place') },
+            deferUpdate: jest.fn().mockResolvedValue(undefined),
+          }),
+        }));
+      }
+      // Second call is Step-3 form loop. Capture the filter and time out.
+      formFilter = filter;
+      return Promise.reject(new Error('timeout'));
+    });
+    const interaction = {
+      ...makeInteraction(),
+      channel: { awaitMessageComponent: channelAwaitMC, members: new Map() },
+    };
+    await cmd.execute(interaction);
+    expect(formFilter).toBeInstanceOf(Function);
+    // Click from another user with a valid form customId — must be filtered out.
+    expect(formFilter({ user: { id: 'someone-else' }, customId: ids.cancelBtn })).toBe(false);
+    // Click from the right user with an unrelated customId — also filtered.
+    expect(formFilter({ user: { id: 'user-1' }, customId: 'qurl_form_other_send' })).toBe(false);
+    // Click from the right user with a valid form customId — accepted.
+    expect(formFilter({ user: { id: 'user-1' }, customId: ids.cancelBtn })).toBe(true);
   });
 });

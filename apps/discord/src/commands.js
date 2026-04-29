@@ -3079,6 +3079,15 @@ module.exports = {
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,
+      // Test-only file-concurrency hooks. The slot counter is module-
+      // private (live state) and exposing a setter lets the cap branch
+      // be tested without a parallel-send harness.
+      getActiveFileSends: () => activeFileSends,
+      setActiveFileSends: (n) => { activeFileSends = n; },
+      // The guild-member fetch cache is module-private; tests need to
+      // reset it between cases so a prior test's cached members don't
+      // mask a `members.fetch` rejection in the next test.
+      memberFetchCache,
     },
   }),
 };
