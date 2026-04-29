@@ -821,7 +821,7 @@ async function handleSend(interaction, apiKey) {
       }
       captureChannel = dm;
       await initBtn.update({
-        content: '\u{1F4EC} **I sent you a DM — drop your file there.** I\'ll wait 60 seconds.',
+        content: '\u{1F4EC} **I sent you a DM — drop your file there and come back here to send it.** I\'ll wait 60 seconds.',
         components: [],
       });
     }
