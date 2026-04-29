@@ -392,7 +392,10 @@ describe('handleSend — Step 2: file path', () => {
   }
 
   it('cancels when no file is dropped within 60s', async () => {
-    const awaitMessages = jest.fn().mockRejectedValue(new Error('time'));
+    // discord.js v14 contract: awaitMessages with errors:['time'] rejects
+    // with the collected Collection on timeout (NOT an Error). The handler
+    // distinguishes Collection-shaped from Error-shaped rejections.
+    const awaitMessages = jest.fn().mockRejectedValue({ size: 0, first: () => null });
     const interaction = makeInteraction({
       awaitQueue: [fileInitBtn()],
       awaitMessages,
@@ -402,6 +405,11 @@ describe('handleSend — Step 2: file path', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('No file received'),
     }));
+    // Timeout path should NOT log as unexpected
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('awaitMessages failed unexpectedly'),
+      expect.any(Object),
+    );
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
@@ -456,6 +464,24 @@ describe('handleSend — Step 2: location path', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('timed out'),
     }));
+    expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
+  it('fast-fails (no 90s wait) when showModal itself rejects', async () => {
+    const initBtn = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockRejectedValue(new Error('Unknown Interaction')),
+      awaitModalSubmit: jest.fn().mockRejectedValue(new Error('should not be reached')),
+    });
+    const interaction = makeInteraction({ awaitQueue: [initBtn] });
+    await cmd.execute(interaction);
+    expect(initBtn.awaitModalSubmit).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Could not open the location input'),
+    }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Location modal showModal rejected',
+      expect.objectContaining({ error: 'Unknown Interaction' }),
+    );
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
@@ -942,7 +968,7 @@ describe('handleSend — additional branch coverage', () => {
 
   // C1 — concurrency cap fires at the atomic slot-claim site after the
   // user clicks Send. The earlier file-acceptance gate was removed because
-  // the up-to-5-min Step-3 form loop made it stale by the time the user
+  // the up-to-3-min Step-3 form loop made it stale by the time the user
   // would actually claim a slot.
   it('rejects file send at slot-claim when concurrency cap is reached', async () => {
     setActiveFileSends(5);
@@ -1004,8 +1030,8 @@ describe('handleSend — additional branch coverage', () => {
     );
   });
 
-  // C4 — Step-3 form-loop 5-min component timeout (no further queue items).
-  it('cancels with a 5-min message when the form loop times out waiting for clicks', async () => {
+  // C4 — Step-3 form-loop 3-min component timeout (no further queue items).
+  it('cancels with a 3-min message when the form loop times out waiting for clicks', async () => {
     const interaction = makeInteraction({ awaitQueue: [locInitBtn()] });
     await cmd.execute(interaction);
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
@@ -1015,7 +1041,7 @@ describe('handleSend — additional branch coverage', () => {
   });
 
   // C5 — re-selecting channel ALWAYS re-resolves (members may join/leave
-  // during the up-to-5-min form-loop window). Regression test for the
+  // during the up-to-3-min form-loop window). Regression test for the
   // ghost-recipients bug Claude bot review flagged.
   it('re-resolves channel members on every channel re-select (no stale recipients)', async () => {
     mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);

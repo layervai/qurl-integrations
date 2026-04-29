@@ -800,12 +800,15 @@ async function handleSend(interaction, apiKey) {
       fileMessage = messages.first();
     } catch (err) {
       // awaitMessages with errors:['time'] rejects with the collected
-      // Collection on timeout, which is the expected exit. Anything else
-      // (channel destroyed, permissions revoked mid-await, gateway
-      // disconnect) is unexpected and worth a log line so a user reporting
-      // "I dropped the file but it didn't take" doesn't go uninvestigated.
-      const isTimeoutCollection = err && typeof err.size === 'number';
-      if (!isTimeoutCollection) {
+      // Collection on timeout (discord.js v14 contract). Anything that's
+      // an Error (channel destroyed, permissions revoked mid-await,
+      // gateway disconnect) is unexpected and worth a log line so a user
+      // reporting "I dropped the file but it didn't take" doesn't go
+      // uninvestigated. Combine the negative check (Error) with the
+      // positive (Collection-shaped) so a future discord.js bump that
+      // changes either shape still routes correctly.
+      const isUnexpected = err instanceof Error;
+      if (isUnexpected) {
         logger.warn('awaitMessages failed unexpectedly during file capture', {
           sendNonce, userId: interaction.user.id, error: err?.message,
         });
@@ -852,13 +855,13 @@ async function handleSend(interaction, apiKey) {
       }).catch(logIgnoredDiscordErr);
     }
     // No early concurrency-cap check here. The original placement was
-    // before the redesign added the up-to-5-minute Step-3 form loop;
+    // before the redesign added the up-to-3-minute Step-3 form loop;
     // by the time the user finishes the form, slot state has shifted
     // and the early "too busy" message is no longer informative — it
     // would also reject users who'd actually have a slot by Send-time.
-    // The atomic re-check at the slot-claim site (line ~1219) is the
-    // authoritative gate now and produces the same user-facing message
-    // when the cap is genuinely full at decision time.
+    // The atomic re-check at the slot-claim site (in Step 4 below) is
+    // the authoritative gate now and produces the same user-facing
+    // message when the cap is genuinely full at decision time.
   } else {
     resourceType = RESOURCE_TYPES.MAPS;
 
@@ -875,7 +878,27 @@ async function handleSend(interaction, apiKey) {
       .setRequired(true);
 
     modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
-    await initBtn.showModal(modal).catch(logIgnoredDiscordErr);
+    // Fast-fail if showModal itself rejects (Unknown Interaction, expired
+    // token, Discord 5xx). Without this, the handler would still proceed
+    // to a 90-second awaitModalSubmit that can never resolve, surfacing as
+    // a confusing "Location input timed out" message for what was really
+    // an immediate API failure.
+    let modalShown = true;
+    try {
+      await initBtn.showModal(modal);
+    } catch (err) {
+      modalShown = false;
+      logger.warn('Location modal showModal rejected', {
+        sendNonce, userId: interaction.user.id, error: err?.message,
+      });
+    }
+    if (!modalShown) {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({
+        content: 'Could not open the location input. Please try again.',
+        components: [],
+      }).catch(logIgnoredDiscordErr);
+    }
 
     // Clear the underlying ephemeral message's components — without this,
     // the original 2-button reply (Send File / Send Location) stays
@@ -957,7 +980,7 @@ async function handleSend(interaction, apiKey) {
   // (UserSelect or auto-resolved channel/voice members) → optional
   // message (modal-driven button) → expiry (default 24h) → Send/Cancel.
   // Loop on component interactions until the user clicks Send or Cancel
-  // (or the 5-min component timeout fires). State is held in closure
+  // (or the 3-min component timeout fires). State is held in closure
   // vars and re-rendered via `compInt.update(...)` on each change.
   let target = null;
   let recipients = [];
@@ -1063,7 +1086,7 @@ async function handleSend(interaction, apiKey) {
   await interaction.editReply({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
 
   // Pre-build the customId set once; the form-loop filter runs on every
-  // component event for the next 5 min and Object.values(ids) would
+  // component event for the next 3 min and Object.values(ids) would
   // otherwise rebuild the array on each dispatch.
   const formCompIdSet = new Set(Object.values(ids));
 
@@ -1114,7 +1137,7 @@ async function handleSend(interaction, apiKey) {
       const newTarget = compInt.values[0];
       // For user-target, re-selecting 'user' is a no-op (UserSelect drives
       // the actual recipient pick). For channel and voice, ALWAYS re-resolve
-      // — members can join or leave during the up-to-5-minute form-loop
+      // — members can join or leave during the up-to-3-minute form-loop
       // window, and a stale recipients array would mint links for ghosts.
       const requiresFreshResolve = newTarget === 'channel' || newTarget === 'voice';
       if (newTarget !== target || requiresFreshResolve) {
@@ -1150,7 +1173,7 @@ async function handleSend(interaction, apiKey) {
           recipients = result.members;
         }
         // Surface the per-send cap NOW, while the user can change targets,
-        // not 5 minutes later after they've filled in the rest of the form.
+        // not 3 minutes later after they've filled in the rest of the form.
         // The post-Send check below stays as a final defense; this is a UX
         // fast-fail so the user isn't sandbagged.
         if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
@@ -1284,7 +1307,7 @@ async function handleSend(interaction, apiKey) {
       // Atomic claim. The earlier cap-check at file acceptance is UX-only
       // (told the user upfront the system was busy); five users could each
       // pass that check while activeFileSends == 0, then all sit in the
-      // 5-min Step-3 form loop, then all increment here past the cap. Re-
+      // 3-min Step-3 form loop, then all increment here past the cap. Re-
       // check at the increment point to keep the cap honest.
       if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
         clearCooldown(interaction.user.id);
