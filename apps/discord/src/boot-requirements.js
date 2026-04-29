@@ -48,4 +48,46 @@ function missingProdKeys(env, isOpenNHPActive) {
   return prodRequired(isOpenNHPActive).filter(k => !env[k]);
 }
 
-module.exports = { bootRequired, prodRequired, missingBootKeys, missingProdKeys };
+// Process-role parsing for the gateway/HTTP split. Lifted out of
+// index.js so the invalid-value path is testable without spawning a
+// child process — same shape as missingBootKeys above. See
+// .env.example's PROCESS_ROLE block for the operator-facing
+// description of each role.
+const VALID_PROCESS_ROLES = Object.freeze(['combined', 'gateway', 'http']);
+
+// Normalize and validate a PROCESS_ROLE value. Returns
+// `{role, isGateway, isHttp}` on success; throws an Error tagged
+// with `code = 'INVALID_PROCESS_ROLE'` on an unknown role so index.js
+// can surface a single boot-fail log line + exit(1) without
+// re-implementing the validation.
+//
+// Accepts the raw env-var string (or undefined). Empty / whitespace-only
+// values fall back to 'combined' — matching the documented default and
+// avoiding a false-positive boot failure when an SSM-seeded param is
+// templated to "" or " ".
+function resolveProcessRole(rawValue) {
+  const trimmed = String(rawValue ?? '').trim();
+  const role = trimmed || 'combined';
+  if (!VALID_PROCESS_ROLES.includes(role)) {
+    const err = new Error(
+      `Invalid PROCESS_ROLE: '${role}'. Valid values: ${VALID_PROCESS_ROLES.join(', ')}. ` +
+      `Set PROCESS_ROLE to one of these, or leave unset to default to 'combined'.`
+    );
+    err.code = 'INVALID_PROCESS_ROLE';
+    throw err;
+  }
+  return {
+    role,
+    isGateway: role === 'gateway' || role === 'combined',
+    isHttp: role === 'http' || role === 'combined',
+  };
+}
+
+module.exports = {
+  bootRequired,
+  prodRequired,
+  missingBootKeys,
+  missingProdKeys,
+  VALID_PROCESS_ROLES,
+  resolveProcessRole,
+};
