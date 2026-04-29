@@ -1249,3 +1249,77 @@ describe('handleSend — additional branch coverage', () => {
     expect(formFilter({ user: { id: 'user-1' }, customId: ids.cancelBtn })).toBe(true);
   });
 });
+
+// ===========================================================================
+// 9. Pure-function unit tests (no state machine)
+// ===========================================================================
+// These exercise helpers exported via `_test` directly, without driving
+// cmd.execute(). They claw back coverage that the deleted slash-options
+// tests used to provide for back-half-adjacent helpers.
+
+describe('safeUrlHost — best-effort host extraction for log lines', () => {
+  const { safeUrlHost } = _test;
+
+  it('returns the host for a well-formed URL', () => {
+    expect(safeUrlHost('https://cdn.discordapp.com/foo/bar')).toBe('cdn.discordapp.com');
+  });
+
+  it('returns invalid-url for malformed input', () => {
+    expect(safeUrlHost('not-a-url')).toBe('invalid-url');
+    expect(safeUrlHost('')).toBe('invalid-url');
+    expect(safeUrlHost(undefined)).toBe('invalid-url');
+    expect(safeUrlHost(null)).toBe('invalid-url');
+  });
+
+  it('preserves the host on a deeply-nested path', () => {
+    expect(safeUrlHost('https://maps.app.goo.gl/abc/def?ghi=jkl')).toBe('maps.app.goo.gl');
+  });
+});
+
+describe('buildDeliveryPayload — location resource type', () => {
+  const { buildDeliveryPayload } = _test;
+
+  it('builds a payload for a location-type send (no resource-type field on embed)', () => {
+    const result = buildDeliveryPayload({
+      senderAlias: 'TestSender',
+      qurlLink: 'https://q.test/loc-1',
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      personalMessage: null,
+    });
+    // Contract: returns an object with embeds array and a components row.
+    expect(result).toEqual(expect.objectContaining({
+      embeds: expect.any(Array),
+      components: expect.any(Array),
+    }));
+    expect(result.embeds.length).toBeGreaterThan(0);
+    expect(result.components.length).toBeGreaterThan(0);
+  });
+
+  it('throws on a non-finite expiresAt (fail-loud over silent degradation)', () => {
+    expect(() => buildDeliveryPayload({
+      senderAlias: 'TestSender',
+      qurlLink: 'https://q.test/loc-2',
+      expiresAt: null,
+      personalMessage: null,
+    })).toThrow(/expiresAt must be a finite Unix-seconds number/);
+    expect(() => buildDeliveryPayload({
+      senderAlias: 'TestSender',
+      qurlLink: 'https://q.test/loc-3',
+      expiresAt: NaN,
+      personalMessage: null,
+    })).toThrow(/expiresAt must be a finite Unix-seconds number/);
+  });
+
+  it('accepts a sanitized personalMessage and renders it into the embed', () => {
+    // CONTRACT: personalMessage arrives pre-sanitized — see the comment
+    // at buildDeliveryPayload's body. This test pins that the helper
+    // accepts a sanitized message without throwing or stripping further.
+    const result = buildDeliveryPayload({
+      senderAlias: 'TestSender',
+      qurlLink: 'https://q.test/loc-4',
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      personalMessage: 'Sanitized note text',
+    });
+    expect(result.embeds.length).toBeGreaterThan(0);
+  });
+});

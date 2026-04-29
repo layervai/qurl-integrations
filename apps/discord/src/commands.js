@@ -877,15 +877,28 @@ async function handleSend(interaction, apiKey) {
     modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
     await initBtn.showModal(modal).catch(logIgnoredDiscordErr);
 
+    // Clear the underlying ephemeral message's components — without this,
+    // the original 2-button reply (Send File / Send Location) stays
+    // clickable while the modal is up. A click on Send File there has no
+    // listener and Discord renders an "Interaction failed" toast. The
+    // file path didn't have this issue because initBtn.update({components:
+    // []}) clears the row before awaitMessages.
+    await interaction.editReply({ components: [] }).catch(logIgnoredDiscordErr);
+
     let modalSubmit;
     try {
       modalSubmit = await initBtn.awaitModalSubmit({
         // Discord scopes modal-submit interactions to the user who saw
         // the modal, but defense-in-depth: match the personal-message
-        // modal filter (line ~1151) so a future reader can't spot a
-        // "missing user check here" inconsistency.
+        // modal filter so a future reader can't spot a "missing user
+        // check here" inconsistency.
         filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}` && i.user.id === interaction.user.id,
-        time: 120000,
+        // 90s, not 120s. Trimmed to keep the location-path worst case
+        // (60s init + 90s modal + 180s form = 5.5min) symmetric with the
+        // file-path worst case (60s init + 60s awaitMessages + 180s form
+        // = 5min) before the back-half starts. Both paths leave ~9-10
+        // min of the 15-min interaction-token window for the back-half.
+        time: 90000,
       });
     } catch (err) {
       const isTimeout = err?.code === 'InteractionCollectorError' || /time/.test(err?.message || '');
@@ -973,12 +986,14 @@ async function handleSend(interaction, apiKey) {
   // Sender's own filename in their own ephemeral form preview is low-blast,
   // but match the same defense the location path applies to locationName so
   // a future copy-paste of formContent() into a non-ephemeral surface
-  // doesn't quietly leak a markdown-injection vector.
-  const safeAttachmentName = () => attachment ? escapeDiscordMarkdown(attachment.name) : '';
+  // doesn't quietly leak a markdown-injection vector. Computed once per
+  // send (the attachment doesn't change after Step 2) so formContent()
+  // doesn't re-escape on every form re-render.
+  const safeAttachmentName = attachment ? escapeDiscordMarkdown(attachment.name) : '';
 
   const formContent = () => {
     let content = '✅ ';
-    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName()}**.`;
+    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName}**.`;
     else content += `Got **${locationName || 'location'}**.`;
     content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
     if (personalMessage) {
@@ -3158,6 +3173,7 @@ module.exports = {
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,
+      safeUrlHost,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
