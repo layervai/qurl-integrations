@@ -788,6 +788,11 @@ async function handleSend(interaction, apiKey) {
     // exposure. If the user invoked /qurl send already in a DM with
     // the bot, just await in the same channel — no pivot needed.
     let captureChannel;
+    // Tracks the bot's "Ready! Drop your file here" message in the DM
+    // so we can delete it after capture. Only set in the DM-pivot path
+    // (the DM-already path uses initBtn.update which is the ephemeral
+    // interaction reply — no separate DM bot message to clean up).
+    let dmPromptMessage = null;
     if (interaction.channel.type === ChannelType.DM) {
       captureChannel = interaction.channel;
       await initBtn.update({
@@ -803,7 +808,7 @@ async function handleSend(interaction, apiKey) {
       let dm;
       try {
         dm = await interaction.user.createDM();
-        await dm.send('\u{1F4C1} **Ready! Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.');
+        dmPromptMessage = await dm.send('\u{1F4C1} **Ready! Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.');
       } catch (err) {
         const dmsBlocked = err && (err.code === 50007 || err.code === '50007');
         if (!dmsBlocked) {
@@ -857,11 +862,66 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
-    // No fileMessage.delete() here. The DM-pivot above means the file
-    // is captured from a 1:1 DM channel (no other viewers); deleting it
-    // would just leave the user wondering where their upload went. If
-    // the user invoked /qurl send already in a DM, same logic — DMs
-    // are private to the user+bot.
+    // No fileMessage.delete() here — bots can't delete user messages
+    // in DMs (Manage Messages doesn't apply outside guild channels), and
+    // even if we could, the file is in a 1:1 DM with no other viewers.
+    //
+    // We CAN delete the bot-authored DM messages once capture is done,
+    // and that's worth doing for visual cleanup. Send a brief "Got your
+    // file" confirmation, then delete BOTH that confirmation and the
+    // earlier "Ready! Drop your file here" prompt. The user's drop-
+    // message stays — they can delete it themselves after Send if they
+    // want a fully clean DM thread.
+    if (dmPromptMessage) {
+      const cleanup = async () => {
+        // Build a Link button back to the channel where /qurl send was
+        // invoked. Discord URL format: discord.com/channels/<guild>/<channel>.
+        // Clicking takes the user straight back to the channel where the
+        // ephemeral form is waiting (ephemeral messages live for the
+        // duration of the interaction token, ~15 min).
+        const channelUrl = `https://discord.com/channels/${interaction.guild?.id ?? '@me'}/${interaction.channelId}`;
+        const rawName = interaction.channel?.name;
+        const channelLabel = rawName
+          ? `Go back to #${rawName}`.slice(0, 80) // Discord button label cap is 80
+          : 'Go back to the channel';
+        const goBackRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel(channelLabel)
+            .setURL(channelUrl)
+        );
+
+        let confirmMsg;
+        try {
+          confirmMsg = await captureChannel.send({
+            content: '✓ **Got your file.** Click below to finish your send.',
+            components: [goBackRow],
+          });
+        } catch (err) {
+          logger.warn('Failed to post DM confirmation after file capture', {
+            sendNonce, userId: interaction.user.id, error: err?.message,
+          });
+        }
+        // Delete the original "Ready!" prompt right away — it's stale.
+        dmPromptMessage.delete().catch((err) => logger.warn('Failed to delete DM prompt message', {
+          sendNonce, userId: interaction.user.id, error: err?.message,
+        }));
+        // Delete the confirmation+button after 60s. Long enough for the
+        // user to navigate back to the channel and finish the send;
+        // short enough that the DM thread doesn't stay cluttered. setTimeout
+        // is fire-and-forget — if the EC2 dies mid-flow the cleanup
+        // never fires; the bot-side debris is low-impact (user can
+        // still delete it manually).
+        if (confirmMsg) {
+          setTimeout(() => {
+            confirmMsg.delete().catch((err) => logger.warn('Failed to delete DM confirmation', {
+              sendNonce, userId: interaction.user.id, error: err?.message,
+            }));
+          }, 60000).unref?.();
+        }
+      };
+      cleanup(); // fire-and-forget; we don't await so the form doesn't block
+    }
 
     // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
     // for parity with the timeout/cancel paths. Up to a few minutes can pass
@@ -1066,7 +1126,7 @@ async function handleSend(interaction, apiKey) {
   // helper owns the leading glyph and switches on the warning shape.
   const formContent = ({ warning } = {}) => {
     let content = warning ? `⚠\u{FE0F} ${warning}\n\n` : '✅ ';
-    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName}**.`;
+    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName}**. You can delete the file in DM after send.`;
     else content += `Got **${locationName || 'location'}**.`;
     content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
     if (personalMessage) {
