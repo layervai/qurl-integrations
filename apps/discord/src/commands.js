@@ -875,7 +875,7 @@ async function handleSend(interaction, apiKey) {
       .setRequired(true);
 
     modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
-    await initBtn.showModal(modal);
+    await initBtn.showModal(modal).catch(logIgnoredDiscordErr);
 
     let modalSubmit;
     try {
@@ -1045,7 +1045,7 @@ async function handleSend(interaction, apiKey) {
     return rows;
   };
 
-  await interaction.editReply({ content: formContent(), components: formRows() });
+  await interaction.editReply({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
 
   // Pre-build the customId set once; the form-loop filter runs on every
   // component event for the next 5 min and Object.values(ids) would
@@ -1085,12 +1085,12 @@ async function handleSend(interaction, apiKey) {
 
     if (compInt.customId === ids.cancelBtn) {
       clearCooldown(interaction.user.id);
-      await safeCompUpdate(compInt,{ content: 'Send cancelled.', components: [] });
+      await safeCompUpdate(compInt, { content: 'Send cancelled.', components: [] });
       return;
     }
 
     if (compInt.customId === ids.sendBtn) {
-      await safeCompUpdate(compInt,{ content: 'Preparing send…', components: [] });
+      await safeCompUpdate(compInt, { content: 'Preparing send…', components: [] });
       sendApproved = true;
       break;
     }
@@ -1111,25 +1111,25 @@ async function handleSend(interaction, apiKey) {
           } catch (err) {
             logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
             clearCooldown(interaction.user.id);
-            await safeCompUpdate(compInt,{ content: 'Failed to load channel members. Send cancelled.', components: [] });
+            await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
             return;
           }
           recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
-            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
             continue;
           }
         } else if (target === 'voice') {
           const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
           if (result.error === 'not_in_voice') {
             target = null;
-            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
             continue;
           }
           if (result.members.length === 0) {
             target = null;
-            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
             continue;
           }
           recipients = result.members;
@@ -1142,14 +1142,14 @@ async function handleSend(interaction, apiKey) {
           const resolvedCount = recipients.length;
           target = null;
           recipients = [];
-          await safeCompUpdate(compInt,{
+          await safeCompUpdate(compInt, {
             content: `⚠\u{FE0F} This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.\n\n` + formContent(),
             components: formRows(),
           });
           continue;
         }
       }
-      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
 
@@ -1160,15 +1160,15 @@ async function handleSend(interaction, apiKey) {
         continue;
       }
       if (selectedUser.bot) {
-        await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt, { content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
         continue;
       }
       if (selectedUser.id === interaction.user.id) {
-        await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt, { content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
         continue;
       }
       recipients = [selectedUser];
-      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
 
@@ -1189,7 +1189,7 @@ async function handleSend(interaction, apiKey) {
           .setRequired(false)
           .setValue(personalMessage || '')
       ));
-      await compInt.showModal(msgModal);
+      await compInt.showModal(msgModal).catch(logIgnoredDiscordErr);
 
       let msgSubmit;
       try {
@@ -1209,13 +1209,13 @@ async function handleSend(interaction, apiKey) {
 
       const raw = msgSubmit.fields.getTextInputValue(messageInputId).trim();
       personalMessage = raw ? sanitizeMessage(raw) : null;
-      await msgSubmit.update({ content: formContent(), components: formRows() });
+      await msgSubmit.update({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
       continue;
     }
 
     if (compInt.customId === ids.expirySelect) {
       expiresIn = compInt.values[0];
-      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
   }
@@ -1242,7 +1242,7 @@ async function handleSend(interaction, apiKey) {
   }
 
   // --- Step 4: Process and send (back-half — preserved unchanged) ---
-  await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] });
+  await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
   const sendId = crypto.randomUUID();
   let qurlLinks = [];

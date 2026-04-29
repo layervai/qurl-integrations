@@ -1119,9 +1119,12 @@ describe('handleSend — additional branch coverage', () => {
     });
     await cmd.execute(interaction);
     // After the second submit, the form preview should NOT contain
-    // "Personal message:" — assert against the LATEST update.
-    const lastUpdateContent = clearMsg.update.mock.calls[0][0].content;
-    expect(lastUpdateContent).not.toContain('Personal message:');
+    // "Personal message:" — assert against the most-recent update so a
+    // future code change that re-renders more than once still verifies
+    // the final state.
+    expect(clearMsg.update).toHaveBeenLastCalledWith(expect.objectContaining({
+      content: expect.not.stringContaining('Personal message:'),
+    }));
   });
 
   // C9 — saveSendConfig failure is logged-and-swallowed; DMs still go out.
