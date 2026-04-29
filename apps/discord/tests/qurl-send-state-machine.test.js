@@ -443,6 +443,26 @@ describe('handleSend — Step 2: file path', () => {
     );
   });
 
+  it.each([
+    ['GuildVoice (voice text)', 2],
+    ['GuildStageVoice', 13],
+  ])('pivots to DM from %s channels (not just GuildText)', async (_label, channelType) => {
+    // Voice channels with text chat (since Discord 2022) and stage
+    // voice channels invoke slash commands the same way as text
+    // channels, but their type isn't DM — so they MUST take the
+    // DM-pivot branch. Pin the behavior so a future refactor that
+    // narrows the gate to "GuildText only" doesn't silently route
+    // voice-channel users back into the public-channel privacy hole.
+    const fileInit = fileInitBtn();
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit],
+      channel: { type: channelType },
+    });
+    await cmd.execute(interaction);
+    expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+  });
+
   it('keeps file capture in-channel when /qurl send is invoked already in a DM', async () => {
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const channelAwaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
