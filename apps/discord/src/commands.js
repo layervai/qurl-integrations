@@ -5,7 +5,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -792,7 +791,18 @@ async function handleSend(interaction, apiKey) {
         errors: ['time'],
       });
       fileMessage = messages.first();
-    } catch {
+    } catch (err) {
+      // awaitMessages with errors:['time'] rejects with the collected
+      // Collection on timeout, which is the expected exit. Anything else
+      // (channel destroyed, permissions revoked mid-await, gateway
+      // disconnect) is unexpected and worth a log line so a user reporting
+      // "I dropped the file but it didn't take" doesn't go uninvestigated.
+      const isTimeoutCollection = err && typeof err.size === 'number';
+      if (!isTimeoutCollection) {
+        logger.warn('awaitMessages failed unexpectedly during file capture', {
+          sendNonce, userId: interaction.user.id, error: err?.message,
+        });
+      }
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
     }
@@ -813,9 +823,25 @@ async function handleSend(interaction, apiKey) {
         components: [],
       });
     }
+    // Defense in depth — connector's downloadAndUpload validates this URL
+    // again, but mirroring handleAddRecipients (line ~1676) keeps the SSRF
+    // check at every callsite that hands an untrusted URL to the connector.
+    // If discord.js ever changes how attachments report URL, the local
+    // check fails fast with a clear message instead of relying on the
+    // downstream module to remain in lockstep.
+    if (!isAllowedSourceUrl(attachment.url)) {
+      clearCooldown(interaction.user.id);
+      logger.warn('File send rejected: attachment.url failed isAllowedSourceUrl', {
+        sendNonce, userId: interaction.user.id, urlHost: (() => { try { return new URL(attachment.url).host; } catch { return 'invalid-url'; } })(),
+      });
+      return interaction.editReply({
+        content: 'The attached file URL is not from a recognized Discord CDN. Cancelled.',
+        components: [],
+      });
+    }
     if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
       clearCooldown(interaction.user.id);
-      logger.warn('File send rejected: concurrency cap reached', { activeFileSends });
+      logger.warn('File send rejected: concurrency cap reached', { activeFileSends, sendNonce, userId: interaction.user.id });
       return interaction.editReply({
         content: 'The bot is processing too many file sends right now. Please try again in a moment.',
         components: [],
@@ -1114,6 +1140,18 @@ async function handleSend(interaction, apiKey) {
     }
   }
 
+  // Defense in depth: the Send button is `setDisabled` until recipients
+  // resolve, but a spoofed component interaction could still fire it with
+  // an empty recipient set. Bail early so the back-half doesn't mint zero
+  // links and surface a confusing "Failed to create any links" message.
+  if (recipients.length === 0) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: 'No recipients selected. Send cancelled.',
+      components: [],
+    });
+  }
+
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     clearCooldown(interaction.user.id);
     const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
@@ -1149,11 +1187,26 @@ async function handleSend(interaction, apiKey) {
   };
   try {
     if (resourceType === RESOURCE_TYPES.FILE) {
+      // Atomic claim. The earlier cap-check at file acceptance is UX-only
+      // (told the user upfront the system was busy); five users could each
+      // pass that check while activeFileSends == 0, then all sit in the
+      // 5-min Step-3 form loop, then all increment here past the cap. Re-
+      // check at the increment point to keep the cap honest.
+      if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+        clearCooldown(interaction.user.id);
+        logger.warn('File send rejected at slot-claim: concurrency cap reached', {
+          activeFileSends, sendId, sendNonce, userId: interaction.user.id,
+        });
+        return interaction.editReply({
+          content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+          components: [],
+        });
+      }
       activeFileSends++;
       fileSendSlotClaimed = true;
       slotWatchdog = setTimeout(() => {
         if (fileSendSlotClaimed) {
-          logger.error('activeFileSends slot watchdog fired — slot force-released', { sendId });
+          logger.error('activeFileSends slot watchdog fired — slot force-released', { sendId, sendNonce, userId: interaction.user.id });
           activeFileSends--;
           fileSendSlotClaimed = false;
         }
@@ -2857,40 +2910,6 @@ function getActiveCommands() {
     : commands.filter(cmd => CUSTOMER_SAFE_COMMANDS.has(cmd.data.name));
 }
 
-// Target choices are surfaced via autocomplete (not static addChoices)
-// so the "voice" option only appears when the command is invoked FROM
-// a voice / stage-voice channel. Showing the voice option in text
-// channels — even when the invoking user happens to be connected to
-// voice elsewhere — was a persistent UX bug: users in text channels
-// don't expect a "voice users" target and the option reads as noise.
-// The backend (handleSend → getVoiceChannelMembers) still validates
-// the sender is in voice and returns a friendly error otherwise, so
-// channel-type gating here just hides the affordance in the wrong
-// context; it doesn't loosen any invariant.
-async function handleTargetAutocomplete(interaction) {
-  const channel = interaction.channel;
-  const isVoiceChannel = channel && (
-    channel.type === ChannelType.GuildVoice ||
-    channel.type === ChannelType.GuildStageVoice
-  );
-  const choices = [
-    { name: 'Everyone in this channel', value: 'channel' },
-    { name: 'A specific user', value: 'user' },
-  ];
-  if (isVoiceChannel) {
-    choices.push({ name: 'Only voice users', value: 'voice' });
-  }
-  // respond() can reject on the 3s autocomplete deadline, Unknown
-  // interaction, or network errors. Swallow + log so the rejection
-  // doesn't bubble as an unhandled promise in the InteractionCreate
-  // listener — the user just sees no suggestions in that case.
-  try {
-    await interaction.respond(choices);
-  } catch (err) {
-    logger.warn('Failed to respond to target autocomplete', { error: err.message });
-  }
-}
-
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
 // not purge each other on a fresh .set() call, so a bot that previously
@@ -2970,15 +2989,11 @@ async function registerCommands(client) {
 
 // Handle command interactions
 async function handleCommand(interaction) {
-  if (interaction.isAutocomplete()) {
-    if (interaction.commandName === 'qurl') {
-      const focused = interaction.options.getFocused(true);
-      if (focused.name === 'target') {
-        return handleTargetAutocomplete(interaction);
-      }
-    }
-    return;
-  }
+  // /qurl now has zero options after the button-driven redesign; no other
+  // command in this file uses autocomplete. Discord can still deliver
+  // autocomplete events (legacy clients, stale registrations) — short-
+  // circuit them so they don't fall through to the chat-input path.
+  if (interaction.isAutocomplete()) return;
 
   if (!interaction.isChatInputCommand()) return;
 
