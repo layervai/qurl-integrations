@@ -1073,8 +1073,12 @@ async function handleSend(interaction, apiKey) {
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.messageBtn)
-        .setLabel(personalMessage ? '✏\u{FE0F} Edit personal message' : '+ Add personal message (optional)')
-        .setStyle(ButtonStyle.Secondary)
+        // Primary (blue) + a longer descriptive label so this button reads as
+        // a peer of the surrounding select dropdowns rather than a small
+        // grey afterthought. Discord doesn't let buttons match select-menu
+        // width, but a more present label closes most of the visual gap.
+        .setLabel(personalMessage ? '✏\u{FE0F} Edit personal message for recipients' : '✏\u{FE0F} Add a personal note for recipients (optional)')
+        .setStyle(ButtonStyle.Primary)
     ));
 
     rows.push(new ActionRowBuilder().addComponents(
