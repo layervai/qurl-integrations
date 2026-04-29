@@ -4,28 +4,29 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
   coverageDirectory: 'coverage',
   coverageThreshold: {
-    // Was 78/68/78/78. The /qurl send button-driven redesign rewrote the
-    // front-half as a state machine; the prior back-half collector /
-    // monitor / handleAddRecipients tests were pinned to the dead 4-options
-    // slash shape and were removed (not kept as describe.skip — that was
-    // 1900+ lines of dead test code). qurl-send-state-machine.test.js now
-    // covers the new flow end-to-end (front-half + 2 back-half happy paths
-    // + DM-failure / DB-error / quota-exceeded / saveSendConfig swallow /
-    // mint-underdelivery / fetchGuildMembers fail / form-loop timeout /
-    // bot-rejection / self-rejection / channel-empty / voice-not-in-voice
-    // + DM-pivot for Send File + voice-channel pivot regression guard).
-    // The gap to 78 is the back-half code preserved unchanged from main
-    // (monitorLinkStatus, post-send confirm message, handleAddRecipients)
-    // PLUS new files merged in from main's #117 (discord-rest.js, http-
-    // only-init.js) that don't yet have full coverage; reintroducing
-    // tests for that surface and restoring the threshold is tracked in
-    // https://github.com/layervai/qurl-integrations/issues/137. Real gate
-    // is the 686-test suite, which runs without any skipped specs.
+    // 78/68/78/78 floors restored. The /qurl send state-machine redesign
+    // removed commands-comprehensive.test.js + coverage-boost.test.js
+    // (1900+ lines of describe.skip-able tests pinned to the dead 4-options
+    // slash shape). Their replacements:
+    //   - qurl-send-state-machine.test.js: front-half flow (handleSend
+    //     pre-flight guards, Step 1/2/3 transitions, file/location paths,
+    //     end-to-end happy paths, DM-pivot + voice-channel regression).
+    //   - qurl-send-back-half.test.js: back-half unit tests
+    //     (monitorLinkStatus polling/transitions/stop()-race/LRU eviction,
+    //     revokeAllLinks per-link failures, handleAddRecipients pre-flight
+    //     guards + file/location paths + DB-failure mid-flow,
+    //     mintLinksInBatches batch boundaries).
+    // Current coverage on commands.js is 81.78 / 72.61 / 81.75 / 82.89,
+    // clear of the 78/68/78/78 floor on every metric.
+    //
+    // Issue #137 (back-half coverage restoration) is closed by this PR per
+    // Justin's hard-blocker review feedback: lowering a quality gate to
+    // merge a UX rewrite is the wrong direction even with a tracker.
     global: {
-      statements: 73,
-      branches: 65,
-      functions: 77,
-      lines: 75,
+      statements: 78,
+      branches: 68,
+      functions: 78,
+      lines: 78,
     },
   },
   verbose: true,

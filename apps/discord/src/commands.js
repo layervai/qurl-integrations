@@ -3335,6 +3335,16 @@ module.exports = {
       buildDeliveryPayload,
       resolveSenderAlias,
       safeUrlHost,
+      // Back-half functions exposed for direct unit testing. Without these
+      // hooks, coverage of the polling/revoke/add-recipients code paths
+      // can only be reached via full handleSend integration tests, which
+      // require mocking the entire state-machine front-half before the
+      // back-half even runs. Direct exposure means each function gets a
+      // focused spec without that setup overhead.
+      monitorLinkStatus,
+      revokeAllLinks,
+      mintLinksInBatches,
+      activeMonitors,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
