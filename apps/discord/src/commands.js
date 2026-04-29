@@ -819,6 +819,20 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
+    // Delete the user's drop-message from the channel. The file's CDN URL
+    // is in the message and would otherwise stay publicly visible to
+    // every channel member for the rest of the channel's history,
+    // defeating the "secure one-time link" framing of qURL — the file
+    // would be readable from the message attachment itself, no qURL link
+    // needed. Best-effort: if the bot lacks Manage Messages or the user
+    // already deleted the message, swallow the error (the send still
+    // proceeds; the channel-side leak is the only thing affected).
+    fileMessage.delete?.().catch?.((err) => {
+      logger.warn('Failed to delete file-drop message after capture', {
+        sendNonce, userId: interaction.user.id, error: err?.message,
+      });
+    });
+
     // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
     // for parity with the timeout/cancel paths. Up to a few minutes can pass
     // between the user dropping the file and these guards firing on a slow form-loop, and
@@ -859,9 +873,11 @@ async function handleSend(interaction, apiKey) {
     // by the time the user finishes the form, slot state has shifted
     // and the early "too busy" message is no longer informative — it
     // would also reject users who'd actually have a slot by Send-time.
-    // The atomic re-check at the slot-claim site (in Step 4 below) is
-    // the authoritative gate now and produces the same user-facing
-    // message when the cap is genuinely full at decision time.
+    // The atomic re-check at the slot-claim site below (the
+    // `if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS)` guard inside
+    // the back-half try-block) is the authoritative gate now and
+    // produces the same user-facing message when the cap is genuinely
+    // full at decision time.
   } else {
     resourceType = RESOURCE_TYPES.MAPS;
 
@@ -1014,8 +1030,12 @@ async function handleSend(interaction, apiKey) {
   // doesn't re-escape on every form re-render.
   const safeAttachmentName = attachment ? escapeDiscordMarkdown(attachment.name) : '';
 
-  const formContent = () => {
-    let content = '✅ ';
+  // `warning` is an optional reason string prepended with the ⚠️ glyph
+  // INSTEAD of the default ✅ prefix. Caller-side string concatenation
+  // would rendered "⚠️ ... \n\n✅ Got X" — visually mixed signals — so the
+  // helper owns the leading glyph and switches on the warning shape.
+  const formContent = ({ warning } = {}) => {
+    let content = warning ? `⚠\u{FE0F} ${warning}\n\n` : '✅ ';
     if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName}**.`;
     else content += `Got **${locationName || 'location'}**.`;
     content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
@@ -1155,19 +1175,19 @@ async function handleSend(interaction, apiKey) {
           recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
-            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other members in this channel. Pick another option.' }), components: formRows() });
             continue;
           }
         } else if (target === 'voice') {
           const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
           if (result.error === 'not_in_voice') {
             target = null;
-            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: formContent({ warning: 'You must be in a voice channel to use this option.' }), components: formRows() });
             continue;
           }
           if (result.members.length === 0) {
             target = null;
-            await safeCompUpdate(compInt, { content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other users in your voice channel.' }), components: formRows() });
             continue;
           }
           recipients = result.members;
@@ -1181,7 +1201,7 @@ async function handleSend(interaction, apiKey) {
           target = null;
           recipients = [];
           await safeCompUpdate(compInt, {
-            content: `⚠\u{FE0F} This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.\n\n` + formContent(),
+            content: formContent({ warning: `This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.` }),
             components: formRows(),
           });
           continue;
@@ -1198,11 +1218,11 @@ async function handleSend(interaction, apiKey) {
         continue;
       }
       if (selectedUser.bot) {
-        await safeCompUpdate(compInt, { content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Pick a different user.' }), components: formRows() });
         continue;
       }
       if (selectedUser.id === interaction.user.id) {
-        await safeCompUpdate(compInt, { content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Pick a different user.' }), components: formRows() });
         continue;
       }
       recipients = [selectedUser];

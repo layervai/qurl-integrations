@@ -391,6 +391,27 @@ describe('handleSend — Step 2: file path', () => {
     return makeCompInt(ids.initFile, { update: jest.fn().mockResolvedValue(undefined) });
   }
 
+  it('logs at warn when awaitMessages rejects with a non-timeout error', async () => {
+    // discord.js v14 contract: awaitMessages with errors:['time'] rejects
+    // with a Collection on timeout. An Error-shaped rejection means
+    // something else broke (channel destroyed, perms revoked, gateway
+    // disconnect) — that path takes the unexpected branch and logs.
+    const awaitMessages = jest.fn().mockRejectedValue(new Error('Channel destroyed mid-await'));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'awaitMessages failed unexpectedly during file capture',
+      expect.objectContaining({ error: 'Channel destroyed mid-await' }),
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('No file received'),
+    }));
+    expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
   it('cancels when no file is dropped within 60s', async () => {
     // discord.js v14 contract: awaitMessages with errors:['time'] rejects
     // with the collected Collection on timeout (NOT an Error). The handler
