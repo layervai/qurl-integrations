@@ -176,19 +176,24 @@ jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]
 // ---------------------------------------------------------------------------
 
 const crypto = require('crypto');
-const originalRandomBytes = crypto.randomBytes;
 const NONCE = 'deadbeef01234567';
-crypto.randomBytes = jest.fn((size) => (size === 8 ? Buffer.from(NONCE, 'hex') : originalRandomBytes(size)));
-crypto.randomUUID = jest.fn(() => 'mock-send-uuid');
+// jest.spyOn (vs raw property assignment) means jest.restoreAllMocks /
+// the configured restoreMocks behavior in jest.config can roll the spy
+// back automatically — and it tracks the original impl internally so
+// the restore never depends on the test file remembering to capture it.
+const originalRandomBytesRef = crypto.randomBytes;
+const randomBytesSpy = jest.spyOn(crypto, 'randomBytes').mockImplementation(
+  (size) => (size === 8 ? Buffer.from(NONCE, 'hex') : originalRandomBytesRef(size)),
+);
+const randomUUIDSpy = jest.spyOn(crypto, 'randomUUID').mockReturnValue('mock-send-uuid');
 
 const { commands, _test } = require('../src/commands');
 const logger = require('../src/logger');
 const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache } = _test;
 
 afterAll(() => {
-  // Restore the singleton crypto.randomBytes so subsequent test files in
-  // the same Jest worker (or future shared-runner mode) see the real impl.
-  crypto.randomBytes = originalRandomBytes;
+  randomBytesSpy.mockRestore();
+  randomUUIDSpy.mockRestore();
 });
 
 afterEach(() => {
@@ -880,18 +885,30 @@ describe('handleSend — additional branch coverage', () => {
     return makeCompInt(ids.initFile, { update: jest.fn().mockResolvedValue(undefined) });
   }
 
-  // C1 — concurrency cap fires both at file-acceptance and at slot-claim.
-  it('rejects file send up-front when concurrency cap is already reached', async () => {
+  // C1 — concurrency cap fires at the atomic slot-claim site after the
+  // user clicks Send. The earlier file-acceptance gate was removed because
+  // the up-to-5-min Step-3 form loop made it stale by the time the user
+  // would actually claim a slot.
+  it('rejects file send at slot-claim when concurrency cap is reached', async () => {
     setActiveFileSends(5);
+    const fileInit = fileInitBtn();
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
-    const interaction = makeInteraction({ awaitQueue: [fileInitBtn()], awaitMessages });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetUser, userSelect, sendBtn],
+      awaitMessages,
+    });
     await cmd.execute(interaction);
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('processing too many file sends'),
     }));
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('concurrency cap reached'),
+      expect.stringContaining('slot-claim'),
       expect.objectContaining({ activeFileSends: 5 }),
     );
     expect(mockDownloadAndUpload).not.toHaveBeenCalled();
@@ -964,6 +981,30 @@ describe('handleSend — additional branch coverage', () => {
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
     await cmd.execute(interaction);
     expect(mockGetVoiceChannelMembers).toHaveBeenCalledTimes(2);
+  });
+
+  // C5d — switching target across types resets recipients (no leakage
+  // from a previously-picked user into a channel send, etc.).
+  it('switches target across types and resets recipients each transition', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
+    const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userPick = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const target3 = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userPick2 = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-7', bot: false, username: 'Carol' })) },
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), target1, userPick, target2, target3, userPick2, sendBtn],
+    });
+    await cmd.execute(interaction);
+    // The send went out — recipient was Carol (the second pick), not
+    // Bob (whose recipients[] was reset by the channel transition).
+    expect(mockSendDM).toHaveBeenCalledWith('user-7', expect.any(Object));
+    expect(mockSendDM).not.toHaveBeenCalledWith('user-2', expect.any(Object));
   });
 
   // C5c — user re-select is still a no-op (UserSelect drives recipients).

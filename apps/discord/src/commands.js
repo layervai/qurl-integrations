@@ -844,14 +844,14 @@ async function handleSend(interaction, apiKey) {
         components: [],
       }).catch(logIgnoredDiscordErr);
     }
-    if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
-      clearCooldown(interaction.user.id);
-      logger.warn('File send rejected: concurrency cap reached', { activeFileSends, sendNonce, userId: interaction.user.id });
-      return interaction.editReply({
-        content: 'The bot is processing too many file sends right now. Please try again in a moment.',
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
+    // No early concurrency-cap check here. The original placement was
+    // before the redesign added the up-to-5-minute Step-3 form loop;
+    // by the time the user finishes the form, slot state has shifted
+    // and the early "too busy" message is no longer informative — it
+    // would also reject users who'd actually have a slot by Send-time.
+    // The atomic re-check at the slot-claim site (line ~1219) is the
+    // authoritative gate now and produces the same user-facing message
+    // when the cap is genuinely full at decision time.
   } else {
     resourceType = RESOURCE_TYPES.MAPS;
 
@@ -873,7 +873,11 @@ async function handleSend(interaction, apiKey) {
     let modalSubmit;
     try {
       modalSubmit = await initBtn.awaitModalSubmit({
-        filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}`,
+        // Discord scopes modal-submit interactions to the user who saw
+        // the modal, but defense-in-depth: match the personal-message
+        // modal filter (line ~1151) so a future reader can't spot a
+        // "missing user check here" inconsistency.
+        filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}` && i.user.id === interaction.user.id,
         time: 120000,
       });
     } catch (err) {
@@ -1034,12 +1038,17 @@ async function handleSend(interaction, apiKey) {
 
   await interaction.editReply({ content: formContent(), components: formRows() });
 
+  // Pre-build the customId set once; the form-loop filter runs on every
+  // component event for the next 5 min and Object.values(ids) would
+  // otherwise rebuild the array on each dispatch.
+  const formCompIdSet = new Set(Object.values(ids));
+
   let sendApproved = false;
   while (!sendApproved) {
     let compInt;
     try {
       compInt = await interaction.channel.awaitMessageComponent({
-        filter: (i) => i.user.id === interaction.user.id && Object.values(ids).includes(i.customId),
+        filter: (i) => i.user.id === interaction.user.id && formCompIdSet.has(i.customId),
         time: 5 * 60000,
       });
     } catch {
@@ -1100,8 +1109,8 @@ async function handleSend(interaction, apiKey) {
         }
         // Surface the per-send cap NOW, while the user can change targets,
         // not 5 minutes later after they've filled in the rest of the form.
-        // The post-Send check at line ~1163 stays as a final defense; this
-        // is a UX fast-fail so the user isn't sandbagged.
+        // The post-Send check below stays as a final defense; this is a UX
+        // fast-fail so the user isn't sandbagged.
         if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
           const resolvedCount = recipients.length;
           target = null;
