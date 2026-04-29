@@ -8,7 +8,8 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-  audit: jest.fn(),}));
+  audit: jest.fn(),
+}));
 
 const { expiryToISO, expiryToMs } = require('../src/utils/time');
 

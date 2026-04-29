@@ -99,9 +99,11 @@ const logger = {
   //
   // Audit lines bypass currentLevel — they're observability, not
   // debug noise. They also bypass the redact() pass on `meta`
-  // (audit fields are pre-vetted by the caller; see call sites in
-  // commands.js + connector.js) so a redact substring like
-  // "token" appearing in a sendId doesn't get blanked.
+  // (audit fields are pre-vetted by the caller — see the AUDIT_EVENTS
+  // call sites in commands.js) so a redact substring like "token"
+  // appearing in a sendId doesn't get blanked. Callers MUST ensure
+  // they don't pass secrets into meta — the constants.js comment
+  // documents this contract.
   audit(event, meta = {}) {
     // Spread meta first, then pin event + agent last so a caller passing
     // `agent` or `event` in meta cannot overwrite the canonical value the

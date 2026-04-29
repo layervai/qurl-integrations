@@ -597,6 +597,17 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
+
+  it('emits revoke_success audit event with success/total tally', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    await revokeAllLinks('send-42', 'sender-1', 'apikey');
+
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-42', success: 2, total: 2,
+    });
+  });
 });
 
 // ===========================================================================
@@ -825,6 +836,35 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
     // updateSendDMStatus called once per recipient with SENT.
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledTimes(2);
+    // Audit emission: upload_success + mint_success + dispatch_sent (×2 recipients).
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'mint_success', 'dispatch_sent']));
+    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
+      send_id: 'send-1', kind: 'location', count: 2,
+    }));
+    expect(emitted.filter(e => e === 'dispatch_sent')).toHaveLength(2);
+  });
+
+  it('emits mint_failed (not mint_success) when uploadJsonToConnector throws', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '5m',
+    });
+    const err = new Error('upstream 429');
+    err.apiCode = 'rate_limited';
+    mockUploadJsonToConnector.mockRejectedValueOnce(err);
+
+    await handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toContain('mint_failed');
+    expect(emitted).not.toContain('mint_success');
+    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
+      send_id: 'send-1', kind: 'location', api_code: 'rate_limited',
+    }));
   });
 
   it('reports failed DMs as failed in the return value', async () => {

@@ -1939,8 +1939,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
+  // Tracks which kind was in flight when a throw escapes — `hasFile` and
+  // `hasLocation` can both be true (a single send-config that had both),
+  // so a "ternary on hasFile" mislabels the failure when location throws
+  // after the file path already succeeded. Set right before each block
+  // that can throw, read by the catch's logger.audit(MINT_FAILED).
+  let inFlightKind = null;
   try {
     if (hasFile) {
+      inFlightKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
       // resource so the 10-token pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
@@ -2019,6 +2026,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'file', count: allLinks.length, expires_in: sendConfig.expires_in });
     }
     if (hasLocation) {
+      inFlightKind = 'location';
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
       const expiresAt = expiryToISO(sendConfig.expires_in);
@@ -2047,7 +2055,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: hasFile ? 'file' : 'location', api_code: error.apiCode || null });
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind, api_code: error.apiCode || null });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'

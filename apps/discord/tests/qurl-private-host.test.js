@@ -14,7 +14,8 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-  audit: jest.fn(),}));
+  audit: jest.fn(),
+}));
 
 const { createOneTimeLink } = require('../src/qurl');
 
