@@ -867,6 +867,43 @@ describe('handleAddRecipients — happy path (location)', () => {
     }));
   });
 
+  // Locks in the inFlightKind invariant — a previous version of this code
+  // labeled the failure with `kind: hasFile ? 'file' : 'location'`, which
+  // misreports `kind: 'file'` when the file path succeeds and then the
+  // location path throws inside the same handleAddRecipients try block.
+  it('emits kind=location on mint_failed when file succeeds first and location then throws', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-orig', expires_in: '5m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      // Both paths active.
+      actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower',
+    });
+    // File path succeeds.
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-file-new' },
+    ]);
+    // Location path then throws.
+    const err = new Error('upstream 503');
+    err.apiCode = 'connector_unavailable';
+    mockUploadJsonToConnector.mockRejectedValueOnce(err);
+
+    await handleAddRecipients(
+      'send-7', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
+      send_id: 'send-7', kind: 'location', api_code: 'connector_unavailable',
+    }));
+    // Sanity: file's mint_success DID fire before the location threw.
+    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
+      send_id: 'send-7', kind: 'file',
+    }));
+  });
+
   it('reports failed DMs as failed in the return value', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',

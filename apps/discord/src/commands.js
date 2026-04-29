@@ -1532,7 +1532,7 @@ async function handleSend(interaction, apiKey) {
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode || null });
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode ?? null });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
     // Surface a specific message for known upstream failure codes so the
@@ -2055,7 +2055,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind, api_code: error.apiCode || null });
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind, api_code: error.apiCode ?? null });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
@@ -2305,10 +2305,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // partial failures are surfaced in the reply message ("Revoked X/Y"),
   // and re-picking the same send from the dropdown wouldn't help anyway
   // since the failed resource_ids are the same.
+  // Emit BEFORE markSendRevoked for the same reason the dispatch
+  // emissions fire before updateSendDMStatus — a DB write throw must
+  // not suppress the audit metric, which is exactly the failure mode
+  // we're trying to measure.
+  logger.audit(AUDIT_EVENTS.REVOKE_SUCCESS, { send_id: sendId, success, total: resourceIds.length });
   await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
-  logger.audit(AUDIT_EVENTS.REVOKE_SUCCESS, { send_id: sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
 }
 
