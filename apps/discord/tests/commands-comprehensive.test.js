@@ -942,7 +942,10 @@ describe('/qurl help subcommand', () => {
     // (1) layerv.ai URL carries the scheme so Discord auto-linkifies it
     expect(content).toContain('https://layerv.ai');
     // (2) self-destruct note covers both access AND expiry
-    expect(content).toMatch(/self-destruct on first access.*expiry elapses/);
+    // PR #134 reworded to singular subject ("a one-time link that
+    // self-destructs..."); the regex tolerates both verb forms so a
+    // future copy tweak doesn't reflexively break this.
+    expect(content).toMatch(/self-destructs? on first access.*expiry elapses/);
     // (3) Terms block disambiguates "protected resource" from "qURL"
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
