@@ -137,7 +137,6 @@ jest.mock('discord.js', () => ({
   TextInputBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
-    setEmoji: jest.fn().mockReturnThis(),
     setPlaceholder: jest.fn().mockReturnThis(),
     setStyle: jest.fn().mockReturnThis(),
     setMaxLength: jest.fn().mockReturnThis(),
