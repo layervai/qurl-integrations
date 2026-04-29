@@ -4,16 +4,21 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
   coverageDirectory: 'coverage',
   coverageThreshold: {
-    // Lowered while /qurl send button-driven redesign is in flight: the
-    // front-half is a new state machine and the back-half collector tests
-    // that drove cmd.execute(send) are .skip'd until new state-machine-aware
-    // setup lands in a follow-up PR. Restore toward 78/68/78/78 once those
-    // tests are reintroduced. Real gate remains the 501-test suite.
+    // Was 78/68/78/78. The /qurl send button-driven redesign rewrote the
+    // front-half as a state machine and pinned the prior back-half
+    // collector / monitor / handleAddRecipients tests to the dead
+    // slash-options shape; those describes are now .skip'd and a fresh
+    // qurl-send-state-machine.test.js suite covers the new flow end-to-end
+    // (front-half + 2 back-half happy paths + DM-failure / DB-error /
+    // quota-exceeded error paths). The gap to 78 is the .skip'd back-half
+    // (monitorLinkStatus 407-619, post-send confirm 1316-1450) which is
+    // preserved unchanged from main; reintroducing those tests is tracked
+    // as a follow-up. Real gate is the 530-test suite.
     global: {
-      statements: 64,
-      branches: 58,
-      functions: 74,
-      lines: 65,
+      statements: 73,
+      branches: 65,
+      functions: 79,
+      lines: 75,
     },
   },
   verbose: true,
