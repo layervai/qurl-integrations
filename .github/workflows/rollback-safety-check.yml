@@ -14,8 +14,11 @@
 # correlate with rollback-unsafe changes. If any are touched, require
 # the PR body to declare `Rollback-Safe: yes` (or `yes - <reason>`).
 # A `no` value is rejected with a clear message; missing marker is
-# also rejected. An admin override comment `/rollback-unsafe-acknowledged`
-# can dismiss the failing check (recorded in the PR thread for audit).
+# also rejected.
+#
+# The marker can be embedded in any common Markdown formatting —
+# bold, blockquote, list item, heading — since contributors copy
+# from PR templates that may render it any of those ways.
 #
 # Inert until the canary pipeline lands. The check still runs on every
 # PR, but the marker requirement is set to "warn-only" mode by default
@@ -26,7 +29,7 @@ name: Rollback-Safety Check
 
 on:
   pull_request:
-    types: [opened, synchronize, edited]
+    types: [opened, synchronize, edited, reopened]
 
 permissions:
   contents: read
@@ -55,10 +58,11 @@ jobs:
             'apps/discord/src/database\.js$'
             'apps/discord/src/connector\.js$'
             'apps/discord/src/qurl\.js$'
-            # Terraform SSM parameter resources (path migrations break old binaries)
-            'qurl-bot-discord/terraform/.*ssm.*\.tf$'
             'apps/.*/migrations/'
             'shared/schema/'
+            # NOTE: Terraform SSM resources live in the sibling
+            # qurl-integrations-infra repo; the equivalent guard
+            # there is its own workflow.
           )
 
           # `git fetch origin $BASE_REF` happened in the checkout step.
@@ -92,17 +96,25 @@ jobs:
           ENFORCE: ${{ vars.ROLLBACK_SAFETY_ENFORCE || 'false' }}
         run: |
           set -euo pipefail
-          # Match: "Rollback-Safe: yes", "Rollback-Safe: yes - <reason>",
-          # or "Rollback-Safe: no". Case-insensitive on yes/no; the
-          # marker name itself stays canonical.
-          MARKER=$(printf '%s\n' "$PR_BODY" | grep -iE '^Rollback-Safe:\s*(yes|no)\b' | head -1 || true)
+          # Match the marker in any common Markdown formatting:
+          #   Rollback-Safe: yes
+          #   **Rollback-Safe:** yes
+          #   - Rollback-Safe: yes
+          #   > Rollback-Safe: yes
+          #   ## Rollback-Safe: yes
+          #   * Rollback-Safe: yes - <reason>
+          # Optional leading list/blockquote/heading/asterisk markers
+          # before "Rollback-Safe", optional asterisks around the
+          # label itself (bold), case-insensitive on yes/no. Marker
+          # name "Rollback-Safe" stays canonical.
+          MARKER=$(printf '%s\n' "$PR_BODY" | grep -iE '^[#>*[:space:]\-]*\**Rollback-Safe\**:\s*(yes|no)\b' | head -1 || true)
 
           if [ -z "$MARKER" ]; then
             echo "::error::PR touched rollback-sensitive paths ($MATCHED) but lacks a 'Rollback-Safe: yes' marker in the PR body."
-            echo "::error::Add one of:"
+            echo "::error::Add one of (any common Markdown formatting OK — bold, list, blockquote, heading):"
             echo "::error::  Rollback-Safe: yes"
             echo "::error::  Rollback-Safe: yes - <one-line reason explaining why the previous binary still runs>"
-            echo "::error::  Rollback-Safe: no   (will block merge until an admin posts /rollback-unsafe-acknowledged)"
+            echo "::error::  Rollback-Safe: no   (blocks merge; require an admin to override via branch-protection bypass)"
             if [ "$ENFORCE" = "true" ]; then
               exit 1
             else
@@ -111,11 +123,8 @@ jobs:
             fi
           fi
 
-          if echo "$MARKER" | grep -iE '^Rollback-Safe:\s*no\b' > /dev/null; then
-            echo "::error::PR is marked Rollback-Safe: no. Merge is blocked unless an admin posts the comment '/rollback-unsafe-acknowledged' on the PR (recorded in the PR thread for audit)."
-            # Note: actual override-comment detection lives in a separate
-            # workflow (rollback-unsafe-override.yml) which posts a check-
-            # run override; this job only enforces the marker shape.
+          if echo "$MARKER" | grep -iE '\bno\b' > /dev/null; then
+            echo "::error::PR is marked Rollback-Safe: no. The author has explicitly declared this PR is rollback-unsafe — auto-rollback to the previous binary may crash the bot. Merge requires an admin to bypass branch protection (or restructure the PR to be rollback-safe)."
             if [ "$ENFORCE" = "true" ]; then
               exit 1
             else
