@@ -829,7 +829,7 @@ async function handleSend(interaction, apiKey) {
       }).catch(logIgnoredDiscordErr);
     }
     // Defense in depth — connector's downloadAndUpload validates this URL
-    // again, but mirroring handleAddRecipients (line ~1676) keeps the SSRF
+    // again, but mirroring the same check inside handleAddRecipients keeps the SSRF
     // check at every callsite that hands an untrusted URL to the connector.
     // If discord.js ever changes how attachments report URL, the local
     // check fails fast with a clear message instead of relying on the
@@ -947,19 +947,21 @@ async function handleSend(interaction, apiKey) {
   const formId = `qurl_form_${sendNonce}`;
   // Component customIds for the form-loop filter. Every entry must be a
   // top-level component the loop's awaitMessageComponent can dispatch on
-  // (button, string select, user select). Don't add modal/text-input
-  // customIds here — they're only consumed inside their own modal-submit
-  // handler and adding them would pollute Object.values(ids) without any
-  // dispatch-time benefit.
+  // (button, string select, user select). Modal customIds are NOT here —
+  // they live as local consts inside their own handler so the form-loop
+  // filter set stays tight.
   const ids = {
     targetSelect: `${formId}_target`,
     userSelect: `${formId}_user`,
     messageBtn: `${formId}_msg_btn`,
-    messageModal: `${formId}_msg_modal`,
     expirySelect: `${formId}_expiry`,
     sendBtn: `${formId}_send`,
     cancelBtn: `${formId}_cancel`,
   };
+  // Modal customId — local to the messageBtn handler; never consumed by
+  // the form-loop filter, kept out of `ids` so Object.values(ids) doesn't
+  // grow noise.
+  const messageModalId = `${formId}_msg_modal`;
 
   // Sender's own filename in their own ephemeral form preview is low-blast,
   // but match the same defense the location path applies to locationName so
@@ -1043,6 +1045,16 @@ async function handleSend(interaction, apiKey) {
   // otherwise rebuild the array on each dispatch.
   const formCompIdSet = new Set(Object.values(ids));
 
+  // Wrap every component-update call in the form loop with the same
+  // .catch(logIgnoredDiscordErr) the front-half error-path editReplys
+  // use. The compInt is freshly issued by awaitMessageComponent so a
+  // rejection is rare in practice (a user closing Discord between the
+  // click landing and the update going out is the realistic case),
+  // but mirroring the editReply convention keeps the unhandled-
+  // rejection surface uniform across handleSend.
+  const safeCompUpdate = (ci, payload) => ci.update(payload).catch(logIgnoredDiscordErr);
+  const safeCompDefer = (ci) => ci.deferUpdate().catch(logIgnoredDiscordErr);
+
   let sendApproved = false;
   while (!sendApproved) {
     let compInt;
@@ -1058,12 +1070,12 @@ async function handleSend(interaction, apiKey) {
 
     if (compInt.customId === ids.cancelBtn) {
       clearCooldown(interaction.user.id);
-      await compInt.update({ content: 'Send cancelled.', components: [] });
+      await safeCompUpdate(compInt,{ content: 'Send cancelled.', components: [] });
       return;
     }
 
     if (compInt.customId === ids.sendBtn) {
-      await compInt.update({ content: 'Preparing send…', components: [] });
+      await safeCompUpdate(compInt,{ content: 'Preparing send…', components: [] });
       sendApproved = true;
       break;
     }
@@ -1084,25 +1096,25 @@ async function handleSend(interaction, apiKey) {
           } catch (err) {
             logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
             clearCooldown(interaction.user.id);
-            await compInt.update({ content: 'Failed to load channel members. Send cancelled.', components: [] });
+            await safeCompUpdate(compInt,{ content: 'Failed to load channel members. Send cancelled.', components: [] });
             return;
           }
           recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
-            await compInt.update({ content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} No other members in this channel. Pick another option.\n\n' + formContent(), components: formRows() });
             continue;
           }
         } else if (target === 'voice') {
           const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
           if (result.error === 'not_in_voice') {
             target = null;
-            await compInt.update({ content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} You must be in a voice channel to use this option.\n\n' + formContent(), components: formRows() });
             continue;
           }
           if (result.members.length === 0) {
             target = null;
-            await compInt.update({ content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
+            await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} No other users in your voice channel.\n\n' + formContent(), components: formRows() });
             continue;
           }
           recipients = result.members;
@@ -1115,33 +1127,33 @@ async function handleSend(interaction, apiKey) {
           const resolvedCount = recipients.length;
           target = null;
           recipients = [];
-          await compInt.update({
+          await safeCompUpdate(compInt,{
             content: `⚠\u{FE0F} This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.\n\n` + formContent(),
             components: formRows(),
           });
           continue;
         }
       }
-      await compInt.update({ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
       continue;
     }
 
     if (compInt.customId === ids.userSelect) {
       const selectedUser = compInt.users.first();
       if (!selectedUser) {
-        await compInt.deferUpdate();
+        await safeCompDefer(compInt);
         continue;
       }
       if (selectedUser.bot) {
-        await compInt.update({ content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} Cannot send to a bot. Pick a different user.\n\n' + formContent(), components: formRows() });
         continue;
       }
       if (selectedUser.id === interaction.user.id) {
-        await compInt.update({ content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
+        await safeCompUpdate(compInt,{ content: '⚠\u{FE0F} Cannot send to yourself. Pick a different user.\n\n' + formContent(), components: formRows() });
         continue;
       }
       recipients = [selectedUser];
-      await compInt.update({ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
       continue;
     }
 
@@ -1151,7 +1163,7 @@ async function handleSend(interaction, apiKey) {
       // it out of `ids` avoids polluting Object.values(ids) lookups.
       const messageInputId = 'message_value';
       const msgModal = new ModalBuilder()
-        .setCustomId(ids.messageModal)
+        .setCustomId(messageModalId)
         .setTitle('Personal message');
       msgModal.addComponents(new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -1167,7 +1179,7 @@ async function handleSend(interaction, apiKey) {
       let msgSubmit;
       try {
         msgSubmit = await compInt.awaitModalSubmit({
-          filter: (i) => i.customId === ids.messageModal && i.user.id === interaction.user.id,
+          filter: (i) => i.customId === messageModalId && i.user.id === interaction.user.id,
           time: 120000,
         });
       } catch {
@@ -1188,7 +1200,7 @@ async function handleSend(interaction, apiKey) {
 
     if (compInt.customId === ids.expirySelect) {
       expiresIn = compInt.values[0];
-      await compInt.update({ content: formContent(), components: formRows() });
+      await safeCompUpdate(compInt,{ content: formContent(), components: formRows() });
       continue;
     }
   }
