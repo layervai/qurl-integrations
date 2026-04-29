@@ -936,20 +936,31 @@ async function handleSend(interaction, apiKey) {
   let expiresIn = '24h';
 
   const formId = `qurl_form_${sendNonce}`;
+  // Component customIds for the form-loop filter. Every entry must be a
+  // top-level component the loop's awaitMessageComponent can dispatch on
+  // (button, string select, user select). Don't add modal/text-input
+  // customIds here — they're only consumed inside their own modal-submit
+  // handler and adding them would pollute Object.values(ids) without any
+  // dispatch-time benefit.
   const ids = {
     targetSelect: `${formId}_target`,
     userSelect: `${formId}_user`,
     messageBtn: `${formId}_msg_btn`,
     messageModal: `${formId}_msg_modal`,
-    messageInput: 'message_value',
     expirySelect: `${formId}_expiry`,
     sendBtn: `${formId}_send`,
     cancelBtn: `${formId}_cancel`,
   };
 
+  // Sender's own filename in their own ephemeral form preview is low-blast,
+  // but match the same defense the location path applies to locationName so
+  // a future copy-paste of formContent() into a non-ephemeral surface
+  // doesn't quietly leak a markdown-injection vector.
+  const safeAttachmentName = () => attachment ? escapeDiscordMarkdown(attachment.name) : '';
+
   const formContent = () => {
     let content = '✅ ';
-    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${attachment.name}**.`;
+    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName()}**.`;
     else content += `Got **${locationName || 'location'}**.`;
     content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
     if (personalMessage) {
@@ -1052,7 +1063,7 @@ async function handleSend(interaction, apiKey) {
           try {
             await fetchGuildMembers(interaction.guild);
           } catch (err) {
-            logger.error('Failed to fetch guild members', { error: err.message });
+            logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
             clearCooldown(interaction.user.id);
             await compInt.update({ content: 'Failed to load channel members. Send cancelled.', components: [] });
             return;
@@ -1076,6 +1087,20 @@ async function handleSend(interaction, apiKey) {
             continue;
           }
           recipients = result.members;
+        }
+        // Surface the per-send cap NOW, while the user can change targets,
+        // not 5 minutes later after they've filled in the rest of the form.
+        // The post-Send check at line ~1163 stays as a final defense; this
+        // is a UX fast-fail so the user isn't sandbagged.
+        if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+          const resolvedCount = recipients.length;
+          target = null;
+          recipients = [];
+          await compInt.update({
+            content: `⚠\u{FE0F} This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.\n\n` + formContent(),
+            components: formRows(),
+          });
+          continue;
         }
       }
       await compInt.update({ content: formContent(), components: formRows() });
@@ -1102,12 +1127,16 @@ async function handleSend(interaction, apiKey) {
     }
 
     if (compInt.customId === ids.messageBtn) {
+      // Local-only — modal text inputs are read by customId inside this
+      // handler, never dispatched through the form-loop filter. Keeping
+      // it out of `ids` avoids polluting Object.values(ids) lookups.
+      const messageInputId = 'message_value';
       const msgModal = new ModalBuilder()
         .setCustomId(ids.messageModal)
         .setTitle('Personal message');
       msgModal.addComponents(new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId(ids.messageInput)
+          .setCustomId(messageInputId)
           .setLabel('Optional note (leave blank to clear)')
           .setStyle(TextInputStyle.Paragraph)
           .setMaxLength(450)
@@ -1127,7 +1156,7 @@ async function handleSend(interaction, apiKey) {
         continue;
       }
 
-      const raw = msgSubmit.fields.getTextInputValue(ids.messageInput).trim();
+      const raw = msgSubmit.fields.getTextInputValue(messageInputId).trim();
       personalMessage = raw ? sanitizeMessage(raw) : null;
       await msgSubmit.update({ content: formContent(), components: formRows() });
       continue;
@@ -1161,8 +1190,7 @@ async function handleSend(interaction, apiKey) {
     });
   }
 
-
-  // --- Step 3: Process and send ---
+  // --- Step 4: Process and send (back-half — preserved unchanged) ---
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] });
 
   const sendId = crypto.randomUUID();

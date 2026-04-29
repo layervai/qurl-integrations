@@ -685,20 +685,21 @@ describe('handleSend — recipients cap', () => {
     });
   }
 
-  it('rejects when resolved recipients exceed QURL_SEND_MAX_RECIPIENTS', async () => {
-    // 51 members > config 50 cap.
+  it('warns immediately at target select when channel members exceed cap (no Send required)', async () => {
+    // 51 members > config 50 cap. The early gate fires inside the
+    // targetSelect handler so the user isn't sandbagged after filling
+    // in the rest of the form.
     const many = Array.from({ length: 51 }, (_, i) => ({ id: `u${i}`, username: `U${i}` }));
     mockGetTextChannelMembers.mockReturnValue(many);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
-    const sendBtn = makeCompInt(ids.sendBtn);
+    const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      awaitQueue: [locInitBtn(), targetChannel, cancel],
     });
     await cmd.execute(interaction);
-    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('per-send cap'),
+    expect(targetChannel.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/over the per-send cap of 50/),
     }));
-    // mintLinks should NOT have been called — guard fires before back-half
     expect(mockMintLinks).not.toHaveBeenCalled();
   });
 });
