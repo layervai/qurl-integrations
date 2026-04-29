@@ -340,7 +340,7 @@ client.on('guildMemberAdd', async (member) => {
   logger.info(`New member joined: ${member.user.tag}`);
 
   // Check if returning contributor
-  const contributions = db.getContributions(member.id);
+  const contributions = await db.getContributions(member.id);
 
   if (contributions.length > 0) {
     // Returning contributor - assign appropriate role
@@ -447,7 +447,7 @@ async function assignContributorRole(discordId, prNumber, repo, githubUsername) 
 
   try {
     const member = await guild.members.fetch(discordId);
-    const contributionCount = db.getContributionCount(discordId);
+    const contributionCount = await db.getContributionCount(discordId);
 
     // Update all appropriate roles
     const result = await updateMemberRoles(member, contributionCount);
@@ -735,7 +735,7 @@ async function postWeeklyDigest() {
     return null;
   }
 
-  const data = db.getWeeklyDigestData();
+  const data = await db.getWeeklyDigestData();
 
   if (data.totalPRs === 0) {
     logger.info('No activity this week, skipping digest');

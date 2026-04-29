@@ -17,7 +17,7 @@ jest.mock('../src/database', () => ({
   deletePendingLink: jest.fn(),
   createLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  recordContribution: jest.fn(() => true),
+  recordContribution: jest.fn(() => 'recorded'),
   checkAndAwardBadges: jest.fn(() => []),
   awardFirstIssueBadge: jest.fn(() => []),
   hasMilestoneBeenAnnounced: jest.fn(() => false),
@@ -28,6 +28,7 @@ jest.mock('../src/database', () => ({
     uniqueContributors: 3,
     byRepo: [],
   })),
+  healthCheck: jest.fn(() => ({ ok: true })),
 }));
 
 // Set required env vars. GUILD_ID must be a valid Discord snowflake AND
@@ -57,6 +58,31 @@ describe('Server', () => {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe('ok');
       expect(res.body.service).toBe('qURL Discord Bot');
+    });
+  });
+
+  describe('GET /health', () => {
+    it('calls db.healthCheck (NOT db.getStats — the latter scans on DDB)', async () => {
+      const res = await request(app).get('/health');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('ok');
+      expect(db.healthCheck).toHaveBeenCalledTimes(1);
+      // Critical regression guard: at LB cadence /health must never
+      // hit the aggregation path. getStats() on the DDB backend is
+      // a paginated full-table Scan whose cost grows with table
+      // size. If a future refactor wires getStats() back into
+      // /health, this assertion fires.
+      expect(db.getStats).not.toHaveBeenCalled();
+    });
+
+    it('returns 503 when db.healthCheck throws', async () => {
+      db.healthCheck.mockImplementationOnce(() => { throw new Error('db unreachable'); });
+      const res = await request(app).get('/health');
+      expect(res.status).toBe(503);
+      expect(res.body.status).toBe('unhealthy');
+      // Don't leak backend internals — only the high-level status
+      // surfaces to the unauthenticated probe.
+      expect(res.body.error).toBeUndefined();
     });
   });
 

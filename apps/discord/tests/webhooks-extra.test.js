@@ -21,7 +21,7 @@ jest.mock('../src/database', () => ({
   deletePendingLink: jest.fn(),
   createLink: jest.fn(),
   getLinkByGithub: jest.fn(),
-  recordContribution: jest.fn(() => true),
+  recordContribution: jest.fn(() => 'recorded'),
   checkAndAwardBadges: jest.fn(() => []),
   awardFirstIssueBadge: jest.fn(() => []),
   hasMilestoneBeenAnnounced: jest.fn(() => false),

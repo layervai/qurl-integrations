@@ -1,11 +1,85 @@
 const config = require('./config');
 const logger = require('./logger');
-const { client, shutdown: discordShutdown } = require('./discord');
+const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys } = require('./boot-requirements');
+const { missingBootKeys, missingProdKeys, resolveProcessRole } = require('./boot-requirements');
+const { initHttpOnly } = require('./http-only-init');
+
+// Process role — selects which subset of the bot runs in this
+// container. Three modes:
+//
+//   combined (default) — legacy single-process shape. Gateway
+//                        client logs in; Express HTTP server
+//                        listens; cron jobs run. Backward-compatible
+//                        for any env that hasn't opted into the
+//                        split (sandbox pre-migration, local dev).
+//
+//   gateway — Discord Gateway WebSocket + interaction handlers +
+//             cron jobs. No Express listener. Deployed as a
+//             singleton (desired_count=1) because a Discord bot
+//             token admits only one active Gateway connection —
+//             two concurrent logins cause a session-identity flap
+//             every few seconds as each replaces the other's
+//             WebSocket.
+//
+//   http — Express listener only (OAuth callback + GitHub
+//          webhooks + /health + /metrics). No Gateway login.
+//          Can scale horizontally behind an ALB. Outbound Discord
+//          API calls go through `discord-rest.js` (REST-only, no
+//          persistent connection).
+//
+// Invariant: `discord.js`'s Client object is still required at
+// module load (it exposes `sendDM` et al. that the current HTTP
+// routes import), but `client.login()` is gated on `isGateway`.
+// Creating a Client without login() does NOT open a WebSocket —
+// the WS only opens on login. HTTP-only replicas therefore never
+// collide with the gateway singleton.
+//
+// http-only mode (`PROCESS_ROLE=http`) needs two things login()
+// would otherwise do for free: (1) a token on `client.rest` so
+// REST helpers (sendDM, channels.X.send, member.roles.add) can
+// authenticate, and (2) an initial `refreshCache()` so the
+// route handlers find a populated guild/roles/channels cache on
+// the first OAuth callback or webhook. Both are seeded
+// explicitly in start() below — see the `if (isHttp && !isGateway)`
+// branch (runs BEFORE startServer so the ALB can't route a
+// request through a half-initialized replica).
+//
+// Known gap (acceptable for now): cache invalidation in http-only
+// mode. The `client.on('roleDelete' / 'channelDelete')` handlers
+// in src/discord.js only fire when the Gateway is connected, so
+// deletions made on the OpenNHP guild stay cached as stale
+// references until the replica restarts. The lazy refresh in
+// each helper checks `if (!channels.X)` — non-null but stale
+// doesn't trigger a refresh. OpenNHP guild admins rarely delete
+// tracked channels; if this becomes load-bearing, a periodic
+// REST-driven `refreshCache()` would close the gap without
+// needing a Gateway connection.
+// Resolve PROCESS_ROLE via the helper in boot-requirements.js so the
+// invalid-value path is unit-testable without a child-process spawn.
+let PROCESS_ROLE, isGateway, isHttp;
+try {
+  ({ role: PROCESS_ROLE, isGateway, isHttp } = resolveProcessRole(process.env.PROCESS_ROLE));
+} catch (err) {
+  logger.error(err.message);
+  // Direct process.exit (not gracefulShutdown) is intentional: this
+  // runs at module-top-level, before gracefulShutdown is even defined,
+  // and there's no state to tear down — no DB open, no HTTP listener,
+  // no WebSocket. A future "fix" routing this through gracefulShutdown
+  // would either fail (undefined reference) or block on shutdown
+  // teardown that has nothing to do.
+  //
+  // The logger.error above is guaranteed-flushed because src/logger.js
+  // writes synchronously via console.error → process.stderr.write
+  // (no winston/pino async transport). If logger.js ever moves to an
+  // async transport, this boot-fail path needs an explicit flush or a
+  // direct console.error fallback so the message survives the exit.
+  process.exit(1);
+}
+logger.info('Process role configured', { role: PROCESS_ROLE, isGateway, isHttp });
 
 // Multi-tenant mode: when GUILD_ID is unset (or not a valid snowflake), the
 // bot treats itself as a public multi-server app. Commands register globally,
@@ -158,18 +232,24 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Register commands when ready
-client.once('ready', async () => {
-  await registerCommands(client);
-});
+// Gateway-only event wiring. HTTP-only replicas skip these because
+// they never login() and so the client never fires these events —
+// but the `.on()` registrations would still leak handler references
+// and register no-op listeners, so gate them for clarity.
+if (isGateway) {
+  // Register commands when ready
+  client.once('ready', async () => {
+    await registerCommands(client);
+  });
 
-// Handle interactions
-client.on('interactionCreate', handleCommand);
+  // Handle interactions
+  client.on('interactionCreate', handleCommand);
 
-// Error handling
-client.on('error', error => {
-  logger.error('Discord client error', { error: error.message });
-});
+  // Error handling
+  client.on('error', error => {
+    logger.error('Discord client error', { error: error.message });
+  });
+}
 
 // Log and continue on unhandled rejections. The old behavior killed the
 // entire process on any stray rejection (transient Discord timeouts, network
@@ -190,6 +270,7 @@ process.on('uncaughtException', error => {
 
 // Graceful shutdown
 let httpServer = null;
+let httpRefreshTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -215,8 +296,22 @@ async function gracefulShutdown(code = 0) {
       });
     }
     stopServerIntervals();
-    await discordShutdown();
-    db.close();
+    // Periodic REST refreshCache in http-only mode is .unref()ed so it
+    // wouldn't block exit on its own, but clearing explicitly keeps
+    // shutdown symmetric with the other intervals (server.js, oauth.js
+    // rateLimitStore sweep, webhooks.js badSig sweep) and avoids one
+    // last refresh firing mid-teardown.
+    if (httpRefreshTimer) {
+      clearInterval(httpRefreshTimer);
+    }
+    // Discord client shutdown only meaningful when we're the gateway
+    // role. HTTP-only replicas never called login(), so there's no
+    // WebSocket to close — discordShutdown() on an un-logged-in
+    // client just releases the event emitter handles.
+    if (isGateway) {
+      await discordShutdown();
+    }
+    await db.close();
     logger.info('Shutdown complete');
   } catch (error) {
     logger.error('Error during shutdown', { error: error.message });
@@ -242,23 +337,77 @@ async function start() {
   logger.info(`Version: ${require('../package.json').version}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-  // Start web server
-  httpServer = startServer();
+  // Pure http-only mode: seed the REST token + warm the cache BEFORE
+  // opening the listener. Otherwise there's a race window where the
+  // ALB can route OAuth callbacks / webhooks to a replica whose
+  // `client.rest` has no token and whose channel/role cache is cold —
+  // the request would 401 inside sendDM / assignContributorRole.
+  // See src/http-only-init.js for the full rationale (token + cache
+  // + periodic-REST-refresh that compensates for missing roleDelete /
+  // channelDelete events). Failures are fatal — propagated through
+  // start().catch() into gracefulShutdown(1) so a Discord-unreachable
+  // replica crash-loops instead of silently serving 5xx.
+  //
+  // Combined mode keeps the legacy listener-then-login ordering. The
+  // same cold-start race window exists every restart there
+  // (listener up, client.rest token unset), but ECS health-check
+  // gating typically dominates: traffic doesn't route to the task
+  // until /health passes, and /health doesn't depend on Discord.
+  // Not a regression here (matches pre-PR); follow-up to apply the
+  // init-before-listen pattern to combined mode if the health-gate
+  // assumption ever weakens.
+  if (isHttp && !isGateway) {
+    const timer = await initHttpOnly({ client, config, refreshCache, logger });
+    // Tight race: SIGTERM during the await above runs gracefulShutdown,
+    // which clears `httpRefreshTimer` (still null) and proceeds. The
+    // setInterval inside initHttpOnly then registers AFTER the
+    // clearInterval already happened. Guard against that here so a stray
+    // refreshCache() doesn't fire mid-teardown. (.unref() means it can't
+    // block exit either way; this just keeps the log noise clean.)
+    if (isShuttingDown && timer) {
+      clearInterval(timer);
+    } else {
+      httpRefreshTimer = timer;
+    }
+  }
 
-  // Background retry-revoke for any OAuth tokens whose initial revoke
-  // failed. Runs hourly on top of the 7-day purge in database.js.
-  startOrphanTokenSweeper();
+  // HTTP listener — OAuth callback, webhooks, health, metrics.
+  // Skipped in `gateway`-only mode; the ALB targets HTTP replicas
+  // only. `combined` keeps the legacy single-process behavior.
+  if (isHttp) {
+    httpServer = startServer();
+  }
 
-  // Login to Discord with a 30s deadline. client.login() doesn't expose a
-  // native timeout; if the Discord API is unreachable the call can hang
-  // indefinitely and block boot without any log line pointing at the cause.
-  await Promise.race([
-    client.login(config.DISCORD_TOKEN),
-    new Promise((_, reject) => {
-      const t = setTimeout(() => reject(new Error('Discord login timed out after 30s')), 30_000);
-      t.unref();
-    }),
-  ]);
+  // Background retry-revoke for any OAuth tokens whose initial
+  // revoke failed. Pinned to `isGateway` not because of any Discord
+  // dependency (the sweeper only calls api.github.com — no Discord
+  // client / REST calls anywhere in src/orphan-token-sweeper.js) but
+  // to keep the sweeper a singleton: N HTTP replicas racing on the
+  // same orphaned-tokens table would each claim and re-revoke every
+  // row. Pinning to the single gateway process avoids that without
+  // a distributed work queue. If this ever needs to scale beyond one
+  // worker, replace with SQS / a Redis lock — not by spreading the
+  // sweeper across HTTP replicas.
+  if (isGateway) {
+    startOrphanTokenSweeper();
+  }
+
+  // Login to Discord with a 30s deadline. client.login() doesn't
+  // expose a native timeout; if the Discord API is unreachable
+  // the call can hang indefinitely and block boot without any
+  // log line pointing at the cause. Gated on `isGateway` — the
+  // HTTP-only replica must NOT open a second Gateway connection
+  // on the same bot token; Discord would flap session identity
+  // between the two WebSockets every few seconds.
+  if (isGateway) {
+    await Promise.race([
+      client.login(config.DISCORD_TOKEN),
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new Error('Discord login timed out after 30s')), 30_000);
+        t.unref();
+      }),
+    ]);
+  }
 }
 
 start().catch(error => {

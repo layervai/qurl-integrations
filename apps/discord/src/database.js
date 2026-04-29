@@ -363,6 +363,11 @@ const dbModule = {
   },
 
   // Contributions
+  // Tri-state return: 'recorded' | 'duplicate' | 'failed'. See
+  // ddb-store's recordContribution for the rationale — callers
+  // (webhooks.js, oauth.js historical-backfill) need to distinguish
+  // dedup from transient failure to avoid silently undercounting
+  // during onboarding. Keep parity with the DDB backend.
   recordContribution(discordId, githubUsername, prNumber, repo, prTitle = null) {
     try {
       const stmt = db.prepare(
@@ -374,14 +379,14 @@ const dbModule = {
         logger.info('Recorded contribution', { discordId, github: githubUsername, pr: prNumber, repo });
         // Update streak only for new contributions
         dbModule.updateStreak(discordId);
-        return true;
+        return 'recorded';
       } else {
         logger.debug('Contribution already exists', { pr: prNumber, repo });
-        return false;
+        return 'duplicate';
       }
     } catch (error) {
       logger.error('Failed to record contribution', { error: error.message, pr: prNumber, repo });
-      return false;
+      return 'failed';
     }
   },
 
@@ -395,7 +400,12 @@ const dbModule = {
     return stmt.all(limit);
   },
 
-  getContributionCount(discordId) {
+  // Second arg accepted for contract parity with the DDB backend
+  // (which uses `{ justWrote: true }` to opt into a GSI-lag retry
+  // loop). SQLite reads are immediately consistent so the option
+  // is a no-op here — kept on the signature so call sites work
+  // identically against both backends.
+  getContributionCount(discordId /* , _opts */) {
     const stmt = db.prepare('SELECT COUNT(*) as count FROM contributions WHERE discord_id = ?');
     return stmt.get(discordId).count;
   },
@@ -876,6 +886,17 @@ const dbModule = {
     const row = stmt.get(guildId);
     if (!row) return row;
     return { ...row, qurl_api_key: row.qurl_api_key ? decrypt(row.qurl_api_key) : row.qurl_api_key };
+  },
+
+  // Cheap data-layer probe for /health. Throws if the underlying
+  // db handle is closed/blocked so the orchestrator replaces the
+  // container; succeeds with an `{ ok: true }` shape that callers
+  // can JSON-serialize. Uses sqlite_master (in-memory metadata, no
+  // user-table read) so the cost stays O(1) even as user tables
+  // grow.
+  healthCheck() {
+    db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get();
+    return { ok: true };
   },
 
   // Close database (for graceful shutdown)

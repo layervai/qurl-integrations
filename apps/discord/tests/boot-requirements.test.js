@@ -15,6 +15,8 @@ const {
   prodRequired,
   missingBootKeys,
   missingProdKeys,
+  VALID_PROCESS_ROLES,
+  resolveProcessRole,
 } = require('../src/boot-requirements');
 
 describe('bootRequired', () => {
@@ -103,5 +105,57 @@ describe('missingProdKeys', () => {
     expect(missingProdKeys(env, true).sort()).toEqual([
       'KEY_ENCRYPTION_KEY', 'QURL_API_KEY',
     ]);
+  });
+});
+
+describe('resolveProcessRole', () => {
+  it('VALID_PROCESS_ROLES is the canonical set in stable order (combined first as the default)', () => {
+    expect(VALID_PROCESS_ROLES).toEqual(['combined', 'gateway', 'http']);
+    expect(Object.isFrozen(VALID_PROCESS_ROLES)).toBe(true);
+  });
+
+  it.each([
+    ['combined', { role: 'combined', isGateway: true, isHttp: true }],
+    ['gateway', { role: 'gateway', isGateway: true, isHttp: false }],
+    ['http', { role: 'http', isGateway: false, isHttp: true }],
+  ])('resolves %s to expected role flags', (input, expected) => {
+    expect(resolveProcessRole(input)).toEqual(expected);
+  });
+
+  it.each([undefined, null, '', '   ', '\t'])(
+    'falls back to combined for unset / whitespace-only value (%p)',
+    (input) => {
+      expect(resolveProcessRole(input)).toEqual({
+        role: 'combined', isGateway: true, isHttp: true,
+      });
+    }
+  );
+
+  it('trims surrounding whitespace before validating', () => {
+    expect(resolveProcessRole('  http  ')).toEqual({
+      role: 'http', isGateway: false, isHttp: true,
+    });
+  });
+
+  it('throws on unknown role with INVALID_PROCESS_ROLE code (so index.js can exit(1))', () => {
+    let caught;
+    try {
+      resolveProcessRole('gatewayy');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught.code).toBe('INVALID_PROCESS_ROLE');
+    // Message names the bad value AND lists the valid ones — operators
+    // pasting the log line into a ticket should see both immediately.
+    expect(caught.message).toMatch(/'gatewayy'/);
+    expect(caught.message).toMatch(/combined, gateway, http/);
+  });
+
+  it('rejects case-variant roles (no silent normalization)', () => {
+    // SQLITE-vs-sqlite parity: an env-templating bug that produces
+    // 'GATEWAY' should fail loud, not silently coerce.
+    expect(() => resolveProcessRole('GATEWAY')).toThrow(/GATEWAY/);
+    expect(() => resolveProcessRole('Combined')).toThrow(/Combined/);
   });
 });

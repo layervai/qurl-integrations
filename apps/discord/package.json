@@ -21,13 +21,17 @@
   "author": "LayerV",
   "license": "Apache-2.0",
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1036.0",
+    "@aws-sdk/lib-dynamodb": "^3.1036.0",
     "better-sqlite3": "~12.8.0",
+    "discord-api-types": "^0.38.33",
     "discord.js": "~14.25.1",
     "express": "~5.2.1",
     "helmet": "~7.2.0",
     "node-cron": "~4.2.1"
   },
   "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
     "eslint": "^8.57.1",
     "jest": "~30.3.0",
     "supertest": "^7.2.2"
