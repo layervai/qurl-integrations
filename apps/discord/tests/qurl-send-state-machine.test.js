@@ -482,6 +482,32 @@ describe('handleSend — Step 2: file path', () => {
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
+  it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
+    // Regression guard: without the cleanup in the awaitMessages catch
+    // path, a timeout would leave the bot's "Ready! Drop your file
+    // here. I'll wait 60 seconds." sitting in the user's DM forever —
+    // bots can't go back and delete prompts later, and the user has
+    // no way to clean it up themselves (only message authors can
+    // delete in DMs).
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmPromptMessage = { delete: dmPromptDelete };
+    const dmSend = jest.fn().mockResolvedValue(dmPromptMessage);
+    const dmAwaitMessages = jest.fn().mockRejectedValue({ size: 0, first: () => null }); // Collection-shaped timeout
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    // Bot tried to capture (awaitMessages on DM was called)
+    expect(dmAwaitMessages).toHaveBeenCalled();
+    // And cleaned up its own DM prompt afterwards
+    expect(dmPromptDelete).toHaveBeenCalled();
+    // User-facing message still surfaces
+    expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('No file received'),
+    }));
+  });
+
   it('cancels when no file is dropped within 60s', async () => {
     // discord.js v14 contract: awaitMessages with errors:['time'] rejects
     // with the collected Collection on timeout (NOT an Error). The handler

@@ -856,6 +856,17 @@ async function handleSend(interaction, apiKey) {
           sendNonce, userId: interaction.user.id, error: err?.message,
         });
       }
+      // Tear down the DM prompt before returning. Without this the user
+      // is left with a stale "Ready! Drop your file here. I'll wait 60
+      // seconds." sitting in their DM thread forever — bots can't go
+      // back and delete the prompt later, and the user sees no feedback
+      // that the timeout happened on the bot side. Cleanup is fire-and-
+      // forget so a delete failure doesn't mask the user-facing message.
+      if (dmPromptMessage) {
+        dmPromptMessage.delete().catch((dErr) => logger.warn('Failed to delete stale DM prompt after capture timeout/error', {
+          sendNonce, userId: interaction.user.id, error: dErr?.message,
+        }));
+      }
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
     }
@@ -906,21 +917,26 @@ async function handleSend(interaction, apiKey) {
         dmPromptMessage.delete().catch((err) => logger.warn('Failed to delete DM prompt message', {
           sendNonce, userId: interaction.user.id, error: err?.message,
         }));
-        // Delete the confirmation+button after 60s. Long enough for the
-        // user to navigate back to the channel and finish the send;
-        // short enough that the DM thread doesn't stay cluttered. setTimeout
-        // is fire-and-forget — if the EC2 dies mid-flow the cleanup
-        // never fires; the bot-side debris is low-impact (user can
-        // still delete it manually).
+        // Delete the confirmation+button after 3 min — matches the
+        // Step-3 form-loop timeout, so the navigation aid stays alive
+        // for as long as the form itself is alive. setTimeout is fire-
+        // and-forget; if the EC2 dies mid-flow the cleanup never fires
+        // and the bot-side debris is low-impact (user can still delete
+        // it manually).
         if (confirmMsg) {
           setTimeout(() => {
             confirmMsg.delete().catch((err) => logger.warn('Failed to delete DM confirmation', {
               sendNonce, userId: interaction.user.id, error: err?.message,
             }));
-          }, 60000).unref?.();
+          }, 3 * 60000).unref?.();
         }
       };
-      cleanup(); // fire-and-forget; we don't await so the form doesn't block
+      // Fire-and-forget but explicitly catch — guards against any future
+      // edit that throws synchronously inside cleanup() and would
+      // otherwise surface as UnhandledPromiseRejection.
+      cleanup().catch((err) => logger.warn('DM cleanup failed', {
+        sendNonce, userId: interaction.user.id, error: err?.message,
+      }));
     }
 
     // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
