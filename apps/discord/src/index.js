@@ -216,7 +216,7 @@ async function gracefulShutdown(code = 0) {
     }
     stopServerIntervals();
     await discordShutdown();
-    db.close();
+    await db.close();
     logger.info('Shutdown complete');
   } catch (error) {
     logger.error('Error during shutdown', { error: error.message });

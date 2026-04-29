@@ -1120,7 +1120,7 @@ async function handleSend(interaction, apiKey) {
   // still exist on the QURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
   try {
-    db.recordQURLSendBatch(qurlLinks.map(link => ({
+    await db.recordQURLSendBatch(qurlLinks.map(link => ({
       sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
       expiresIn, channelId: interaction.channelId, targetType: target,
@@ -1169,7 +1169,7 @@ async function handleSend(interaction, apiKey) {
     });
 
     const sent = await sendDM(link.recipientId, dmPayload);
-    db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -1194,7 +1194,7 @@ async function handleSend(interaction, apiKey) {
   // this send. The per-link rows in qurl_sends persisted above, so /qurl
   // revoke by sendId still works even if this row is missing.
   try {
-    db.saveSendConfig({
+    await db.saveSendConfig({
       sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
       actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
       attachmentName: attachment?.name || null,
@@ -1467,7 +1467,7 @@ async function handleSend(interaction, apiKey) {
 // user's send.
 async function handleAddRecipients(sendId, usersCollection, originalInteraction, apiKey) {
   const senderDiscordId = originalInteraction.user.id;
-  const sendConfig = db.getSendConfig(sendId, senderDiscordId);
+  const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0 };
   }
@@ -1622,7 +1622,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Same guarantee as handleSend: if the DB write fails, abort BEFORE any
   // DMs go out so we don't leave live QURL links with no local record.
   try {
-    db.recordQURLSendBatch(batchSends);
+    await db.recordQURLSendBatch(batchSends);
   } catch (err) {
     logger.error('recordQURLSendBatch failed in addRecipients; aborting before DMs', {
       sendId, error: err.message, linkCount: batchSends.length,
@@ -1687,7 +1687,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
     // same update links.length times.
-    db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    await db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { sent, username: recipient.username };
   }, 5);
 
@@ -1770,7 +1770,7 @@ async function handleRevoke(interaction, apiKey) {
   }
   await interaction.deferReply({ ephemeral: true });
 
-  const recentSends = db.getRecentSends(interaction.user.id, 5);
+  const recentSends = await db.getRecentSends(interaction.user.id, 5);
 
   if (recentSends.length === 0) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
@@ -1824,7 +1824,7 @@ async function handleRevoke(interaction, apiKey) {
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
-  const resourceIds = db.getSendResourceIds(sendId, senderDiscordId);
+  const resourceIds = await db.getSendResourceIds(sendId, senderDiscordId);
   let success = 0;
 
   const results = await batchSettled(resourceIds, async (resourceId) => {
@@ -1842,7 +1842,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // partial failures are surfaced in the reply message ("Revoked X/Y"),
   // and re-picking the same send from the dropdown wouldn't help anyway
   // since the failed resource_ids are the same.
-  db.markSendRevoked(sendId, senderDiscordId);
+  await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
@@ -1869,13 +1869,13 @@ const commands = [
       const discordId = interaction.user.id;
 
       // Check if already linked
-      const existing = db.getLinkByDiscord(discordId);
+      const existing = await db.getLinkByDiscord(discordId);
 
       // Generate state and create pending link. State is HMAC-bound to the
       // discord user ID so the OAuth callback can verify cross-user replay
       // didn't happen even if the random nonce were somehow leaked.
       const state = generateState(discordId);
-      db.createPendingLink(state, discordId);
+      await db.createPendingLink(state, discordId);
 
       const authUrl = `${config.BASE_URL}/auth/github?state=${state}`;
 
@@ -1917,7 +1917,7 @@ const commands = [
     async execute(interaction) {
       const discordId = interaction.user.id;
 
-      const existing = db.getLinkByDiscord(discordId);
+      const existing = await db.getLinkByDiscord(discordId);
       if (!existing) {
         return interaction.reply({
           content: 'You don\'t have a GitHub account linked.',
@@ -1962,7 +1962,7 @@ const commands = [
         });
 
         if (buttonInteraction.customId === `unlink_confirm_${nonce}`) {
-          db.deleteLink(discordId);
+          await db.deleteLink(discordId);
           await buttonInteraction.update({
             content: `✓ Unlinked from GitHub **@${existing.github_username}**.\n\nYou can link a new account anytime with \`/link\`.`,
             embeds: [],
@@ -1997,12 +1997,12 @@ const commands = [
       ),
     async execute(interaction) {
       const targetUser = interaction.options.getUser('user') || interaction.user;
-      const link = db.getLinkByDiscord(targetUser.id);
+      const link = await db.getLinkByDiscord(targetUser.id);
 
       if (link) {
-        const contributions = db.getContributions(targetUser.id);
-        const badges = db.getBadges(targetUser.id);
-        const streak = db.getStreak(targetUser.id);
+        const contributions = await db.getContributions(targetUser.id);
+        const badges = await db.getBadges(targetUser.id);
+        const streak = await db.getStreak(targetUser.id);
 
         const embed = new EmbedBuilder()
           .setColor(COLORS.SUCCESS)
@@ -2071,7 +2071,7 @@ const commands = [
       ),
     async execute(interaction) {
       const targetUser = interaction.options.getUser('user') || interaction.user;
-      const contributions = db.getContributions(targetUser.id);
+      const contributions = await db.getContributions(targetUser.id);
 
       if (contributions.length === 0) {
         return interaction.reply({
@@ -2113,7 +2113,7 @@ const commands = [
       .setName('stats')
       .setDescription('Show bot statistics'),
     async execute(interaction) {
-      const stats = db.getStats();
+      const stats = await db.getStats();
 
       const embed = new EmbedBuilder()
         .setColor(COLORS.PURPLE)
@@ -2133,7 +2133,7 @@ const commands = [
       }
 
       // Add leaderboard
-      const topContributors = db.getTopContributors(5);
+      const topContributors = await db.getTopContributors(5);
       if (topContributors.length > 0) {
         const leaderboard = topContributors
           .map((c, i) => {
@@ -2154,7 +2154,7 @@ const commands = [
       .setName('leaderboard')
       .setDescription('Show contribution leaderboard'),
     async execute(interaction) {
-      const topContributors = db.getTopContributors(10);
+      const topContributors = await db.getTopContributors(10);
 
       if (topContributors.length === 0) {
         return interaction.reply({
@@ -2212,7 +2212,7 @@ const commands = [
         });
       }
 
-      const existingLink = db.getLinkByGithub(githubUsername);
+      const existingLink = await db.getLinkByGithub(githubUsername);
       if (existingLink && existingLink.discord_id !== targetUser.id) {
         return interaction.reply({
           content: `⚠️ GitHub **@${githubUsername}** is already linked to <@${existingLink.discord_id}>. Unlink them first.`,
@@ -2220,7 +2220,7 @@ const commands = [
         });
       }
 
-      db.forceLink(targetUser.id, githubUsername);
+      await db.forceLink(targetUser.id, githubUsername);
 
       await interaction.reply({
         content: `✓ Linked <@${targetUser.id}> to GitHub **@${githubUsername}**`,
@@ -2276,14 +2276,14 @@ const commands = [
         }
 
         try {
-          const existing = db.getLinkByGithub(github);
+          const existing = await db.getLinkByGithub(github);
           if (existing && existing.discord_id !== discordId) {
             failed++;
             errors.push(`@${github} already linked to another user`);
             continue;
           }
 
-          db.forceLink(discordId, github);
+          await db.forceLink(discordId, github);
           success++;
         } catch (error) {
           failed++;
@@ -2346,8 +2346,8 @@ const commands = [
 
       for (const milestone of config.STAR_MILESTONES) {
         if (stars >= milestone) {
-          if (!db.hasMilestoneBeenAnnounced('stars', milestone, repo)) {
-            if (db.recordMilestone('stars', milestone, repo)) {
+          if (!(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
+            if (await db.recordMilestone('stars', milestone, repo)) {
               backfilled++;
             }
           } else {
@@ -2400,7 +2400,7 @@ const commands = [
         const contributors = members.filter(m => m.roles.cache.has(contributorRole.id));
 
         // Check which ones are not linked (single bulk query, not N+1)
-        const linkedIds = db.getLinkedDiscordIds();
+        const linkedIds = await db.getLinkedDiscordIds();
         const unlinked = [];
         for (const [id, member] of contributors) {
           if (!linkedIds.has(id)) unlinked.push(member);
@@ -2555,7 +2555,7 @@ const commands = [
         }
 
         const guildId = interaction.guildId;
-        db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
+        await db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
         logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
         return modalSubmit.editReply({
           content: '✅ **qURL is now configured for this server!**\n\n' +
@@ -2575,7 +2575,7 @@ const commands = [
             ephemeral: true,
           });
         }
-        const guildConfig = db.getGuildConfig(interaction.guildId);
+        const guildConfig = await db.getGuildConfig(interaction.guildId);
         if (guildConfig) {
           // Show a short sha256 fingerprint instead of any key substring — a
           // 4-char suffix narrows brute-force space and a prefix leaks tenant
@@ -2584,7 +2584,7 @@ const commands = [
           // getGuildConfig no longer returns the decrypted key (it would
           // leak via any row dump); go through the explicit accessor and
           // let the plaintext fall out of scope immediately after hashing.
-          const plaintextKey = db.getGuildApiKey(interaction.guildId) || '';
+          const plaintextKey = await db.getGuildApiKey(interaction.guildId) || '';
           const keyFingerprint = crypto.createHash('sha256')
             .update(plaintextKey)
             .digest('hex')
@@ -2609,7 +2609,7 @@ const commands = [
       // Gate: require guild API key for send/revoke
       let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
-        const guildApiKey = interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null;
+        const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
             content: '❌ **qURL is not configured for this server.**\n\n' +

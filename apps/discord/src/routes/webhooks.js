@@ -243,26 +243,39 @@ async function handlePullRequest(payload) {
     .setTimestamp();
   await postToGitHubFeed(mergeEmbed);
 
-  const link = db.getLinkByGithub(githubUsername);
+  const link = await db.getLinkByGithub(githubUsername);
 
   if (link) {
     // Record the contribution BEFORE assignContributorRole — the role-assign
     // path reads getContributionCount, so if we called it first a first-time
     // contributor would still read a count of 0 and never get the role.
-    // recordContribution returns false on transient DB error; if the row
-    // didn't land we skip the role-assign + badge flow so the user gets a
-    // consistent state (role assigned ↔ contribution recorded) instead of
-    // a dangling role with no persisted credit.
-    const recorded = db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
-    if (!recorded) {
-      logger.error('recordContribution failed — skipping role assign + badges', {
+    //
+    // Tri-state status: 'recorded' | 'duplicate' | 'failed'.
+    //   'recorded' — first-write success → run role+badges normally.
+    //   'duplicate' — webhook redelivery; the original delivery already
+    //                 ran role+badges, skip to keep this idempotent.
+    //                 Steady state for at-least-once webhook delivery,
+    //                 not an error condition.
+    //   'failed'   — transient DB error (throttle / 5xx). GitHub will
+    //                redeliver, so skip role+badges to preserve the
+    //                "role assigned ↔ contribution recorded" invariant
+    //                AND log loud so a sustained failure is visible.
+    const status = await db.recordContribution(link.discord_id, githubUsername, prNumber, repo, prTitle);
+    if (status === 'duplicate') {
+      logger.debug('Webhook redelivery — contribution already recorded, skipping role+badges', {
+        discord_id: link.discord_id, githubUsername, prNumber, repo,
+      });
+      return;
+    }
+    if (status === 'failed') {
+      logger.error('recordContribution failed — skipping role assign + badges (GitHub will redeliver)', {
         discord_id: link.discord_id, githubUsername, prNumber, repo,
       });
       return;
     }
     const result = await assignContributorRole(link.discord_id, prNumber, repo, githubUsername);
 
-    const newBadges = db.checkAndAwardBadges(link.discord_id, prTitle, repo);
+    const newBadges = await db.checkAndAwardBadges(link.discord_id, prTitle, repo);
     if (newBadges.length > 0) {
       await notifyBadgeEarned(link.discord_id, newBadges);
     }
@@ -297,9 +310,9 @@ async function handleIssue(payload) {
   }
 
   if (payload.action === 'opened' && githubUsername) {
-    const link = db.getLinkByGithub(githubUsername);
+    const link = await db.getLinkByGithub(githubUsername);
     if (link) {
-      const awarded = db.awardFirstIssueBadge(link.discord_id);
+      const awarded = await db.awardFirstIssueBadge(link.discord_id);
       if (awarded.length > 0) {
         await notifyBadgeEarned(link.discord_id, awarded);
       }
@@ -356,8 +369,8 @@ async function handleStar(payload) {
   // Iterate in descending order to find the highest applicable milestone
   const milestonesDesc = [...config.STAR_MILESTONES].sort((a, b) => b - a);
   for (const milestone of milestonesDesc) {
-    if (stars >= milestone && !db.hasMilestoneBeenAnnounced('stars', milestone, repo)) {
-      if (db.recordMilestone('stars', milestone, repo)) {
+    if (stars >= milestone && !(await db.hasMilestoneBeenAnnounced('stars', milestone, repo))) {
+      if (await db.recordMilestone('stars', milestone, repo)) {
         await postStarMilestone(repo, milestone, repoUrl);
         break;
       }

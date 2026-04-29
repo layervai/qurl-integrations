@@ -111,6 +111,12 @@ const STORE_METHODS = Object.freeze([
 
   // Lifecycle
   'close',
+  // Cheap "is the data layer functional" probe — called by /health
+  // at LB-cadence (10–30s typical). Backends must keep this O(1):
+  // SQLite uses a trivial query against an indexed table, DDB uses
+  // a single GetItem on a sentinel key. NEVER use this for
+  // aggregation / scan work; /metrics is the right home for that.
+  'healthCheck',
 ]);
 
 // Constants surfaced on the Store object (not methods). Backends must

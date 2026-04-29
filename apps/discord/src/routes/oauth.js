@@ -94,17 +94,31 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
 
     logger.info(`Found ${contributions.length} historical contribution(s) for @${githubUsername}`);
 
-    // Record each contribution (db handles duplicates)
+    // Record each contribution. Tri-state status:
+    //   'recorded'  — counts toward the user-facing newCount
+    //   'duplicate' — already linked, expected during repeat onboarding
+    //   'failed'    — transient DB error during backfill; log loud so
+    //                 ops can see if onboarding is undercounting before
+    //                 the user notices. We don't retry inline (the
+    //                 onboarding flow has a wall-clock budget); the
+    //                 user can re-link to re-run.
     let newCount = 0;
+    let failedCount = 0;
     for (const contrib of contributions) {
-      const recorded = db.recordContribution(
+      const status = await db.recordContribution(
         discordId,
         githubUsername,
         contrib.prNumber,
         contrib.repo,
         contrib.title
       );
-      if (recorded) newCount++;
+      if (status === 'recorded') newCount++;
+      else if (status === 'failed') failedCount++;
+    }
+    if (failedCount > 0) {
+      logger.warn('Historical backfill had transient failures; user-visible count under-reports', {
+        discordId, githubUsername, failedCount, totalAttempted: contributions.length,
+      });
     }
 
     // Assign contributor role
@@ -127,7 +141,7 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
       const key = `${contrib.title}\x00${contrib.repo}`;
       if (seenTitleKeys.has(key)) continue;
       seenTitleKeys.add(key);
-      const badges = db.checkAndAwardBadges(discordId, contrib.title, contrib.repo);
+      const badges = await db.checkAndAwardBadges(discordId, contrib.title, contrib.repo);
       newBadges.push(...badges);
     }
 
@@ -270,7 +284,7 @@ const OAUTH_SESSION_COOKIE = 'qurl_oauth_session';
 const COOKIE_TTL_SECONDS = 15 * 60; // 15 minutes
 
 // Start GitHub OAuth flow
-router.get('/github', rateLimit, (req, res) => {
+router.get('/github', rateLimit, async (req, res) => {
   const { state } = req.query;
 
   if (!state || !/^[a-f0-9]{32}\.[a-f0-9]{64}$/.test(state)) {
@@ -283,7 +297,7 @@ router.get('/github', rateLimit, (req, res) => {
     }));
   }
 
-  const pending = db.getPendingLink(state);
+  const pending = await db.getPendingLink(state);
   if (!pending) {
     return res.status(400).send(renderPage({
       title: 'Link Expired',
@@ -371,7 +385,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
 
   // Atomic DELETE ... RETURNING closes the TOCTOU window: a second concurrent
   // request with the same state gets no row back and is rejected.
-  const pending = db.consumePendingLink(state);
+  const pending = await db.consumePendingLink(state);
   if (!pending) {
     return res.status(400).send(renderPage({
       title: 'Link Expired',
@@ -471,7 +485,7 @@ router.get('/github/callback', rateLimit, async (req, res) => {
       }));
     }
 
-    db.createLink(pending.discord_id, userData.login);
+    await db.createLink(pending.discord_id, userData.login);
     // deletePendingLink already called above (TOCTOU prevention)
 
     logger.info(`Linked Discord ${pending.discord_id} to GitHub @${userData.login}`);
@@ -595,12 +609,12 @@ router.get('/github/callback', rateLimit, async (req, res) => {
           tokenHash8,
         });
         try {
-          db.recordOrphanedToken(accessToken);
+          await db.recordOrphanedToken(accessToken);
           // Error-level (not warn) so monitoring/alerting catches orphaned
           // tokens accumulating — an operator needs to notice this trend
           // before the 7-day sweeper retention window lapses. Includes the
           // current orphan-queue depth so PagerDuty thresholds can trigger.
-          const orphanCount = db.countOrphanedTokens?.() ?? -1;
+          const orphanCount = await db.countOrphanedTokens().catch(() => -1);
           logger.error('OAuth token orphaned (revocation retries exhausted) — alert oncall', {
             tokenHash8,
             orphanQueueDepth: orphanCount,
