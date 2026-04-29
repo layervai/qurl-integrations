@@ -75,6 +75,7 @@ jest.mock('discord.js', () => ({
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
+    setEmoji: jest.fn().mockReturnThis(),
     setStyle: jest.fn().mockReturnThis(),
     setURL: jest.fn().mockReturnThis(),
   })),
@@ -1324,6 +1325,7 @@ describe('handleAddRecipients', () => {
       ButtonBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setLabel: jest.fn().mockReturnThis(),
+        setEmoji: jest.fn().mockReturnThis(),
         setStyle: jest.fn().mockReturnThis(),
         setURL: jest.fn().mockReturnThis(),
       })),
@@ -1348,6 +1350,7 @@ describe('handleAddRecipients', () => {
       TextInputBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setLabel: jest.fn().mockReturnThis(),
+        setEmoji: jest.fn().mockReturnThis(),
         setPlaceholder: jest.fn().mockReturnThis(),
         setStyle: jest.fn().mockReturnThis(),
         setMaxLength: jest.fn().mockReturnThis(),

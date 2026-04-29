@@ -55,6 +55,7 @@ jest.mock('discord.js', () => {
     const obj = {
       setCustomId: jest.fn().mockReturnThis(),
       setLabel: jest.fn().mockReturnThis(),
+      setEmoji: jest.fn().mockReturnThis(),
       setStyle: jest.fn().mockReturnThis(),
       setURL: jest.fn().mockReturnThis(),
       setTitle: jest.fn().mockReturnThis(),

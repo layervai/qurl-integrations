@@ -267,7 +267,7 @@ function resolveSenderAlias(interaction) {
 // "what's on the other side is invisible to … scanners, bots, crawlers,
 // strangers") rather than literal ("shared a file with you") — the brand
 // goal is to convey the qURL hidden-layer model, not just announce a
-// file transfer. The qURL link is rendered as a `Step Through →` Link
+// file transfer. The qURL link is rendered as a `🔗 Step Through` Link
 // button rather than a bare URL field; recipients click the button to
 // open the link in their default browser.
 //
@@ -302,7 +302,7 @@ function resolveSenderAlias(interaction) {
 //     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
-//     │  │   Step Through →         │  (Link button — opens qURL)
+//     │  │   🔗 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
@@ -389,11 +389,21 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     },
   );
 
-  // Link button: grey, single-click opens qurlLink in the recipient's
-  // browser. No interaction handler needed — Discord handles the redirect.
+  // Link button: opens qurlLink in the recipient's browser on a
+  // single click. No interaction handler needed — Discord handles
+  // the redirect.
+  //
+  // Style is `ButtonStyle.Link` because Discord requires URL buttons
+  // to be Link-style (Primary/Success/Danger/Secondary cannot carry
+  // a URL — they only fire interaction handlers). Link buttons render
+  // gray, which can read as "text" rather than a clickable affordance.
+  // The leading 🔗 emoji adds visual weight so the recipient sees a
+  // clear button shape; arrow `→` dropped from the label since the
+  // emoji conveys the same "go elsewhere" intent.
   const stepThrough = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setLabel('Step Through →')
+    .setEmoji('🔗')
+    .setLabel('Step Through')
     .setURL(qurlLink);
   const components = [new ActionRowBuilder().addComponents(stepThrough)];
 
