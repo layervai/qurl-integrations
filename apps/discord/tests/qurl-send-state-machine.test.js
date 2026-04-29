@@ -1142,6 +1142,33 @@ describe('handleSend — audit emission', () => {
     const emitted = logger.audit.mock.calls.map(c => c[0]);
     expect(emitted).toContain('dispatch_sent');
   });
+
+  // Locks the try/finally invariant: sendDM is contractually no-throw
+  // today, but if a future change to sendDM lets it throw, the audit
+  // must still fire as dispatch_failed (not silently disappear when the
+  // promise rejection bubbles through batchSettled).
+  it('emits dispatch_failed when sendDM itself throws (contract regression guard)', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    mockSendDM.mockRejectedValueOnce(new Error('Discord API 503'));
+    const locInit = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInit, targetChannel, sendBtn],
+    });
+    await cmd.execute(interaction);
+
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toContain('dispatch_failed');
+    expect(emitted).not.toContain('dispatch_sent');
+  });
 });
 
 // ===========================================================================

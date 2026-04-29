@@ -1619,13 +1619,21 @@ async function handleSend(interaction, apiKey) {
       personalMessage,
     });
 
-    const sent = await sendDM(link.recipientId, dmPayload);
-    // Emit the audit event BEFORE the DB write — if updateSendDMStatus
-    // throws (e.g., transient DDB throttle), the recipient is still
-    // counted in CloudWatch metrics. Doing it after the DB write would
-    // silently drop the metric on every DB-layer hiccup, which is the
-    // exact failure mode the audit metric is supposed to measure.
-    logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    // Audit in `finally` so the metric fires whether sendDM resolves to
+    // false OR throws. sendDM is contractually no-throw today (see
+    // apps/discord/src/discord.js — its own try/catch returns false on
+    // every failure mode), but try/finally locks the metric's accuracy
+    // against a future change to that contract: a thrown sendDM should
+    // still count as dispatch_failed, not silently disappear from
+    // CloudWatch. Audit also fires BEFORE the DB write so a DDB-layer
+    // throw can't suppress it — that's the failure mode the audit
+    // metric exists to measure.
+    let sent = false;
+    try {
+      sent = await sendDM(link.recipientId, dmPayload);
+    } finally {
+      logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    }
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
@@ -2070,7 +2078,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind, api_code: error.apiCode ?? null });
+    // `?? 'unknown'` is defensive — the early `if (!hasFile && !hasLocation)`
+    // guard above means we never reach the catch with inFlightKind=null
+    // today, but a future refactor that adds a throwable op before the
+    // first inFlightKind assignment would otherwise emit `kind: null`,
+    // which the CloudWatch dimension can't bucket.
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind ?? 'unknown', api_code: error.apiCode ?? null });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
@@ -2157,10 +2170,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
     }
 
-    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
-    // Audit BEFORE the DB write — see handleSend's batchSettled callback
-    // for the rationale (DB throw must not suppress the metric).
-    logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    // try/finally + before-DB-write — see handleSend's batchSettled
+    // callback for the full rationale (sendDM-throws AND DB-throw must
+    // both still emit the metric).
+    let sent = false;
+    try {
+      sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+    } finally {
+      logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    }
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
