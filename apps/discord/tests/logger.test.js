@@ -126,4 +126,66 @@ describe('logger', () => {
     // ISO format: [2026-...T...Z]
     expect(output).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
+
+  describe('audit', () => {
+    it('emits a parseable JSON line with event, agent, and ts', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('mint_success', { send_id: 'abc', count: 3 });
+
+      expect(consoleSpy.log).toHaveBeenCalledTimes(1);
+      const line = consoleSpy.log.mock.calls[0][0];
+      const parsed = JSON.parse(line);
+      expect(parsed.audit.event).toBe('mint_success');
+      expect(parsed.audit.agent).toBe('discord');
+      expect(parsed.audit.send_id).toBe('abc');
+      expect(parsed.audit.count).toBe(3);
+      expect(parsed.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    });
+
+    it('bypasses currentLevel (emits even at error level)', () => {
+      process.env.LOG_LEVEL = 'error';
+      logger = require('../src/logger');
+
+      logger.audit('dispatch_sent', { send_id: 'x' });
+
+      expect(consoleSpy.log).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.event).toBe('dispatch_sent');
+    });
+
+    it('does not redact secret-shaped meta keys (audit fields are pre-vetted)', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // A send_id or token-shaped field name must survive verbatim so a
+      // CloudWatch metric filter dimensioning on it sees the real value.
+      logger.audit('mint_success', { send_id: 'token-shaped-id-12345' });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.send_id).toBe('token-shaped-id-12345');
+    });
+
+    it('agent is not overridable via meta', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('mint_success', { agent: 'slack', send_id: 'x' });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.agent).toBe('discord');
+    });
+
+    it('handles missing meta gracefully', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('revoke_success');
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.event).toBe('revoke_success');
+      expect(parsed.audit.agent).toBe('discord');
+    });
+  });
 });

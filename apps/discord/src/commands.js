@@ -1498,6 +1498,8 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
+      logger.audit('upload_success', { send_id: sendId, kind: 'file' });
+      logger.audit('mint_success', { send_id: sendId, kind: 'file', count: qurlLinks.length, expires_in: expiresIn });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
       // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
@@ -1525,9 +1527,12 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
+      logger.audit('upload_success', { send_id: sendId, kind: 'location' });
+      logger.audit('mint_success', { send_id: sendId, kind: 'location', count: qurlLinks.length, expires_in: expiresIn });
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
+    logger.audit('mint_failed', { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode || null });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
     // Surface a specific message for known upstream failure codes so the
@@ -1606,6 +1611,7 @@ async function handleSend(interaction, apiKey) {
 
     const sent = await sendDM(link.recipientId, dmPayload);
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    logger.audit(sent ? 'dispatch_sent' : 'dispatch_failed', { send_id: sendId });
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -2281,6 +2287,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
+  logger.audit('revoke_success', { send_id: sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
 }
 

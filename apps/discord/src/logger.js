@@ -83,6 +83,38 @@ const logger = {
       console.log(formatMessage('debug', message, meta));
     }
   },
+
+  // Structured audit event. Emitted as a JSON-only log line (no
+  // human-readable preamble) so CloudWatch Logs metric filters can
+  // pattern-match `{ $.audit.event = "<name>" }` and dimension by
+  // `$.audit.agent`. The terraform filters at
+  // qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+  // pick these up.
+  //
+  // `agent` is hard-coded to "discord" for this codebase. Future
+  // integrations (Slack, Teams, CLI, web/portal) emit their own
+  // constant value so a single CloudWatch metric Minted{Agent} can
+  // attribute mints across the whole product. The string set is
+  // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
+  //
+  // Audit lines bypass currentLevel — they're observability, not
+  // debug noise. They also bypass the redact() pass on `meta`
+  // (audit fields are pre-vetted by the caller; see call sites in
+  // commands.js + connector.js) so a redact substring like
+  // "token" appearing in a sendId doesn't get blanked.
+  audit(event, meta = {}) {
+    // Spread meta first, then pin event + agent last so a caller passing
+    // `agent` or `event` in meta cannot overwrite the canonical value the
+    // CloudWatch filters key off of.
+    const audit = { ...meta, event, agent: 'discord' };
+    // Single-line JSON, parseable by `{ $.audit.event = "..." }`
+    // CloudWatch filter syntax. No timestamp prefix — the JSON has
+    // its own ts field. console.log adds a trailing newline.
+    console.log(JSON.stringify({
+      audit,
+      ts: formatTimestamp(),
+    }));
+  },
 };
 
 module.exports = logger;
