@@ -15,8 +15,9 @@ module.exports = {
     // bot-rejection / self-rejection / channel-empty / voice-not-in-voice).
     // The gap to 78 is the back-half code preserved unchanged from main
     // (monitorLinkStatus, post-send confirm message, handleAddRecipients);
-    // reintroducing tests for that surface is tracked as a follow-up. Real
-    // gate is the 536-test suite, which now runs without any skipped specs.
+    // reintroducing tests for that surface and restoring the threshold is
+    // tracked in https://github.com/layervai/qurl-integrations/issues/137.
+    // Real gate is the 540-test suite, which runs without any skipped specs.
     global: {
       statements: 73,
       branches: 65,

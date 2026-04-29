@@ -868,6 +868,61 @@ describe('handleSend — end-to-end happy paths', () => {
 });
 
 // ===========================================================================
+// 7b. Channel-announcement post — sender displayName sanitization
+// ===========================================================================
+// The /qurl send back-half posts a public announcement in the channel
+// when target is 'channel' or 'voice'. Because that post is wider blast
+// radius than a DM, sanitizeDisplayName MUST strip bidi (U+202E) and
+// zero-width (U+200B) chars from the sender's displayName before it
+// goes out. This regression test was ported from the deleted
+// commands-comprehensive.test.js (the old slash-options test file
+// that was retired with the redesign) — its docstring made the
+// security intent explicit: "if a future refactor replaces
+// sanitizeDisplayName with raw displayName at this site, this test
+// fails". Keep it that way.
+describe('handleSend — channel-announcement post sanitizes sender displayName', () => {
+  function locInitBtn() {
+    return makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+  }
+
+  it('strips RLO (U+202E) and ZWSP (U+200B) before posting to channel', async () => {
+    mockGetTextChannelMembers.mockReturnValue([
+      { id: 'u2', username: 'Alice' },
+    ]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    const channelSend = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      channel: {
+        send: channelSend,
+        // awaitMessageComponent + awaitMessages still need to come from
+        // the queue/default; spread doesn't matter since the makeInteraction
+        // overrides set channel from these props.
+      },
+      member: { displayName: '‮Admin​bob' },
+      user: { id: 'user-1', username: 'TestUser', displayName: '‮Admin​bob' },
+    });
+    await cmd.execute(interaction);
+    // Public channel post should have happened (delivered > 0, target = 'channel')
+    expect(channelSend).toHaveBeenCalledTimes(1);
+    const msg = channelSend.mock.calls[0][0].content;
+    // Sanitized: no RLO, no ZWSP
+    expect(msg).not.toContain('‮');
+    expect(msg).not.toContain('​');
+    // The sanitized name should appear (NFKC + strip leaves "Adminbob")
+    expect(msg).toMatch(/Adminbob/);
+  });
+});
+
+// ===========================================================================
 // 8. Additional coverage targeted at branches the review flagged
 // ===========================================================================
 
@@ -954,7 +1009,7 @@ describe('handleSend — additional branch coverage', () => {
     const interaction = makeInteraction({ awaitQueue: [locInitBtn()] });
     await cmd.execute(interaction);
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('Send timed out (5 min)'),
+      content: expect.stringContaining('Send timed out (3 min)'),
     }));
     expect(sendCooldowns.has('user-1')).toBe(false);
   });

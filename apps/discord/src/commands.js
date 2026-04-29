@@ -125,6 +125,13 @@ function isGoogleMapsURL(url) {
 
 const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName } = require('./utils/sanitize');
 
+// Best-effort host extraction for log lines. URL parsing throws on
+// pathological input (no scheme, embedded null, etc.) — swallow and
+// return a marker so a log line is still useful in triage.
+function safeUrlHost(url) {
+  try { return new URL(url).host; } catch { return 'invalid-url'; }
+}
+
 function sanitizeMessage(msg) {
   // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
   // would otherwise be escaped and the mention regex wouldn't match). Then
@@ -810,8 +817,8 @@ async function handleSend(interaction, apiKey) {
     attachment = fileMessage.attachments.first();
 
     // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
-    // for parity with the timeout/cancel paths. Up to 5 minutes can pass between
-    // the user dropping the file and these guards firing on a slow form-loop, and
+    // for parity with the timeout/cancel paths. Up to a few minutes can pass
+    // between the user dropping the file and these guards firing on a slow form-loop, and
     // an `editReply` against a stale interaction can reject with "Unknown
     // Interaction" — swallow + log instead of surfacing as an unhandled rejection.
     if (!isAllowedFileType(attachment.contentType)) {
@@ -837,7 +844,7 @@ async function handleSend(interaction, apiKey) {
     if (!isAllowedSourceUrl(attachment.url)) {
       clearCooldown(interaction.user.id);
       logger.warn('File send rejected: attachment.url failed isAllowedSourceUrl', {
-        sendNonce, userId: interaction.user.id, urlHost: (() => { try { return new URL(attachment.url).host; } catch { return 'invalid-url'; } })(),
+        sendNonce, userId: interaction.user.id, urlHost: safeUrlHost(attachment.url),
       });
       return interaction.editReply({
         content: 'The attached file URL is not from a recognized Discord CDN. Cancelled.',
@@ -1061,11 +1068,19 @@ async function handleSend(interaction, apiKey) {
     try {
       compInt = await interaction.channel.awaitMessageComponent({
         filter: (i) => i.user.id === interaction.user.id && formCompIdSet.has(i.customId),
-        time: 5 * 60000,
+        // 3 min, not 5: total time-since-original-`reply()` must stay under
+        // Discord's 15-min interaction-token expiry, including 60s init
+        // wait + 60s file awaitMessages + back-half (download → re-upload
+        // → mint batches → DM fan-out). 5 min on the form alone left only
+        // ~9 min for the back-half, which a 25 MB file with batched
+        // re-uploads on a slow upstream can blow through. 3 min keeps the
+        // back-half headroom comfortable while still being plenty of
+        // recipient-picking time for any realistic flow.
+        time: 3 * 60000,
       });
     } catch {
       clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'Send timed out (5 min). Cancelled.', components: [] }).catch(logIgnoredDiscordErr);
+      return interaction.editReply({ content: 'Send timed out (3 min). Cancelled.', components: [] }).catch(logIgnoredDiscordErr);
     }
 
     if (compInt.customId === ids.cancelBtn) {
