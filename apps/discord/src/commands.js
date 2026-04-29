@@ -5,6 +5,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -779,19 +780,58 @@ async function handleSend(interaction, apiKey) {
   if (initBtn.customId === `qurl_init_file_${sendNonce}`) {
     resourceType = RESOURCE_TYPES.FILE;
 
-    await initBtn.update({
-      content: '\u{1F4C1} **Drop your file in this channel** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.',
-      components: [],
-    });
+    // Pivot the file capture to a DM with the user when /qurl send was
+    // invoked from a guild channel. Dropping the file in the public
+    // channel exposes the CDN URL to every channel member — even with
+    // an immediate `delete()`, the 1-2s race window leaks the file. A
+    // DM between the user and the bot is 1:1 and doesn't have that
+    // exposure. If the user invoked /qurl send already in a DM with
+    // the bot, just await in the same channel — no pivot needed.
+    let captureChannel;
+    if (interaction.channel.type === ChannelType.DM) {
+      captureChannel = interaction.channel;
+      await initBtn.update({
+        content: '\u{1F4C1} **Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.',
+        components: [],
+      });
+    } else {
+      // Try to open a DM and post the prompt there. If the user has
+      // server-DMs disabled (DiscordAPIError 50007), bail with a clear
+      // next-step message — don't silently fall back to dropping in the
+      // guild channel, which is exactly the privacy regression the
+      // pivot was added to prevent.
+      let dm;
+      try {
+        dm = await interaction.user.createDM();
+        await dm.send('\u{1F4C1} **Ready! Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.');
+      } catch (err) {
+        const dmsBlocked = err && (err.code === 50007 || err.code === '50007');
+        if (!dmsBlocked) {
+          logger.error('Failed to open DM for file capture', {
+            sendNonce, userId: interaction.user.id, error: err?.message, code: err?.code,
+          });
+        }
+        clearCooldown(interaction.user.id);
+        return initBtn.update({
+          content: dmsBlocked
+            ? 'I tried to DM you but your DMs from server members are blocked. Enable them in your privacy settings, or open a DM with me directly and run `/qurl send` there.'
+            : 'Could not open a DM right now. Please try again.',
+          components: [],
+        }).catch(logIgnoredDiscordErr);
+      }
+      captureChannel = dm;
+      await initBtn.update({
+        content: '\u{1F4EC} **I sent you a DM — drop your file there.** I\'ll wait 60 seconds.',
+        components: [],
+      });
+    }
 
     // awaitMessages — attachments aren't gated by MessageContent intent,
-    // and the filter restricts to the invoking user's NEXT message
-    // bearing an attachment. Not perfect (the user could attach a file
-    // in a different channel and we'd miss it), but it matches the
-    // existing user mental model of "drag a file into chat."
+    // and the filter restricts to the invoking user's NEXT message in
+    // `captureChannel` bearing an attachment.
     let fileMessage;
     try {
-      const messages = await interaction.channel.awaitMessages({
+      const messages = await captureChannel.awaitMessages({
         filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
         max: 1,
         time: 60000,
@@ -804,9 +844,7 @@ async function handleSend(interaction, apiKey) {
       // an Error (channel destroyed, permissions revoked mid-await,
       // gateway disconnect) is unexpected and worth a log line so a user
       // reporting "I dropped the file but it didn't take" doesn't go
-      // uninvestigated. Combine the negative check (Error) with the
-      // positive (Collection-shaped) so a future discord.js bump that
-      // changes either shape still routes correctly.
+      // uninvestigated.
       const isUnexpected = err instanceof Error;
       if (isUnexpected) {
         logger.warn('awaitMessages failed unexpectedly during file capture', {
@@ -819,19 +857,11 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
-    // Delete the user's drop-message from the channel. The file's CDN URL
-    // is in the message and would otherwise stay publicly visible to
-    // every channel member for the rest of the channel's history,
-    // defeating the "secure one-time link" framing of qURL — the file
-    // would be readable from the message attachment itself, no qURL link
-    // needed. Best-effort: if the bot lacks Manage Messages or the user
-    // already deleted the message, swallow the error (the send still
-    // proceeds; the channel-side leak is the only thing affected).
-    fileMessage.delete?.().catch?.((err) => {
-      logger.warn('Failed to delete file-drop message after capture', {
-        sendNonce, userId: interaction.user.id, error: err?.message,
-      });
-    });
+    // No fileMessage.delete() here. The DM-pivot above means the file
+    // is captured from a 1:1 DM channel (no other viewers); deleting it
+    // would just leave the user wondering where their upload went. If
+    // the user invoked /qurl send already in a DM, same logic — DMs
+    // are private to the user+bot.
 
     // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
     // for parity with the timeout/cancel paths. Up to a few minutes can pass

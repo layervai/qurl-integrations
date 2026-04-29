@@ -108,7 +108,7 @@ jest.mock('discord.js', () => {
     }),
     ButtonBuilder: jest.fn().mockImplementation(() => makeChainable()),
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
-    ChannelType: { GuildText: 0, GuildVoice: 2, GuildStageVoice: 13 },
+    ChannelType: { GuildText: 0, DM: 1, GuildVoice: 2, GuildStageVoice: 13 },
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
     StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
     UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
@@ -237,7 +237,7 @@ function makeCompInt(customId, overrides = {}) {
   };
 }
 
-function makeInteraction({ awaitQueue = [], awaitMessages, channel = {}, guild = {}, ...overrides } = {}) {
+function makeInteraction({ awaitQueue = [], awaitMessages, channel = {}, guild = {}, dm = {}, user = {}, ...overrides } = {}) {
   // Each call to channel.awaitMessageComponent pulls from awaitQueue in
   // FIFO order. Items can be a value (resolved) or { reject: err } (rejected).
   let queueIdx = 0;
@@ -247,8 +247,20 @@ function makeInteraction({ awaitQueue = [], awaitMessages, channel = {}, guild =
     if (next.reject) return Promise.reject(next.reject);
     return Promise.resolve(next);
   });
+  // The DM channel returned by interaction.user.createDM(). The file
+  // path pivots here when channel.type !== DM. By default we wire the
+  // top-level `awaitMessages` arg into the DM channel (most file tests
+  // are guild-channel-pivot-to-DM); for DM-already tests, pass
+  // `channel: { type: 1, awaitMessages: ... }` instead.
+  const dmAwaitMessages = awaitMessages || jest.fn().mockRejectedValue(new Error('timeout'));
+  const dmChannel = {
+    type: 1, // ChannelType.DM
+    send: jest.fn().mockResolvedValue(undefined),
+    awaitMessages: dmAwaitMessages,
+    ...dm,
+  };
   return {
-    user: { id: 'user-1', username: 'TestUser' },
+    user: { id: 'user-1', username: 'TestUser', createDM: jest.fn().mockResolvedValue(dmChannel), ...user },
     options: {
       getSubcommand: jest.fn(() => 'send'),
       getString: jest.fn(() => null),
@@ -262,11 +274,13 @@ function makeInteraction({ awaitQueue = [], awaitMessages, channel = {}, guild =
     deferReply: jest.fn().mockResolvedValue(undefined),
     followUp: jest.fn().mockResolvedValue(undefined),
     channel: {
+      type: 0, // ChannelType.GuildText — DM-pivot fires by default
       awaitMessageComponent: channelAwaitMC,
-      awaitMessages: awaitMessages || jest.fn().mockRejectedValue(new Error('timeout')),
+      awaitMessages: jest.fn().mockRejectedValue(new Error('should not await on guild channel for file capture')),
       members: new Map(),
       ...channel,
     },
+    _dmChannel: dmChannel, // exposed for assertion convenience
     channelId: 'ch-1',
     guild: {
       id: 'guild-1',
@@ -390,6 +404,62 @@ describe('handleSend — Step 2: file path', () => {
   function fileInitBtn() {
     return makeCompInt(ids.initFile, { update: jest.fn().mockResolvedValue(undefined) });
   }
+
+  // DM-pivot branch tests — the file path opens a DM with the user when
+  // /qurl send is invoked from a guild channel. Goal: file CDN URL never
+  // touches a public channel. The 1:1 DM has no other viewers.
+
+  it('pivots to DM: createDM + dm.send + awaitMessages on the DM channel (not the guild channel)', async () => {
+    // Don't supply awaitMessages — let it remain rejecting. We assert
+    // createDM and dm.send fired but stop before file-drop.
+    const fileInit = fileInitBtn();
+    const interaction = makeInteraction({ awaitQueue: [fileInit] });
+    await cmd.execute(interaction);
+    expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+    expect(fileInit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('I sent you a DM'),
+    }));
+    // Channel-side awaitMessages MUST NOT have been called — the
+    // pivot has to consume the DM's awaitMessages instead.
+    expect(interaction.channel.awaitMessages).not.toHaveBeenCalled();
+  });
+
+  it('bails with a clear error when DMs are blocked (Discord error 50007)', async () => {
+    const err = Object.assign(new Error('Cannot send messages to this user'), { code: 50007 });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      user: { createDM: jest.fn().mockRejectedValue(err) },
+    });
+    await cmd.execute(interaction);
+    // No bot-side download / mint / DM should have happened
+    expect(mockDownloadAndUpload).not.toHaveBeenCalled();
+    expect(sendCooldowns.has('user-1')).toBe(false);
+    // Discord-error 50007 is a normal user-state, NOT an unexpected
+    // failure — we don't want logger.error noise.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      'Failed to open DM for file capture',
+      expect.any(Object),
+    );
+  });
+
+  it('keeps file capture in-channel when /qurl send is invoked already in a DM', async () => {
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const channelAwaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      // Override channel to be a DM (type:1). The file capture should
+      // run on this channel directly, no createDM pivot.
+      channel: {
+        type: 1, // ChannelType.DM
+        awaitMessages: channelAwaitMessages,
+      },
+    });
+    await cmd.execute(interaction);
+    expect(interaction.user.createDM).not.toHaveBeenCalled();
+    expect(channelAwaitMessages).toHaveBeenCalled();
+  });
+
 
   it('logs at warn when awaitMessages rejects with a non-timeout error', async () => {
     // discord.js v14 contract: awaitMessages with errors:['time'] rejects
