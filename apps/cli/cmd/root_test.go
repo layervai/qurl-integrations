@@ -48,6 +48,8 @@ func TestResolveValue(t *testing.T) {
 
 func TestNewClient_MissingAPIKey(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "")
+	// Isolate from any real config file on the developer's machine.
+	t.Setenv("HOME", t.TempDir())
 	opts := &globalOpts{}
 	_, err := opts.newClient()
 	if err == nil {

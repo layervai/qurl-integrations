@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // durationPattern matches Go-style durations and day suffixes (e.g., "1h", "24h", "7d", "30m").
@@ -50,6 +51,18 @@ func validateResourceID(id string) error {
 	}
 	if len(id) < 4 {
 		return fmt.Errorf("invalid resource ID %q: too short", id)
+	}
+	return nil
+}
+
+// validateRFC3339 checks that the date string is a valid RFC3339 timestamp.
+// An empty string is accepted (the field is optional).
+func validateRFC3339(flag, value string) error {
+	if value == "" {
+		return nil // optional
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		return fmt.Errorf("invalid --%s value %q: must be RFC3339 (e.g., 2026-01-01T00:00:00Z)", flag, value)
 	}
 	return nil
 }

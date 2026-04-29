@@ -62,18 +62,18 @@ func (f TableFormatter) FormatQURL(w io.Writer, qurl *client.QURL) error {
 	if qurl.Description != "" {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Description:"), qurl.Description)
 	}
+	if len(qurl.Tags) > 0 {
+		wr.printf("%s\t%s\n", f.bold.Sprint("Tags:"), strings.Join(qurl.Tags, ", "))
+	}
 	if qurl.QURLSite != "" {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Site:"), qurl.QURLSite)
+	}
+	if qurl.CustomDomain != nil && *qurl.CustomDomain != "" {
+		wr.printf("%s\t%s\n", f.bold.Sprint("Custom domain:"), *qurl.CustomDomain)
 	}
 	wr.printf("%s\t%s\n", f.bold.Sprint("Created:"), formatRelativeTime(qurl.CreatedAt))
 	if qurl.ExpiresAt != nil {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Expires:"), formatExpiry(*qurl.ExpiresAt))
-	}
-	if qurl.OneTimeUse {
-		wr.printf("%s\t%s\n", f.bold.Sprint("One-time:"), "yes")
-	}
-	if qurl.MaxSessions > 0 {
-		wr.printf("%s\t%d\n", f.bold.Sprint("Max sessions:"), qurl.MaxSessions)
 	}
 	return wr.flush(tw)
 }
@@ -83,9 +83,15 @@ func (f TableFormatter) FormatCreate(w io.Writer, output *client.CreateOutput) e
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	wr := &errWriter{w: tw}
 	wr.printf("%s\n\n", f.green.Sprint("qURL created"))
+	if output.QURLID != "" {
+		wr.printf("%s\t%s\n", f.bold.Sprint("qURL ID:"), output.QURLID)
+	}
 	wr.printf("%s\t%s\n", f.bold.Sprint("ID:"), output.ResourceID)
 	wr.printf("%s\t%s\n", f.bold.Sprint("Link:"), output.QURLLink)
 	wr.printf("%s\t%s\n", f.bold.Sprint("Site:"), output.QURLSite)
+	if output.Label != "" {
+		wr.printf("%s\t%s\n", f.bold.Sprint("Label:"), output.Label)
+	}
 	if output.ExpiresAt != nil {
 		wr.printf("%s\t%s\n", f.bold.Sprint("Expires:"), formatExpiry(*output.ExpiresAt))
 	}
@@ -190,7 +196,9 @@ func (f TableFormatter) colorStatus(status string) string {
 	switch status {
 	case client.StatusActive:
 		return f.green.Sprint(status)
-	case client.StatusExpired, client.StatusRevoked, client.StatusConsumed:
+	case client.StatusRevoked:
+		// "expired" and "consumed" are removed from the API spec as of this version;
+		// unknown statuses fall through to the default (uncolored) to stay readable.
 		return f.red.Sprint(status)
 	default:
 		return status

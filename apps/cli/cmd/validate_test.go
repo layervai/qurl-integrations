@@ -104,3 +104,27 @@ func TestValidateAccessToken(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRFC3339(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty ok", "", false},
+		{"valid UTC", "2026-01-01T00:00:00Z", false},
+		{"valid with offset", "2026-06-15T12:30:00+05:30", false},
+		{"date only", "2026-01-01", true},
+		{"invalid format", "Jan 1 2026", true},
+		{"garbage", "not-a-date", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRFC3339("test-flag", tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateRFC3339(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
+			}
+		})
+	}
+}

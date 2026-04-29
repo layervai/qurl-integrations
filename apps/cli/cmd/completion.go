@@ -47,7 +47,7 @@ func resourceIDCompletion(opts *globalOpts) func(*cobra.Command, []string, strin
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 		defer cancel()
-		result, err := c.List(ctx, client.ListInput{Limit: 20, Query: toComplete})
+		result, err := c.List(ctx, &client.ListInput{Limit: 20, Query: toComplete})
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
