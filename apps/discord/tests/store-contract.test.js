@@ -23,7 +23,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+  audit: jest.fn(),}));
 
 const { STORE_METHODS, STORE_CONSTANTS, assertStoreShape } = require('../src/store/contract');
 

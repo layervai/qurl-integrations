@@ -7,7 +7,7 @@ jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
-  debug: jest.fn(),
+  debug: jest.fn(), audit: jest.fn(),
 }));
 
 const originalFetch = globalThis.fetch;
@@ -25,7 +25,7 @@ describe('qURL client — getResourceStatus (line 51)', () => {
       info: jest.fn(),
       warn: jest.fn(),
       error: jest.fn(),
-      debug: jest.fn(),
+      debug: jest.fn(), audit: jest.fn(),
     }));
     qurl = require('../src/qurl');
   });
@@ -100,7 +100,7 @@ describe('qURL client — retry logic on transient failures', () => {
       QURL_ENDPOINT: 'https://api.test.local',
     }));
     jest.mock('../src/logger', () => ({
-      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
     }));
     qurl = require('../src/qurl');
   });
@@ -160,7 +160,7 @@ describe('qURL client — createOneTimeLink happy path', () => {
       QURL_ENDPOINT: 'https://api.test.local',
     }));
     jest.doMock('../src/logger', () => ({
-      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
     }));
     jest.doMock('dns', () => ({
       promises: { lookup: jest.fn().mockResolvedValue([{ address: '93.184.216.34', family: 4 }]) },
@@ -181,7 +181,7 @@ describe('qURL client — createOneTimeLink happy path', () => {
   it('rejects when DNS lookup fails', async () => {
     jest.resetModules();
     jest.doMock('../src/config', () => ({ QURL_API_KEY: 'k', QURL_ENDPOINT: 'https://api.test.local' }));
-    jest.doMock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+    jest.doMock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn() }));
     jest.doMock('dns', () => ({
       promises: { lookup: jest.fn().mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })) },
     }));

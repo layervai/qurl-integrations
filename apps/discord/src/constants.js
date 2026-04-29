@@ -78,6 +78,22 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Canonical event names emitted via logger.audit(). The CloudWatch metric
+// filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// pattern-match these strings, so a typo at a call site silently disables
+// the metric. Always import from here rather than passing literal strings.
+// Adding a new event: add the constant here, the call site, AND the
+// terraform filter (in the same merge train, since the filter is a no-op
+// without the emission and vice versa).
+const AUDIT_EVENTS = {
+  UPLOAD_SUCCESS: 'upload_success',
+  MINT_SUCCESS: 'mint_success',
+  MINT_FAILED: 'mint_failed',
+  DISPATCH_SENT: 'dispatch_sent',
+  DISPATCH_FAILED: 'dispatch_failed',
+  REVOKE_SUCCESS: 'revoke_success',
+};
+
 module.exports = {
   COLORS,
   RESOURCE_TYPES,
@@ -89,4 +105,5 @@ module.exports = {
   MAX_CONCURRENT_MONITORS,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  AUDIT_EVENTS,
 };

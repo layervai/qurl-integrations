@@ -1032,6 +1032,118 @@ describe('handleSend — end-to-end happy paths', () => {
 });
 
 // ===========================================================================
+// 7b. Audit event emission — guards the contract that CloudWatch metric
+// filters in qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// pattern-match against. A typo in an event name silently disables a
+// production metric, so these assertions live next to the happy paths.
+// ===========================================================================
+
+describe('handleSend — audit emission', () => {
+  it('emits upload_success + mint_success + dispatch_sent on the file happy path', async () => {
+    const fileInit = makeCompInt(ids.initFile);
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetUser, userSelect, sendBtn],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'mint_success', 'dispatch_sent']));
+    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
+      send_id: expect.any(String), kind: 'file', count: expect.any(Number),
+    }));
+  });
+
+  it('emits mint_failed (not mint_success) when upload throws on the location path', async () => {
+    const err = new Error('upstream quota');
+    err.apiCode = 'quota_exceeded';
+    mockUploadJsonToConnector.mockRejectedValue(err);
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const locInit = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInit, targetChannel, sendBtn],
+    });
+    await cmd.execute(interaction);
+
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toContain('mint_failed');
+    expect(emitted).not.toContain('mint_success');
+    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
+      send_id: expect.any(String), kind: 'location', api_code: 'quota_exceeded',
+    }));
+  });
+
+  it('emits dispatch_sent / dispatch_failed once per recipient, even on partial DM failure', async () => {
+    mockGetTextChannelMembers.mockReturnValue([
+      { id: 'u2', username: 'Alice' },
+      { id: 'u3', username: 'Bob' },
+    ]);
+    mockMintLinks.mockResolvedValue([
+      { qurl_link: 'https://q.test/a' },
+      { qurl_link: 'https://q.test/b' },
+    ]);
+    mockSendDM.mockImplementation(async (recipientId) => recipientId === 'u2');
+    const locInit = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInit, targetChannel, sendBtn],
+    });
+    await cmd.execute(interaction);
+
+    const dispatchCalls = logger.audit.mock.calls.filter(c => c[0] === 'dispatch_sent' || c[0] === 'dispatch_failed');
+    expect(dispatchCalls).toHaveLength(2);
+    const events = dispatchCalls.map(c => c[0]).sort();
+    expect(events).toEqual(['dispatch_failed', 'dispatch_sent']);
+  });
+
+  it('emits dispatch_sent before the DB write, so a DDB throw cannot suppress the metric', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    mockSendDM.mockResolvedValue(true);
+    // Make the DM-status DB write throw — audit must already have fired.
+    mockDb.updateSendDMStatus.mockRejectedValueOnce(new Error('DDB ProvisionedThroughputExceededException'));
+    const locInit = makeCompInt(ids.initLoc, {
+      showModal: jest.fn().mockResolvedValue(undefined),
+      awaitModalSubmit: jest.fn().mockResolvedValue({
+        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
+        deferUpdate: jest.fn().mockResolvedValue(undefined),
+      }),
+    });
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInit, targetChannel, sendBtn],
+    });
+    await cmd.execute(interaction);
+
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toContain('dispatch_sent');
+  });
+});
+
+// ===========================================================================
 // 7b. Channel-announcement post — sender displayName sanitization
 // ===========================================================================
 // The /qurl send back-half posts a public announcement in the channel

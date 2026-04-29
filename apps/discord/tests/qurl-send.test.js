@@ -28,7 +28,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+  audit: jest.fn(),}));
 
 // Mock dns.lookup so createOneTimeLink's DNS-rebinding guard doesn't hit
 // the network. Any public-looking hostname resolves to a public IP.
@@ -510,7 +510,7 @@ describe('qURL client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
-    }));
+  audit: jest.fn(),    }));
 
     qurl = require('../src/qurl');
   });
@@ -615,7 +615,7 @@ describe('Connector client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
-    }));
+  audit: jest.fn(),    }));
     jest.mock('form-data', () => {
       return jest.fn().mockImplementation(() => ({
         append: jest.fn(),
@@ -778,7 +778,7 @@ describe('Places client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
-    }));
+  audit: jest.fn(),    }));
   });
 
   afterEach(() => {
@@ -1279,7 +1279,7 @@ describe('handleAddRecipients', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
-    }));
+  audit: jest.fn(),    }));
 
     // Mock discord.js
     jest.mock('discord.js', () => ({

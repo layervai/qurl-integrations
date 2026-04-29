@@ -50,7 +50,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+  audit: jest.fn(),}));
 
 // Track EmbedBuilder calls
 const embedInstances = [];

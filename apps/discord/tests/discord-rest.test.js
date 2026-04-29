@@ -21,7 +21,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+  audit: jest.fn(),}));
 
 // Mock ../src/discord to expose a controllable client.rest. discord-rest
 // reads `client.rest` at module load and reuses it for every REST call,

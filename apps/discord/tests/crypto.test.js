@@ -8,7 +8,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
-}));
+  audit: jest.fn(),}));
 
 const nodeCrypto = require('crypto');
 const { encrypt, decrypt, _resetKeyCache } = require('../src/utils/crypto');

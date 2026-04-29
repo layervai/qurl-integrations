@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -1498,8 +1498,8 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
-      logger.audit('upload_success', { send_id: sendId, kind: 'file' });
-      logger.audit('mint_success', { send_id: sendId, kind: 'file', count: qurlLinks.length, expires_in: expiresIn });
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
+      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'file', count: qurlLinks.length, expires_in: expiresIn });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
       // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
@@ -1527,12 +1527,12 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
-      logger.audit('upload_success', { send_id: sendId, kind: 'location' });
-      logger.audit('mint_success', { send_id: sendId, kind: 'location', count: qurlLinks.length, expires_in: expiresIn });
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
+      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'location', count: qurlLinks.length, expires_in: expiresIn });
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
-    logger.audit('mint_failed', { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode || null });
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode || null });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
     // Surface a specific message for known upstream failure codes so the
@@ -1610,8 +1610,13 @@ async function handleSend(interaction, apiKey) {
     });
 
     const sent = await sendDM(link.recipientId, dmPayload);
+    // Emit the audit event BEFORE the DB write — if updateSendDMStatus
+    // throws (e.g., transient DDB throttle), the recipient is still
+    // counted in CloudWatch metrics. Doing it after the DB write would
+    // silently drop the metric on every DB-layer hiccup, which is the
+    // exact failure mode the audit metric is supposed to measure.
+    logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    logger.audit(sent ? 'dispatch_sent' : 'dispatch_failed', { send_id: sendId });
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -2010,6 +2015,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       }
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
+      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'file', count: allLinks.length, expires_in: sendConfig.expires_in });
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
@@ -2035,9 +2042,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
       });
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
+      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'location', count: allLinks.length, expires_in: sendConfig.expires_in });
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
+    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: hasFile ? 'file' : 'location', api_code: error.apiCode || null });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
@@ -2125,6 +2135,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
 
     const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+    // Audit BEFORE the DB write — see handleSend's batchSettled callback
+    // for the rationale (DB throw must not suppress the metric).
+    logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
@@ -2287,7 +2300,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });
-  logger.audit('revoke_success', { send_id: sendId, success, total: resourceIds.length });
+  logger.audit(AUDIT_EVENTS.REVOKE_SUCCESS, { send_id: sendId, success, total: resourceIds.length });
   return { success, total: resourceIds.length };
 }
 
