@@ -2001,6 +2001,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
+        // Emit mint_failed here too — the inner catch returns early, so the
+        // outer catch (which also emits) never sees these errors. Without
+        // this line the metric undercounts the most common file-path
+        // failure mode (Discord CDN URL expiry).
+        logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: 'file', api_code: err.apiCode ?? null });
         return { msg, newResourceIds: [], delivered: 0, failed: 0 };
       }
 
@@ -2308,8 +2313,13 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // Emit BEFORE markSendRevoked for the same reason the dispatch
   // emissions fire before updateSendDMStatus — a DB write throw must
   // not suppress the audit metric, which is exactly the failure mode
-  // we're trying to measure.
-  logger.audit(AUDIT_EVENTS.REVOKE_SUCCESS, { send_id: sendId, success, total: resourceIds.length });
+  // we're trying to measure. Distinguish all-failed (success === 0)
+  // from at-least-partial (success > 0) so the dashboard isn't
+  // misled into counting fully-failed revokes as successes.
+  if (resourceIds.length > 0) {
+    const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
+    logger.audit(event, { send_id: sendId, success, total: resourceIds.length });
+  }
   await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });

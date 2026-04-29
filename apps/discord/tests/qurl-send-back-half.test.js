@@ -598,7 +598,7 @@ describe('revokeAllLinks', () => {
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
-  it('emits revoke_success audit event with success/total tally', async () => {
+  it('emits revoke_success audit event with success/total tally when at least one link revoked', async () => {
     mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
     mockDeleteLink.mockResolvedValue(undefined);
 
@@ -607,6 +607,30 @@ describe('revokeAllLinks', () => {
     expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
       send_id: 'send-42', success: 2, total: 2,
     });
+  });
+
+  it('emits revoke_failed (not revoke_success) when every per-link delete throws', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDeleteLink.mockRejectedValue(new Error('429 rate limited'));
+
+    await revokeAllLinks('send-43', 'sender-1', 'apikey');
+
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).toContain('revoke_failed');
+    expect(events).not.toContain('revoke_success');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-43', success: 0, total: 2,
+    });
+  });
+
+  it('emits no audit event when there are no resources to revoke (avoids 0/0 noise)', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce([]);
+
+    await revokeAllLinks('send-44', 'sender-1', 'apikey');
+
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).not.toContain('revoke_success');
+    expect(events).not.toContain('revoke_failed');
   });
 });
 
@@ -740,6 +764,30 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
 
     expect(result.msg).toMatch(/failed to prepare links/i);
+  });
+
+  // The file-path inner try/catch returns early before reaching the outer
+  // catch, so the outer catch's logger.audit(MINT_FAILED) never sees these
+  // errors. The inner catch must emit its own mint_failed or the metric
+  // undercounts the most common file-path failure mode (CDN URL expiry).
+  it('emits mint_failed when downloadAndUpload throws (inner-catch path)', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '5m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    const err = new Error('403 Forbidden — URL expired');
+    err.apiCode = 'cdn_expired';
+    mockDownloadAndUpload.mockRejectedValueOnce(err);
+
+    await handleAddRecipients(
+      'send-9', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
+      send_id: 'send-9', kind: 'file', api_code: 'cdn_expired',
+    }));
   });
 
   it('reports underdelivery when mintLinks returns fewer links than recipients', async () => {

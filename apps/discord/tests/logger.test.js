@@ -155,16 +155,33 @@ describe('logger', () => {
       expect(parsed.audit.event).toBe('dispatch_sent');
     });
 
-    it('does not redact secret-shaped meta keys (audit fields are pre-vetted)', () => {
+    it('does not redact meta keys whose names match REDACT_SUBSTRINGS', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // A send_id or token-shaped field name must survive verbatim so a
-      // CloudWatch metric filter dimensioning on it sees the real value.
-      logger.audit('mint_success', { send_id: 'token-shaped-id-12345' });
+      // redact() matches on KEY name, not value. A future audit meta
+      // field like `tokens_minted` or `token_count` would otherwise
+      // get blanked — which would corrupt a CloudWatch metric
+      // dimension. Verify audit() bypasses redact for these keys.
+      logger.audit('mint_success', { tokens_minted: 7, send_id: 'send-1' });
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      expect(parsed.audit.send_id).toBe('token-shaped-id-12345');
+      expect(parsed.audit.tokens_minted).toBe(7);
+      expect(parsed.audit.send_id).toBe('send-1');
+    });
+
+    it('catches JSON.stringify failures and logs an error instead of throwing', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // Circular ref — JSON.stringify throws TypeError. audit() must
+      // not propagate that to the caller (would fail per-recipient
+      // dispatch in batchSettled).
+      const circ = {};
+      circ.self = circ;
+      expect(() => logger.audit('mint_success', { circ })).not.toThrow();
+      expect(consoleSpy.error).toHaveBeenCalled();
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('logger.audit serialization failed');
     });
 
     it('agent is not overridable via meta', () => {

@@ -98,12 +98,11 @@ const logger = {
   // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
   //
   // Audit lines bypass currentLevel — they're observability, not
-  // debug noise. They also bypass the redact() pass on `meta`
-  // (audit fields are pre-vetted by the caller — see the AUDIT_EVENTS
-  // call sites in commands.js) so a redact substring like "token"
-  // appearing in a sendId doesn't get blanked. Callers MUST ensure
-  // they don't pass secrets into meta — the constants.js comment
-  // documents this contract.
+  // debug noise. They also bypass the redact() pass on `meta`. redact()
+  // matches on KEY name (not value), so future fields like `token_count`
+  // or `tokens_minted` would be blanked otherwise — which would corrupt
+  // a CloudWatch metric dimension. Callers MUST ensure they don't pass
+  // secrets into meta — the constants.js comment documents this contract.
   audit(event, meta = {}) {
     // Spread meta first, then pin event + agent last so a caller passing
     // `agent` or `event` in meta cannot overwrite the canonical value the
@@ -112,10 +111,20 @@ const logger = {
     // Single-line JSON, parseable by `{ $.audit.event = "..." }`
     // CloudWatch filter syntax. No timestamp prefix — the JSON has
     // its own ts field. console.log adds a trailing newline.
-    console.log(JSON.stringify({
-      audit,
-      ts: formatTimestamp(),
-    }));
+    //
+    // Wrap JSON.stringify in try/catch — a circular reference, BigInt,
+    // or other non-serializable value in meta would otherwise throw
+    // out of audit() and into the caller, which on the per-recipient
+    // batchSettled callback would fail an entire DM. Audit must never
+    // break the user-visible flow; degrade to an error log instead.
+    try {
+      console.log(JSON.stringify({
+        audit,
+        ts: formatTimestamp(),
+      }));
+    } catch (err) {
+      console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err.message)}`);
+    }
   },
 };
 

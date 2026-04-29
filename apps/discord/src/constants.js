@@ -91,7 +91,13 @@ const AUDIT_EVENTS = {
   MINT_FAILED: 'mint_failed',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
+  // REVOKE_SUCCESS fires when at least one per-link delete succeeded;
+  // REVOKE_FAILED fires when every per-link delete threw (success === 0
+  // && total > 0). When total === 0 (nothing to revoke — already-revoked
+  // or unknown sendId) neither event fires. Splitting the two stops a
+  // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
+  REVOKE_FAILED: 'revoke_failed',
 };
 
 module.exports = {
