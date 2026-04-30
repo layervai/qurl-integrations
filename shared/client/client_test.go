@@ -710,23 +710,36 @@ func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
 		t.Errorf("server should not be hit on invalid-byte keys; got %d hits", hits.Load())
 	}
 
-	// Positive case: every printable-ASCII char from 0x20-0x7E plus tab
-	// is accepted. This pins the inverse contract — anything we *don't*
-	// reject should make it on the wire.
+	// Positive cases: pin the inverse contract — anything not in the
+	// reject set should make it on the wire.
 	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		apiEnvelope(t, w, map[string]any{"resource_id": "r_valid"})
 	}))
 	defer srvOK.Close()
 	cOK := testClient(srvOK.URL, "test-key")
-	var allPrintable strings.Builder
-	allPrintable.WriteByte('\t')
-	for b := byte(0x20); b <= 0x7E; b++ {
-		allPrintable.WriteByte(b)
-	}
-	if _, err := cOK.Create(context.Background(), CreateInput{
-		TargetURL:      "https://example.com",
-		IdempotencyKey: allPrintable.String(),
-	}); err != nil {
-		t.Errorf("all-printable-ASCII key: unexpected error %v", err)
-	}
+
+	t.Run("all printable ASCII (0x20-0x7E) accepted", func(t *testing.T) {
+		var b strings.Builder
+		for c := byte(0x20); c <= 0x7E; c++ {
+			b.WriteByte(c)
+		}
+		if _, err := cOK.Create(context.Background(), CreateInput{
+			TargetURL:      "https://example.com",
+			IdempotencyKey: b.String(),
+		}); err != nil {
+			t.Errorf("unexpected error %v", err)
+		}
+	})
+
+	t.Run("tab (0x09) accepted", func(t *testing.T) {
+		// Documented exception: validator accepts tab even though it's
+		// a control byte. Real-world keys won't include it, but the
+		// validator's contract permits it; pin that explicitly.
+		if _, err := cOK.Create(context.Background(), CreateInput{
+			TargetURL:      "https://example.com",
+			IdempotencyKey: "key\twith\ttabs",
+		}); err != nil {
+			t.Errorf("unexpected error %v", err)
+		}
+	})
 }
