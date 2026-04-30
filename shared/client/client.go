@@ -23,6 +23,45 @@ const (
 	defaultMaxDelay   = 30 * time.Second
 )
 
+// HeaderIdempotencyKey is the request header the qURL API reads to dedupe
+// retried writes (the partition key on `qurl-service`'s
+// idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
+//
+// Callers don't set this header directly — pass IdempotencyKey on the
+// per-request input struct (currently CreateInput.IdempotencyKey) and the
+// client wires the header. The constant is exported only so observability
+// code can grep for it consistently across logs and request inspectors.
+//
+// Key construction guidance (apply to every caller — not just Slack):
+//
+//   - **Hash identifiers, never pass them raw.** The key transits as a
+//     request header and lands in CloudWatch / ALB access logs / any
+//     intermediary observer. For Slack the canonical idiom is
+//     `sha256("slack:" + team_id + ":" + trigger_id)` hex-encoded — 64
+//     ASCII bytes, well under the cap, reveals no PII.
+//   - **Stay within the printable-ASCII byte range** (0x20-0x7E + tab) —
+//     `Create` rejects anything else with `ErrIdempotencyKeyInvalid` to
+//     dodge encoding ambiguity in the upstream key hash.
+const HeaderIdempotencyKey = "Idempotency-Key"
+
+// MaxIdempotencyKeyLength is the byte cap mirrored from qurl-service's
+// idempotency-store schema (see `idempotency_dynamodb.go`). Since the
+// validator rejects ≥0x80, accepted keys are pure ASCII — bytes equal
+// runes by construction.
+const MaxIdempotencyKeyLength = 256
+
+// ErrIdempotencyKeyTooLong is returned when an idempotency key exceeds
+// MaxIdempotencyKeyLength bytes.
+var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 bytes")
+
+// ErrIdempotencyKeyInvalid is returned by Create when CreateInput.IdempotencyKey
+// contains bytes that aren't valid in an HTTP header value (CR, LF, NUL, or
+// other non-printable control characters). Without this check, Go's HTTP
+// transport would reject the request with `net/http: invalid header field
+// value` — a confusing low-level error rather than a typed sentinel the
+// caller can `errors.Is` against.
+var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid header-value bytes (CR/LF/NUL/control)")
+
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
@@ -150,6 +189,11 @@ type CreateInput struct {
 	OneTimeUse   bool          `json:"one_time_use,omitempty"`
 	MaxSessions  int           `json:"max_sessions,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+
+	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
+	// request header so the API dedupes retried writes. See
+	// [HeaderIdempotencyKey] for key-construction guidance.
+	IdempotencyKey string `json:"-"`
 }
 
 // CreateOutput is the response from creating a qURL.
@@ -160,8 +204,40 @@ type CreateOutput struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
+// isHeaderSafeASCIIByte reports whether b is safe to ship in a header
+// value: tab (0x09) plus visible ASCII (0x20-0x7E). Rejects CR/LF/NUL,
+// DEL (0x7F), other control bytes, and all non-ASCII (≥0x80) — the
+// upstream qURL API hashes the raw bytes for its dedup partition key, so
+// we constrain to the unambiguous-encoding subset.
+func isHeaderSafeASCIIByte(b byte) bool {
+	return b == '\t' || (b >= 0x20 && b <= 0x7E)
+}
+
+// validateIdempotencyKey enforces the constraints documented on
+// HeaderIdempotencyKey: ≤MaxIdempotencyKeyLength bytes and header-safe
+// ASCII only. Empty key is valid (means "no header sent"). Extracted
+// as a helper so future write methods that need idempotency (#148) can
+// reuse the same contract.
+func validateIdempotencyKey(key string) error {
+	if len(key) > MaxIdempotencyKeyLength {
+		return ErrIdempotencyKeyTooLong
+	}
+	for i := range len(key) {
+		if !isHeaderSafeASCIIByte(key[i]) {
+			return ErrIdempotencyKeyInvalid
+		}
+	}
+	return nil
+}
+
 // Create creates a new qURL.
+//
+//nolint:gocritic // hugeParam: CreateInput is 88 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
+	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -170,6 +246,9 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurl", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if input.IdempotencyKey != "" {
+		req.Header.Set(HeaderIdempotencyKey, input.IdempotencyKey)
 	}
 
 	var out CreateOutput
