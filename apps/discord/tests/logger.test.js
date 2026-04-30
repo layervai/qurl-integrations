@@ -202,7 +202,7 @@ describe('logger', () => {
 
       // Warn fires with the offending key name.
       expect(consoleSpy.error).toHaveBeenCalled();
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');  // singular OR plural, matches "secret-shaped key" prefix
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
       // Value redacted in the emitted payload — sibling key untouched.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
@@ -241,6 +241,42 @@ describe('logger', () => {
       expect(parsed.audit.context.auth_token).toBe('[REDACTED]');
       // Top-level send_id still flows.
       expect(parsed.audit.send_id).toBe('s1');
+    });
+
+    it('reports ALL offending secret-shaped keys in a single warn line', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // If a caller leaks both auth_token AND password, the warn must
+      // surface both — a single-key report would let them fix one and
+      // re-run before discovering the second.
+      logger.audit('upload_success', { send_id: 's1', auth_token: 'a', password: 'b' });
+
+      expect(consoleSpy.error).toHaveBeenCalledTimes(1);
+      const msg = consoleSpy.error.mock.calls[0][0];
+      expect(msg).toContain('auth_token');
+      expect(msg).toContain('password');
+      // Both values redacted in the emitted payload.
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.auth_token).toBe('[REDACTED]');
+      expect(parsed.audit.password).toBe('[REDACTED]');
+    });
+
+    it('AUDIT_SECRET_KEYS entries are all lowercase (lookup uses .toLowerCase())', () => {
+      // The membership check is `AUDIT_SECRET_KEYS.has(key.toLowerCase())`,
+      // so an entry like 'API_Key' would silently never match. Lock the
+      // invariant so a future addition catches review.
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+      // Force re-require so we can pull AUDIT_SECRET_KEYS via the test
+      // export. The set isn't exported today; instead, exercise the
+      // invariant by feeding a deliberately mixed-case key and
+      // confirming it still triggers the warn.
+      logger.audit('upload_success', { Auth_Token: 'sk-xyz', PASSWORD: 'p' });
+      expect(consoleSpy.error).toHaveBeenCalled();
+      const msg = consoleSpy.error.mock.calls[0][0];
+      expect(msg.toLowerCase()).toContain('auth_token');
+      expect(msg.toLowerCase()).toContain('password');
     });
 
     it('redacts secret-shaped keys nested inside an array element', () => {

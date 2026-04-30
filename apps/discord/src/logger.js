@@ -48,8 +48,10 @@ function isAuditSecretKey(key) {
 // Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS
 // replaced by '[REDACTED]'. Recurses to depth 5 with redact()'s array
 // handling so a buried `{ context: { auth_token } }` is also covered.
-// Returns the second member of the tuple as the FIRST offending key
-// name observed, so audit() can include it in the warn line.
+// Also returns `secretKeys`, an array of every offending key observed
+// (deduped, in encounter order) so audit() can name all of them in
+// the warn line — partial reporting would let a caller fix one key
+// and re-run only to discover another the next time.
 //
 // Note on the contract shift: the original audit() bypassed redact()
 // entirely because the legacy substring-match REDACT_SUBSTRINGS would
@@ -60,35 +62,27 @@ function isAuditSecretKey(key) {
 // offending key without risk of corrupting a metric — and that's
 // strictly safer than emitting the secret verbatim and relying on a
 // dashboard sweep to catch it.
-function redactAuditSecrets(value, depth = 0) {
+function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   if (depth > 5 || value == null || typeof value !== 'object') {
-    return { value, secretKey: null };
+    return { value, secretKeys };
   }
   if (Array.isArray(value)) {
-    let secretKey = null;
-    const arr = value.map((v) => {
-      const { value: cleaned, secretKey: childKey } = redactAuditSecrets(v, depth + 1);
-      if (childKey && !secretKey) secretKey = childKey;
-      return cleaned;
-    });
-    return { value: arr, secretKey };
+    const arr = value.map((v) => redactAuditSecrets(v, depth + 1, secretKeys).value);
+    return { value: arr, secretKeys };
   }
   const out = {};
-  let secretKey = null;
   for (const [k, v] of Object.entries(value)) {
     if (isAuditSecretKey(k)) {
       // Match redact()'s shape: blank only non-empty strings; non-string
       // values (numbers, null, etc.) survive — they can't carry a usable
       // secret on their own and zero-string-replace would lose type info.
       out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
-      if (!secretKey) secretKey = k;
+      if (!secretKeys.includes(k)) secretKeys.push(k);
     } else {
-      const { value: cleaned, secretKey: childKey } = redactAuditSecrets(v, depth + 1);
-      out[k] = cleaned;
-      if (childKey && !secretKey) secretKey = childKey;
+      out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
     }
   }
-  return { value: out, secretKey };
+  return { value: out, secretKeys };
 }
 
 function redact(value, depth = 0) {
@@ -186,15 +180,18 @@ const logger = {
     // offending key name so the operator log below can name it. Safe
     // to redact because exact-match doesn't false-positive on
     // legitimate dimensions (proven by the tokens_minted test).
-    const { value: cleanedMeta, secretKey } = redactAuditSecrets(meta);
-    if (secretKey) {
+    const { value: cleanedMeta, secretKeys } = redactAuditSecrets(meta);
+    if (secretKeys.length > 0) {
       // Logged via console.error so it surfaces at error level in
       // CloudWatch (the logger has no separate warn channel that
       // emits at error severity). Defense-in-depth alongside the
       // value redaction above — the redacted payload still emits,
-      // but the operator can grep the error log to find the
-      // misbehaving call site and remove the key from meta.
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(secretKey)}" in event=${sanitizeMessage(event)}; value redacted in emitted payload — caller must remove from meta`);
+      // but the operator can grep the error log to find every
+      // misbehaving call site and remove the key from meta. ALL
+      // offending keys are listed so a caller fixing the first
+      // doesn't have to re-run to discover the second.
+      const namedKeys = secretKeys.map(k => `"${sanitizeMessage(k)}"`).join(', ');
+      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key(s) [${namedKeys}] in event=${sanitizeMessage(event)}; value(s) redacted in emitted payload — caller must remove from meta`);
     }
     // Spread cleaned meta first, then pin event + agent last so a
     // caller passing `agent` or `event` in meta cannot overwrite the
