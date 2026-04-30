@@ -28,14 +28,24 @@ const (
 // idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
 const HeaderIdempotencyKey = "Idempotency-Key"
 
-// MaxIdempotencyKeyLength matches the qURL API's stored cap. Values longer
-// than this would round-trip as a 400 Bad Request — we reject client-side
+// MaxIdempotencyKeyLength matches the qURL API's stored cap, measured in
+// bytes (matching `qurl-service/internal/api/middleware/idempotency_dynamodb.go`'s
+// `len()` check). For multi-byte UTF-8 callers, count bytes not runes.
+// Values longer would round-trip as 400 Bad Request — we reject client-side
 // so the caller fails fast instead of consuming a network round-trip.
 const MaxIdempotencyKeyLength = 256
 
 // ErrIdempotencyKeyTooLong is returned by Create when CreateInput.IdempotencyKey
-// exceeds MaxIdempotencyKeyLength.
-var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 characters")
+// exceeds MaxIdempotencyKeyLength bytes.
+var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 bytes")
+
+// ErrIdempotencyKeyInvalid is returned by Create when CreateInput.IdempotencyKey
+// contains bytes that aren't valid in an HTTP header value (CR, LF, NUL, or
+// other non-printable control characters). Without this check, Go's HTTP
+// transport would reject the request with `net/http: invalid header field
+// value` — a confusing low-level error rather than a typed sentinel the
+// caller can `errors.Is` against.
+var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid header-value bytes (CR/LF/NUL/control)")
 
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
@@ -168,8 +178,17 @@ type CreateInput struct {
 	// IdempotencyKey, when non-empty, is sent as the `Idempotency-Key`
 	// request header so the API dedupes retried writes against an
 	// already-completed Create. Caller-chosen — must be unique to the
-	// logical operation (e.g. a Slack `trigger_id` hashed with the team
-	// id). `json:"-"` keeps it off the wire body.
+	// logical operation.
+	//
+	// Prefer hashing identifiers rather than passing them raw, since this
+	// value transits as a request header and ends up in CloudWatch /
+	// access logs. For Slack: `sha256("slack:" + team_id + ":" + trigger_id)`
+	// hex-encoded — 64 ASCII bytes, well under MaxIdempotencyKeyLength,
+	// and reveals no PII to an observer.
+	//
+	// Validation: the value must be ≤ MaxIdempotencyKeyLength bytes and
+	// contain no CR/LF/NUL/control characters (see ErrIdempotencyKeyTooLong
+	// and ErrIdempotencyKeyInvalid). `json:"-"` keeps it off the wire body.
 	IdempotencyKey string `json:"-"`
 }
 
@@ -179,6 +198,16 @@ type CreateOutput struct {
 	QURLLink   string     `json:"qurl_link"`
 	QURLSite   string     `json:"qurl_site"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+}
+
+// validIdempotencyKeyByte reports whether b is permitted in a header value.
+// Equivalent to httpguts.IsTokenRune for the byte range we accept: visible
+// ASCII (0x21-0x7E), tab (0x09), and space (0x20). Rejects CR (0x0D), LF
+// (0x0A), NUL (0x00), DEL (0x7F), all other control bytes, and any
+// non-ASCII byte (the qURL API stores these verbatim in DynamoDB; we
+// don't want to invite encoding ambiguity).
+func validIdempotencyKeyByte(b byte) bool {
+	return b == '\t' || (b >= 0x20 && b <= 0x7E)
 }
 
 // Create creates a new qURL.
@@ -192,6 +221,11 @@ type CreateOutput struct {
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if len(input.IdempotencyKey) > MaxIdempotencyKeyLength {
 		return nil, ErrIdempotencyKeyTooLong
+	}
+	for i := 0; i < len(input.IdempotencyKey); i++ {
+		if !validIdempotencyKeyByte(input.IdempotencyKey[i]) {
+			return nil, ErrIdempotencyKeyInvalid
+		}
 	}
 
 	body, err := json.Marshal(input)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -588,10 +589,19 @@ func TestCreateBodyByteIdenticalWithAndWithoutIdempotencyKey(t *testing.T) {
 
 func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 	var attempts atomic.Int32
+	// Synchronize the slice append explicitly even though the client
+	// serializes attempts (next httpClient.Do happens-after the previous
+	// response is fully read). The mutex preserves correctness if any
+	// future refactor breaks that serialization invariant — and keeps
+	// `go test -race` clean on platforms where the implicit
+	// happens-before is harder for the race detector to see.
+	var mu sync.Mutex
 	var sawKeyOnAttempts []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := attempts.Add(1)
+		mu.Lock()
 		sawKeyOnAttempts = append(sawKeyOnAttempts, r.Header.Get(HeaderIdempotencyKey))
+		mu.Unlock()
 		if n <= 2 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -614,6 +624,8 @@ func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 	if attempts.Load() != 3 {
 		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	for i, k := range sawKeyOnAttempts {
 		if k != "slack:T1:trig_retry" {
 			t.Errorf("attempt %d: Idempotency-Key got %q, want %q", i+1, k, "slack:T1:trig_retry")
@@ -659,5 +671,64 @@ func TestCreateIdempotencyKeyTooLong(t *testing.T) {
 		IdempotencyKey: atRoot,
 	}); err != nil {
 		t.Errorf("boundary case (256 chars exactly): unexpected error %v", err)
+	}
+}
+
+func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
+	// Server should never be hit — fail-fast is the contract for any
+	// invalid-byte case.
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := testClient(srv.URL, "test-key")
+
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"CR injection", "slack:T1:abc\rfoo"},
+		{"LF injection", "slack:T1:abc\nfoo"},
+		{"CRLF injection", "slack:T1:abc\r\nfoo"},
+		{"NUL byte", "slack:T1:abc\x00foo"},
+		{"DEL byte", "slack:T1:abc\x7ffoo"},
+		{"low control", "slack:T1:abc\x01foo"},
+		{"non-ASCII (emoji)", "slack:T1:abc\xf0\x9f\x9a\x80foo"}, // 🚀
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.Create(context.Background(), CreateInput{
+				TargetURL:      "https://example.com",
+				IdempotencyKey: tc.key,
+			})
+			if !errors.Is(err, ErrIdempotencyKeyInvalid) {
+				t.Errorf("got %v, want ErrIdempotencyKeyInvalid", err)
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Errorf("server should not be hit on invalid-byte keys; got %d hits", hits.Load())
+	}
+
+	// Positive case: every printable-ASCII char from 0x20-0x7E plus tab
+	// is accepted. This pins the inverse contract — anything we *don't*
+	// reject should make it on the wire.
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_valid"})
+	}))
+	defer srvOK.Close()
+	cOK := testClient(srvOK.URL, "test-key")
+	var allPrintable strings.Builder
+	allPrintable.WriteByte('\t')
+	for b := byte(0x20); b <= 0x7E; b++ {
+		allPrintable.WriteByte(b)
+	}
+	if _, err := cOK.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: allPrintable.String(),
+	}); err != nil {
+		t.Errorf("all-printable-ASCII key: unexpected error %v", err)
 	}
 }
