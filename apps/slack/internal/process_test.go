@@ -233,14 +233,21 @@ func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
 	t.Cleanup(h.Wait)
 
 	body := createCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
+	// Sign once on the test goroutine. Doing it inside each spawned
+	// goroutine would mean 100 redundant HMAC computations and would
+	// expose us to t.Helper / t.Fatalf inside non-test goroutines —
+	// which leaves wg.Wait blocked on a runtime.Goexit'd worker.
+	sig, ts := signSlackBody(t, body)
 
 	var wg sync.WaitGroup
 	for range concurrency {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+			r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(body))
+			r.Header.Set(headerSlackSignature, sig)
+			r.Header.Set(headerSlackTimestamp, ts)
+			h.ServeHTTP(httptest.NewRecorder(), r)
 		}()
 	}
 	wg.Wait()
@@ -311,15 +318,13 @@ func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
 // long-running workers fill the pool; the third request must drop.
 func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	release := make(chan struct{})
-	t.Cleanup(func() {
-		// Defensive: unblock any worker still waiting on release so
-		// h.Wait() can drain. Idempotent close via select.
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	// Failure path: a t.Fatalf before the explicit releaseAll below
+	// would otherwise leave the parked worker goroutines blocked,
+	// hanging h.Wait() in t.Cleanup. sync.Once makes the explicit
+	// close + the cleanup safe to both call.
+	t.Cleanup(releaseAll)
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-release
 		w.Header().Set("Content-Type", "application/json")
@@ -372,7 +377,7 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	}
 
 	// Release the parked workers so h.Wait() drains.
-	close(release)
+	releaseAll()
 }
 
 // TestHandle_AsyncListPostsResultToResponseURL fences /qurl list's

@@ -145,17 +145,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	respClient := cfg.ResponseURLClient
 	if respClient == nil {
-		respClient = &http.Client{
-			Timeout: responseURLTimeout,
-			// Refuse redirects: validateResponseURL pins the initial host
-			// to hooks.slack.com, but Go's default 10-redirect follow
-			// would let a 30x bounce land on any host. Returning
-			// ErrUseLastResponse surfaces the redirect to the caller
-			// without dialing the target.
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		respClient = defaultResponseURLClient()
 	}
 	return &Handler{
 		cfg:                   cfg,
@@ -175,6 +165,24 @@ func NewHandler(cfg Config) *Handler {
 // always call it on every shutdown without conditionals.
 func (h *Handler) Wait() {
 	h.wg.Wait()
+}
+
+// defaultResponseURLClient is the http.Client used to POST follow-up
+// messages to Slack's response_url unless the caller injects one.
+//
+// CheckRedirect refusing redirects is load-bearing for the
+// host-pinning posture: validateResponseURL only validates the URL the
+// caller provided, so a 30x bounce from hooks.slack.com to any host
+// would otherwise be silently followed (Go's default cap is 10 hops).
+// Returning ErrUseLastResponse surfaces the 30x to the caller without
+// dialing the redirected target.
+func defaultResponseURLClient() *http.Client {
+	return &http.Client{
+		Timeout: responseURLTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

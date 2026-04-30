@@ -67,6 +67,14 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 
 	h.wg.Add(1)
 	go func() {
+		// Defer LIFO is load-bearing here: on panic, the recover
+		// runs FIRST (innermost), absorbs the panic, then sem
+		// release and wg.Done run unwinding outward. Reordering
+		// these — putting recover above the sem release, say —
+		// would silently leak a slot and a wg counter on every
+		// panic. The ctx cancel is innermost-of-innermost so
+		// children of that ctx see cancellation before the worker
+		// frame returns.
 		defer h.wg.Done()
 		defer func() { <-h.sem }()
 		defer func() {
