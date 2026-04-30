@@ -96,6 +96,11 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // free without each re-implementing emission. Tracked separately; see
 // Justin's review comment on qurl-integrations-infra#309.
 const AUDIT_EVENTS = {
+  // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
+  // check all succeed — i.e. when the send is fully prepared and ready
+  // to dispatch. It's not just the connector POST. Name is kept literal
+  // ("upload_success") for back-compat with the upload_count terraform
+  // filter; semantically closer to "prepare_success" or "links_ready".
   UPLOAD_SUCCESS: 'upload_success',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',

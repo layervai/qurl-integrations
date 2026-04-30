@@ -1606,27 +1606,25 @@ async function handleSend(interaction, apiKey) {
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
-    const dmPayload = buildDeliveryPayload({
-      // member.displayName resolves to nickname || globalName || username,
-      // so it works whether the sender has a per-guild nickname, only a
-      // global display name, or just the legacy @-handle.
-      senderAlias: resolveSenderAlias(interaction),
-      qurlLink: link.qurlLink,
-      expiresAt,
-      personalMessage,
-    });
-
-    // Audit in `finally` so the metric fires whether sendDM resolves to
-    // false OR throws. sendDM is contractually no-throw today (see
-    // apps/discord/src/discord.js — its own try/catch returns false on
-    // every failure mode), but try/finally locks the metric's accuracy
-    // against a future change to that contract: a thrown sendDM should
-    // still count as dispatch_failed, not silently disappear from
-    // CloudWatch. Audit also fires BEFORE the DB write so a DDB-layer
-    // throw can't suppress it — that's the failure mode the audit
-    // metric exists to measure.
+    // Audit in `finally` so the metric fires for every recipient regardless
+    // of where the dispatch fails — sendDM resolving to false, sendDM
+    // throwing (against contract — see apps/discord/src/discord.js), OR
+    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
+    // it either — that's the failure mode the audit metric exists to
+    // measure. Coverage spans the entire dispatch attempt, not just the
+    // network leg.
     let sent = false;
     try {
+      const dmPayload = buildDeliveryPayload({
+        // member.displayName resolves to nickname || globalName || username,
+        // so it works whether the sender has a per-guild nickname, only a
+        // global display name, or just the legacy @-handle.
+        senderAlias: resolveSenderAlias(interaction),
+        qurlLink: link.qurlLink,
+        expiresAt,
+        personalMessage,
+      });
       sent = await sendDM(link.recipientId, dmPayload);
     } finally {
       logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
@@ -2114,43 +2112,47 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // with their corresponding embed. Multi-link UX would benefit from
     // per-link button labels (e.g. "Step Through · report.pdf"), but
     // today links.length is always 1 so labels are uniform.
-    // Same Unix-seconds expiry computation as handleSend — see comment
-    // there. Computed once per recipient (cheap; the alternative would
-    // be threading a single timestamp through sendConfig).
-    const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
-    const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-      // Same alias resolution as handleSend — see comment there for
-      // the nickname > globalName > username fallback rationale.
-      senderAlias: resolveSenderAlias(originalInteraction),
-      qurlLink: link.qurlLink,
-      expiresAt,
-      personalMessage: sendConfig.personal_message,
-    }));
-    // Contract with buildDeliveryPayload: each payload's `components`
-    // array contains exactly one ActionRow whose `components` are the
-    // per-link buttons. We pull each payload's first row's children
-    // (one Step Through button per link) and re-pack into 5-per-row
-    // ActionRows since Discord caps at 5 buttons per ActionRow.
-    const allEmbeds = payloads.flatMap(p => p.embeds);
-    const allButtons = payloads.flatMap(p => {
-      // Hard fail rather than silently drop buttons if the contract
-      // ever changes — easier to catch than a button quietly missing
-      // from a recipient's DM.
-      if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
-        throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
-      }
-      return p.components[0].components;
-    });
-    const allComponents = [];
-    for (let i = 0; i < allButtons.length; i += 5) {
-      allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
-    }
-
     // try/finally + before-DB-write — see handleSend's batchSettled
-    // callback for the full rationale (sendDM-throws AND DB-throw must
-    // both still emit the metric).
+    // callback for the full rationale (payload-build, sendDM-throws,
+    // AND DB-throw must all still emit the metric). Wraps the entire
+    // dispatch attempt — payload assembly, button re-packing, network
+    // call — so a malformed sendConfig (e.g. pathological
+    // personalMessage that throws inside buildDeliveryPayload) still
+    // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;
     try {
+      // Same Unix-seconds expiry computation as handleSend — see comment
+      // there. Computed once per recipient (cheap; the alternative would
+      // be threading a single timestamp through sendConfig).
+      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+      const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
+        // Same alias resolution as handleSend — see comment there for
+        // the nickname > globalName > username fallback rationale.
+        senderAlias: resolveSenderAlias(originalInteraction),
+        qurlLink: link.qurlLink,
+        expiresAt,
+        personalMessage: sendConfig.personal_message,
+      }));
+      // Contract with buildDeliveryPayload: each payload's `components`
+      // array contains exactly one ActionRow whose `components` are the
+      // per-link buttons. We pull each payload's first row's children
+      // (one Step Through button per link) and re-pack into 5-per-row
+      // ActionRows since Discord caps at 5 buttons per ActionRow.
+      const allEmbeds = payloads.flatMap(p => p.embeds);
+      const allButtons = payloads.flatMap(p => {
+        // Hard fail rather than silently drop buttons if the contract
+        // ever changes — easier to catch than a button quietly missing
+        // from a recipient's DM.
+        if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
+          throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
+        }
+        return p.components[0].components;
+      });
+      const allComponents = [];
+      for (let i = 0; i < allButtons.length; i += 5) {
+        allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+      }
+
       sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
       logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
