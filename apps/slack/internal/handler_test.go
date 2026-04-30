@@ -334,8 +334,9 @@ func TestHealthEndpoint_AcceptsHead(t *testing.T) {
 // Off-by-one on MaxBytesReader would silently 400 legitimate large
 // payloads — this row catches that regression.
 func TestHandle_BodyAtCapAccepted(t *testing.T) {
-	srv := noopQURLServer(t)
-	h := newTestHandler(t, srv)
+	// noopQURLServer is required to populate Config.NewClient; this test
+	// posts to /slack/events, which never calls out to qURL.
+	h := newTestHandler(t, noopQURLServer(t))
 	// /slack/events accepts arbitrary bytes; we're fencing read+verify,
 	// not the event payload shape.
 	body := strings.Repeat("a", maxRequestBodyBytes)

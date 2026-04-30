@@ -37,10 +37,11 @@ const (
 // task to allocate unbounded memory.
 const maxRequestBodyBytes = 1 << 20
 
-// internalErrorJSON is the canonical 500 envelope used when JSON marshal
-// of a richer body fails. Package-level so the unreachable fallback path
-// doesn't allocate the same bytes on every call.
-var internalErrorJSON = []byte(`{"error":"internal"}`)
+// internalErrorEnvelope is the canonical 500 body used when JSON marshal
+// of a richer payload fails. Stored as a const so the slice the writer
+// receives is conjured fresh per call — there's no shared []byte that a
+// future caller could accidentally mutate.
+const internalErrorEnvelope = `{"error":"internal"}`
 
 // Config holds the Slack handler configuration.
 type Config struct {
@@ -330,7 +331,7 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 		// practice; log and fall back to a fixed JSON envelope so the
 		// Content-Type header doesn't disagree with the body.
 		slog.Error("response marshal failed", "error", err)
-		b = internalErrorJSON
+		b = []byte(internalErrorEnvelope)
 		status = http.StatusInternalServerError
 	}
 	w.Header().Set("Content-Type", "application/json")
