@@ -101,10 +101,10 @@ func run() error {
 
 	slog.Info("starting Slack bot HTTP server", "addr", listenAddr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		// Bind/listen failure: skip the drain wait. The deferred stop()
-		// cancels the signal context, which fires the shutdown goroutine;
-		// Shutdown on an unstarted server is a no-op and os.Exit reaps
-		// the goroutine.
+		// Bind/listen failure: skip the drain wait. Ordering on this path:
+		//   stop() (deferred) → signal ctx cancels → goroutine wakes →
+		//   srv.Shutdown is a no-op on an unstarted server → main reaches
+		//   os.Exit(1) → goroutine is reaped mid-run, harmless.
 		return fmt.Errorf("listen: %w", err)
 	}
 

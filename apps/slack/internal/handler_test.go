@@ -263,26 +263,10 @@ func TestClassifySlackErr_SentinelsMapToDistinctLabels(t *testing.T) {
 	}
 }
 
-// Slack signature headers arrive in canonical mixed case; net/http
-// canonicalizes header names so r.Header.Get(headerSlackSignature)
-// transparently handles whatever casing the proxy delivers. This test
-// fences the lowercase shape an ALB/Slack-relay quirk could produce.
-func TestSlashCommand_LowercaseSignatureHeaders(t *testing.T) {
-	h := newTestHandler(t, noopQURLServer(t))
-	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	sig, ts := signSlackBody(t, body)
-
-	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(body))
-	r.Header.Set("x-slack-signature", sig)
-	r.Header.Set("x-slack-request-timestamp", ts)
-
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("lowercase signature headers: status = %d, want 200", w.Code)
-	}
-}
+// Note: an earlier "lowercase signature headers" test was dropped — net/http
+// canonicalizes header names on wire parse via textproto.CanonicalMIMEHeaderKey,
+// and httptest's Header.Set canonicalizes too, so the path is structurally
+// covered by any signed request and a duplicate test added no coverage.
 
 // Body-size cap rejects oversize requests with 413 before any read.
 // httptest.NewRequest sets Content-Length from the reader, so this

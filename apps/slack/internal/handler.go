@@ -202,6 +202,9 @@ func (h *Handler) handleSlashCommand(ctx context.Context, w http.ResponseWriter,
 	case strings.HasPrefix(text, "list"):
 		h.handleList(ctx, w, values)
 	default:
+		// Surfaced to telemetry so a workspace using a stale slash-command
+		// spec is visible in dashboards (rather than only via user reports).
+		slog.Info("unknown slash subcommand", "command", command, "text", text)
 		respondSlack(w, fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 	}
 }
