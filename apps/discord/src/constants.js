@@ -85,10 +85,18 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // Adding a new event: add the constant here, the call site, AND the
 // terraform filter (in the same merge train, since the filter is a no-op
 // without the emission and vice versa).
+//
+// Scope: this set covers events the qURL service cannot see — transport-
+// layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen
+// at the service but the all-or-partial-success tally lives here), and
+// upload-to-connector results. Mint counts (`mint_success` / `mint_failed`)
+// are intentionally NOT here — they belong at the qURL service layer
+// with an `agent` dimension fed by an X-QURL-Agent header so every
+// integration (Discord, Slack, Teams, CLI, web/portal) gets them for
+// free without each re-implementing emission. Tracked separately; see
+// Justin's review comment on qurl-integrations-infra#309.
 const AUDIT_EVENTS = {
   UPLOAD_SUCCESS: 'upload_success',
-  MINT_SUCCESS: 'mint_success',
-  MINT_FAILED: 'mint_failed',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
   // REVOKE_SUCCESS fires when at least one per-link delete succeeded;

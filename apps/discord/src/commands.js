@@ -1509,7 +1509,6 @@ async function handleSend(interaction, apiKey) {
         resourceId: allLinks[i].resourceId,
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
-      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'file', count: qurlLinks.length, expires_in: expiresIn });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
       // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
@@ -1538,11 +1537,9 @@ async function handleSend(interaction, apiKey) {
         resourceId: allLinks[i].resourceId,
       }));
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
-      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'location', count: qurlLinks.length, expires_in: expiresIn });
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location', api_code: error.apiCode ?? null });
     clearCooldown(interaction.user.id); // allow retry on failure
     releaseSlot();
     // Surface a specific message for known upstream failure codes so the
@@ -1957,15 +1954,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
-  // Tracks which kind was in flight when a throw escapes — `hasFile` and
-  // `hasLocation` can both be true (a single send-config that had both),
-  // so a "ternary on hasFile" mislabels the failure when location throws
-  // after the file path already succeeded. Set right before each block
-  // that can throw, read by the catch's logger.audit(MINT_FAILED).
-  let inFlightKind = null;
   try {
     if (hasFile) {
-      inFlightKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
       // resource so the 10-token pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
@@ -2019,11 +2009,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
-        // Emit mint_failed here too — the inner catch returns early, so the
-        // outer catch (which also emits) never sees these errors. Without
-        // this line the metric undercounts the most common file-path
-        // failure mode (Discord CDN URL expiry).
-        logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: 'file', api_code: err.apiCode ?? null });
         return { msg, newResourceIds: [], delivered: 0, failed: 0 };
       }
 
@@ -2046,10 +2031,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         });
       }
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
-      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'file', count: allLinks.length, expires_in: sendConfig.expires_in });
     }
     if (hasLocation) {
-      inFlightKind = 'location';
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
       const expiresAt = expiryToISO(sendConfig.expires_in);
@@ -2074,16 +2057,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         });
       });
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
-      logger.audit(AUDIT_EVENTS.MINT_SUCCESS, { send_id: sendId, kind: 'location', count: allLinks.length, expires_in: sendConfig.expires_in });
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
-    // `?? 'unknown'` is defensive — the early `if (!hasFile && !hasLocation)`
-    // guard above means we never reach the catch with inFlightKind=null
-    // today, but a future refactor that adds a throwable op before the
-    // first inFlightKind assignment would otherwise emit `kind: null`,
-    // which the CloudWatch dimension can't bucket.
-    logger.audit(AUDIT_EVENTS.MINT_FAILED, { send_id: sendId, kind: inFlightKind ?? 'unknown', api_code: error.apiCode ?? null });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'

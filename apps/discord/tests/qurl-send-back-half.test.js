@@ -767,30 +767,6 @@ describe('handleAddRecipients — file path failure modes', () => {
     expect(result.msg).toMatch(/failed to prepare links/i);
   });
 
-  // The file-path inner try/catch returns early before reaching the outer
-  // catch, so the outer catch's logger.audit(MINT_FAILED) never sees these
-  // errors. The inner catch must emit its own mint_failed or the metric
-  // undercounts the most common file-path failure mode (CDN URL expiry).
-  it('emits mint_failed when downloadAndUpload throws (inner-catch path)', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-    });
-    const err = new Error('403 Forbidden — URL expired');
-    err.apiCode = 'cdn_expired';
-    mockDownloadAndUpload.mockRejectedValueOnce(err);
-
-    await handleAddRecipients(
-      'send-9', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
-      send_id: 'send-9', kind: 'file', api_code: 'cdn_expired',
-    }));
-  });
-
   it('reports underdelivery when mintLinks returns fewer links than recipients', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1', expires_in: '5m',
@@ -885,72 +861,17 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
     // updateSendDMStatus called once per recipient with SENT.
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledTimes(2);
-    // Audit emission: upload_success + mint_success + dispatch_sent (×2 recipients).
+    // Audit emission: upload_success + dispatch_sent (×2 recipients).
+    // mint_* is intentionally not emitted from the bot — see
+    // constants.js AUDIT_EVENTS comment.
     const emitted = logger.audit.mock.calls.map(c => c[0]);
-    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'mint_success', 'dispatch_sent']));
-    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
-      send_id: 'send-1', kind: 'location', count: 2,
+    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'dispatch_sent']));
+    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({
+      send_id: 'send-1', kind: 'location',
     }));
     expect(emitted.filter(e => e === 'dispatch_sent')).toHaveLength(2);
-  });
-
-  it('emits mint_failed (not mint_success) when uploadJsonToConnector throws', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '5m',
-    });
-    const err = new Error('upstream 429');
-    err.apiCode = 'rate_limited';
-    mockUploadJsonToConnector.mockRejectedValueOnce(err);
-
-    await handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    const emitted = logger.audit.mock.calls.map(c => c[0]);
-    expect(emitted).toContain('mint_failed');
     expect(emitted).not.toContain('mint_success');
-    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
-      send_id: 'send-1', kind: 'location', api_code: 'rate_limited',
-    }));
-  });
-
-  // Locks in the inFlightKind invariant — a previous version of this code
-  // labeled the failure with `kind: hasFile ? 'file' : 'location'`, which
-  // misreports `kind: 'file'` when the file path succeeds and then the
-  // location path throws inside the same handleAddRecipients try block.
-  it('emits kind=location on mint_failed when file succeeds first and location then throws', async () => {
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-orig', expires_in: '5m',
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-      // Both paths active.
-      actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower',
-    });
-    // File path succeeds.
-    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_link: 'https://q.test/1', resource_id: 'res-file-new' },
-    ]);
-    // Location path then throws.
-    const err = new Error('upstream 503');
-    err.apiCode = 'connector_unavailable';
-    mockUploadJsonToConnector.mockRejectedValueOnce(err);
-
-    await handleAddRecipients(
-      'send-7', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    );
-
-    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
-      send_id: 'send-7', kind: 'location', api_code: 'connector_unavailable',
-    }));
-    // Sanity: file's mint_success DID fire before the location threw.
-    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
-      send_id: 'send-7', kind: 'file',
-    }));
+    expect(emitted).not.toContain('mint_failed');
   });
 
   it('reports failed DMs as failed in the return value', async () => {

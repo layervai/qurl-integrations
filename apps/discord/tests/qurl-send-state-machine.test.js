@@ -1040,7 +1040,7 @@ describe('handleSend — end-to-end happy paths', () => {
 // ===========================================================================
 
 describe('handleSend — audit emission', () => {
-  it('emits upload_success + mint_success + dispatch_sent on the file happy path', async () => {
+  it('emits upload_success + dispatch_sent on the file happy path', async () => {
     const fileInit = makeCompInt(ids.initFile);
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
@@ -1056,37 +1056,16 @@ describe('handleSend — audit emission', () => {
     await cmd.execute(interaction);
 
     const emitted = logger.audit.mock.calls.map(c => c[0]);
-    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'mint_success', 'dispatch_sent']));
-    expect(logger.audit).toHaveBeenCalledWith('mint_success', expect.objectContaining({
-      send_id: expect.any(String), kind: 'file', count: expect.any(Number),
+    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'dispatch_sent']));
+    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({
+      send_id: expect.any(String), kind: 'file',
     }));
-  });
-
-  it('emits mint_failed (not mint_success) when upload throws on the location path', async () => {
-    const err = new Error('upstream quota');
-    err.apiCode = 'quota_exceeded';
-    mockUploadJsonToConnector.mockRejectedValue(err);
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
-    const locInit = makeCompInt(ids.initLoc, {
-      showModal: jest.fn().mockResolvedValue(undefined),
-      awaitModalSubmit: jest.fn().mockResolvedValue({
-        fields: { getTextInputValue: jest.fn(() => 'Test Place') },
-        deferUpdate: jest.fn().mockResolvedValue(undefined),
-      }),
-    });
-    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
-    const sendBtn = makeCompInt(ids.sendBtn);
-    const interaction = makeInteraction({
-      awaitQueue: [locInit, targetChannel, sendBtn],
-    });
-    await cmd.execute(interaction);
-
-    const emitted = logger.audit.mock.calls.map(c => c[0]);
-    expect(emitted).toContain('mint_failed');
+    // mint_* events intentionally NOT emitted from the bot — they belong
+    // at the qURL service layer with an `agent` dimension. Locking that
+    // here so a future re-add doesn't sneak past review without an
+    // explicit decision to re-introduce per-integration emission.
     expect(emitted).not.toContain('mint_success');
-    expect(logger.audit).toHaveBeenCalledWith('mint_failed', expect.objectContaining({
-      send_id: expect.any(String), kind: 'location', api_code: 'quota_exceeded',
-    }));
+    expect(emitted).not.toContain('mint_failed');
   });
 
   it('emits dispatch_sent / dispatch_failed once per recipient, even on partial DM failure', async () => {

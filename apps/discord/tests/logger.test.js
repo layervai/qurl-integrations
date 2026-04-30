@@ -132,12 +132,12 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.audit('mint_success', { send_id: 'abc', count: 3 });
+      logger.audit('upload_success', { send_id: 'abc', count: 3 });
 
       expect(consoleSpy.log).toHaveBeenCalledTimes(1);
       const line = consoleSpy.log.mock.calls[0][0];
       const parsed = JSON.parse(line);
-      expect(parsed.audit.event).toBe('mint_success');
+      expect(parsed.audit.event).toBe('upload_success');
       expect(parsed.audit.agent).toBe('discord');
       expect(parsed.audit.send_id).toBe('abc');
       expect(parsed.audit.count).toBe(3);
@@ -163,7 +163,7 @@ describe('logger', () => {
       // field like `tokens_minted` or `token_count` would otherwise
       // get blanked — which would corrupt a CloudWatch metric
       // dimension. Verify audit() bypasses redact for these keys.
-      logger.audit('mint_success', { tokens_minted: 7, send_id: 'send-1' });
+      logger.audit('upload_success', { tokens_minted: 7, send_id: 'send-1' });
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.tokens_minted).toBe(7);
@@ -179,7 +179,7 @@ describe('logger', () => {
       // dispatch in batchSettled).
       const circ = {};
       circ.self = circ;
-      expect(() => logger.audit('mint_success', { circ })).not.toThrow();
+      expect(() => logger.audit('upload_success', { circ })).not.toThrow();
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('logger.audit serialization failed');
     });
@@ -188,7 +188,7 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.audit('mint_success', { agent: 'slack', send_id: 'x' });
+      logger.audit('upload_success', { agent: 'slack', send_id: 'x' });
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.agent).toBe('discord');
