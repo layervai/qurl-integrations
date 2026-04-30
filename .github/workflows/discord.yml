@@ -84,7 +84,7 @@ jobs:
     # Replaces the prior DEPLOY_PAT + peter-evans/repository-dispatch
     # pattern. SHA-pinned per the org's reusable-workflow convention;
     # bumps require an explicit PR. Closes #75.
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@__OPS_ROUTINES_WORKFLOWS_SHA__
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0
     with:
       target_repo: qurl-integrations-infra
       event_type: discord-bot-deploy
