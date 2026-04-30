@@ -654,23 +654,56 @@ func TestCreateIdempotencyKeyTooLong(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Errorf("server should not be hit on too-long key; got %d hits", hits.Load())
 	}
+}
 
-	// Boundary: exactly MaxIdempotencyKeyLength is allowed.
-	atRoot := strings.Repeat("b", MaxIdempotencyKeyLength)
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get(HeaderIdempotencyKey); got != atRoot {
-			t.Errorf("boundary case: header got %q, want length %d", got, len(atRoot))
+func TestCreateIdempotencyKeyAtMaxBoundary(t *testing.T) {
+	// Boundary case split out from the over-cap test so a future
+	// regression on the boundary points at this test name directly.
+	atMax := strings.Repeat("b", MaxIdempotencyKeyLength)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(HeaderIdempotencyKey); got != atMax {
+			t.Errorf("header got len=%d, want %q (len=%d)", len(got), atMax, len(atMax))
 		}
 		apiEnvelope(t, w, map[string]any{"resource_id": "r_boundary"})
 	}))
-	defer srv2.Close()
+	defer srv.Close()
 
-	c2 := testClient(srv2.URL, "test-key")
-	if _, err := c2.Create(context.Background(), CreateInput{
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{
 		TargetURL:      "https://example.com",
-		IdempotencyKey: atRoot,
+		IdempotencyKey: atMax,
 	}); err != nil {
-		t.Errorf("boundary case (256 chars exactly): unexpected error %v", err)
+		t.Errorf("at-max boundary (%d bytes exactly): unexpected error %v", MaxIdempotencyKeyLength, err)
+	}
+}
+
+func TestValidateIdempotencyKey(t *testing.T) {
+	// Direct unit test on the validator — protects the contract from a
+	// future refactor (e.g. someone adds a min-length check that breaks
+	// the empty-key-is-valid path) without going through the full
+	// httptest+Create round-trip every assertion.
+	cases := []struct {
+		name string
+		key  string
+		want error
+	}{
+		{"empty (no header)", "", nil},
+		{"single ASCII char", "a", nil},
+		{"sha256-hex (Slack canonical)", strings.Repeat("0123456789abcdef", 4), nil}, // 64 chars
+		{"max-length boundary", strings.Repeat("x", MaxIdempotencyKeyLength), nil},
+		{"one byte over cap", strings.Repeat("x", MaxIdempotencyKeyLength+1), ErrIdempotencyKeyTooLong},
+		{"CR injection", "abc\rdef", ErrIdempotencyKeyInvalid},
+		{"LF injection", "abc\ndef", ErrIdempotencyKeyInvalid},
+		{"NUL byte", "abc\x00def", ErrIdempotencyKeyInvalid},
+		{"non-ASCII", "abc\xc3\xa9def", ErrIdempotencyKeyInvalid}, // é
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := validateIdempotencyKey(tc.key)
+			if !errors.Is(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

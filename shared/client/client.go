@@ -39,9 +39,12 @@ const (
 //     intermediary observer. For Slack the canonical idiom is
 //     `sha256("slack:" + team_id + ":" + trigger_id)` hex-encoded — 64
 //     ASCII bytes, well under the cap, reveals no PII.
-//   - **Choose a natural unique-per-intent identifier.** Slack's
-//     `trigger_id` is unique per slash-command click and valid for 3
-//     seconds, which exactly matches the dedup window we want.
+//   - **Choose a unique-per-intent identifier that survives the retry
+//     window.** Slack's `trigger_id` is unique per slash-command click
+//     and stays unique for the whole window in which Slack might retry
+//     the request — that's the property we need (it's a different
+//     concern from the qURL API's stored-dedup TTL, which is much
+//     longer than the trigger_id's 3-second client-side validity).
 //   - **Stay within the printable-ASCII byte range** (0x20-0x7E + tab) —
 //     `Create` rejects anything else with `ErrIdempotencyKeyInvalid` to
 //     dodge encoding ambiguity in the upstream key hash.
@@ -49,14 +52,19 @@ const HeaderIdempotencyKey = "Idempotency-Key"
 
 // MaxIdempotencyKeyLength matches the qURL API's stored cap, measured in
 // bytes (matching `qurl-service/internal/api/middleware/idempotency_dynamodb.go`'s
-// `len()` check). For multi-byte UTF-8 callers, count bytes not runes.
+// `len()` check). The validator below also rejects all non-ASCII (≥0x80),
+// so in practice byte-count and rune-count converge — this constant is
+// the byte-cap as written by `qurl-service`, kept in sync deliberately.
 // Values longer would round-trip as 400 Bad Request — we reject client-side
 // so the caller fails fast instead of consuming a network round-trip.
 const MaxIdempotencyKeyLength = 256
 
 // ErrIdempotencyKeyTooLong is returned when an idempotency key exceeds
-// MaxIdempotencyKeyLength bytes.
-var ErrIdempotencyKeyTooLong = fmt.Errorf("idempotency key exceeds %d bytes", MaxIdempotencyKeyLength)
+// MaxIdempotencyKeyLength bytes. Hardcoded value in the message: this
+// cap won't change without a coordinated server-side bump (qurl-service's
+// idempotency-store schema), so message-and-constant drift isn't a
+// realistic concern.
+var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 bytes")
 
 // ErrIdempotencyKeyInvalid is returned by Create when CreateInput.IdempotencyKey
 // contains bytes that aren't valid in an HTTP header value (CR, LF, NUL, or
