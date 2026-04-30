@@ -32,13 +32,19 @@ const (
 	// in-flight handlers; bumping shutdownTimeout above 25s won't extend
 	// long-running handlers, only the wait for short ones to drain.
 	//
-	// Budget contract: shutdownTimeout must comfortably exceed
-	// (srv.Shutdown drain time) + (internal.responseURLTimeout = 5s)
-	// so a healthy in-flight async worker has time to land its
-	// follow-up POST before WaitTimeout(remaining) gives up. With
-	// ack-and-spawn handlers, srv.Shutdown finishes in milliseconds —
-	// the worst-case pre-Wait drain is dominated by per-handler
-	// completion (instant), leaving ~25s for response_url POSTs.
+	// Budget contract: shutdownTimeout is sized against the EXPECTED
+	// drain, not the theoretical max. The expected drain is
+	// dominated by:
+	//   srv.Shutdown (≈0ms — handlers ack and return instantly)
+	//   + qURL call returns ctx.Canceled almost instantly on signal
+	//   + responseURLTimeout (5s) for the failure follow-up POST
+	//
+	// The theoretical max is asyncWorkTimeout (25s) + 5s = 30s,
+	// which would wedge if a worker ignored ctx — that's why
+	// handler.WaitTimeout caps the wait at the remaining budget
+	// rather than calling Wait. The 25s default leaves comfortable
+	// headroom for the expected case while staying well inside
+	// Fargate's 30s SIGTERM→SIGKILL window.
 	shutdownTimeout = 25 * time.Second
 	// maxHeaderBytes is well above Slack's realistic header size (sig +
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds

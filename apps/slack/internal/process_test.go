@@ -284,11 +284,19 @@ func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
 	t.Setenv("QURL_API_KEY", "test-key")
 
 	rec := newResponseURLRecorder(t)
-	h := newTestHandler(t, qurlSrv)
-	// Disable retries so the test isn't 30s long when 500 is returned.
-	h.cfg.NewClient = func(apiKey string) *client.Client {
-		return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
-	}
+	// Build the handler from a Config that already disables retries so
+	// a 500 doesn't push the test toward the 30s retry budget. Cleaner
+	// than mutating cfg.NewClient post-construction.
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = url.Parse
+	t.Cleanup(h.Wait)
 
 	body := createCommandBody("https://example.com", "T123", "trig-err", rec.URL)
 	w := httptest.NewRecorder()
