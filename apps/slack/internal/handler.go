@@ -202,10 +202,12 @@ func (h *Handler) WaitTimeout(d time.Duration) bool {
 		h.wg.Wait()
 		close(done)
 	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-done:
 		return true
-	case <-time.After(d):
+	case <-t.C:
 		return false
 	}
 }

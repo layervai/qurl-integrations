@@ -98,10 +98,18 @@ func run() error {
 	maxConcurrentAsync := 0
 	if raw := os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil {
+		switch {
+		case err != nil:
 			slog.Warn("ignoring malformed QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 				"raw", raw, "error", err)
-		} else {
+		case parsed <= 0:
+			// NewHandler treats 0/negative as "use default", but a
+			// negative value is more likely a typo or env-substitution
+			// mishap than an intentional choice — surface it the same
+			// way as malformed input so it doesn't silently swallow.
+			slog.Warn("ignoring non-positive QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+				"raw", raw)
+		default:
 			maxConcurrentAsync = parsed
 		}
 	}

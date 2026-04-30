@@ -281,12 +281,15 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 
 	// Read up to a small cap of the body so a 4xx from Slack
 	// (`invalid_url`, `channel_not_found`, etc.) is visible in the
-	// warn log rather than swallowed. Then drain anything past the
-	// cap so Go's transport can recycle the connection — without the
-	// trailing Discard, keep-alive degrades silently if Slack ever
-	// returns a body larger than the cap.
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	_, _ = io.Copy(io.Discard, resp.Body)
+	// warn log rather than swallowed. If the LimitReader actually
+	// hit the cap, drain the remainder so Go's transport can recycle
+	// the connection — without that, keep-alive degrades silently if
+	// Slack ever returns a body larger than the cap.
+	const respBodyCap = 4096
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, respBodyCap))
+	if len(respBody) == respBodyCap {
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}
 	if resp.StatusCode >= 400 {
 		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
 	}
