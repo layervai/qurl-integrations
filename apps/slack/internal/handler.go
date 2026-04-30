@@ -190,6 +190,12 @@ func (h *Handler) Wait() {
 // Returns true on clean drain; false on timeout (workers still in
 // flight). cmd/main.go uses this so a misbehaving worker can't block
 // graceful shutdown past the SIGTERM→SIGKILL window.
+//
+// Note: on the timeout path the inner h.wg.Wait goroutine outlives
+// this call until the underlying workers actually finish. This is fine
+// in the cmd shutdown path (the process is exiting) but means
+// WaitTimeout is NOT appropriate as a hot-path drain primitive — only
+// use at end-of-life.
 func (h *Handler) WaitTimeout(d time.Duration) bool {
 	done := make(chan struct{})
 	go func() {

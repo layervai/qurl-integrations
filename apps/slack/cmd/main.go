@@ -90,11 +90,21 @@ func run() error {
 	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
 	userAgent := "qurl-slack/" + version
 
-	// Optional pool-cap override. Empty/invalid env yields 0, which
-	// internal.NewHandler interprets as "use default" (50). Lets
-	// operators tune saturation without a recompile when a workspace
-	// load shape diverges from the documented enterprise default.
-	maxConcurrentAsync, _ := strconv.Atoi(os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC"))
+	// Optional pool-cap override. Empty env is "use default" silently;
+	// non-empty-but-malformed env is a misconfiguration we surface at
+	// startup so it doesn't get discovered during a saturation
+	// incident. Either way the value reaching NewHandler may be 0,
+	// which Handler interprets as "use the built-in default (50)".
+	maxConcurrentAsync := 0
+	if raw := os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			slog.Warn("ignoring malformed QURL_SLACK_MAX_CONCURRENT_ASYNC; falling back to default", //nolint:gosec // G706: raw is env-var input; slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+				"raw", raw, "error", err)
+		} else {
+			maxConcurrentAsync = parsed
+		}
+	}
 
 	// signalCtx feeds two seams: the main goroutine (to detect
 	// SIGTERM and trigger srv.Shutdown) and Handler.BaseContext (so
