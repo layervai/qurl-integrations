@@ -3,7 +3,6 @@ module github.com/layervai/qurl-integrations
 go 1.26.2
 
 require (
-	github.com/aws/aws-lambda-go v1.54.0
 	github.com/fatih/color v1.19.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.42.0

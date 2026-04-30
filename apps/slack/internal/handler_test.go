@@ -1,10 +1,8 @@
 package internal
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -12,21 +10,41 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/aws/aws-lambda-go/events"
 
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-func base64Encode(t *testing.T, s string) string {
+const testSigningSecret = "test-secret"
+
+// noopQURLServer is a stand-in upstream that 200s every request. Tests
+// that exercise routing/auth (not the QURL API contract) use this so the
+// handler can construct a *client.Client without making real network calls.
+func noopQURLServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return base64.StdEncoding.EncodeToString([]byte(s))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-const testSigningSecret = "test-secret"
+// countingQURLServer is like noopQURLServer but exposes the number of
+// requests it received. Used by negative-path tests that want to fence
+// "no upstream call leaked through" in addition to "401 returned".
+func countingQURLServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
 
 // fixedNow pins the handler's clock so every signed-request test produces
 // a stable timestamp. Arbitrary absolute value — tests inject h.now so the
@@ -37,7 +55,6 @@ var fixedNow = time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	t.Helper()
 	h := NewHandler(Config{
-		QURLEndpoint:       qurlServer.URL,
 		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
 		SlackSigningSecret: testSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
@@ -51,65 +68,57 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 // signSlackBody returns the pair of headers Slack would send to authenticate
 // `body` at `fixedNow`. Using the same algorithm as the handler means any
 // drift between them gets caught by the verification tests themselves.
-func signSlackBody(t *testing.T, body string) map[string]string {
+func signSlackBody(t *testing.T, body string) (sig, ts string) {
 	t.Helper()
-	tsHeader := strconv.FormatInt(fixedNow.Unix(), 10)
+	ts = strconv.FormatInt(fixedNow.Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(testSigningSecret))
-	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":" + body))
-	sig := slackSignatureVersion + "=" + hex.EncodeToString(mac.Sum(nil))
-	return map[string]string{
-		headerSlackSignature: sig,
-		headerSlackTimestamp: tsHeader,
+	mac.Write([]byte(slackSignatureVersion + ":" + ts + ":" + body))
+	sig = slackSignatureVersion + "=" + hex.EncodeToString(mac.Sum(nil))
+	return sig, ts
+}
+
+// newSignedRequest builds a request to `path` carrying `body` and the
+// matching signature/timestamp headers for `body`. Caller-supplied
+// `signBody` (if non-empty) is what gets signed — used by tamper tests
+// where the wire body differs from the signed body.
+func newSignedRequest(t *testing.T, path, body, signBody string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if signBody != "" {
+		sig, ts := signSlackBody(t, signBody)
+		r.Header.Set(headerSlackSignature, sig)
+		r.Header.Set(headerSlackTimestamp, ts)
 	}
+	return r
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
 
-	h := newTestHandler(t, srv)
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/health",
-		HTTPMethod: "GET",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
 	}
 }
 
 func TestSlashCommandHelp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
+	h := newTestHandler(t, noopQURLServer(t))
 	body := url.Values{
 		"command": {"/qurl"},
 		"text":    {"help"},
 		"team_id": {"T123"},
 	}.Encode()
 
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		Headers:    signSlackBody(t, body),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
 	}
 
 	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if result["text"] == "" {
@@ -118,7 +127,6 @@ func TestSlashCommandHelp(t *testing.T) {
 }
 
 func TestSlashCommandCreate(t *testing.T) {
-	// Mock server returns API envelope format
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
@@ -135,7 +143,7 @@ func TestSlashCommandCreate(t *testing.T) {
 			t.Errorf("encode response: %v", err)
 		}
 	}))
-	defer qurlSrv.Close()
+	t.Cleanup(qurlSrv.Close)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 
@@ -146,21 +154,15 @@ func TestSlashCommandCreate(t *testing.T) {
 		"team_id": {"T123"},
 	}.Encode()
 
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		Headers:    signSlackBody(t, body),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
 	}
 
 	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if result["response_type"] != "ephemeral" {
@@ -169,26 +171,14 @@ func TestSlashCommandCreate(t *testing.T) {
 }
 
 func TestURLVerificationChallenge(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
+	h := newTestHandler(t, noopQURLServer(t))
 	body := `{"type":"url_verification","challenge":"test-challenge-123"}`
 
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/events",
-		HTTPMethod: methodPost,
-		Body:       body,
-		Headers:    signSlackBody(t, body),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
 
 	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if result["challenge"] != "test-challenge-123" {
@@ -198,13 +188,10 @@ func TestURLVerificationChallenge(t *testing.T) {
 
 // TestSlackEndpoints_Reject401 is the main negative-path fence. Every row
 // is a request the handler must reject; the three paths (commands / events
-// /interactions) ensure a future endpoint addition can't silently skip
+// / interactions) ensure a future endpoint addition can't silently skip
 // signature verification.
 func TestSlackEndpoints_Reject401(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	srv, hits := countingQURLServer(t)
 
 	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
 	tamperedBody := url.Values{"command": {"/qurl"}, "text": {"create https://evil.example"}, "team_id": {"T999"}}.Encode()
@@ -232,138 +219,47 @@ func TestSlackEndpoints_Reject401(t *testing.T) {
 			if tc.nowOffset != 0 {
 				h.now = func() time.Time { return fixedNow.Add(tc.nowOffset) }
 			}
-			headers := map[string]string{}
-			if tc.signBody != "" {
-				headers = signSlackBody(t, tc.signBody)
-			}
-			resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-				Path: tc.path, HTTPMethod: methodPost, Body: tc.body, Headers: headers,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", resp.StatusCode)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, tc.path, tc.body, tc.signBody))
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", w.Code)
 			}
 		})
 	}
-}
 
-// Fences the API-Gateway-binary-media-type trap: HMAC runs against the
-// decoded body AND the decoded body reaches the downstream handler (the
-// help-text assertion catches a broken threading that would otherwise
-// silently 200 with the wrong body).
-func TestSlashCommand_Base64Body_Help(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	rawBody := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	headers := signSlackBody(t, rawBody)
-	encoded := base64Encode(t, rawBody)
-
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:            "/slack/commands",
-		HTTPMethod:      methodPost,
-		Body:            encoded,
-		Headers:         headers,
-		IsBase64Encoded: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("base64 body + valid signature: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
-	}
-	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !strings.Contains(result["text"], "qurl create") {
-		t.Errorf("base64 body + text=help did not produce help response — body threading regressed. Got: %q", result["text"])
-	}
-}
-
-// Strengthens the body-threading fence: a signed create command must
-// actually reach handleCreate (which hits the mock qURL server).
-func TestSlashCommand_Base64Body_Create(t *testing.T) {
-	var qurlCalled bool
-	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		qurlCalled = true
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]any{
-			"data": map[string]any{"resource_id": "r_test", "qurl_link": "https://qurl.link/at_t", "qurl_site": "https://r_test.qurl.site"},
-			"meta": map[string]string{"request_id": "req_test"},
-		}
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			t.Errorf("encode: %v", err)
-		}
-	}))
-	defer qurlSrv.Close()
-
-	t.Setenv("QURL_API_KEY", "test-key")
-	h := newTestHandler(t, qurlSrv)
-	rawBody := url.Values{"command": {"/qurl"}, "text": {"create https://example.com"}, "team_id": {"T123"}}.Encode()
-	headers := signSlackBody(t, rawBody)
-	encoded := base64Encode(t, rawBody)
-
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:            "/slack/commands",
-		HTTPMethod:      methodPost,
-		Body:            encoded,
-		Headers:         headers,
-		IsBase64Encoded: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("base64 create: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
-	}
-	if !qurlCalled {
-		t.Error("qURL backend was never called — handleCreate didn't run; body threading regressed")
+	// Property fence: every 401 above means we rejected before
+	// dispatching to the qURL upstream. The status check alone wouldn't
+	// catch a regression that 401'd at the wire while leaking the call.
+	if got := hits.Load(); got != 0 {
+		t.Errorf("upstream qURL hits during auth-failure suite = %d, want 0", got)
 	}
 }
 
 // Empty signing secret must 401 every request — deployment-is-open fence.
 func TestHandle_EmptySigningSecret(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
+	h := newTestHandler(t, noopQURLServer(t))
 	h.cfg.SlackSigningSecret = ""
 
 	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
 	// Even with "correct-looking" headers — an empty secret means no message
 	// can verify. We include them to prove the 401 isn't coming from the
 	// "missing headers" path.
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		Headers: map[string]string{
-			headerSlackSignature: "v0=aaaa",
-			headerSlackTimestamp: "1761998400",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("empty signing secret: status = %d, want 401", resp.StatusCode)
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(body))
+	r.Header.Set(headerSlackSignature, "v0=aaaa")
+	r.Header.Set(headerSlackTimestamp, "1761998400")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("empty signing secret: status = %d, want 401", w.Code)
 	}
 }
 
 // classifySlackErr must emit stable, distinct labels for each sentinel —
 // ops dashboards page on "secret_empty" distinctly from ordinary 401
-// noise, and splitting "sig_malformed" from "ts_malformed" separates
-// client-sent-junk from API-Gateway-is-wrapping-us. A regression that
-// collapsed labels (or downgraded the secret_empty slog.Error) would
-// silently lose the page signal.
+// noise. A regression that collapsed labels (or downgraded the
+// secret_empty slog.Error) would silently lose the page signal.
 func TestClassifySlackErr_SentinelsMapToDistinctLabels(t *testing.T) {
 	cases := []struct {
 		err  error
@@ -389,123 +285,187 @@ func TestClassifySlackErr_SentinelsMapToDistinctLabels(t *testing.T) {
 	}
 }
 
-// Fences the v1-API-Gateway multi-value-headers path end-to-end through
-// Handle. Isolated helper coverage lives in TestHeaderValue; this one
-// proves prepareAndVerifySlackRequest pulls from MultiValueHeaders when
-// Headers is nil.
-func TestSlashCommand_SignatureInMultiValueHeaders(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+// Note: an earlier "lowercase signature headers" test was dropped — net/http
+// canonicalizes header names on wire parse via textproto.CanonicalMIMEHeaderKey,
+// and httptest's Header.Set canonicalizes too, so the path is structurally
+// covered by any signed request and a duplicate test added no coverage.
 
-	h := newTestHandler(t, srv)
-	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	hdrs := signSlackBody(t, body)
-	multi := map[string][]string{
-		headerSlackSignature: {hdrs[headerSlackSignature]},
-		headerSlackTimestamp: {hdrs[headerSlackTimestamp]},
-	}
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:       "/slack/commands",
-		HTTPMethod: methodPost,
-		Body:       body,
-		// Explicit nil pins the v1-gateway shape (MultiValueHeaders only)
-		// rather than relying on implicit zero values — a future refactor
-		// that defaulted Headers to a populated map would otherwise make
-		// this test pass through the wrong code path.
-		Headers:           nil,
-		MultiValueHeaders: multi,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("signature delivered via MultiValueHeaders: status = %d, want 200", resp.StatusCode)
+// Body-size cap rejects oversize requests with 413 before any read.
+// httptest.NewRequest sets Content-Length from the reader, so this
+// exercises the honest-sender pre-allocation guard. The dishonest-sender
+// path (no/lying Content-Length) is caught by MaxBytesReader during the
+// read; that defense-in-depth is structural rather than unit-testable.
+func TestHandle_OversizeBodyReturns413(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// 2 MiB — twice the 1 MiB cap.
+	oversize := strings.Repeat("a", 2<<20)
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(oversize))
+	// Headers intentionally absent — the body-size guard runs before
+	// signature verification.
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversize body: status = %d, want 413", w.Code)
 	}
 }
 
-// End-to-end fence for the lowercase-key-over-MultiValueHeaders shape —
-// API Gateway v2 normalizes caller headers to lowercase, and headerValue
-// is pure (TestHeaderValue covers it in isolation), but nothing currently
-// exercises that shape all the way through Handle. This row closes the
-// loop: same Handle path, keys lowercased.
-func TestSlashCommand_SignatureInMultiValueHeaders_LowercaseKeys(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+// Routing fence: GET on a /slack/* path must 405 (the path exists, the
+// method doesn't) with an Allow header pointing to POST. 404 would lie
+// about the endpoint's existence; 401 would leak that the path is
+// gated behind auth.
+func TestHandle_GetOnSlackPathReturns405(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/slack/commands", http.NoBody))
 
-	h := newTestHandler(t, srv)
-	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
-	hdrs := signSlackBody(t, body)
-	multi := map[string][]string{
-		"x-slack-signature":         {hdrs[headerSlackSignature]},
-		"x-slack-request-timestamp": {hdrs[headerSlackTimestamp]},
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /slack/commands: status = %d, want 405", w.Code)
 	}
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:              "/slack/commands",
-		HTTPMethod:        methodPost,
-		Body:              body,
-		Headers:           nil,
-		MultiValueHeaders: multi,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("lowercase MultiValueHeaders keys: status = %d, want 200", resp.StatusCode)
+	if got := w.Header().Get("Allow"); got != "POST" {
+		t.Errorf("Allow header = %q, want %q", got, "POST")
 	}
 }
 
-func TestHeaderValue(t *testing.T) {
-	// API Gateway v1 preserves caller casing (Slack sends mixed case);
-	// v2 lowercases. Some v1 configs populate MultiValueHeaders instead of
-	// Headers. The helper handles all four combinations.
-	cases := []struct {
-		name   string
-		hdrs   map[string]string
-		multi  map[string][]string
-		lookup string
-		want   string
-	}{
-		{"mixed case in Headers", map[string]string{"X-Slack-Signature": "v0=abc"}, nil, "X-Slack-Signature", "v0=abc"},
-		{"lowercase in Headers", map[string]string{"x-slack-signature": "v0=abc"}, nil, "X-Slack-Signature", "v0=abc"},
-		{"not present returns empty", map[string]string{"other": "val"}, nil, "X-Slack-Signature", ""},
-		{"MultiValueHeaders mixed case", nil, map[string][]string{"X-Slack-Signature": {"v0=abc"}}, "X-Slack-Signature", "v0=abc"},
-		{"MultiValueHeaders lowercase", nil, map[string][]string{"x-slack-signature": {"v0=abc"}}, "X-Slack-Signature", "v0=abc"},
-		{"empty multi-value returns empty", nil, map[string][]string{"X-Slack-Signature": {}}, "X-Slack-Signature", ""},
-		{"Headers wins over MultiValueHeaders", map[string]string{"X-Slack-Signature": "v0=fromhdrs"}, map[string][]string{"X-Slack-Signature": {"v0=frommulti"}}, "X-Slack-Signature", "v0=fromhdrs"},
+// /health must accept GET and HEAD (for ALB probes) and reject other
+// methods with 405 + Allow.
+func TestHealthEndpoint_RejectsNonGet(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/health", http.NoBody))
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /health: status = %d, want 405", w.Code)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := headerValue(tc.hdrs, tc.multi, tc.lookup)
-			if got != tc.want {
-				t.Errorf("headerValue = %q, want %q", got, tc.want)
-			}
-		})
+	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow header = %q, want %q", got, "GET, HEAD")
 	}
 }
 
-// Fences the decode-error branch in prepareAndVerifySlackRequest.
-func TestSlashCommand_InvalidBase64_Returns401(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+func TestHealthEndpoint_AcceptsHead(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodHead, "/health", http.NoBody))
 
-	h := newTestHandler(t, srv)
-	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
-		Path:            "/slack/commands",
-		HTTPMethod:      methodPost,
-		Body:            "this is not valid base64 at all!@#$%",
-		Headers:         map[string]string{headerSlackSignature: "v0=deadbeef", headerSlackTimestamp: "1761998400"},
-		IsBase64Encoded: true,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD /health: status = %d, want 200", w.Code)
 	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("invalid base64 with IsBase64Encoded=true: status = %d, want 401", resp.StatusCode)
+}
+
+// Boundary fence: a body exactly at the cap must succeed end-to-end.
+// Off-by-one on MaxBytesReader would silently 400 legitimate large
+// payloads — this row catches that regression.
+func TestHandle_BodyAtCapAccepted(t *testing.T) {
+	// noopQURLServer is required to populate Config.NewClient; this test
+	// posts to /slack/events, which never calls out to qURL.
+	h := newTestHandler(t, noopQURLServer(t))
+	// /slack/events accepts arbitrary bytes; we're fencing read+verify,
+	// not the event payload shape.
+	body := strings.Repeat("a", maxRequestBodyBytes)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("body at cap (%d bytes): status = %d, want 200", maxRequestBodyBytes, w.Code)
+	}
+}
+
+// Pre-allocation fence: a client honestly declaring a too-large
+// Content-Length must be rejected with 413 before any body is read.
+func TestHandle_DeclaredOversizeReturns413(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader("ignored"))
+	r.ContentLength = int64(maxRequestBodyBytes + 1)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("declared oversize: status = %d, want 413", w.Code)
+	}
+}
+
+// Simulates the chunked-transfer / no-Content-Length path through
+// MaxBytesReader — http.Server reads up to declared CL for non-chunked
+// bodies, so the real-world dishonest case is chunked encoding (no CL,
+// or a CL that doesn't reflect actual body size). The under-declared
+// CL here forces ServeHTTP past the pre-allocation pre-check and
+// exercises MaxBytesReader-during-read returning *http.MaxBytesError
+// — which must surface as 413, not 400, so operator dashboards bucket
+// it with the honest-oversize 413s.
+func TestHandle_DishonestContentLengthReturns413(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	oversize := strings.Repeat("a", 2<<20)
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(oversize))
+	r.ContentLength = 100
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("dishonest CL: status = %d, want 413", w.Code)
+	}
+}
+
+// A 100 KiB signed body must reach handleEvent intact and 200. Locks
+// the contract that no future refactor caps the read short of the body
+// — a truncated read would silently 401 (HMAC mismatch on partial
+// bytes) and look like a signature-secret-rotation bug.
+func TestHandle_LargeSignedBodyAccepted(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	body := strings.Repeat("b", 100*1024)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("100 KiB signed body: status = %d, want 200", w.Code)
+	}
+}
+
+// Signed-but-malformed JSON event must 200 with the {"ok":"true"}
+// envelope. Slack retries on non-2xx, so a regression to 400 would
+// cause retry storms; a regression to 200-with-error-body would mask
+// real failures from monitoring.
+func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	body := `{not json at all`
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("malformed JSON event: status = %d, want 200", w.Code)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["ok"] != "true" {
+		t.Errorf("malformed JSON event: body = %q, want ok=true", w.Body.String())
+	}
+}
+
+// Empty-body fence: locks the contract so a future ParseQuery
+// substitution can't silently change the empty-text help fallback.
+func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(""))
+	sig, ts := signSlackBody(t, "")
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, ts)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("signed empty body: status = %d, want 200 (help branch); body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "qurl create") {
+		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }
