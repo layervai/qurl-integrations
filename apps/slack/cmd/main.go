@@ -89,17 +89,20 @@ func run() error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
 	// Bind first so a port-already-in-use failure returns before the
 	// drain goroutine spawns — keeps the "received shutdown signal"
-	// log line off the bind-failure path.
+	// log line off the bind-failure path. Use a fresh background ctx
+	// for the bind so a SIGTERM arriving in the gap between
+	// signal.NotifyContext and Listen doesn't surface as
+	// "listen: context canceled".
 	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "tcp", listenAddr)
+	ln, err := lc.Listen(context.Background(), "tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -114,11 +117,17 @@ func run() error {
 	}()
 
 	slog.Info("starting Slack bot HTTP server", "addr", listenAddr)
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve: %w", err)
-	}
+	serveErr := srv.Serve(ln)
 
+	// Always release the signal handler and wait for the drain goroutine
+	// regardless of how Serve returned — keeps the cleanup deterministic
+	// even if Serve fails with a non-ErrServerClosed error.
+	stop()
 	<-shutdownDone
+
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", serveErr)
+	}
 	slog.Info("server stopped cleanly")
 	return nil
 }

@@ -37,10 +37,8 @@ const (
 // task to allocate unbounded memory.
 const maxRequestBodyBytes = 1 << 20
 
-// internalErrorEnvelope is the canonical 500 body used when JSON marshal
-// of a richer payload fails. Stored as a const so the slice the writer
-// receives is conjured fresh per call — there's no shared []byte that a
-// future caller could accidentally mutate.
+// internalErrorEnvelope is the fallback 500 body used when JSON marshal
+// of a richer payload fails (unreachable for current callers).
 const internalErrorEnvelope = `{"error":"internal"}`
 
 // Config holds the Slack handler configuration.
