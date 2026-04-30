@@ -386,14 +386,16 @@ func TestHandle_DeclaredOversizeReturns413(t *testing.T) {
 	}
 }
 
-// Dishonest sender (Content-Length lying about body size) — the
-// MaxBytesReader path during read returns a *http.MaxBytesError that
-// must surface as 413, not 400. Otherwise operator dashboards split
-// the same condition across two buckets.
+// Simulates the chunked-transfer / no-Content-Length path through
+// MaxBytesReader — http.Server reads up to declared CL for non-chunked
+// bodies, so the real-world dishonest case is chunked encoding (no CL,
+// or a CL that doesn't reflect actual body size). The under-declared
+// CL here forces ServeHTTP past the pre-allocation pre-check and
+// exercises MaxBytesReader-during-read returning *http.MaxBytesError
+// — which must surface as 413, not 400, so operator dashboards bucket
+// it with the honest-oversize 413s.
 func TestHandle_DishonestContentLengthReturns413(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
-	// 2 MiB body, but Content-Length under-declared so the
-	// pre-allocation guard lets it through.
 	oversize := strings.Repeat("a", 2<<20)
 	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(oversize))
 	r.ContentLength = 100

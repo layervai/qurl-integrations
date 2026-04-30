@@ -79,6 +79,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Exact-path match by design: Slack sends the canonical paths without
+	// trailing slashes, and a strict match means a path-rewriting proxy
+	// can't accidentally normalize "/slack/commands/" into a 404 silently
+	// further upstream — it dies here in our routing instead. If we ever
+	// front this with such a proxy, switch to strings.TrimRight or move
+	// to http.ServeMux.
 	switch r.URL.Path {
 	case pathSlackCommands, pathSlackEvents, pathSlackInteractions:
 		if r.Method != http.MethodPost {

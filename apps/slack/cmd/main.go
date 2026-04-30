@@ -26,8 +26,15 @@ const (
 	listenAddr = ":8080"
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
-	// and reap the process.
+	// and reap the process. This is the cap on the drain *as a whole*, not
+	// per request — http.Server.WriteTimeout (15s) still bounds individual
+	// in-flight handlers; bumping shutdownTimeout above 25s won't extend
+	// long-running handlers, only the wait for short ones to drain.
 	shutdownTimeout = 25 * time.Second
+	// maxHeaderBytes is well above Slack's realistic header size (sig +
+	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
+	// the per-connection memory an attacker can force pre-handler.
+	maxHeaderBytes = 8 << 10 // 8 KiB
 )
 
 // version is set at build time via `-ldflags "-X main.version=<sha>"`.
@@ -89,7 +96,7 @@ func run() error {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
 	// Bind first so a port-already-in-use failure returns before the
