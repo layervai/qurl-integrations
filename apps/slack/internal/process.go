@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"strings"
 
 	"github.com/layervai/qurl-integrations/shared/client"
@@ -155,8 +156,16 @@ func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.
 
 // idempotencyKeyForCreate hashes the workspace + trigger so the qURL
 // service dedupes Slack-side retries.
+//
+// Inputs are length-framed before hashing so a future rev of Slack's
+// ID format that introduced a colon couldn't collide distinct (team,
+// trigger) pairs into the same key. Today's IDs (T-prefixed alphanum
+// teams; UUID-shaped trigger IDs) don't contain colons, but pinning
+// the contract via length-framing is cheap and removes the assumption.
 func idempotencyKeyForCreate(teamID, triggerID string) string {
-	sum := sha256.Sum256([]byte("slack:" + teamID + ":" + triggerID))
+	pre := "slack:" + strconv.Itoa(len(teamID)) + ":" + teamID +
+		":" + strconv.Itoa(len(triggerID)) + ":" + triggerID
+	sum := sha256.Sum256([]byte(pre))
 	return hex.EncodeToString(sum[:])
 }
 

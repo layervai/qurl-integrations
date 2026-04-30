@@ -376,12 +376,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		respondSlack(w, helpMessage())
 	case strings.HasPrefix(text, "create "):
 		h.handleCreate(w, values)
-	case text == "list" || strings.HasPrefix(text, "list "):
-		// Prefix-match `"list"` alone matched `listing`, `lists`,
-		// `list-foo` — silently routing them to the list handler
-		// where they'd ignore the trailing tokens. The exact-match
-		// + trailing-space fork shows the user a "Unknown subcommand"
-		// help nudge instead.
+	case text == "list":
+		// Exact match only: the looser `HasPrefix(text, "list")` form
+		// matched `listing`, `lists`, `list-foo` (silently routing
+		// them to the list handler) AND `list extra args` (which
+		// processList ignores). Anything other than the bare token
+		// falls through to the unknown-subcommand branch and gets a
+		// help nudge.
 		h.handleList(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command

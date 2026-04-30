@@ -67,7 +67,10 @@ func createCommandBody(targetURL, teamID, triggerID, responseURL string) string 
 }
 
 // waitFor polls until cond returns true or the deadline elapses. Used
-// to gate on async post-ack work without hard sleeps.
+// to gate on async post-ack work without hard sleeps. The 10ms tick
+// keeps the success path snappy while the timeout argument bounds the
+// failure path; callers should pass a value that absorbs race-detector
+// load on a busy CI runner.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -75,7 +78,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		if cond() {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s", timeout)
 }
@@ -363,8 +366,9 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 	// Wait until both workers are actually parked in the qURL handler;
 	// otherwise the third send could race ahead while a slot is still
 	// unclaimed.
-	waitFor(t, time.Second, func() bool {
-		// Two slots taken means a third reservation will fail.
+	waitFor(t, 2*time.Second, func() bool {
+		// Two slots taken means a third reservation will fail. 2s
+		// gives the race detector + a busy CI runner enough headroom.
 		return len(h.sem) == 2
 	})
 	third := send("trig-3")
@@ -806,32 +810,86 @@ func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
 	}
 }
 
-// TestHandle_ListPrefixDoesNotMatchListing fences the tightened
-// prefix match for "/qurl list": before, "listing" matched as a list
-// prefix and silently routed to processList. Now it falls through to
-// the unknown-subcommand branch with a help nudge.
-func TestHandle_ListPrefixDoesNotMatchListing(t *testing.T) {
-	srv, hits := countingQURLServer(t)
-	h := newTestHandler(t, srv)
+// TestHandle_PostResponseRefusesRedirectsEndToEnd is the end-to-end
+// counterpart to TestResponseURLClient_RefusesRedirects: it goes
+// through processCreate → postResponse so a regression that wired the
+// request through a non-default *http.Client at the call site is
+// caught here even if the client unit test still passed.
+func TestHandle_PostResponseRefusesRedirectsEndToEnd(t *testing.T) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1","qurl_link":"https://qurl.link/x"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
 
-	body := url.Values{
-		"command": {"/qurl"},
-		"text":    {"listing"},
-		"team_id": {"T123"},
-	}.Encode()
+	t.Setenv("QURL_API_KEY", "test-key")
 
+	// Evil host — should never see traffic if redirect-refusal works.
+	var evilHits atomic.Int32
+	evilSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		evilHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(evilSrv.Close)
+
+	// response_url server returns 302 to the evil host.
+	var responseURLHits atomic.Int32
+	responseSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responseURLHits.Add(1)
+		http.Redirect(w, r, evilSrv.URL, http.StatusFound)
+	}))
+	t.Cleanup(responseSrv.Close)
+
+	h := newTestHandler(t, qurlSrv)
+	body := createCommandBody("https://example.com", "T123", "trig-redir-e2e", responseSrv.URL)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	h.Wait()
 
-	var ack map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if got := responseURLHits.Load(); got != 1 {
+		t.Errorf("response_url server hit count = %d, want 1 (initial POST)", got)
 	}
-	if !strings.Contains(ack["text"], "Unknown subcommand") {
-		t.Errorf("expected 'Unknown subcommand' help nudge for `listing`, got: %q", ack["text"])
+	if got := evilHits.Load(); got != 0 {
+		t.Errorf("evil server hit count = %d, want 0 (redirect must be refused)", got)
 	}
-	// And no upstream qURL request was made.
-	if got := hits.Load(); got != 0 {
-		t.Errorf("upstream qURL hits for `listing`: got %d, want 0", got)
+}
+
+// TestHandle_ListExactMatchOnly fences the tightened "/qurl list"
+// matcher: the looser HasPrefix(text, "list") form matched `listing`,
+// `lists`, `list-foo` (silently routing them to processList) AND
+// `list extra args` (which processList ignores). Now only the bare
+// token reaches processList — anything else falls through to the
+// unknown-subcommand branch.
+func TestHandle_ListExactMatchOnly(t *testing.T) {
+	cases := []string{
+		"listing",
+		"lists",
+		"list-foo",
+		"list foo bar", // trailing tokens — list takes no args
+	}
+	for _, text := range cases {
+		t.Run(text, func(t *testing.T) {
+			srv, hits := countingQURLServer(t)
+			h := newTestHandler(t, srv)
+			body := url.Values{
+				"command": {"/qurl"},
+				"text":    {text},
+				"team_id": {"T123"},
+			}.Encode()
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+			var ack map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !strings.Contains(ack["text"], "Unknown subcommand") {
+				t.Errorf("expected 'Unknown subcommand' help nudge for %q, got: %q", text, ack["text"])
+			}
+			if got := hits.Load(); got != 0 {
+				t.Errorf("upstream qURL hits for %q: got %d, want 0", text, got)
+			}
+		})
 	}
 }

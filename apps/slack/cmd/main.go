@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -30,6 +31,14 @@ const (
 	// per request — http.Server.WriteTimeout (15s) still bounds individual
 	// in-flight handlers; bumping shutdownTimeout above 25s won't extend
 	// long-running handlers, only the wait for short ones to drain.
+	//
+	// Budget contract: shutdownTimeout must comfortably exceed
+	// (srv.Shutdown drain time) + (internal.responseURLTimeout = 5s)
+	// so a healthy in-flight async worker has time to land its
+	// follow-up POST before WaitTimeout(remaining) gives up. With
+	// ack-and-spawn handlers, srv.Shutdown finishes in milliseconds —
+	// the worst-case pre-Wait drain is dominated by per-handler
+	// completion (instant), leaving ~25s for response_url POSTs.
 	shutdownTimeout = 25 * time.Second
 	// maxHeaderBytes is well above Slack's realistic header size (sig +
 	// timestamp + standard headers fit comfortably in 2 KiB) but bounds
@@ -75,6 +84,12 @@ func run() error {
 	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
 	userAgent := "qurl-slack/" + version
 
+	// Optional pool-cap override. Empty/invalid env yields 0, which
+	// internal.NewHandler interprets as "use default" (50). Lets
+	// operators tune saturation without a recompile when a workspace
+	// load shape diverges from the documented enterprise default.
+	maxConcurrentAsync, _ := strconv.Atoi(os.Getenv("QURL_SLACK_MAX_CONCURRENT_ASYNC"))
+
 	// signalCtx feeds two seams: the main goroutine (to detect
 	// SIGTERM and trigger srv.Shutdown) and Handler.BaseContext (so
 	// async slash-command workers observe cancellation through the
@@ -89,6 +104,7 @@ func run() error {
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		BaseContext:        signalCtx,
+		MaxConcurrentAsync: maxConcurrentAsync,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
