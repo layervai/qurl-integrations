@@ -75,14 +75,28 @@ func run() error {
 	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
 	userAgent := "qurl-slack/" + version
 
+	// signalCtx feeds two seams: the main goroutine (to detect
+	// SIGTERM and trigger srv.Shutdown) and Handler.BaseContext (so
+	// async slash-command workers observe cancellation through the
+	// same signal). Threading the same ctx into both keeps the
+	// shutdown story coherent — a worker mid-POST to response_url
+	// receives ctx.Canceled at the same instant Shutdown starts
+	// refusing new connections.
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
+		BaseContext:        signalCtx,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
+				// The async worker has up to 25s before its context fires;
+				// the qURL client may retry transient 429/5xx within that
+				// budget. WithRetry(2) gives two retries with the existing
+				// exponential-backoff schedule before bubbling to the user.
 				client.WithUserAgent(userAgent),
-				// Synchronous ack path — Slack's 3s budget rules out retries here.
-				client.WithRetry(0),
+				client.WithRetry(2),
 			)
 		},
 	})
@@ -111,18 +125,21 @@ func run() error {
 		return fmt.Errorf("bind %s: %w", listenAddr, err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
 	shutdownDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		<-signalCtx.Done()
 		slog.Info("received shutdown signal — draining HTTP server")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("graceful shutdown failed", "error", err)
 		}
+		// Shutdown returns once HTTP handlers have responded. Slash-
+		// command handlers ack and return nearly instantly, so
+		// in-flight async workers (the goroutines runAsync spawned)
+		// outlive Shutdown. Wait drains them — their contexts are
+		// already canceled via signalCtx, so they return promptly.
+		handler.Wait()
 		close(shutdownDone)
 	}()
 

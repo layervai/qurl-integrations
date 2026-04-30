@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/layervai/qurl-integrations/shared/auth"
@@ -18,6 +19,16 @@ import (
 )
 
 const authFailureMessage = "Failed to authenticate. Please check your qURL API key configuration."
+
+// ackWorkingOnIt is the user-visible ephemeral text returned synchronously
+// while async work runs. The hourglass keeps the user oriented that a
+// follow-up via response_url is on its way.
+const ackWorkingOnIt = ":hourglass: Working on it…"
+
+// ackBusy is returned when the bounded async pool is saturated. Surfacing
+// this to the user (rather than silently dropping) makes back-pressure
+// visible and gives them an actionable next step.
+const ackBusy = ":warning: Slack bot is busy — please retry in a moment."
 
 const (
 	headerSlackSignature = "X-Slack-Signature"
@@ -29,6 +40,26 @@ const (
 	pathSlackCommands     = "/slack/commands"
 	pathSlackEvents       = "/slack/events"
 	pathSlackInteractions = "/slack/interactions"
+)
+
+const (
+	// defaultMaxConcurrentAsync caps in-flight goroutines. A Slack-side
+	// flood (replay storm, runaway integration) drops with ackBusy past
+	// this threshold rather than unbounded-spawning until the task OOMs.
+	// 50 is generous for steady-state — the target customer (50 active
+	// users) won't sustain >1 click/sec across the whole workspace.
+	defaultMaxConcurrentAsync = 50
+
+	// asyncWorkTimeout caps how long a single async job may run. Slack's
+	// response_url is valid for 30 minutes, but in practice qURL API calls
+	// resolve in <1s; 25s is the deadline beyond which the user is better
+	// served by a "failed" follow-up than an indefinite "Working on it…".
+	asyncWorkTimeout = 25 * time.Second
+
+	// responseURLTimeout bounds the POST to Slack's response_url. Slack's
+	// hooks endpoint typically responds in <500ms; 5s catches transient
+	// blips without holding a goroutine slot for the full asyncWorkTimeout.
+	responseURLTimeout = 5 * time.Second
 )
 
 // maxRequestBodyBytes caps the request body the handler will read. Slack
@@ -51,6 +82,23 @@ type Config struct {
 	AuthProvider       auth.Provider
 	SlackSigningSecret string
 	NewClient          func(apiKey string) *client.Client
+
+	// BaseContext is the server-lifetime parent of every async work
+	// goroutine's context. SIGTERM cancels it, which propagates to
+	// in-flight qURL API calls and response_url POSTs so they release
+	// the worker slot promptly during shutdown. Defaults to
+	// context.Background() if nil — fine for tests, not for production
+	// (cmd/main.go threads the signal-canceled context).
+	BaseContext context.Context
+
+	// MaxConcurrentAsync caps in-flight async goroutines. Zero or
+	// negative falls back to defaultMaxConcurrentAsync.
+	MaxConcurrentAsync int
+
+	// ResponseURLClient is the HTTP client used to POST follow-up
+	// messages to Slack's response_url. Nil means "use a default *http.Client
+	// with responseURLTimeout"; tests inject one to assert payloads.
+	ResponseURLClient *http.Client
 }
 
 // Handler processes Slack events and commands.
@@ -59,11 +107,74 @@ type Handler struct {
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
+	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
+	// context.Background()). Each async goroutine derives a
+	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
+	// (via SIGTERM in main.go) signals every in-flight worker.
+	baseCtx context.Context
+	// wg tracks live async workers so cmd/main.go's Wait() can drain
+	// them after http.Server.Shutdown returns. wg.Add MUST happen on
+	// the request goroutine (before the `go` keyword) — adding inside
+	// the spawned goroutine races Wait().
+	wg sync.WaitGroup
+	// sem is a buffered-channel semaphore bounding concurrent async
+	// workers to len(sem) capacity. Send-with-default-drop gives back-
+	// pressure feedback to the user as ackBusy rather than queueing.
+	sem chan struct{}
+	// responseURLClient is owned per-Handler so tests can inject a
+	// transport and so the lifetime is tied to the handler (not the
+	// per-request goroutine).
+	responseURLClient *http.Client
+	// validateResponseURLFn defaults to validateResponseURL — pinned to
+	// https://hooks.slack.com/* in production. Tests override it to
+	// permit httptest server URLs (which are http://127.0.0.1:NNNNN).
+	// Field rather than parameter so the production default needs no
+	// per-deploy wiring.
+	validateResponseURLFn func(string) error
 }
 
 // NewHandler creates a new Slack handler.
 func NewHandler(cfg Config) *Handler {
-	return &Handler{cfg: cfg, now: time.Now}
+	baseCtx := cfg.BaseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	maxAsync := cfg.MaxConcurrentAsync
+	if maxAsync <= 0 {
+		maxAsync = defaultMaxConcurrentAsync
+	}
+	respClient := cfg.ResponseURLClient
+	if respClient == nil {
+		respClient = &http.Client{
+			Timeout: responseURLTimeout,
+			// Refuse redirects: validateResponseURL pins the initial host
+			// to hooks.slack.com, but Go's default 10-redirect follow
+			// would let a 30x bounce land on any host. Returning
+			// ErrUseLastResponse surfaces the redirect to the caller
+			// without dialing the target.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+	return &Handler{
+		cfg:                   cfg,
+		now:                   time.Now,
+		baseCtx:               baseCtx,
+		sem:                   make(chan struct{}, maxAsync),
+		responseURLClient:     respClient,
+		validateResponseURLFn: validateResponseURL,
+	}
+}
+
+// Wait blocks until every async worker spawned by this handler has
+// returned. Call it after http.Server.Shutdown so the process doesn't
+// exit while a goroutine is still mid-POST to Slack's response_url.
+//
+// Wait is a no-op if no async work is in flight, so the cmd path can
+// always call it on every shutdown without conditionals.
+func (h *Handler) Wait() {
+	h.wg.Wait()
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +246,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case pathSlackCommands:
-		h.handleSlashCommand(r.Context(), w, body)
+		// r.Context() is intentionally NOT threaded into the slash-command
+		// dispatch: handleCreate/handleList spawn goroutines that outlive
+		// the HTTP response, and r.Context() cancels as soon as ServeHTTP
+		// returns. Async work uses h.baseCtx instead.
+		h.handleSlashCommand(w, body)
 	case pathSlackEvents:
 		h.handleEvent(w, body)
 	case pathSlackInteractions:
@@ -199,7 +314,7 @@ func classifySlackErr(err error) string {
 	}
 }
 
-func (h *Handler) handleSlashCommand(ctx context.Context, w http.ResponseWriter, body []byte) {
+func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid form body"})
@@ -215,9 +330,9 @@ func (h *Handler) handleSlashCommand(ctx context.Context, w http.ResponseWriter,
 	case text == "" || text == "help":
 		respondSlack(w, helpMessage())
 	case strings.HasPrefix(text, "create "):
-		h.handleCreate(ctx, w, values)
+		h.handleCreate(w, values)
 	case strings.HasPrefix(text, "list"):
-		h.handleList(ctx, w, values)
+		h.handleList(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -226,64 +341,24 @@ func (h *Handler) handleSlashCommand(ctx context.Context, w http.ResponseWriter,
 	}
 }
 
-func (h *Handler) handleCreate(ctx context.Context, w http.ResponseWriter, values url.Values) {
+func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
 	text := strings.TrimSpace(values.Get("text"))
-	targetURL := strings.TrimPrefix(text, "create ")
-	targetURL = strings.TrimSpace(targetURL)
+	targetURL := strings.TrimSpace(strings.TrimPrefix(text, "create "))
 
 	if targetURL == "" {
 		respondSlack(w, "Usage: `/qurl create <url>`")
 		return
 	}
 
-	c, err := h.authenticatedClient(ctx, values.Get("team_id"))
-	if err != nil {
-		slog.Error("failed to get API key", "error", err)
-		respondSlack(w, authFailureMessage)
-		return
-	}
-
-	result, err := c.Create(ctx, client.CreateInput{TargetURL: targetURL})
-	if err != nil {
-		slog.Error("failed to create qURL", "error", err, "target_url", targetURL)
-		respondSlack(w, "Failed to create qURL: "+err.Error())
-		return
-	}
-
-	respondSlack(w, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
+	h.runAsync(w, "create", values, func(ctx context.Context, log *slog.Logger) {
+		h.processCreate(ctx, log, values, targetURL)
+	})
 }
 
-func (h *Handler) handleList(ctx context.Context, w http.ResponseWriter, values url.Values) {
-	c, err := h.authenticatedClient(ctx, values.Get("team_id"))
-	if err != nil {
-		slog.Error("failed to get API key", "error", err)
-		respondSlack(w, authFailureMessage)
-		return
-	}
-
-	result, err := c.List(ctx, client.ListInput{Limit: 5})
-	if err != nil {
-		slog.Error("failed to list qURLs", "error", err)
-		respondSlack(w, "Failed to list qURLs: "+err.Error())
-		return
-	}
-
-	if len(result.QURLs) == 0 {
-		respondSlack(w, "No qURLs found.")
-		return
-	}
-
-	lines := make([]string, 0, len(result.QURLs))
-	for i := range result.QURLs {
-		q := &result.QURLs[i]
-		line := fmt.Sprintf("• `%s` → %s [%s]", q.ResourceID, q.TargetURL, q.Status)
-		if q.Description != "" {
-			line = fmt.Sprintf("• *%s* — `%s` → %s [%s]", q.Description, q.ResourceID, q.TargetURL, q.Status)
-		}
-		lines = append(lines, line)
-	}
-
-	respondSlack(w, "*Recent qURLs:*\n"+strings.Join(lines, "\n"))
+func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
+	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
+		h.processList(ctx, log, values)
+	})
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.

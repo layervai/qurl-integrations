@@ -1,0 +1,671 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/layervai/qurl-integrations/shared/auth"
+	"github.com/layervai/qurl-integrations/shared/client"
+)
+
+// responseURLRecorder is an httptest.Server that captures every
+// response_url POST it receives. Tests use it to assert the body the
+// async worker delivered after the synchronous ack.
+type responseURLRecorder struct {
+	URL string
+
+	mu    sync.Mutex
+	posts []map[string]string
+}
+
+// posts returns a snapshot of the captured payloads.
+func (r *responseURLRecorder) Posts() []map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.posts)
+}
+
+func newResponseURLRecorder(t *testing.T) *responseURLRecorder {
+	t.Helper()
+	rec := &responseURLRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		rec.mu.Lock()
+		rec.posts = append(rec.posts, body)
+		rec.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	rec.URL = srv.URL
+	return rec
+}
+
+// createCommandBody builds a /slack/commands form payload for a
+// /qurl create call. response_url is parameterized so a test can wire
+// it at the recorder it controls.
+func createCommandBody(targetURL, teamID, triggerID, responseURL string) string {
+	return url.Values{
+		"command":      {"/qurl"},
+		"text":         {"create " + targetURL},
+		"team_id":      {teamID},
+		"channel_id":   {"C123"},
+		"trigger_id":   {triggerID},
+		"response_url": {responseURL},
+	}.Encode()
+}
+
+// waitFor polls until cond returns true or the deadline elapses. Used
+// to gate on async post-ack work without hard sleeps.
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %s", timeout)
+}
+
+// TestHandle_AckIsFastUnderSlowAPI fences the load-bearing UX promise:
+// no matter how slow the qURL upstream is, the handler must ack within
+// Slack's 3s budget — a 50ms cap leaves room for ~60x slowdown before
+// the timeout starts to bite.
+func TestHandle_AckIsFastUnderSlowAPI(t *testing.T) {
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Far longer than the 50ms ack budget — synchronous code would
+		// exceed it; the async path returns the ack first and hits the
+		// upstream off the request goroutine.
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1","qurl_link":"https://qurl.link/x"}}`))
+	}))
+	t.Cleanup(slowSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, slowSrv)
+
+	body := createCommandBody("https://example.com", "T123", "trig-fast", rec.URL)
+
+	start := time.Now()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	elapsed := time.Since(start)
+
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("ack took %v, want ≤50ms", elapsed)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	var ack map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil {
+		t.Fatalf("unmarshal ack: %v", err)
+	}
+	if ack["text"] != ackWorkingOnIt {
+		t.Errorf("ack text = %q, want %q", ack["text"], ackWorkingOnIt)
+	}
+}
+
+// TestHandle_AsyncCreatePostsResultToResponseURL fences the round-trip:
+// after the ack, the worker POSTs the qURL link via response_url.
+func TestHandle_AsyncCreatePostsResultToResponseURL(t *testing.T) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r_abc","qurl_link":"https://qurl.link/at_token"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, qurlSrv)
+
+	body := createCommandBody("https://example.com", "T123", "trig-create", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	h.Wait() // drain the async worker before asserting on what it posted.
+
+	posts := rec.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("response_url POST count = %d, want 1; posts=%v", len(posts), posts)
+	}
+	got := posts[0]
+	if got["response_type"] != "ephemeral" {
+		t.Errorf("response_url response_type = %q, want ephemeral", got["response_type"])
+	}
+	if !strings.Contains(got["text"], "https://qurl.link/at_token") {
+		t.Errorf("response_url text missing qURL link: %q", got["text"])
+	}
+}
+
+// TestHandle_AsyncCreateSurfacesIdempotencyKey fences the dedup contract:
+// every /qurl create with a fixed team_id+trigger_id MUST carry the same
+// Idempotency-Key. Slack's 3s ack timeout is below typical qURL API
+// latency under load, so Slack-side retries are real — the qURL service
+// uses this header to fold them into a single resource creation.
+func TestHandle_AsyncCreateSurfacesIdempotencyKey(t *testing.T) {
+	var seenKey string
+	var keyMu sync.Mutex
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		k := r.Header.Get(client.HeaderIdempotencyKey)
+		keyMu.Lock()
+		seenKey = k
+		keyMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1","qurl_link":"https://qurl.link/x"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, qurlSrv)
+
+	body := createCommandBody("https://example.com", "T999", "trig-dedup", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	h.Wait()
+
+	keyMu.Lock()
+	got := seenKey
+	keyMu.Unlock()
+	if got == "" {
+		t.Fatal("upstream saw no Idempotency-Key header")
+	}
+	want := idempotencyKeyForCreate("T999", "trig-dedup")
+	if got != want {
+		t.Errorf("Idempotency-Key = %q, want %q", got, want)
+	}
+}
+
+// TestHandle_ConcurrentCreateSharesIdempotencyKey is the load-bearing
+// dedup integration test: 100 concurrent /qurl create requests with the
+// same trigger_id must all carry the same Idempotency-Key. Anything
+// less is a regression that re-introduces duplicate qURLs under
+// Slack's retry storm.
+func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
+	const concurrency = 100
+
+	var keys sync.Map
+	var hits atomic.Int32
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if k := r.Header.Get(client.HeaderIdempotencyKey); k != "" {
+			keys.LoadOrStore(k, struct{}{})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1","qurl_link":"https://qurl.link/x"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	// Pool capacity bumped so all concurrency requests are dispatched
+	// (the dedup property is what's under test, not back-pressure).
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		MaxConcurrentAsync: concurrency,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey)
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = func(string) error { return nil }
+	t.Cleanup(h.Wait)
+
+	body := createCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
+
+	var wg sync.WaitGroup
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+		}()
+	}
+	wg.Wait()
+	h.Wait()
+
+	if got := hits.Load(); got != concurrency {
+		t.Errorf("upstream hits = %d, want %d (pool was sized for full dispatch)", got, concurrency)
+	}
+	var uniqueKeys int
+	keys.Range(func(_, _ any) bool { uniqueKeys++; return true })
+	if uniqueKeys != 1 {
+		t.Errorf("upstream observed %d unique Idempotency-Keys across %d requests, want 1", uniqueKeys, concurrency)
+	}
+}
+
+// TestHandle_AsyncCreateSanitizesAPIError fences the sanitization
+// contract: a qURL API error reaches the user as the safe Title +
+// RequestID, and the unsafe Detail (which can leak server internals)
+// stays out of the user-facing payload.
+func TestHandle_AsyncCreateSanitizesAPIError(t *testing.T) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		// `detail` carries a representative server-side internal — a
+		// regression that surfaced this string to users would leak
+		// implementation details (here: a synthetic stack hint).
+		_, _ = fmt.Fprint(w, `{"error":{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"db: connection to internal-host:5432 refused (stack: ...)","code":"SECRET_LEAK_HOOK"},"meta":{"request_id":"req_abc123"}}`)
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, qurlSrv)
+	// Disable retries so the test isn't 30s long when 500 is returned.
+	h.cfg.NewClient = func(apiKey string) *client.Client {
+		return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+	}
+
+	body := createCommandBody("https://example.com", "T123", "trig-err", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	h.Wait()
+
+	posts := rec.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("response_url POST count = %d, want 1", len(posts))
+	}
+	text := posts[0]["text"]
+
+	// Detail must NOT appear — it carries server internals.
+	if strings.Contains(text, "internal-host") || strings.Contains(text, "stack") {
+		t.Errorf("sanitization leak: response contains Detail substring: %q", text)
+	}
+	// Title is safe and informative.
+	if !strings.Contains(text, "Internal Server Error") {
+		t.Errorf("expected Title in user-facing text, got: %q", text)
+	}
+	// RequestID is the operator-correlation handle.
+	if !strings.Contains(text, "req_abc123") {
+		t.Errorf("expected RequestID in user-facing text, got: %q", text)
+	}
+}
+
+// TestHandle_PoolSaturationDropsWithBusyAck fences back-pressure: when
+// the bounded async pool is full, further requests get ackBusy
+// instantly rather than queueing or unbounded-spawning. Two concurrent
+// long-running workers fill the pool; the third request must drop.
+func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		// Defensive: unblock any worker still waiting on release so
+		// h.Wait() can drain. Idempotent close via select.
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		MaxConcurrentAsync: 2,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = func(string) error { return nil }
+	t.Cleanup(h.Wait)
+
+	send := func(triggerID string) string {
+		body := createCommandBody("https://example.com", "T123", triggerID, rec.URL)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+		var ack map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil {
+			t.Fatalf("unmarshal ack: %v", err)
+		}
+		return ack["text"]
+	}
+
+	first := send("trig-1")
+	second := send("trig-2")
+	// Wait until both workers are actually parked in the qURL handler;
+	// otherwise the third send could race ahead while a slot is still
+	// unclaimed.
+	waitFor(t, time.Second, func() bool {
+		// Two slots taken means a third reservation will fail.
+		return len(h.sem) == 2
+	})
+	third := send("trig-3")
+
+	if first != ackWorkingOnIt || second != ackWorkingOnIt {
+		t.Errorf("first/second acks should be working-on-it; got %q / %q", first, second)
+	}
+	if third != ackBusy {
+		t.Errorf("third (saturated) ack = %q, want %q", third, ackBusy)
+	}
+
+	// Release the parked workers so h.Wait() drains.
+	close(release)
+}
+
+// TestHandle_AsyncListPostsResultToResponseURL fences /qurl list's
+// async path including the empty-list and populated-list code paths.
+func TestHandle_AsyncListPostsResultToResponseURL(t *testing.T) {
+	cases := []struct {
+		name     string
+		respJSON string
+		want     string
+	}{
+		{
+			name:     "no qurls",
+			respJSON: `{"data":[]}`,
+			want:     "No qURLs found.",
+		},
+		{
+			name:     "with qurls",
+			respJSON: `{"data":[{"resource_id":"r1","target_url":"https://example.com","status":"active"}]}`,
+			want:     "*Recent qURLs:*",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.respJSON))
+			}))
+			t.Cleanup(qurlSrv.Close)
+
+			t.Setenv("QURL_API_KEY", "test-key")
+
+			rec := newResponseURLRecorder(t)
+			h := newTestHandler(t, qurlSrv)
+			body := url.Values{
+				"command":      {"/qurl"},
+				"text":         {"list"},
+				"team_id":      {"T123"},
+				"trigger_id":   {"trig-list"},
+				"response_url": {rec.URL},
+			}.Encode()
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+			h.Wait()
+
+			posts := rec.Posts()
+			if len(posts) != 1 {
+				t.Fatalf("response_url POST count = %d, want 1", len(posts))
+			}
+			if !strings.Contains(posts[0]["text"], tc.want) {
+				t.Errorf("response_url text = %q, want substring %q", posts[0]["text"], tc.want)
+			}
+		})
+	}
+}
+
+// TestHandle_PanicInAsyncWorkRecovers fences the panic-recovery defer
+// in runAsync. A panicking auth.Provider must not crash the process or
+// leak a wg slot — the goroutine returns cleanly via the recover, sem
+// releases, and h.Wait drains.
+func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	rec := newResponseURLRecorder(t)
+	h := NewHandler(Config{
+		AuthProvider:       panickingProvider{},
+		SlackSigningSecret: testSigningSecret,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = func(string) error { return nil }
+
+	body := createCommandBody("https://example.com", "T123", "trig-panic", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	// h.Wait() blocks if the panic wasn't recovered cleanly (wg.Done
+	// would leak); the test would hang on a regression that broke
+	// the recover path.
+	h.Wait()
+
+	// Sem slot must be released too.
+	if got := len(h.sem); got != 0 {
+		t.Errorf("sem leak after panic: len(sem) = %d, want 0", got)
+	}
+}
+
+// panickingProvider implements auth.Provider but panics on APIKey, used
+// to exercise runAsync's panic-recovery defer.
+type panickingProvider struct{}
+
+func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
+	panic("provider panic for test")
+}
+
+// TestValidateResponseURL fences the production validator: only HTTPS
+// to hooks.slack.com is accepted. Anything else is a refusal — even a
+// signature-passing request can't pivot the bot into an SSRF emitter.
+func TestValidateResponseURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "valid Slack hooks URL", raw: "https://hooks.slack.com/commands/T1/abc/xyz", wantErr: false},
+		{name: "valid Slack hooks URL with explicit 443", raw: "https://hooks.slack.com:443/commands/T1/abc/xyz", wantErr: false},
+		{name: "rejects http (no TLS)", raw: "http://hooks.slack.com/commands/T1/abc/xyz", wantErr: true},
+		{name: "rejects non-Slack host", raw: "https://attacker.example/commands/T1/abc/xyz", wantErr: true},
+		{name: "rejects subdomain trick", raw: "https://hooks.slack.com.attacker.example/path", wantErr: true},
+		{name: "rejects empty URL", raw: "", wantErr: true},
+		{name: "rejects relative path", raw: "/oops", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateResponseURL(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateResponseURL(%q) err = %v, wantErr = %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestResponseURLClient_RefusesRedirects fences the redirect-refusal
+// posture on the default response_url client: a 30x from
+// hooks.slack.com to any other host must NOT be followed. Without the
+// CheckRedirect override, Go's default would silently follow up to 10
+// redirects, defeating the validateResponseURL host pin.
+func TestResponseURLClient_RefusesRedirects(t *testing.T) {
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		NewClient:          func(string) *client.Client { return nil },
+	})
+
+	var followCount atomic.Int32
+	var redirectTo string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followCount.Add(1)
+		// Always 302 to ourselves — without redirect-refusal the
+		// follower would loop until Go's 10-redirect cap, accumulating
+		// follow hits.
+		http.Redirect(w, r, redirectTo, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	redirectTo = srv.URL
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := h.responseURLClient.Do(req)
+	if err != nil {
+		t.Fatalf("client returned error instead of surfacing 302: %v", err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want 302 (caller sees the redirect, doesn't follow)", resp.StatusCode)
+	}
+	if got := followCount.Load(); got != 1 {
+		t.Errorf("server hit count = %d, want 1 (any >1 means a redirect was followed)", got)
+	}
+}
+
+// TestSanitizeAPIError fences the user-facing message contract for a
+// range of qURL API error shapes. A regression that surfaced Detail or
+// dropped RequestID would change the security/observability posture.
+func TestSanitizeAPIError(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		prefix  string
+		wantSub []string
+		notSub  []string
+	}{
+		{
+			name: "APIError with title and request id",
+			err: &client.APIError{
+				StatusCode: 500,
+				Title:      "Internal Server Error",
+				Detail:     "db: leaked-internal-host failed",
+				RequestID:  "req_xyz",
+			},
+			prefix:  "Failed to create qURL",
+			wantSub: []string{"Failed to create qURL", "Internal Server Error", "req_xyz"},
+			notSub:  []string{"leaked-internal-host"},
+		},
+		{
+			name: "APIError without title",
+			err: &client.APIError{
+				StatusCode: 500,
+				Detail:     "internal error",
+				RequestID:  "req_abc",
+			},
+			prefix:  "Failed to create qURL",
+			wantSub: []string{"Failed to create qURL", "req_abc"},
+			notSub:  []string{"internal error"},
+		},
+		{
+			name:    "non-APIError falls back to prefix only",
+			err:     errors.New("some opaque transport error"),
+			prefix:  "Failed to list qURLs",
+			wantSub: []string{"Failed to list qURLs"},
+			notSub:  []string{"opaque transport"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeAPIError(tc.err, tc.prefix)
+			for _, s := range tc.wantSub {
+				if !strings.Contains(got, s) {
+					t.Errorf("sanitizeAPIError missing %q in %q", s, got)
+				}
+			}
+			for _, s := range tc.notSub {
+				if strings.Contains(got, s) {
+					t.Errorf("sanitizeAPIError leaked %q in %q", s, got)
+				}
+			}
+		})
+	}
+}
+
+// TestIdempotencyKeyForCreate fences the key construction: deterministic
+// for a given (team_id, trigger_id), distinct across teams or triggers.
+func TestIdempotencyKeyForCreate(t *testing.T) {
+	cases := []struct {
+		teamA, trigA, teamB, trigB string
+		wantEqual                  bool
+	}{
+		{"T1", "trig1", "T1", "trig1", true},
+		{"T1", "trig1", "T2", "trig1", false},
+		{"T1", "trig1", "T1", "trig2", false},
+		{"T1", "trig1", "T1trig1", "", false}, // ensure colon framing isn't ambiguous
+	}
+	for i, tc := range cases {
+		a := idempotencyKeyForCreate(tc.teamA, tc.trigA)
+		b := idempotencyKeyForCreate(tc.teamB, tc.trigB)
+		if (a == b) != tc.wantEqual {
+			t.Errorf("case %d: equal=%v, want %v (a=%q b=%q)", i, a == b, tc.wantEqual, a, b)
+		}
+		if len(a) != 64 {
+			t.Errorf("case %d: key length = %d, want 64 (sha256 hex)", i, len(a))
+		}
+	}
+}
+
+// TestHandle_AsyncWorkObservesBaseContextCancellation fences the
+// shutdown-cancellation contract: when h.baseCtx is canceled, an
+// in-flight worker exits promptly rather than blocking shutdown.
+func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
+	// Block forever so cancellation is the only exit.
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	rec := newResponseURLRecorder(t)
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		BaseContext:        baseCtx,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = func(string) error { return nil }
+
+	body := createCommandBody("https://example.com", "T123", "trig-cancel", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	// Worker is parked in qURL upstream. Cancel baseCtx; worker
+	// context fires; httpClient.Do returns; goroutine exits.
+	baseCancel()
+
+	done := make(chan struct{})
+	go func() {
+		h.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("h.Wait did not return within 2s after baseCtx cancellation")
+	}
+}

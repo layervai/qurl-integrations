@@ -62,6 +62,14 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 		},
 	})
 	h.now = func() time.Time { return fixedNow }
+	// Tests target httptest servers (http://127.0.0.1:NNNNN) that the
+	// production validator rejects. Override here so the async path
+	// runs end-to-end; the production validator gets its own table
+	// test in process_test.go.
+	h.validateResponseURLFn = func(string) error { return nil }
+	// LIFO: this drain runs before any httptest server cleanup, so a
+	// goroutine still mid-call to qurlServer doesn't race the close.
+	t.Cleanup(h.Wait)
 	return h
 }
 
@@ -126,7 +134,10 @@ func TestSlashCommandHelp(t *testing.T) {
 	}
 }
 
-func TestSlashCommandCreate(t *testing.T) {
+func TestSlashCommandCreate_AcksWithWorkingOnIt(t *testing.T) {
+	// Ack contract for /qurl create: the synchronous response is the
+	// ephemeral working-on-it message. The actual qURL link is
+	// delivered later via response_url (covered in process_test.go).
 	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{
@@ -135,9 +146,7 @@ func TestSlashCommandCreate(t *testing.T) {
 				"qurl_link":   "https://qurl.link/at_testtoken",
 				"qurl_site":   "https://r_abc123test.qurl.site",
 			},
-			"meta": map[string]string{
-				"request_id": "req_test",
-			},
+			"meta": map[string]string{"request_id": "req_test"},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Errorf("encode response: %v", err)
@@ -149,9 +158,10 @@ func TestSlashCommandCreate(t *testing.T) {
 
 	h := newTestHandler(t, qurlSrv)
 	body := url.Values{
-		"command": {"/qurl"},
-		"text":    {"create https://example.com"},
-		"team_id": {"T123"},
+		"command":    {"/qurl"},
+		"text":       {"create https://example.com"},
+		"team_id":    {"T123"},
+		"trigger_id": {"trig-1"},
 	}.Encode()
 
 	w := httptest.NewRecorder()
@@ -167,6 +177,9 @@ func TestSlashCommandCreate(t *testing.T) {
 	}
 	if result["response_type"] != "ephemeral" {
 		t.Errorf("expected ephemeral response, got %q", result["response_type"])
+	}
+	if result["text"] != ackWorkingOnIt {
+		t.Errorf("ack text = %q, want %q", result["text"], ackWorkingOnIt)
 	}
 }
 
