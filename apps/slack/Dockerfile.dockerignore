@@ -8,12 +8,13 @@ coverage.out
 *.test
 *.out
 
-# Other apps' source — irrelevant to the slack binary, and keeps an
-# unrelated app change from invalidating this Dockerfile's cache.
-apps/discord
-apps/cli
-apps/teams
-apps/zapier
+# Sibling apps' source trees — irrelevant to the slack binary, and
+# keeps an unrelated app change from invalidating this Dockerfile's
+# cache. Allow-list pattern (vs explicit deny) so a fifth app added
+# later doesn't silently leak into the build context.
+apps/*
+!apps/slack
+
 e2e
 scripts
 docs
@@ -30,5 +31,10 @@ go.work.sum
 *.pem
 *.key
 
+# Excluding *.md is a build-context optimization, not a strict
+# correctness requirement. If a future change adds `embed.FS` for a
+# markdown asset (help text, error template) under `apps/slack/`,
+# remove the exclusion or scope it — otherwise the container build
+# breaks while a local `go build` still works.
 *.md
 LICENSE
