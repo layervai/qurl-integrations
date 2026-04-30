@@ -66,11 +66,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks are silent: ALB target-group probes hit this every
 	// 15-30s per task and would otherwise dominate log volume.
 	if r.URL.Path == pathHealth {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		default:
 			respondMethodNotAllowed(w, "GET, HEAD")
-			return
 		}
-		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -90,12 +91,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.
 	if r.ContentLength > maxRequestBodyBytes {
-		respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
+		slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "content_length_pre_check", "declared", r.ContentLength) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+		respondPayloadTooLarge(w)
 		return
 	}
 
 	body, err := readBody(w, r)
 	if err != nil {
+		// Same operational condition as the Content-Length pre-check
+		// above; bucket them together so dashboards see one 413 stream.
+		var mbErr *http.MaxBytesError
+		if errors.As(err, &mbErr) {
+			slog.Info("oversize body rejected", "path", r.URL.Path, "reason", "max_bytes_during_read") //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
+			respondPayloadTooLarge(w)
+			return
+		}
 		slog.Warn("failed to read request body", "error", err, "path", r.URL.Path) //nolint:gosec // G706: see ServeHTTP — slog escapes tainted attribute values.
 		respondJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
@@ -301,6 +311,13 @@ func helpMessage() string {
 func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
 	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+}
+
+// respondPayloadTooLarge writes 413 for both the Content-Length pre-check
+// and the MaxBytesReader-during-read paths. Centralizing keeps the wire
+// envelope identical so operator dashboards bucket them together.
+func respondPayloadTooLarge(w http.ResponseWriter) {
+	respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
 }
 
 func respondJSON(w http.ResponseWriter, status int, body any) {

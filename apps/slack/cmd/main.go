@@ -44,8 +44,8 @@ func main() {
 	}
 }
 
-// run holds the full server lifecycle so deferred cleanup (signal handler
-// release, etc.) executes before main returns to os.Exit.
+// run holds the full server lifecycle so `defer stop()` releases the
+// signal handler before main reaches os.Exit on the error path.
 func run() error {
 	// Required env vars are explicit by design: a missing QURL_ENDPOINT
 	// previously fell back to the sandbox URL, which is the kind of silent

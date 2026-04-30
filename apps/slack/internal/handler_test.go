@@ -379,6 +379,65 @@ func TestHandle_DeclaredOversizeReturns413(t *testing.T) {
 	}
 }
 
+// Dishonest sender (Content-Length lying about body size) — the
+// MaxBytesReader path during read returns a *http.MaxBytesError that
+// must surface as 413, not 400. Otherwise operator dashboards split
+// the same condition across two buckets.
+func TestHandle_DishonestContentLengthReturns413(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// 2 MiB body, but Content-Length under-declared so the
+	// pre-allocation guard lets it through.
+	oversize := strings.Repeat("a", 2<<20)
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(oversize))
+	r.ContentLength = 100
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("dishonest CL: status = %d, want 413", w.Code)
+	}
+}
+
+// A 100 KiB signed body must reach handleEvent intact and 200. Locks
+// the contract that no future refactor caps the read short of the body
+// — a truncated read would silently 401 (HMAC mismatch on partial
+// bytes) and look like a signature-secret-rotation bug.
+func TestHandle_LargeSignedBodyAccepted(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	body := strings.Repeat("b", 100*1024)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("100 KiB signed body: status = %d, want 200", w.Code)
+	}
+}
+
+// Signed-but-malformed JSON event must 200 with the {"ok":"true"}
+// envelope. Slack retries on non-2xx, so a regression to 400 would
+// cause retry storms; a regression to 200-with-error-body would mask
+// real failures from monitoring.
+func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	body := `{not json at all`
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("malformed JSON event: status = %d, want 200", w.Code)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["ok"] != "true" {
+		t.Errorf("malformed JSON event: body = %q, want ok=true", w.Body.String())
+	}
+}
+
 // Empty-body fence: locks the contract so a future ParseQuery
 // substitution can't silently change the empty-text help fallback.
 func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
