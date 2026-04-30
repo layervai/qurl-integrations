@@ -54,6 +54,15 @@ const (
 	// response_url is valid for 30 minutes, but in practice qURL API calls
 	// resolve in <1s; 25s is the deadline beyond which the user is better
 	// served by a "failed" follow-up than an indefinite "Working on it…".
+	//
+	// Interaction with WithRetry(2): the qURL client uses exponential
+	// backoff with a 30s cap (shared/client.defaultMaxDelay). Under a
+	// 5xx storm, retry backoff alone could in principle exceed the
+	// remaining ctx budget — `c.waitForRetry` honors ctx and returns
+	// ctx.Err() in that case, which surfaces as a non-*APIError and
+	// hits sanitizeAPIError's prefix-only fallback. Trade-off is
+	// intentional: cap the user's wait at this deadline rather than
+	// let retries dominate.
 	asyncWorkTimeout = 25 * time.Second
 
 	// responseURLTimeout bounds the POST to Slack's response_url. Slack's
@@ -169,8 +178,30 @@ func NewHandler(cfg Config) *Handler {
 //
 // Wait is a no-op if no async work is in flight, so the cmd path can
 // always call it on every shutdown without conditionals.
+//
+// In production, prefer WaitTimeout — an unbounded Wait() leaves the
+// process exposed to a future regression where a worker ignores its
+// ctx, wedging shutdown past the platform's hard-kill window.
 func (h *Handler) Wait() {
 	h.wg.Wait()
+}
+
+// WaitTimeout drains in-flight async workers, returning early after d.
+// Returns true on clean drain; false on timeout (workers still in
+// flight). cmd/main.go uses this so a misbehaving worker can't block
+// graceful shutdown past the SIGTERM→SIGKILL window.
+func (h *Handler) WaitTimeout(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		h.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // defaultResponseURLClient is the http.Client used to POST follow-up
@@ -345,7 +376,12 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		respondSlack(w, helpMessage())
 	case strings.HasPrefix(text, "create "):
 		h.handleCreate(w, values)
-	case strings.HasPrefix(text, "list"):
+	case text == "list" || strings.HasPrefix(text, "list "):
+		// Prefix-match `"list"` alone matched `listing`, `lists`,
+		// `list-foo` — silently routing them to the list handler
+		// where they'd ignore the trailing tokens. The exact-match
+		// + trailing-space fork shows the user a "Unknown subcommand"
+		// help nudge instead.
 		h.handleList(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -112,7 +113,7 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(ctx, log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authFailureMessage)
 		return
 	}
 
@@ -122,11 +123,11 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 	})
 	if err != nil {
 		log.Error("failed to create qURL", "error", err, "target_url", targetURL)
-		h.postResponse(ctx, log, responseURL, sanitizeAPIError(err, "Failed to create qURL"))
+		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to create qURL"))
 		return
 	}
 
-	h.postResponse(ctx, log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
+	h.postResponse(log, responseURL, fmt.Sprintf("qURL created!\n*Link:* %s\n*Target:* %s", result.QURLLink, targetURL))
 }
 
 // processList runs the asynchronous /qurl list work: page through the
@@ -138,18 +139,18 @@ func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(ctx, log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authFailureMessage)
 		return
 	}
 
 	result, err := c.List(ctx, client.ListInput{Limit: 5})
 	if err != nil {
 		log.Error("failed to list qURLs", "error", err)
-		h.postResponse(ctx, log, responseURL, sanitizeAPIError(err, "Failed to list qURLs"))
+		h.postResponse(log, responseURL, sanitizeAPIError(err, "Failed to list qURLs"))
 		return
 	}
 
-	h.postResponse(ctx, log, responseURL, formatListMessage(result.QURLs))
+	h.postResponse(log, responseURL, formatListMessage(result.QURLs))
 }
 
 // idempotencyKeyForCreate hashes the workspace + trigger so the qURL
@@ -178,7 +179,11 @@ func sanitizeAPIError(err error, prefix string) string {
 	}
 	msg := prefix
 	if apiErr.Title != "" {
-		msg = prefix + ": " + apiErr.Title
+		// Trim a trailing period from Title so the appended one
+		// below doesn't double-punctuate (some upstream servers
+		// emit "Internal Server Error." — surfacing that verbatim
+		// reads as "...Server Error..").
+		msg = prefix + ": " + strings.TrimRight(apiErr.Title, ".")
 	}
 	if apiErr.RequestID != "" {
 		msg += fmt.Sprintf(" (Reference: `%s`)", apiErr.RequestID)
@@ -211,7 +216,15 @@ func formatListMessage(qurls []client.QURL) string {
 // Validates scheme+host before dialing so a malformed (or attacker-
 // controlled, in the event of a signature-gate bypass) URL can't make
 // the bot a generic SSRF emitter.
-func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseURL, text string) {
+//
+// Note: the worker's ctx is intentionally NOT used for the HTTP
+// request. On SIGTERM the worker ctx is canceled, which has already
+// failed the qURL call upstream — we still owe the user the failure
+// follow-up. Deriving from context.Background() with a tight
+// responseURLTimeout lets the follow-up land before Fargate's hard
+// kill while still bounding the goroutine's lifetime.
+// handler.Wait()/WaitTimeout in main blocks process exit.
+func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	if responseURL == "" {
 		log.Warn("missing response_url — async result has nowhere to go")
 		return
@@ -233,6 +246,9 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 		return
 	}
 
+	deliverCtx, cancel := context.WithTimeout(context.Background(), responseURLTimeout)
+	defer cancel()
+
 	// Dial the URL the validator returned, NOT the original
 	// responseURL string. The production validator constructs the
 	// returned URL with Scheme and Host pinned to literal-string
@@ -240,7 +256,7 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 	// and CodeQL's go/request-forgery taint analysis is satisfied
 	// (validateResponseURLFn is the sanitizer; target is the safe
 	// post-sanitizer value).
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
 		return
@@ -254,8 +270,13 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Read up to a small cap of the body so HTTP keep-alive can
+	// recycle the connection AND so a 4xx from Slack
+	// (`invalid_url`, `channel_not_found`, etc.) is visible in the
+	// warn log rather than swallowed.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 400 {
-		log.Warn("response_url returned non-2xx", "status", resp.StatusCode)
+		log.Warn("response_url returned non-2xx", "status", resp.StatusCode, "body", string(respBody))
 	}
 }
 
@@ -281,10 +302,18 @@ func validateResponseURL(rawURL string) (*url.URL, error) {
 	if u.Scheme != "https" {
 		return nil, fmt.Errorf("response_url scheme %q is not https", u.Scheme)
 	}
+	// Reject embedded userinfo (https://x:y@hooks.slack.com/...). Slack
+	// will never send those; rejecting tightens the canonical-shape
+	// contract and removes a footgun on the SSRF fence.
+	if u.User != nil {
+		return nil, errors.New("response_url contains userinfo")
+	}
 	// Hostname strips any port suffix; Slack doesn't send explicit ports
 	// today, but treating ports as transparent matches user intent and
 	// dodges a future regression where a port appears.
-	if u.Hostname() != slackResponseURLHost {
+	// EqualFold is RFC 3986-correct: DNS hostnames are case-insensitive,
+	// so a Hooks.Slack.Com URL that resolves identically must validate.
+	if !strings.EqualFold(u.Hostname(), slackResponseURLHost) {
 		return nil, fmt.Errorf("response_url host %q is not %s", u.Hostname(), slackResponseURLHost)
 	}
 	return &url.URL{

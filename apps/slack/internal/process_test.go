@@ -491,9 +491,11 @@ func TestValidateResponseURL(t *testing.T) {
 	}{
 		{name: "valid Slack hooks URL", raw: "https://hooks.slack.com/commands/T1/abc/xyz", wantErr: false},
 		{name: "valid Slack hooks URL with explicit 443", raw: "https://hooks.slack.com:443/commands/T1/abc/xyz", wantErr: false},
+		{name: "valid Slack hooks URL with mixed-case host", raw: "https://Hooks.Slack.Com/commands/T1/abc/xyz", wantErr: false},
 		{name: "rejects http (no TLS)", raw: "http://hooks.slack.com/commands/T1/abc/xyz", wantErr: true},
 		{name: "rejects non-Slack host", raw: "https://attacker.example/commands/T1/abc/xyz", wantErr: true},
 		{name: "rejects subdomain trick", raw: "https://hooks.slack.com.attacker.example/path", wantErr: true},
+		{name: "rejects embedded userinfo", raw: "https://user:pw@hooks.slack.com/commands/T1/abc/xyz", wantErr: true},
 		{name: "rejects empty URL", raw: "", wantErr: true},
 		{name: "rejects relative path", raw: "/oops", wantErr: true},
 	}
@@ -603,6 +605,16 @@ func TestSanitizeAPIError(t *testing.T) {
 			wantSub: []string{"Failed to list qURLs"},
 			notSub:  []string{"opaque transport"},
 		},
+		{
+			name: "Title with trailing period does not double-punctuate",
+			err: &client.APIError{
+				StatusCode: 500,
+				Title:      "Internal Server Error.",
+			},
+			prefix:  "Failed to create qURL",
+			wantSub: []string{"Internal Server Error"},
+			notSub:  []string{".."},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -687,5 +699,139 @@ func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("h.Wait did not return within 2s after baseCtx cancellation")
+	}
+}
+
+// TestHandle_OrphanAckPreventionOnBaseContextCancel fences the
+// orphan-ack contract: when baseCtx cancels mid-flight (SIGTERM
+// reaches the worker after the qURL call has started), the failure
+// follow-up MUST still reach response_url. postResponse therefore uses
+// a context decoupled from the worker's, scoped to responseURLTimeout.
+func TestHandle_OrphanAckPreventionOnBaseContextCancel(t *testing.T) {
+	// qURL upstream blocks on r.Context().Done() so the only exit is
+	// cancellation. After baseCancel, c.Create returns ctx.Canceled —
+	// processCreate then sanitizes and calls postResponse. If
+	// postResponse used the worker ctx, that POST would fail too
+	// (orphan ack); with a fresh context it should succeed.
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	rec := newResponseURLRecorder(t)
+	h := NewHandler(Config{
+		AuthProvider:       &auth.EnvProvider{EnvVar: "QURL_API_KEY"},
+		SlackSigningSecret: testSigningSecret,
+		BaseContext:        baseCtx,
+		NewClient: func(apiKey string) *client.Client {
+			return client.New(qurlSrv.URL, apiKey, client.WithRetry(0))
+		},
+	})
+	h.now = func() time.Time { return fixedNow }
+	h.validateResponseURLFn = url.Parse
+
+	body := createCommandBody("https://example.com", "T123", "trig-orphan", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	// Cancel baseCtx mid-flight (simulates SIGTERM). The worker's
+	// qURL call returns ctx.Canceled, processCreate calls
+	// postResponse with the failure, and that POST must land.
+	baseCancel()
+	h.Wait()
+
+	posts := rec.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("response_url POST count = %d, want 1 (failure follow-up must reach Slack on shutdown)", len(posts))
+	}
+	if !strings.Contains(posts[0]["text"], "Failed to create qURL") {
+		t.Errorf("expected sanitized failure text in follow-up, got: %q", posts[0]["text"])
+	}
+}
+
+// TestHandler_WaitTimeout fences the bounded-drain contract: if a
+// worker outlives the budget, WaitTimeout returns false rather than
+// blocking the caller indefinitely. This is the cheap insurance against
+// a future regression where a worker stops honoring its ctx.
+func TestHandler_WaitTimeout(t *testing.T) {
+	// qURL upstream blocks indefinitely on a non-ctx-honoring channel,
+	// simulating a worker that ignored ctx.
+	block := make(chan struct{})
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		<-block
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, qurlSrv)
+	// Register the block-release AFTER newTestHandler so LIFO runs it
+	// BEFORE newTestHandler's t.Cleanup(h.Wait) — otherwise h.Wait
+	// blocks on the parked worker and t.Cleanup deadlocks.
+	t.Cleanup(func() { close(block) })
+
+	body := createCommandBody("https://example.com", "T123", "trig-waittimeout", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	if drained := h.WaitTimeout(50 * time.Millisecond); drained {
+		t.Errorf("WaitTimeout returned true with worker still parked; want false")
+	}
+}
+
+// TestHandler_WaitTimeout_DrainsOnSuccess fences the success path:
+// when workers complete inside the budget, WaitTimeout returns true.
+func TestHandler_WaitTimeout_DrainsOnSuccess(t *testing.T) {
+	qurlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"resource_id":"r1","qurl_link":"https://qurl.link/x"}}`))
+	}))
+	t.Cleanup(qurlSrv.Close)
+
+	t.Setenv("QURL_API_KEY", "test-key")
+
+	rec := newResponseURLRecorder(t)
+	h := newTestHandler(t, qurlSrv)
+
+	body := createCommandBody("https://example.com", "T123", "trig-waittimeout-ok", rec.URL)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	if drained := h.WaitTimeout(2 * time.Second); !drained {
+		t.Errorf("WaitTimeout returned false on a fast-completing worker; want true")
+	}
+}
+
+// TestHandle_ListPrefixDoesNotMatchListing fences the tightened
+// prefix match for "/qurl list": before, "listing" matched as a list
+// prefix and silently routed to processList. Now it falls through to
+// the unknown-subcommand branch with a help nudge.
+func TestHandle_ListPrefixDoesNotMatchListing(t *testing.T) {
+	srv, hits := countingQURLServer(t)
+	h := newTestHandler(t, srv)
+
+	body := url.Values{
+		"command": {"/qurl"},
+		"text":    {"listing"},
+		"team_id": {"T123"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+
+	var ack map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &ack); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(ack["text"], "Unknown subcommand") {
+		t.Errorf("expected 'Unknown subcommand' help nudge for `listing`, got: %q", ack["text"])
+	}
+	// And no upstream qURL request was made.
+	if got := hits.Load(); got != 0 {
+		t.Errorf("upstream qURL hits for `listing`: got %d, want 0", got)
 	}
 }

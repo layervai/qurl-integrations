@@ -129,6 +129,7 @@ func run() error {
 	go func() {
 		<-signalCtx.Done()
 		slog.Info("received shutdown signal — draining HTTP server")
+		shutdownStart := time.Now()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -137,9 +138,17 @@ func run() error {
 		// Shutdown returns once HTTP handlers have responded. Slash-
 		// command handlers ack and return nearly instantly, so
 		// in-flight async workers (the goroutines runAsync spawned)
-		// outlive Shutdown. Wait drains them — their contexts are
-		// already canceled via signalCtx, so they return promptly.
-		handler.Wait()
+		// outlive Shutdown. WaitTimeout drains them within whatever
+		// of shutdownTimeout remains — a misbehaving worker that
+		// ignored its ctx can't wedge the process past Fargate's
+		// hard kill.
+		drainBudget := shutdownTimeout - time.Since(shutdownStart)
+		if drainBudget < 0 {
+			drainBudget = 0
+		}
+		if !handler.WaitTimeout(drainBudget) {
+			slog.Warn("async drain timed out — exiting with workers still in flight", "budget", drainBudget)
+		}
 		close(shutdownDone)
 	}()
 
