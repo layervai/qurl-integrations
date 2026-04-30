@@ -72,21 +72,22 @@ jobs:
 
   trigger-deploy:
     needs: [build-and-test, docker-check]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      # SECURITY: DEPLOY_PAT must be a *fine-grained* personal access token
-      # scoped to:
-      #   - Repository: layervai/qurl-integrations-infra (ONLY)
-      #   - Permissions: Contents = Read and write (repository_dispatch)
-      # A classic PAT with broad 'repo' scope would let a compromised run of
-      # this workflow trigger deploys or modify content on ANY repo the
-      # token-owner has access to. Rotate on any suspected exposure.
-      - name: Trigger deploy in infra repo
-        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
-        with:
-          token: ${{ secrets.DEPLOY_PAT }}
-          repository: layervai/qurl-integrations-infra
-          event-type: discord-bot-deploy
-          client-payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
+    # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
+    # isn't read by any step, so deny everything.
+    permissions: {}
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0 # v0.5.0
+    with:
+      target_repo: qurl-integrations-infra
+      # `event_type` must match the receiver's `repository_dispatch.types` at
+      # qurl-integrations-infra/.github/workflows/qurl-bot-discord-deploy.yml.
+      # An off-allowlist value hard-fails in the reusable; an allowlisted
+      # value that misses the receiver silently no-ops (HTTP 204 from the
+      # dispatch API but no workflow fires).
+      event_type: discord-bot-deploy
+      client_payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
+    # Explicit `secrets:` map (not `inherit`) keeps the reusable's surface
+    # to the two named App secrets even as more secrets get added here.
+    secrets:
+      app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
+      app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}
