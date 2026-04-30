@@ -1627,7 +1627,7 @@ async function handleSend(interaction, apiKey) {
       });
       sent = await sendDM(link.recipientId, dmPayload);
     } finally {
-      logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
@@ -2177,7 +2177,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
-      logger.audit(sent ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.

@@ -262,7 +262,7 @@ describe('logger', () => {
       expect(parsed.audit.password).toBe('[REDACTED]');
     });
 
-    it('AUDIT_SECRET_KEYS entries are all lowercase (lookup uses .toLowerCase())', () => {
+    it('mixed-case secret-shaped keys are still detected via .toLowerCase() lookup', () => {
       // The membership check is `AUDIT_SECRET_KEYS.has(key.toLowerCase())`,
       // so an entry like 'API_Key' would silently never match. Lock the
       // invariant so a future addition catches review.
