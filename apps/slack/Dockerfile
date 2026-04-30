@@ -4,15 +4,7 @@
 # ignore list (default frontend reads only `<context>/.dockerignore`,
 # which is the wrong place for a multi-app monorepo).
 
-# `--platform=$BUILDPLATFORM` pins the build stage to the runner's
-# native arch so amd64 CI runners don't pay QEMU's emulation cost
-# while compiling. Go cross-compiles natively, so the binary is still
-# `linux/arm64` (set via `GOARCH=$TARGETARCH` below) — the runtime
-# image stays on the requested target platform.
-FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS build
-
-ARG TARGETOS
-ARG TARGETARCH
+FROM golang:1.26.2-alpine@sha256:f85330846cde1e57ca9ec309382da3b8e6ae3ab943d2739500e08c86393a21b1 AS build
 
 WORKDIR /src
 
@@ -29,7 +21,7 @@ COPY apps/slack/ ./apps/slack/
 # preceding source/dep layers. Don't move it up.
 ARG VERSION=dev
 
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
     go build -trimpath -mod=readonly -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/qurl-bot-slack ./apps/slack/cmd/
 
