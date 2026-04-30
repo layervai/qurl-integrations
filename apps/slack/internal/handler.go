@@ -92,10 +92,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		// Silent on 404: ALB target groups are reachable to internet
-		// probes (/wp-login.php, /.env, etc.); logging each one would
-		// be noise. The slack and health paths are the only legitimate
-		// surface and they get their own log lines.
+		// Silent on 404 — and 405 on /slack/* takes the same path
+		// (method gate above returns before the request log fires).
+		// ALB target groups are reachable to internet probes
+		// (/wp-login.php, /.env, credentialed scrapers GET-ing
+		// /slack/commands); logging each would be noise. Slack and
+		// health paths are the only legitimate surface and they get
+		// their own log lines.
 		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
@@ -297,7 +300,13 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 		Type      string `json:"type"`
 		Challenge string `json:"challenge"`
 	}
-	if err := json.Unmarshal(body, &v); err == nil && v.Type == "url_verification" {
+	switch err := json.Unmarshal(body, &v); {
+	case err != nil:
+		// Bad JSON shouldn't 4xx (Slack retries on non-2xx). Surface
+		// the parse error at Debug so spec drift / corrupt payloads
+		// are visible to operators without breaking the contract.
+		slog.Debug("event JSON parse failed", "error", err, "body_length", len(body))
+	case v.Type == "url_verification":
 		respondJSON(w, http.StatusOK, map[string]string{"challenge": v.Challenge})
 		return
 	}

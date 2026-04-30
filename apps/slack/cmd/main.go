@@ -108,7 +108,7 @@ func run() error {
 	lc := &net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("bind %s: %w", listenAddr, err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

@@ -143,7 +143,7 @@ func TestSlashCommandCreate(t *testing.T) {
 			t.Errorf("encode response: %v", err)
 		}
 	}))
-	defer qurlSrv.Close()
+	t.Cleanup(qurlSrv.Close)
 
 	t.Setenv("QURL_API_KEY", "test-key")
 
