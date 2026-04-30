@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,6 +36,10 @@ const (
 var version = "dev"
 
 func main() {
+	// JSON handler is load-bearing for log-injection safety: the G706
+	// gosec suppressions in apps/slack/internal/handler.go assume slog's
+	// JSON output escapes control characters in tainted attribute
+	// values. Don't swap to TextHandler without revisiting those sites.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
@@ -87,6 +92,15 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// Bind first so a port-already-in-use failure returns before the
+	// drain goroutine spawns — keeps the "received shutdown signal"
+	// log line off the bind-failure path.
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
 	shutdownDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -100,16 +114,10 @@ func run() error {
 	}()
 
 	slog.Info("starting Slack bot HTTP server", "addr", listenAddr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		// Bind/listen failure: skip the drain wait. Ordering on this path:
-		//   stop() (deferred) → signal ctx cancels → goroutine wakes →
-		//   srv.Shutdown is a no-op on an unstarted server → main reaches
-		//   os.Exit(1) → goroutine is reaped mid-run, harmless.
-		return fmt.Errorf("listen: %w", err)
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
 	}
 
-	// Reached only on the clean-close path (Shutdown was called via
-	// SIGTERM); wait for the drain goroutine to finish before returning.
 	<-shutdownDone
 	slog.Info("server stopped cleanly")
 	return nil
