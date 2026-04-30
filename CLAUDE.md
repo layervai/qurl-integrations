@@ -136,6 +136,6 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/qurl-bot-slack ./apps/sla
 ## Key Architecture Decisions
 
 - **Auth:** Start with workspace API keys (qurl-api-keys table exists). Per-user OAuth later.
-- **Runtime (Slack):** AWS Fargate (arm64, distroless container) behind an ALB. Always-on; the steady enterprise workload makes Lambda cold starts the wrong shape (memory: feedback_provisioned_concurrency_smell).
+- **Runtime (Slack):** AWS Fargate (arm64, distroless container) behind an ALB. Always-on; the steady enterprise workload makes Lambda cold starts the wrong shape.
 - **Shared client:** `shared/client/` wraps the qURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.

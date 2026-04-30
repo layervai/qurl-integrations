@@ -38,7 +38,7 @@ coverage:
 ## Building
 
 build-slack:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o release/slack/qurl-bot-slack ./apps/slack/cmd/
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-w -s -X main.version=$(VERSION)" -o release/slack/qurl-bot-slack ./apps/slack/cmd/
 
 build-cli: # Builds for host OS/arch (developer machine). Cross-compile manually if needed.
 	CGO_ENABLED=0 go build -ldflags="-w -s -X main.version=$(VERSION)" -o release/cli/qurl ./apps/cli/cmd/

@@ -26,29 +26,9 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  changes:
-    name: Detect Changes
-    runs-on: ubuntu-latest
-    outputs:
-      app: ${{ steps.filter.outputs.app }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
-        id: filter
-        with:
-          filters: |
-            app:
-              - 'apps/slack/**'
-              - 'shared/**'
-              - 'go.mod'
-              - 'go.sum'
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -66,8 +46,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -96,8 +74,6 @@ jobs:
   vulnerability-scan:
     name: Vulnerability Scan
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -115,18 +91,10 @@ jobs:
   docker-check:
     name: Docker
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Verify the Dockerfile builds end-to-end on the same arm64
-      # platform Fargate runs. Buildx is preinstalled on
-      # ubuntu-latest; QEMU emulates arm64 cleanly for the build
-      # since we don't run the binary here. The ECR push happens in
-      # qurl-integrations-infra's deploy workflow — this job only
-      # fences "Dockerfile is buildable from main" so a regression
-      # is caught at PR time, not at deploy time.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
@@ -140,29 +108,23 @@ jobs:
           file: apps/slack/Dockerfile
           platforms: linux/arm64
           push: false
-          # `load: false` would skip writing to the local daemon, which
-          # we don't need anyway — the build succeeding is the test.
-          # Cache via GHA backend so subsequent PR pushes don't repay
-          # the full module-download + compile cost.
           cache-from: type=gha,scope=slack-docker
           cache-to: type=gha,mode=max,scope=slack-docker
           build-args: |
             VERSION=${{ github.sha }}
 
   trigger-deploy:
-    needs: [changes, lint, test, vulnerability-scan, docker-check]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.app == 'true'
+    needs: [lint, test, vulnerability-scan, docker-check]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
     uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0 # v0.5.0
     with:
       target_repo: qurl-integrations-infra
-      # `event_type` must match the receiver's `repository_dispatch.types`
-      # at qurl-integrations-infra/.github/workflows/qurl-bot-slack-deploy.yml.
-      # That receiver lands in Phase 3 of the master plan; until then this
-      # dispatch is a no-op (HTTP 204 from the dispatch API but no workflow
-      # fires receiver-side). Mirrors the discord-bot-deploy pattern.
+      # An off-allowlist value hard-fails in the reusable; an allowlisted
+      # value that misses the receiver silently no-ops (HTTP 204 from the
+      # dispatch API but no workflow fires).
       event_type: slack-bot-deploy
       client_payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
     # Explicit `secrets:` map (not `inherit`) keeps the reusable's surface

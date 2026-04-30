@@ -1,35 +1,27 @@
-# BuildKit-specific per-Dockerfile ignore. Picked up because the
-# workflow passes `context: .` with `file: apps/slack/Dockerfile`, so
-# scoping ignores here keeps the Slack build's transferred context
-# small without affecting other apps that may build from the same
-# repo root in the future.
-#
-# The Dockerfile only COPYs `go.mod`, `go.sum`, `apps/slack/`, and
-# `shared/`, so anything outside that is wasted bytes in the buildx
-# transfer + cache key. Keeping `apps/discord/` and `apps/cli/` in
-# the context would also invalidate this Dockerfile's cache on
-# unrelated changes to those apps.
-
 .git
 .github
 .claude
 .DS_Store
 
-# Local build output (Makefile `make build-slack` writes here).
 release
 coverage.out
 *.test
 *.out
 
-# Other apps' source — irrelevant to the slack binary.
+# Other apps' source — irrelevant to the slack binary, and keeps an
+# unrelated app change from invalidating this Dockerfile's cache.
 apps/discord
 apps/cli
-
-# Generated docs / man pages.
+apps/teams
+apps/zapier
+e2e
+scripts
 docs
 man
+vendor
+go.work
+go.work.sum
 
-# Editor / IDE.
 .vscode
 .idea
 *.swp
@@ -38,7 +30,5 @@ man
 *.pem
 *.key
 
-# Top-level prose. The runtime image is distroless; READMEs add
-# nothing at runtime and just bloat the build context.
 *.md
 LICENSE
