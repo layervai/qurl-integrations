@@ -194,56 +194,70 @@ describe('logger', () => {
       expect(typeof fallback.audit.reason).toBe('string');
     });
 
-    it('warns but still emits when meta contains a secret-shaped key', () => {
+    it('redacts secret-shaped key VALUES while keeping siblings intact + warns', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // Defense-in-depth — the contract is "callers MUST not pass
-      // secrets," and audit() does not redact. The warn surfaces the
-      // violation as a CloudWatch-visible error log so a misbehaving
-      // caller is catchable in dashboards rather than silent. The
-      // value still emits unredacted because dropping would corrupt
-      // any legitimate dimension a CloudWatch filter is keying on.
       logger.audit('upload_success', { send_id: 's1', auth_token: 'sk-abc123' });
 
-      // Warn fired
+      // Warn fires with the offending key name.
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
-      // Audit line still emitted with the value verbatim
-      expect(consoleSpy.log).toHaveBeenCalled();
+      // Value redacted in the emitted payload — sibling key untouched.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      expect(parsed.audit.auth_token).toBe('sk-abc123');
+      expect(parsed.audit.auth_token).toBe('[REDACTED]');
+      expect(parsed.audit.send_id).toBe('s1');
     });
 
-    it('warns on secret-shaped keys nested inside a meta object', () => {
+    it('redacts non-empty string values; non-string secret values pass through', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // null / number values can't carry a usable secret on their own
+      // — preserve type so a downstream parser doesn't choke on a
+      // string where it expected something else.
+      logger.audit('upload_success', { auth_token: null, api_key: 0 });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.auth_token).toBeNull();
+      expect(parsed.audit.api_key).toBe(0);
+    });
+
+    it('redacts secret-shaped keys nested inside a meta object', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       // Top-level-only iteration would miss this. Recursion is the
-      // whole point of the defense-in-depth — a caller passing
-      // `{ context: { auth_token: '...' } }` is the most realistic
-      // accidental-leak path (e.g., dumping an error context object).
+      // whole point — a caller passing `{ context: { auth_token: '...' } }`
+      // is the most realistic accidental-leak path (e.g., dumping
+      // an error context object).
       logger.audit('upload_success', { send_id: 's1', context: { auth_token: 'sk-nested' } });
 
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
-      // Value still emits — audit doesn't redact, by contract.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
-      expect(parsed.audit.context.auth_token).toBe('sk-nested');
+      // Nested value redacted.
+      expect(parsed.audit.context.auth_token).toBe('[REDACTED]');
+      // Top-level send_id still flows.
+      expect(parsed.audit.send_id).toBe('s1');
     });
 
-    it('warns on secret-shaped keys nested inside an array element', () => {
+    it('redacts secret-shaped keys nested inside an array element', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       logger.audit('upload_success', {
         send_id: 's1',
-        history: [{ ts: 1, password: 'p1' }],
+        history: [{ ts: 1, password: 'p1' }, { ts: 2, password: 'p2' }],
       });
 
       expect(consoleSpy.error).toHaveBeenCalled();
       expect(consoleSpy.error.mock.calls[0][0]).toContain('password');
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.history[0].password).toBe('[REDACTED]');
+      expect(parsed.audit.history[0].ts).toBe(1);
+      expect(parsed.audit.history[1].password).toBe('[REDACTED]');
     });
 
     it('does NOT warn for legitimate dimension keys that contain "token" as a substring', () => {
@@ -313,6 +327,23 @@ describe('logger', () => {
         expect(line.audit.event).toBe('dispatch_sent');
         expect(line.audit.agent).toBe('discord');
       }
+    });
+
+    it('coerces array meta to {} so it does not spread into numeric-index keys', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // typeof [] === 'object', so a `typeof !== 'object'` guard alone
+      // would let an array through and produce `{0:1, 1:2, event, agent}`
+      // — confusing in CloudWatch and likely a caller bug. Coerce to
+      // empty meta instead.
+      expect(() => logger.audit('dispatch_sent', [1, 2, 3])).not.toThrow();
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.event).toBe('dispatch_sent');
+      expect(parsed.audit.agent).toBe('discord');
+      // No numeric-index keys leaked from the spread.
+      expect(parsed.audit['0']).toBeUndefined();
+      expect(parsed.audit['1']).toBeUndefined();
     });
   });
 });

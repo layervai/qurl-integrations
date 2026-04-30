@@ -45,27 +45,50 @@ function isAuditSecretKey(key) {
   return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
 }
 
-// Walks a meta value recursively looking for any object key in
-// AUDIT_SECRET_KEYS. Returns the offending key name on first hit, or
-// null. Matches redact()'s depth cap (5) and array handling. Used by
-// audit() to surface a CloudWatch-visible warn when a caller buries a
-// secret inside a nested object — top-level-only iteration would miss
-// `{ context: { auth_token: '...' } }`.
-function findAuditSecretKey(value, depth = 0) {
-  if (depth > 5 || value == null || typeof value !== 'object') return null;
+// Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS
+// replaced by '[REDACTED]'. Recurses to depth 5 with redact()'s array
+// handling so a buried `{ context: { auth_token } }` is also covered.
+// Returns the second member of the tuple as the FIRST offending key
+// name observed, so audit() can include it in the warn line.
+//
+// Note on the contract shift: the original audit() bypassed redact()
+// entirely because the legacy substring-match REDACT_SUBSTRINGS would
+// blank legitimate dimensions like `tokens_minted`. AUDIT_SECRET_KEYS
+// uses exact-match against a closed set of canonical secret names
+// (auth_token, api_key, password, ...), none of which collide with any
+// known legitimate audit dimension. So we can redact the value of an
+// offending key without risk of corrupting a metric — and that's
+// strictly safer than emitting the secret verbatim and relying on a
+// dashboard sweep to catch it.
+function redactAuditSecrets(value, depth = 0) {
+  if (depth > 5 || value == null || typeof value !== 'object') {
+    return { value, secretKey: null };
+  }
   if (Array.isArray(value)) {
-    for (const v of value) {
-      const found = findAuditSecretKey(v, depth + 1);
-      if (found) return found;
-    }
-    return null;
+    let secretKey = null;
+    const arr = value.map((v) => {
+      const { value: cleaned, secretKey: childKey } = redactAuditSecrets(v, depth + 1);
+      if (childKey && !secretKey) secretKey = childKey;
+      return cleaned;
+    });
+    return { value: arr, secretKey };
   }
+  const out = {};
+  let secretKey = null;
   for (const [k, v] of Object.entries(value)) {
-    if (isAuditSecretKey(k)) return k;
-    const found = findAuditSecretKey(v, depth + 1);
-    if (found) return found;
+    if (isAuditSecretKey(k)) {
+      // Match redact()'s shape: blank only non-empty strings; non-string
+      // values (numbers, null, etc.) survive — they can't carry a usable
+      // secret on their own and zero-string-replace would lose type info.
+      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+      if (!secretKey) secretKey = k;
+    } else {
+      const { value: cleaned, secretKey: childKey } = redactAuditSecrets(v, depth + 1);
+      out[k] = cleaned;
+      if (childKey && !secretKey) secretKey = childKey;
+    }
   }
-  return null;
+  return { value: out, secretKey };
 }
 
 function redact(value, depth = 0) {
@@ -138,40 +161,45 @@ const logger = {
   // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
   //
   // Audit lines bypass currentLevel — they're observability, not
-  // debug noise. They also bypass the redact() pass on `meta`. redact()
-  // matches on KEY name (not value), so future fields like `token_count`
-  // or `tokens_minted` would be blanked otherwise — which would corrupt
-  // a CloudWatch metric dimension. Callers MUST NOT pass secrets in meta:
-  // because audit() does not redact, a key like `auth_token` or
-  // `apiKey` lands in CloudWatch verbatim. The defense-in-depth warn
-  // below catches this at runtime; the static contract is enforced
-  // by the AUDIT_EVENTS allowlist in constants.js (callers always
-  // pass meta from a small, pre-vetted set: send_id, kind, count,
-  // expires_in, success, total).
+  // debug noise. They also bypass the top-level redact() pass on
+  // `meta` because that pass matches on KEY-name SUBSTRING and would
+  // blank legitimate dimensions like `tokens_minted` or `token_count`.
+  // Instead, audit() runs redactAuditSecrets() — same shape but uses
+  // exact-match against a closed AUDIT_SECRET_KEYS set so only canonical
+  // secret-bearer names (auth_token, api_key, password, ...) are
+  // blanked. Callers SHOULD still avoid passing secrets in meta —
+  // the AUDIT_EVENTS allowlist in constants.js documents the small,
+  // pre-vetted vocabulary (send_id, kind, count, expires_in, success,
+  // total). The redaction here is belt-and-suspenders: an error log
+  // fires too so a misbehaving caller is catchable in dashboards.
   audit(event, meta = {}) {
     // Default param only fires for `undefined`. A caller passing `null`
     // (easy mistake from optional chaining: `someObj?.meta`) would
-    // otherwise crash `Object.keys(null)` BEFORE the protected
+    // otherwise crash `Object.entries(null)` BEFORE the protected
     // try/catch around JSON.stringify, defeating the "audit never
-    // breaks user flow" contract. Coerce to {} for any non-object.
-    if (meta == null || typeof meta !== 'object') meta = {};
-    // Defense-in-depth: warn if any object key (top-level OR nested)
-    // in meta matches AUDIT_SECRET_KEYS (auth_token, api_key, password,
-    // ...). Recurses to depth 5 so a buried `{ context: { auth_token } }`
-    // still surfaces. Audit doesn't redact (would corrupt dimensions)
-    // and doesn't drop (must always emit), so we surface the violation
-    // as a CloudWatch-visible error log to make a misbehaving caller
-    // catchable in dashboards rather than silent. Exact-match (not
-    // substring) so legitimate dimensions like `tokens_minted` don't
-    // trigger false-positive warns.
-    const secretKey = findAuditSecretKey(meta);
+    // breaks user flow" contract. Also coerces arrays — typeof [] is
+    // 'object' so the typeof check alone would let `audit('x', [1,2])`
+    // through and produce a confusing `{0:1,1:2,event,agent}` payload.
+    if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) meta = {};
+    // Targeted secret redaction: walk meta, replace the value of any
+    // key in AUDIT_SECRET_KEYS with '[REDACTED]', return the first
+    // offending key name so the operator log below can name it. Safe
+    // to redact because exact-match doesn't false-positive on
+    // legitimate dimensions (proven by the tokens_minted test).
+    const { value: cleanedMeta, secretKey } = redactAuditSecrets(meta);
     if (secretKey) {
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(secretKey)}" in event=${sanitizeMessage(event)}; emitting unredacted per audit contract — caller must remove from meta`);
+      // Logged via console.error so it surfaces at error level in
+      // CloudWatch (the logger has no separate warn channel that
+      // emits at error severity). Defense-in-depth alongside the
+      // value redaction above — the redacted payload still emits,
+      // but the operator can grep the error log to find the
+      // misbehaving call site and remove the key from meta.
+      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(secretKey)}" in event=${sanitizeMessage(event)}; value redacted in emitted payload — caller must remove from meta`);
     }
-    // Spread meta first, then pin event + agent last so a caller passing
-    // `agent` or `event` in meta cannot overwrite the canonical value the
-    // CloudWatch filters key off of.
-    const auditPayload = { ...meta, event, agent: 'discord' };
+    // Spread cleaned meta first, then pin event + agent last so a
+    // caller passing `agent` or `event` in meta cannot overwrite the
+    // canonical value the CloudWatch filters key off of.
+    const auditPayload = { ...cleanedMeta, event, agent: 'discord' };
     // Single-line JSON, parseable by `{ $.audit.event = "..." }`
     // CloudWatch filter syntax. No timestamp prefix — the JSON has
     // its own ts field. console.log adds a trailing newline.

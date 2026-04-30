@@ -96,18 +96,20 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // free without each re-implementing emission. Tracked separately; see
 // Justin's review comment on qurl-integrations-infra#309.
 //
-// SECRETS CONTRACT: logger.audit() bypasses the redact() pass on meta
-// (key-name redaction would blank legitimate dimensions like
-// `tokens_minted`). Callers MUST therefore pass only non-sensitive meta
-// values from a small, pre-vetted vocabulary: `send_id`, `kind`,
-// `count`, `expires_in`, `api_code`, `success`, `total`. Never pass
-// API keys, tokens, OAuth state, secrets, raw user input, or anything
-// whose value should not appear verbatim in CloudWatch. logger.audit()
-// emits a warn-level error if a meta key exactly matches one of a
-// small set of known secret-bearer names (`auth_token`, `api_key`,
-// `password`, etc. — see AUDIT_SECRET_KEYS in logger.js), but the
-// warn is defense-in-depth — the canonical contract enforcement is
-// the call-site review of every new audit emission.
+// SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
+// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
+// `expires_in`, `api_code`, `success`, `total`. logger.audit()
+// defends in two layers if a caller still slips a secret-shaped key
+// in (top-level OR nested):
+//   1. The value is redacted to '[REDACTED]' in the emitted payload.
+//   2. A CloudWatch-visible `console.error` line names the offending
+//      key so the call site is grep-able from the dashboard.
+// Sibling keys are unaffected, so legitimate dimensions still flow.
+// Detection uses an EXACT-MATCH set (AUDIT_SECRET_KEYS in logger.js),
+// not the top-level logger's substring-based REDACT_SUBSTRINGS — that
+// way `tokens_minted` / `token_count` / similar legitimate dimensions
+// don't trigger false-positive redactions. The substring approach
+// would have made the redaction unsafe; exact-match makes it safe.
 const AUDIT_EVENTS = {
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
   // check all succeed — i.e. when the send is fully prepared and ready
