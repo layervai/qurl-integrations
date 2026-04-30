@@ -216,7 +216,8 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 		log.Warn("missing response_url — async result has nowhere to go")
 		return
 	}
-	if err := h.validateResponseURLFn(responseURL); err != nil {
+	target, err := h.validateResponseURLFn(responseURL)
+	if err != nil {
 		log.Warn("invalid response_url — refusing to dial", "error", err)
 		return
 	}
@@ -232,7 +233,14 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
+	// Dial the URL the validator returned, NOT the original
+	// responseURL string. The production validator constructs the
+	// returned URL with Scheme and Host pinned to literal-string
+	// constants, so the network destination is statically determined
+	// and CodeQL's go/request-forgery taint analysis is satisfied
+	// (validateResponseURLFn is the sanitizer; target is the safe
+	// post-sanitizer value).
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		log.Error("build response_url request failed", "error", err)
 		return
@@ -257,19 +265,33 @@ func (h *Handler) postResponse(ctx context.Context, log *slog.Logger, responseUR
 // an attacker who finds a way past the signature gate (or a future
 // regression there) still can't pivot the bot into an arbitrary-host
 // SSRF emitter.
-func validateResponseURL(rawURL string) error {
+//
+// On success, returns a *url.URL whose Scheme and Host are set to
+// literal-string constants (NOT propagated from the parsed input).
+// This is load-bearing for SSRF taint analysis: the dial target's
+// network destination is statically determined, so CodeQL's
+// go/request-forgery query treats this function as the sanitizer.
+// The Path/RawQuery still flow from the input but those don't change
+// the network destination.
+func validateResponseURL(rawURL string) (*url.URL, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parse response_url: %w", err)
+		return nil, fmt.Errorf("parse response_url: %w", err)
 	}
 	if u.Scheme != "https" {
-		return fmt.Errorf("response_url scheme %q is not https", u.Scheme)
+		return nil, fmt.Errorf("response_url scheme %q is not https", u.Scheme)
 	}
 	// Hostname strips any port suffix; Slack doesn't send explicit ports
 	// today, but treating ports as transparent matches user intent and
 	// dodges a future regression where a port appears.
 	if u.Hostname() != slackResponseURLHost {
-		return fmt.Errorf("response_url host %q is not %s", u.Hostname(), slackResponseURLHost)
+		return nil, fmt.Errorf("response_url host %q is not %s", u.Hostname(), slackResponseURLHost)
 	}
-	return nil
+	return &url.URL{
+		Scheme:   "https",
+		Host:     slackResponseURLHost,
+		Path:     u.Path,
+		RawPath:  u.RawPath,
+		RawQuery: u.RawQuery,
+	}, nil
 }

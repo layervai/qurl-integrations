@@ -66,7 +66,7 @@ func newTestHandler(t *testing.T, qurlServer *httptest.Server) *Handler {
 	// production validator rejects. Override here so the async path
 	// runs end-to-end; the production validator gets its own table
 	// test in process_test.go.
-	h.validateResponseURLFn = func(string) error { return nil }
+	h.validateResponseURLFn = url.Parse
 	// LIFO: this drain runs before any httptest server cleanup, so a
 	// goroutine still mid-call to qurlServer doesn't race the close.
 	t.Cleanup(h.Wait)

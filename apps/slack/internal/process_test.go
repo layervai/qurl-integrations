@@ -229,7 +229,7 @@ func TestHandle_ConcurrentCreateSharesIdempotencyKey(t *testing.T) {
 		},
 	})
 	h.now = func() time.Time { return fixedNow }
-	h.validateResponseURLFn = func(string) error { return nil }
+	h.validateResponseURLFn = url.Parse
 	t.Cleanup(h.Wait)
 
 	body := createCommandBody("https://example.com", "T-concurrent", "trig-shared", rec.URL)
@@ -344,7 +344,7 @@ func TestHandle_PoolSaturationDropsWithBusyAck(t *testing.T) {
 		},
 	})
 	h.now = func() time.Time { return fixedNow }
-	h.validateResponseURLFn = func(string) error { return nil }
+	h.validateResponseURLFn = url.Parse
 	t.Cleanup(h.Wait)
 
 	send := func(triggerID string) string {
@@ -453,7 +453,7 @@ func TestHandle_PanicInAsyncWorkRecovers(t *testing.T) {
 		},
 	})
 	h.now = func() time.Time { return fixedNow }
-	h.validateResponseURLFn = func(string) error { return nil }
+	h.validateResponseURLFn = url.Parse
 
 	body := createCommandBody("https://example.com", "T123", "trig-panic", rec.URL)
 	w := httptest.NewRecorder()
@@ -481,6 +481,8 @@ func (panickingProvider) APIKey(_ context.Context, _ string) (string, error) {
 // TestValidateResponseURL fences the production validator: only HTTPS
 // to hooks.slack.com is accepted. Anything else is a refusal — even a
 // signature-passing request can't pivot the bot into an SSRF emitter.
+// Successful returns must also have Scheme/Host pinned to the literal
+// constants (the SSRF-sanitization contract CodeQL relies on).
 func TestValidateResponseURL(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -497,9 +499,22 @@ func TestValidateResponseURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateResponseURL(tc.raw)
+			u, err := validateResponseURL(tc.raw)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("validateResponseURL(%q) err = %v, wantErr = %v", tc.raw, err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				// On success, Scheme and Host must be the pinned
+				// literal constants (NOT propagated from input).
+				// This is the CodeQL-recognizable sanitization
+				// pattern; a regression that returned the parsed
+				// URL unchanged would re-introduce the SSRF flow.
+				if u.Scheme != "https" {
+					t.Errorf("validated URL Scheme = %q, want %q", u.Scheme, "https")
+				}
+				if u.Host != slackResponseURLHost {
+					t.Errorf("validated URL Host = %q, want %q", u.Host, slackResponseURLHost)
+				}
 			}
 		})
 	}
@@ -653,7 +668,7 @@ func TestHandle_AsyncWorkObservesBaseContextCancellation(t *testing.T) {
 		},
 	})
 	h.now = func() time.Time { return fixedNow }
-	h.validateResponseURLFn = func(string) error { return nil }
+	h.validateResponseURLFn = url.Parse
 
 	body := createCommandBody("https://example.com", "T123", "trig-cancel", rec.URL)
 	w := httptest.NewRecorder()

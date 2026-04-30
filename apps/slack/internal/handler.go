@@ -130,7 +130,13 @@ type Handler struct {
 	// permit httptest server URLs (which are http://127.0.0.1:NNNNN).
 	// Field rather than parameter so the production default needs no
 	// per-deploy wiring.
-	validateResponseURLFn func(string) error
+	//
+	// Returns a *url.URL on success rather than just an error so the
+	// caller dials the validated/reconstructed URL — the production
+	// validator pins Scheme and Host to literal constants on the
+	// returned value, which is the SSRF-sanitization pattern CodeQL's
+	// taint analysis recognizes.
+	validateResponseURLFn func(string) (*url.URL, error)
 }
 
 // NewHandler creates a new Slack handler.
