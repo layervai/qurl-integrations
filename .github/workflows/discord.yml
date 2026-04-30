@@ -73,14 +73,17 @@ jobs:
   trigger-deploy:
     needs: [build-and-test, docker-check]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # `event_type` must match the receiver's `repository_dispatch.types` in
-    # qurl-integrations-infra/.github/workflows/qurl-bot-discord-deploy.yml —
-    # a typo silently no-ops the deploy.
-    permissions:
-      contents: read
+    # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
+    # isn't read by any step, so deny everything.
+    permissions: {}
     uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0 # v0.5.0
     with:
       target_repo: qurl-integrations-infra
+      # `event_type` must match the receiver's `repository_dispatch.types` at
+      # qurl-integrations-infra/.github/workflows/qurl-bot-discord-deploy.yml.
+      # An off-allowlist value hard-fails in the reusable; an allowlisted
+      # value that misses the receiver silently no-ops (HTTP 204 from the
+      # dispatch API but no workflow fires).
       event_type: discord-bot-deploy
       client_payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
     # Explicit `secrets:` map (not `inherit`) keeps the reusable's surface
