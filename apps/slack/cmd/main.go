@@ -29,6 +29,11 @@ const (
 	shutdownTimeout = 25 * time.Second
 )
 
+// version is set at build time via `-ldflags "-X main.version=<sha>"`.
+// Used in the qURL client User-Agent so server-side traces can pin a
+// failure to a specific bot release.
+var version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -42,9 +47,12 @@ func main() {
 // run holds the full server lifecycle so deferred cleanup (signal handler
 // release, etc.) executes before main returns to os.Exit.
 func run() error {
+	// Required env vars are explicit by design: a missing QURL_ENDPOINT
+	// previously fell back to the sandbox URL, which is the kind of silent
+	// misconfiguration that ships a prod deploy at sandbox.
 	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
 	if qurlEndpoint == "" {
-		qurlEndpoint = "https://api.layerv.xyz"
+		return errors.New("QURL_ENDPOINT is required")
 	}
 
 	slackSigningSecret := os.Getenv("SLACK_SIGNING_SECRET")
@@ -53,13 +61,14 @@ func run() error {
 	}
 
 	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
+	userAgent := "qurl-slack/" + version
 
 	handler := internal.NewHandler(internal.Config{
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
-				client.WithUserAgent("qurl-slack/dev"),
+				client.WithUserAgent(userAgent),
 				// Synchronous ack path — Slack's 3s budget rules out retries here.
 				client.WithRetry(0),
 			)
