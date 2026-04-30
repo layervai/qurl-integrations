@@ -39,7 +39,7 @@ var (
 // HMAC. All checks before HMAC touch only caller-supplied data (never the
 // signing secret), so there's no timing oracle on the secret. Don't
 // reorder.
-func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now time.Time) error {
+func verifySlackSignature(signingSecret string, body []byte, sigHeader, tsHeader string, now time.Time) error {
 	if signingSecret == "" {
 		return errSlackSigningSecretEmpty
 	}
@@ -80,7 +80,8 @@ func verifySlackSignature(signingSecret, body, sigHeader, tsHeader string, now t
 	}
 
 	mac := hmac.New(sha256.New, []byte(signingSecret))
-	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":" + body))
+	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":"))
+	mac.Write(body)
 	if !hmac.Equal(mac.Sum(nil), providedSig) {
 		return errSlackSignatureMismatch
 	}

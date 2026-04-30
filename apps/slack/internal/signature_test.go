@@ -10,27 +10,30 @@ import (
 	"time"
 )
 
-func validSigAndHeaders(t *testing.T, secret, body string, ts time.Time) (sig, tsHeader string) {
+func validSigAndHeaders(t *testing.T, secret string, body []byte, ts time.Time) (sig, tsHeader string) {
 	t.Helper()
 	tsHeader = strconv.FormatInt(ts.Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":" + body))
+	mac.Write([]byte(slackSignatureVersion + ":" + tsHeader + ":"))
+	mac.Write(body)
 	sig = slackSignatureVersion + "=" + hex.EncodeToString(mac.Sum(nil))
 	return sig, tsHeader
 }
 
 func TestVerifySlackSignature_Valid(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	sig, ts := validSigAndHeaders(t, "secret", "hello", now)
+	body := []byte("hello")
+	sig, ts := validSigAndHeaders(t, "secret", body, now)
 
-	if err := verifySlackSignature("secret", "hello", sig, ts, now); err != nil {
+	if err := verifySlackSignature("secret", body, sig, ts, now); err != nil {
 		t.Fatalf("valid signature rejected: %v", err)
 	}
 }
 
 func TestVerifySlackSignature_BoundaryCases(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	sig, ts := validSigAndHeaders(t, "secret", "hello", now)
+	body := []byte("hello")
+	sig, ts := validSigAndHeaders(t, "secret", body, now)
 
 	cases := []struct {
 		name string
@@ -40,59 +43,59 @@ func TestVerifySlackSignature_BoundaryCases(t *testing.T) {
 		{
 			name: "empty secret fails closed",
 			want: errSlackSigningSecretEmpty,
-			call: func() error { return verifySlackSignature("", "hello", sig, ts, now) },
+			call: func() error { return verifySlackSignature("", body, sig, ts, now) },
 		},
 		{
 			name: "missing signature header",
 			want: errSlackSignatureMissing,
-			call: func() error { return verifySlackSignature("secret", "hello", "", ts, now) },
+			call: func() error { return verifySlackSignature("secret", body, "", ts, now) },
 		},
 		{
 			name: "missing timestamp header",
 			want: errSlackSignatureMissing,
-			call: func() error { return verifySlackSignature("secret", "hello", sig, "", now) },
+			call: func() error { return verifySlackSignature("secret", body, sig, "", now) },
 		},
 		{
 			name: "malformed signature (no v0= prefix)",
 			want: errSlackSignatureMalformed,
-			call: func() error { return verifySlackSignature("secret", "hello", "deadbeef", ts, now) },
+			call: func() error { return verifySlackSignature("secret", body, "deadbeef", ts, now) },
 		},
 		{
 			name: "malformed signature (non-hex)",
 			want: errSlackSignatureMalformed,
-			call: func() error { return verifySlackSignature("secret", "hello", "v0=notvalidhex", ts, now) },
+			call: func() error { return verifySlackSignature("secret", body, "v0=notvalidhex", ts, now) },
 		},
 		{
 			name: "malformed timestamp",
 			want: errSlackTimestampMalformed,
-			call: func() error { return verifySlackSignature("secret", "hello", sig, "not-a-timestamp", now) },
+			call: func() error { return verifySlackSignature("secret", body, sig, "not-a-timestamp", now) },
 		},
 		{
 			name: "timestamp in the past outside skew",
 			want: errSlackTimestampStale,
-			call: func() error { return verifySlackSignature("secret", "hello", sig, ts, now.Add(10*time.Minute)) },
+			call: func() error { return verifySlackSignature("secret", body, sig, ts, now.Add(10*time.Minute)) },
 		},
 		{
 			name: "timestamp in the future outside skew",
 			want: errSlackTimestampStale,
-			call: func() error { return verifySlackSignature("secret", "hello", sig, ts, now.Add(-10*time.Minute)) },
+			call: func() error { return verifySlackSignature("secret", body, sig, ts, now.Add(-10*time.Minute)) },
 		},
 		{
 			name: "tampered body",
 			want: errSlackSignatureMismatch,
-			call: func() error { return verifySlackSignature("secret", "tampered", sig, ts, now) },
+			call: func() error { return verifySlackSignature("secret", []byte("tampered"), sig, ts, now) },
 		},
 		{
 			name: "wrong secret",
 			want: errSlackSignatureMismatch,
-			call: func() error { return verifySlackSignature("different-secret", "hello", sig, ts, now) },
+			call: func() error { return verifySlackSignature("different-secret", body, sig, ts, now) },
 		},
 		{
 			// Guard rails the defense-in-depth against a math.MinInt64
 			// timestamp that would wrap the subtraction/abs chain.
 			name: "negative timestamp fails stale",
 			want: errSlackTimestampStale,
-			call: func() error { return verifySlackSignature("secret", "hello", sig, "-9223372036854775808", now) },
+			call: func() error { return verifySlackSignature("secret", body, sig, "-9223372036854775808", now) },
 		},
 	}
 
@@ -113,13 +116,14 @@ func TestVerifySlackSignature_SkewBoundary(t *testing.T) {
 	// The skew check should accept a signature exactly at the boundary and
 	// reject one past it, so replays aren't off-by-one-ing their way in.
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	sig, ts := validSigAndHeaders(t, "secret", "body", now)
+	body := []byte("body")
+	sig, ts := validSigAndHeaders(t, "secret", body, now)
 
-	if err := verifySlackSignature("secret", "body", sig, ts, now.Add(slackTimestampSkew)); err != nil {
+	if err := verifySlackSignature("secret", body, sig, ts, now.Add(slackTimestampSkew)); err != nil {
 		t.Errorf("signature at exact skew boundary rejected: %v", err)
 	}
 
-	if err := verifySlackSignature("secret", "body", sig, ts, now.Add(slackTimestampSkew+time.Second)); !errors.Is(err, errSlackTimestampStale) {
+	if err := verifySlackSignature("secret", body, sig, ts, now.Add(slackTimestampSkew+time.Second)); !errors.Is(err, errSlackTimestampStale) {
 		t.Errorf("signature one second past skew boundary: got %v, want %v", err, errSlackTimestampStale)
 	}
 }
