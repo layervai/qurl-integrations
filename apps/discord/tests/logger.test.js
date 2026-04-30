@@ -184,6 +184,46 @@ describe('logger', () => {
       expect(consoleSpy.error.mock.calls[0][0]).toContain('logger.audit serialization failed');
     });
 
+    it('warns but still emits when meta contains a secret-shaped key', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // Defense-in-depth — the contract is "callers MUST not pass
+      // secrets," and audit() does not redact. The warn surfaces the
+      // violation as a CloudWatch-visible error log so a misbehaving
+      // caller is catchable in dashboards rather than silent. The
+      // value still emits unredacted because dropping would corrupt
+      // any legitimate dimension a CloudWatch filter is keying on.
+      logger.audit('upload_success', { send_id: 's1', auth_token: 'sk-abc123' });
+
+      // Warn fired
+      expect(consoleSpy.error).toHaveBeenCalled();
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
+      // Audit line still emitted with the value verbatim
+      expect(consoleSpy.log).toHaveBeenCalled();
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.auth_token).toBe('sk-abc123');
+    });
+
+    it('does NOT warn for legitimate dimension keys that contain "token" as a substring', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // tokens_minted contains "token" as a substring but is NOT in
+      // AUDIT_SECRET_KEYS — it's a legitimate audit dimension. The
+      // warn must use exact-match (not substring) so this kind of
+      // key doesn't trigger a false positive every emission.
+      logger.audit('upload_success', { send_id: 's1', tokens_minted: 7, token_count: 3 });
+
+      // No warn for these substring-matching but non-secret keys.
+      expect(consoleSpy.error).not.toHaveBeenCalled();
+      // Values emit verbatim.
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.tokens_minted).toBe(7);
+      expect(parsed.audit.token_count).toBe(3);
+    });
+
     it('agent is not overridable via meta', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');

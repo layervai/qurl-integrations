@@ -2103,6 +2103,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   const dmResults = await batchSettled(newRecipients, async (recipient) => {
     const links = recipientLinks[recipient.id];
+    // Defensive guard: recipientLinks is populated above for every newRecipient,
+    // so reaching this branch means an upstream invariant broke (recipient
+    // present in the loop input but missing from the link map). We skip
+    // both the network call AND the audit emission — the metric represents
+    // actual dispatch attempts, not "recipients listed in the input." A
+    // dropped audit here is correct: there is no transport leg to count.
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
     // links.slice(0, 10) caps at Discord's 10-embed-per-message limit.

@@ -28,6 +28,23 @@ function shouldRedact(key) {
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
 
+// Exact key names that audit() refuses to emit silently — these are the
+// classic secret-bearers a caller is most likely to leak by accident.
+// Exact-match (not substring) so legitimate audit dimensions like
+// `tokens_minted` or `token_count` don't trigger false-positive warns.
+// REDACT_SUBSTRINGS is too aggressive for audit metadata: the bypass
+// exists precisely because legitimate dimensions can contain those
+// substrings.
+const AUDIT_SECRET_KEYS = new Set([
+  'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
+  'auth_token', 'access_token', 'refresh_token', 'bearer_token',
+  'session_token', 'private_key', 'client_secret', 'webhook_secret',
+]);
+
+function isAuditSecretKey(key) {
+  return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
+}
+
 function redact(value, depth = 0) {
   if (depth > 5 || value == null) return value;
   if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
@@ -101,9 +118,28 @@ const logger = {
   // debug noise. They also bypass the redact() pass on `meta`. redact()
   // matches on KEY name (not value), so future fields like `token_count`
   // or `tokens_minted` would be blanked otherwise — which would corrupt
-  // a CloudWatch metric dimension. Callers MUST ensure they don't pass
-  // secrets into meta — the constants.js comment documents this contract.
+  // a CloudWatch metric dimension. Callers MUST NOT pass secrets in meta:
+  // because audit() does not redact, a key like `auth_token` or
+  // `apiKey` lands in CloudWatch verbatim. The defense-in-depth warn
+  // below catches this at runtime; the static contract is enforced
+  // by the AUDIT_EVENTS allowlist in constants.js (callers always
+  // pass meta from a small, pre-vetted set: send_id, kind, count,
+  // expires_in, success, total).
   audit(event, meta = {}) {
+    // Defense-in-depth: warn if a meta key matches the exact-match
+    // AUDIT_SECRET_KEYS set (auth_token, api_key, password, ...). We
+    // don't redact (would corrupt dimensions) and we don't drop the
+    // value (audit must always emit), but we surface the violation
+    // as a CloudWatch-visible error log so a misbehaving caller is
+    // catchable in dashboards rather than failing silently. Uses
+    // exact-match instead of REDACT_SUBSTRINGS's includes() check
+    // so legitimate dimensions like `tokens_minted` don't trigger.
+    for (const key of Object.keys(meta)) {
+      if (isAuditSecretKey(key)) {
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(key)}" in event=${sanitizeMessage(event)}; emitting unredacted per audit contract — caller must remove from meta`);
+        break;
+      }
+    }
     // Spread meta first, then pin event + agent last so a caller passing
     // `agent` or `event` in meta cannot overwrite the canonical value the
     // CloudWatch filters key off of.
@@ -123,7 +159,7 @@ const logger = {
         ts: formatTimestamp(),
       }));
     } catch (err) {
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err.message)}`);
+      console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err && err.message)}`);
     }
   },
 };

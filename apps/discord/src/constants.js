@@ -95,6 +95,19 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
 // integration (Discord, Slack, Teams, CLI, web/portal) gets them for
 // free without each re-implementing emission. Tracked separately; see
 // Justin's review comment on qurl-integrations-infra#309.
+//
+// SECRETS CONTRACT: logger.audit() bypasses the redact() pass on meta
+// (key-name redaction would blank legitimate dimensions like
+// `tokens_minted`). Callers MUST therefore pass only non-sensitive meta
+// values from a small, pre-vetted vocabulary: `send_id`, `kind`,
+// `count`, `expires_in`, `api_code`, `success`, `total`. Never pass
+// API keys, tokens, OAuth state, secrets, raw user input, or anything
+// whose value should not appear verbatim in CloudWatch. logger.audit()
+// emits a warn-level error if a meta key exactly matches one of a
+// small set of known secret-bearer names (`auth_token`, `api_key`,
+// `password`, etc. — see AUDIT_SECRET_KEYS in logger.js), but the
+// warn is defense-in-depth — the canonical contract enforcement is
+// the call-site review of every new audit emission.
 const AUDIT_EVENTS = {
   // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
   // check all succeed — i.e. when the send is fully prepared and ready
