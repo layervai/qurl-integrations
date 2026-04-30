@@ -1,16 +1,9 @@
 # Changelog
 
-## [0.1.1](https://github.com/layervai/qurl-integrations/compare/slack-v0.1.0...slack-v0.1.1) (2026-04-30)
+## [0.1.1](https://github.com/layervai/qurl-integrations/compare/cli-v0.1.0...cli-v0.1.1) (2026-04-30)
 
 
 ### Features
 
 * **cli:** add QURL CLI tool ([#8](https://github.com/layervai/qurl-integrations/issues/8)) ([e8ed942](https://github.com/layervai/qurl-integrations/commit/e8ed942b78990db4eb93fef33da7fab633176758))
 * scaffold qurl-integrations monorepo ([#1](https://github.com/layervai/qurl-integrations/issues/1)) ([071e7ff](https://github.com/layervai/qurl-integrations/commit/071e7ffd4dba4db4c0c6c9a2cc2b3e9fa2ea1cab))
-
-
-### Bug Fixes
-
-* **slack:** verify HMAC signature on every Slack endpoint ([#71](https://github.com/layervai/qurl-integrations/issues/71)) ([#73](https://github.com/layervai/qurl-integrations/issues/73)) ([410746a](https://github.com/layervai/qurl-integrations/commit/410746a0e72bbbb8935cd3eaaaa6b25fd5bfabe9))
-
-## Changelog
