@@ -128,9 +128,10 @@ docker buildx build --platform linux/arm64 \
   -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
 ```
 
-For a local Go binary outside Docker (development, debugging):
+For a local Go binary outside Docker (development, debugging) — `make build-slack` is the supported path:
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/qurl-bot-slack ./apps/slack/cmd/
+make build-slack
+# binary lands at release/slack/qurl-bot-slack (gitignored)
 ```
 
 ## Key Architecture Decisions

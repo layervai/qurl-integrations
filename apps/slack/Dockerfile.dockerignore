@@ -30,10 +30,11 @@ go.work.sum
 *.pem
 *.key
 
-# Excluding *.md is a build-context optimization, not a strict
-# correctness requirement. If a future change adds `embed.FS` for a
-# markdown asset (help text, error template) under `apps/slack/`,
-# remove the exclusion or scope it — otherwise the container build
-# breaks while a local `go build` still works.
-*.md
+# Scoped narrowly so a future `embed.FS` of a markdown asset under
+# `apps/slack/` (help text, error template) still works in the
+# container build. Repo-root prose + per-app READMEs + docs/ are
+# the only things that can never be embed-needed.
+/*.md
+apps/*/README.md
+docs/**/*.md
 LICENSE
