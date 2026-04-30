@@ -55,12 +55,15 @@ const MaxIdempotencyKeyLength = 256
 var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 bytes")
 
 // ErrIdempotencyKeyInvalid is returned by Create when CreateInput.IdempotencyKey
-// contains bytes that aren't valid in an HTTP header value (CR, LF, NUL, or
-// other non-printable control characters). Without this check, Go's HTTP
-// transport would reject the request with `net/http: invalid header field
-// value` — a confusing low-level error rather than a typed sentinel the
-// caller can `errors.Is` against.
-var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid header-value bytes (CR/LF/NUL/control)")
+// contains bytes that aren't valid in an HTTP header value: CR/LF/NUL/control
+// bytes, non-ASCII bytes, OR leading/trailing whitespace. The first three
+// would otherwise cause Go's HTTP transport to reject with an opaque
+// `net/http: invalid header field value`; the whitespace case is more
+// subtle — RFC 7230's OWS rule trims leading/trailing space and tab on
+// the wire, so the upstream dedup hash would silently see a key
+// different from what the caller passed. Either way, fail-fast with a
+// typed sentinel.
+var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid bytes (CR/LF/NUL/control, non-ASCII, or leading/trailing whitespace)")
 
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
@@ -215,12 +218,20 @@ func isHeaderSafeASCIIByte(b byte) bool {
 
 // validateIdempotencyKey enforces the constraints documented on
 // HeaderIdempotencyKey: ≤MaxIdempotencyKeyLength bytes and header-safe
-// ASCII only. Empty key is valid (means "no header sent"). Extracted
-// as a helper so future write methods that need idempotency (#148) can
-// reuse the same contract.
+// ASCII only, with no leading/trailing whitespace (RFC 7230 OWS would
+// trim those on the wire, silently changing the upstream dedup hash).
+// Empty key is valid (means "no header sent"). Extracted as a helper
+// so future write methods that need idempotency (#148) can reuse the
+// same contract.
 func validateIdempotencyKey(key string) error {
 	if len(key) > MaxIdempotencyKeyLength {
 		return ErrIdempotencyKeyTooLong
+	}
+	if key != "" {
+		first, last := key[0], key[len(key)-1]
+		if first == ' ' || first == '\t' || last == ' ' || last == '\t' {
+			return ErrIdempotencyKeyInvalid
+		}
 	}
 	for i := range len(key) {
 		if !isHeaderSafeASCIIByte(key[i]) {
@@ -247,6 +258,10 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	// Set Idempotency-Key here (not in do()) because it's request-specific,
+	// not transport-wide — Content-Type/Authorization/User-Agent are
+	// set in do() because they apply to every request. Either way the
+	// header survives retries since do() reuses the same *http.Request.
 	if input.IdempotencyKey != "" {
 		req.Header.Set(HeaderIdempotencyKey, input.IdempotencyKey)
 	}

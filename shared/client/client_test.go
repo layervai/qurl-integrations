@@ -21,6 +21,17 @@ func testClient(url, key string) *Client {
 	return New(url, key, WithRetry(0))
 }
 
+// withDelaysForTest collapses retry/backoff delays to 1ns. Reaches into
+// unexported fields, which only works because tests are same-package —
+// preferable to a public knob since the values aren't meaningful outside
+// of test speed.
+func withDelaysForTest() Option {
+	return func(c *Client) {
+		c.baseDelay = 1
+		c.maxDelay = 1
+	}
+}
+
 // apiEnvelope wraps data in the API response envelope.
 func apiEnvelope(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
@@ -425,7 +436,7 @@ func TestRetryOn503(t *testing.T) {
 	c := New(srv.URL, "test-key",
 		WithRetry(3),
 		// Use very short delays for test speed.
-		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+		withDelaysForTest(),
 	)
 	got, err := c.Get(context.Background(), "r_test")
 	if err != nil {
@@ -450,7 +461,7 @@ func TestRetryExhausted(t *testing.T) {
 
 	c := New(srv.URL, "test-key",
 		WithRetry(2),
-		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+		withDelaysForTest(),
 	)
 	_, err := c.Get(context.Background(), "r_test")
 	if err == nil {
@@ -480,7 +491,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 
 	c := New(srv.URL, "test-key",
 		WithRetry(3),
-		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+		withDelaysForTest(),
 	)
 	_, err := c.Get(context.Background(), "r_test")
 	if err == nil {
@@ -612,7 +623,7 @@ func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
 
 	c := New(srv.URL, "test-key",
 		WithRetry(3),
-		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+		withDelaysForTest(),
 	)
 	_, err := c.Create(context.Background(), CreateInput{
 		TargetURL:      "https://example.com",
@@ -691,6 +702,11 @@ func TestValidateIdempotencyKey(t *testing.T) {
 		{"single ASCII char", "a", nil},
 		{"sha256-hex (Slack canonical)", strings.Repeat("0123456789abcdef", 4), nil}, // 64 chars
 		{"max-length boundary", strings.Repeat("x", MaxIdempotencyKeyLength), nil},
+		{"internal space accepted", "key with spaces", nil},
+		{"leading space rejected (would be trimmed by OWS)", " abc", ErrIdempotencyKeyInvalid},
+		{"trailing space rejected (would be trimmed by OWS)", "abc ", ErrIdempotencyKeyInvalid},
+		{"leading tab rejected (would be trimmed by OWS)", "\tabc", ErrIdempotencyKeyInvalid},
+		{"trailing tab rejected (would be trimmed by OWS)", "abc\t", ErrIdempotencyKeyInvalid},
 		{"one byte over cap", strings.Repeat("x", MaxIdempotencyKeyLength+1), ErrIdempotencyKeyTooLong},
 		{"CR injection", "abc\rdef", ErrIdempotencyKeyInvalid},
 		{"LF injection", "abc\ndef", ErrIdempotencyKeyInvalid},
@@ -742,37 +758,68 @@ func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Errorf("server should not be hit on invalid-byte keys; got %d hits", hits.Load())
 	}
+}
 
-	// Positive cases: pin the inverse contract — anything not in the
-	// reject set should make it on the wire.
-	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
+	// Inverse-contract tests: anything outside the reject set must
+	// reach the wire unchanged. Split out from RejectsInvalidBytes so
+	// "rejects" actually means rejects (no positive cases hidden in
+	// the same parent test).
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get(HeaderIdempotencyKey)
 		apiEnvelope(t, w, map[string]any{"resource_id": "r_valid"})
 	}))
-	defer srvOK.Close()
-	cOK := testClient(srvOK.URL, "test-key")
+	defer srv.Close()
+	c := testClient(srv.URL, "test-key")
 
-	t.Run("all printable ASCII (0x20-0x7E) accepted", func(t *testing.T) {
+	t.Run("all printable ASCII 0x21-0x7E (excluding boundary space)", func(t *testing.T) {
+		// Skip 0x20 (space) here because it's only valid mid-key —
+		// validator rejects it as the first or last byte (RFC 7230
+		// OWS would trim it on the wire). Mid-key space is covered
+		// by the "internal space" subtest below.
 		var b strings.Builder
-		for c := byte(0x20); c <= 0x7E; c++ {
-			b.WriteByte(c)
+		for byteVal := byte(0x21); byteVal <= 0x7E; byteVal++ {
+			b.WriteByte(byteVal)
 		}
-		if _, err := cOK.Create(context.Background(), CreateInput{
+		want := b.String()
+		if _, err := c.Create(context.Background(), CreateInput{
 			TargetURL:      "https://example.com",
-			IdempotencyKey: b.String(),
+			IdempotencyKey: want,
 		}); err != nil {
 			t.Errorf("unexpected error %v", err)
+		}
+		if gotKey != want {
+			t.Errorf("header drift: got %q, want %q", gotKey, want)
 		}
 	})
 
-	t.Run("tab (0x09) accepted", func(t *testing.T) {
-		// Documented exception: validator accepts tab even though it's
-		// a control byte. Real-world keys won't include it, but the
-		// validator's contract permits it; pin that explicitly.
-		if _, err := cOK.Create(context.Background(), CreateInput{
+	t.Run("internal space accepted and preserved", func(t *testing.T) {
+		// Mid-key space is permitted; only boundary whitespace
+		// triggers OWS-trim by the wire.
+		want := "key with spaces"
+		if _, err := c.Create(context.Background(), CreateInput{
 			TargetURL:      "https://example.com",
-			IdempotencyKey: "key\twith\ttabs",
+			IdempotencyKey: want,
 		}); err != nil {
 			t.Errorf("unexpected error %v", err)
+		}
+		if gotKey != want {
+			t.Errorf("header drift: got %q, want %q", gotKey, want)
+		}
+	})
+
+	t.Run("internal tab accepted and preserved", func(t *testing.T) {
+		// Mid-key tab is permitted by the validator; pin it.
+		want := "key\twith\ttabs"
+		if _, err := c.Create(context.Background(), CreateInput{
+			TargetURL:      "https://example.com",
+			IdempotencyKey: want,
+		}); err != nil {
+			t.Errorf("unexpected error %v", err)
+		}
+		if gotKey != want {
+			t.Errorf("header drift: got %q, want %q", gotKey, want)
 		}
 	})
 }
