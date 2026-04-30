@@ -187,7 +187,26 @@ const logger = {
         ts: formatTimestamp(),
       }));
     } catch (err) {
-      console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err && err.message)}`);
+      // Two-tier degradation: emit a minimal audit line with a fixed
+      // synthetic event so CloudWatch metric filters can pattern-match
+      // `{ $.audit.event = "audit_serialization_failed" }` and surface
+      // the gap. The fallback payload only contains primitive strings
+      // — no caller meta — so it cannot itself trip JSON.stringify.
+      // If even this throws (effectively impossible), fall through to
+      // a plain error log so an operator still sees something.
+      try {
+        console.log(JSON.stringify({
+          audit: {
+            event: 'audit_serialization_failed',
+            agent: 'discord',
+            original_event: String(event),
+            reason: sanitizeMessage(err && err.message),
+          },
+          ts: formatTimestamp(),
+        }));
+      } catch (fallbackErr) {
+        console.error(`[${formatTimestamp()}] ERROR: logger.audit serialization failed event=${sanitizeMessage(event)} reason=${sanitizeMessage(err && err.message)} fallback_reason=${sanitizeMessage(fallbackErr && fallbackErr.message)}`);
+      }
     }
   },
 };

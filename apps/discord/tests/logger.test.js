@@ -170,18 +170,28 @@ describe('logger', () => {
       expect(parsed.audit.send_id).toBe('send-1');
     });
 
-    it('catches JSON.stringify failures and logs an error instead of throwing', () => {
+    it('emits a fallback audit_serialization_failed event when JSON.stringify throws', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // Circular ref — JSON.stringify throws TypeError. audit() must
-      // not propagate that to the caller (would fail per-recipient
-      // dispatch in batchSettled).
+      // Circular ref — JSON.stringify throws TypeError on the primary
+      // emission. audit() must (a) not propagate that to the caller
+      // (would fail per-recipient dispatch in batchSettled), and
+      // (b) still emit a CloudWatch-visible audit line so the gap is
+      // discoverable via metric filter, not just a free-text error log.
       const circ = {};
       circ.self = circ;
       expect(() => logger.audit('upload_success', { circ })).not.toThrow();
-      expect(consoleSpy.error).toHaveBeenCalled();
-      expect(consoleSpy.error.mock.calls[0][0]).toContain('logger.audit serialization failed');
+
+      // Fallback audit line was emitted with the synthetic event name.
+      const auditLines = consoleSpy.log.mock.calls.map(c => {
+        try { return JSON.parse(c[0]); } catch { return null; }
+      }).filter(Boolean);
+      const fallback = auditLines.find(l => l.audit && l.audit.event === 'audit_serialization_failed');
+      expect(fallback).toBeDefined();
+      expect(fallback.audit.agent).toBe('discord');
+      expect(fallback.audit.original_event).toBe('upload_success');
+      expect(typeof fallback.audit.reason).toBe('string');
     });
 
     it('warns but still emits when meta contains a secret-shaped key', () => {

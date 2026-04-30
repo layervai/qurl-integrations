@@ -134,6 +134,13 @@ const AUDIT_EVENTS = {
   REVOKE_FAILED: 'revoke_failed',
 };
 
+// Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
+// runtime can't silently break a CloudWatch metric (the literal string
+// would still work but the filter would stop matching). The other
+// constant objects in this file aren't frozen, but AUDIT_EVENTS is the
+// only one whose mutation is undetectable by tests.
+Object.freeze(AUDIT_EVENTS);
+
 module.exports = {
   COLORS,
   RESOURCE_TYPES,
