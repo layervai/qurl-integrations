@@ -675,8 +675,6 @@ func TestCreateIdempotencyKeyTooLong(t *testing.T) {
 }
 
 func TestCreateIdempotencyKeyRejectsInvalidBytes(t *testing.T) {
-	// Server should never be hit — fail-fast is the contract for any
-	// invalid-byte case.
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)

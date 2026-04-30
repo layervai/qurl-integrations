@@ -26,6 +26,20 @@ const (
 // HeaderIdempotencyKey is the request header the qURL API reads to dedupe
 // retried writes (the partition key on `qurl-service`'s
 // idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
+//
+// Key construction guidance (apply to every caller — not just Slack):
+//
+//   - **Hash identifiers, never pass them raw.** The key transits as a
+//     request header and lands in CloudWatch / ALB access logs / any
+//     intermediary observer. For Slack the canonical idiom is
+//     `sha256("slack:" + team_id + ":" + trigger_id)` hex-encoded — 64
+//     ASCII bytes, well under the cap, reveals no PII.
+//   - **Choose a natural unique-per-intent identifier.** Slack's
+//     `trigger_id` is unique per slash-command click and valid for 3
+//     seconds, which exactly matches the dedup window we want.
+//   - **Stay within the printable-ASCII byte range** (0x20-0x7E + tab) —
+//     `Create` rejects anything else with `ErrIdempotencyKeyInvalid` to
+//     dodge encoding ambiguity in the upstream key hash.
 const HeaderIdempotencyKey = "Idempotency-Key"
 
 // MaxIdempotencyKeyLength matches the qURL API's stored cap, measured in
@@ -175,20 +189,9 @@ type CreateInput struct {
 	MaxSessions  int           `json:"max_sessions,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 
-	// IdempotencyKey, when non-empty, is sent as the `Idempotency-Key`
-	// request header so the API dedupes retried writes against an
-	// already-completed Create. Caller-chosen — must be unique to the
-	// logical operation.
-	//
-	// Prefer hashing identifiers rather than passing them raw, since this
-	// value transits as a request header and ends up in CloudWatch /
-	// access logs. For Slack: `sha256("slack:" + team_id + ":" + trigger_id)`
-	// hex-encoded — 64 ASCII bytes, well under MaxIdempotencyKeyLength,
-	// and reveals no PII to an observer.
-	//
-	// Validation: the value must be ≤ MaxIdempotencyKeyLength bytes and
-	// contain no CR/LF/NUL/control characters (see ErrIdempotencyKeyTooLong
-	// and ErrIdempotencyKeyInvalid). `json:"-"` keeps it off the wire body.
+	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
+	// request header so the API dedupes retried writes. See
+	// [HeaderIdempotencyKey] for key-construction guidance.
 	IdempotencyKey string `json:"-"`
 }
 
@@ -200,30 +203,24 @@ type CreateOutput struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
-// validIdempotencyKeyByte reports whether b is permitted in a header value.
-// Equivalent to httpguts.IsTokenRune for the byte range we accept: visible
-// ASCII (0x21-0x7E), tab (0x09), and space (0x20). Rejects CR (0x0D), LF
-// (0x0A), NUL (0x00), DEL (0x7F), all other control bytes, and any
-// non-ASCII byte (the qURL API stores these verbatim in DynamoDB; we
-// don't want to invite encoding ambiguity).
-func validIdempotencyKeyByte(b byte) bool {
+// isHeaderSafeASCIIByte reports whether b is safe to ship in a header
+// value: tab (0x09) plus visible ASCII (0x20-0x7E). Rejects CR/LF/NUL,
+// DEL (0x7F), other control bytes, and all non-ASCII (≥0x80) — the
+// upstream qURL API hashes the raw bytes for its dedup partition key, so
+// we constrain to the unambiguous-encoding subset.
+func isHeaderSafeASCIIByte(b byte) bool {
 	return b == '\t' || (b >= 0x20 && b <= 0x7E)
 }
 
 // Create creates a new qURL.
 //
-// CreateInput is passed by value here to keep the API stable for existing
-// callers (apps/cli, apps/slack/internal). Migrating to *CreateInput is the
-// right idiomatic fix once the struct keeps growing — tracked separately so
-// the cross-package change can ship as its own reviewable refactor.
-//
-//nolint:gocritic // hugeParam: 88 bytes after IdempotencyKey; see comment above.
+//nolint:gocritic // hugeParam: CreateInput is 88 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if len(input.IdempotencyKey) > MaxIdempotencyKeyLength {
 		return nil, ErrIdempotencyKeyTooLong
 	}
 	for i := 0; i < len(input.IdempotencyKey); i++ {
-		if !validIdempotencyKeyByte(input.IdempotencyKey[i]) {
+		if !isHeaderSafeASCIIByte(input.IdempotencyKey[i]) {
 			return nil, ErrIdempotencyKeyInvalid
 		}
 	}
