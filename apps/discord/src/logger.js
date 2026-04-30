@@ -126,6 +126,12 @@ const logger = {
   // pass meta from a small, pre-vetted set: send_id, kind, count,
   // expires_in, success, total).
   audit(event, meta = {}) {
+    // Default param only fires for `undefined`. A caller passing `null`
+    // (easy mistake from optional chaining: `someObj?.meta`) would
+    // otherwise crash `Object.keys(null)` BEFORE the protected
+    // try/catch around JSON.stringify, defeating the "audit never
+    // breaks user flow" contract. Coerce to {} for any non-object.
+    if (meta == null || typeof meta !== 'object') meta = {};
     // Defense-in-depth: warn if a meta key matches the exact-match
     // AUDIT_SECRET_KEYS set (auth_token, api_key, password, ...). We
     // don't redact (would corrupt dimensions) and we don't drop the
@@ -143,7 +149,7 @@ const logger = {
     // Spread meta first, then pin event + agent last so a caller passing
     // `agent` or `event` in meta cannot overwrite the canonical value the
     // CloudWatch filters key off of.
-    const audit = { ...meta, event, agent: 'discord' };
+    const auditPayload = { ...meta, event, agent: 'discord' };
     // Single-line JSON, parseable by `{ $.audit.event = "..." }`
     // CloudWatch filter syntax. No timestamp prefix — the JSON has
     // its own ts field. console.log adds a trailing newline.
@@ -155,7 +161,7 @@ const logger = {
     // break the user-visible flow; degrade to an error log instead.
     try {
       console.log(JSON.stringify({
-        audit,
+        audit: auditPayload,
         ts: formatTimestamp(),
       }));
     } catch (err) {

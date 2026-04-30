@@ -244,5 +244,35 @@ describe('logger', () => {
       expect(parsed.audit.event).toBe('revoke_success');
       expect(parsed.audit.agent).toBe('discord');
     });
+
+    it('coerces null meta to {} so Object.keys() does not throw', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // Default-param `meta = {}` only fires for `undefined`. A caller
+      // doing `logger.audit('x', someObj?.meta)` could easily pass null.
+      // The coerce-to-{} guard inside audit() must run BEFORE the
+      // Object.keys(meta) loop, otherwise null would crash audit() and
+      // bubble out of batchSettled — defeating the never-throw contract.
+      expect(() => logger.audit('dispatch_sent', null)).not.toThrow();
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.event).toBe('dispatch_sent');
+      expect(parsed.audit.agent).toBe('discord');
+    });
+
+    it('coerces non-object meta (string, number) to {} without crashing', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      expect(() => logger.audit('dispatch_sent', 'oops-stringly-typed')).not.toThrow();
+      expect(() => logger.audit('dispatch_sent', 42)).not.toThrow();
+      // Both emit a clean audit line with just event + agent.
+      const lines = consoleSpy.log.mock.calls.map(c => JSON.parse(c[0]));
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(line.audit.event).toBe('dispatch_sent');
+        expect(line.audit.agent).toBe('discord');
+      }
+    });
   });
 });
