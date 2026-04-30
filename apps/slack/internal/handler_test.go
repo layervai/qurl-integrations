@@ -284,34 +284,120 @@ func TestSlashCommand_LowercaseSignatureHeaders(t *testing.T) {
 	}
 }
 
-// MaxBytesReader caps the request body — anything larger must 400 (and
-// must not trigger HMAC over a partial read, which would silently 401 on
-// a legitimate truncated payload from a misbehaving proxy and obscure
-// the real cause).
-func TestHandle_OversizeBodyReturns400(t *testing.T) {
+// Body-size cap rejects oversize requests with 413 before any read.
+// httptest.NewRequest sets Content-Length from the reader, so this
+// exercises the honest-sender pre-allocation guard. The dishonest-sender
+// path (no/lying Content-Length) is caught by MaxBytesReader during the
+// read; that defense-in-depth is structural rather than unit-testable.
+func TestHandle_OversizeBodyReturns413(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	// 2 MiB — twice the 1 MiB cap.
 	oversize := strings.Repeat("a", 2<<20)
 	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(oversize))
-	// Headers are intentionally absent — the body-size guard runs before
-	// signature verification, so the failure mode we're fencing is "body
-	// read fails first" not "signature check rejects".
+	// Headers intentionally absent — the body-size guard runs before
+	// signature verification.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("oversize body: status = %d, want 400", w.Code)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversize body: status = %d, want 413", w.Code)
 	}
 }
 
-// Routing fence: GET on a /slack/* path must 404 (not fall through to
-// signature verification, which would 401 and confuse the operator).
-func TestHandle_GetOnSlackPathReturns404(t *testing.T) {
+// Routing fence: GET on a /slack/* path must 405 (the path exists, the
+// method doesn't) with an Allow header pointing to POST. 404 would lie
+// about the endpoint's existence; 401 would leak that the path is
+// gated behind auth.
+func TestHandle_GetOnSlackPathReturns405(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/slack/commands", http.NoBody))
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf("GET /slack/commands: status = %d, want 404", w.Code)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /slack/commands: status = %d, want 405", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "POST" {
+		t.Errorf("Allow header = %q, want %q", got, "POST")
+	}
+}
+
+// /health must accept GET and HEAD (for ALB probes) and reject other
+// methods with 405 + Allow.
+func TestHealthEndpoint_RejectsNonGet(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/health", http.NoBody))
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /health: status = %d, want 405", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow header = %q, want %q", got, "GET, HEAD")
+	}
+}
+
+func TestHealthEndpoint_AcceptsHead(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodHead, "/health", http.NoBody))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("HEAD /health: status = %d, want 200", w.Code)
+	}
+}
+
+// Boundary fence: a body exactly at the cap must succeed end-to-end.
+// Off-by-one on MaxBytesReader would silently 400 legitimate large
+// payloads — this row catches that regression.
+func TestHandle_BodyAtCapAccepted(t *testing.T) {
+	srv := noopQURLServer(t)
+	h := newTestHandler(t, srv)
+	// /slack/events accepts arbitrary bytes; we're fencing read+verify,
+	// not the event payload shape.
+	body := strings.Repeat("a", maxRequestBodyBytes)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/events", body, body))
+
+	if w.Code != http.StatusOK {
+		t.Errorf("body at cap (%d bytes): status = %d, want 200", maxRequestBodyBytes, w.Code)
+	}
+}
+
+// Pre-allocation fence: a client honestly declaring a too-large
+// Content-Length must be rejected with 413 before any body is read.
+func TestHandle_DeclaredOversizeReturns413(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader("ignored"))
+	r.ContentLength = int64(maxRequestBodyBytes + 1)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("declared oversize: status = %d, want 413", w.Code)
+	}
+}
+
+// Empty-body fence: locks the contract so a future ParseQuery
+// substitution can't silently change the empty-text help fallback.
+func TestSlashCommand_EmptyBodyShowsHelp(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	r := httptest.NewRequest(http.MethodPost, "/slack/commands", strings.NewReader(""))
+	sig, ts := signSlackBody(t, "")
+	r.Header.Set(headerSlackSignature, sig)
+	r.Header.Set(headerSlackTimestamp, ts)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("signed empty body: status = %d, want 200 (help branch); body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "qurl create") {
+		t.Errorf("signed empty body did not produce help; got: %q", result["text"])
 	}
 }

@@ -37,6 +37,11 @@ const (
 // task to allocate unbounded memory.
 const maxRequestBodyBytes = 1 << 20
 
+// internalErrorJSON is the canonical 500 envelope used when JSON marshal
+// of a richer body fails. Package-level so the unreachable fallback path
+// doesn't allocate the same bytes on every call.
+var internalErrorJSON = []byte(`{"error":"internal"}`)
+
 // Config holds the Slack handler configuration.
 type Config struct {
 	AuthProvider       auth.Provider
@@ -58,22 +63,34 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
-
+	// Health checks are silent: ALB target-group probes hit this every
+	// 15-30s per task and would otherwise dominate log volume.
 	if r.URL.Path == pathHealth {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			respondMethodNotAllowed(w, "GET, HEAD")
+			return
+		}
 		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
-	if r.Method != http.MethodPost {
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
+
+	switch r.URL.Path {
+	case pathSlackCommands, pathSlackEvents, pathSlackInteractions:
+		if r.Method != http.MethodPost {
+			respondMethodNotAllowed(w, "POST")
+			return
+		}
+	default:
 		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 
-	switch r.URL.Path {
-	case pathSlackCommands, pathSlackEvents, pathSlackInteractions:
-	default:
-		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	// Honest oversize declarations get rejected before allocation.
+	// MaxBytesReader still catches dishonest senders during the read.
+	if r.ContentLength > maxRequestBodyBytes {
+		respondJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "body too large"})
 		return
 	}
 
@@ -278,15 +295,23 @@ func helpMessage() string {
 • ` + "`/qurl help`" + ` — Show this help message`
 }
 
+// respondMethodNotAllowed writes 405 with an RFC 7231 §6.5.5 Allow header.
+// The header is the discriminator that lets ops separate "wrong method"
+// from "missing path" (404) and "auth-gated" (401).
+func respondMethodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	respondJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+}
+
 func respondJSON(w http.ResponseWriter, status int, body any) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		// Marshaling a map[string]string / map[string]any can't fail in
-		// practice; log just in case the caller ever passes a richer type
-		// that does. Wire response stays a generic 500.
+		// practice; log and fall back to a fixed JSON envelope so the
+		// Content-Type header doesn't disagree with the body.
 		slog.Error("response marshal failed", "error", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
-		return
+		b = internalErrorJSON
+		status = http.StatusInternalServerError
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
