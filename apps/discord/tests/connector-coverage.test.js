@@ -9,6 +9,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 const originalFetch = globalThis.fetch;
@@ -27,6 +28,7 @@ describe('Connector client — coverage boost', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
     connector = require('../src/connector');
   });
@@ -257,6 +259,7 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
     connector = require('../src/connector');
   });

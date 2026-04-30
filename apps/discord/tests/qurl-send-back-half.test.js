@@ -57,6 +57,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 jest.mock('discord.js', () => {
@@ -64,6 +65,7 @@ jest.mock('discord.js', () => {
     const obj = {
       setCustomId: jest.fn().mockReturnThis(),
       setLabel: jest.fn().mockReturnThis(),
+      setEmoji: jest.fn().mockReturnThis(),
       setStyle: jest.fn().mockReturnThis(),
       setURL: jest.fn().mockReturnThis(),
       setTitle: jest.fn().mockReturnThis(),
@@ -596,6 +598,41 @@ describe('revokeAllLinks', () => {
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
+
+  it('emits revoke_success audit event with success/total tally when at least one link revoked', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    await revokeAllLinks('send-42', 'sender-1', 'apikey');
+
+    expect(logger.audit).toHaveBeenCalledWith('revoke_success', {
+      send_id: 'send-42', success: 2, total: 2,
+    });
+  });
+
+  it('emits revoke_failed (not revoke_success) when every per-link delete throws', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDeleteLink.mockRejectedValue(new Error('429 rate limited'));
+
+    await revokeAllLinks('send-43', 'sender-1', 'apikey');
+
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).toContain('revoke_failed');
+    expect(events).not.toContain('revoke_success');
+    expect(logger.audit).toHaveBeenCalledWith('revoke_failed', {
+      send_id: 'send-43', success: 0, total: 2,
+    });
+  });
+
+  it('emits no audit event when there are no resources to revoke (avoids 0/0 noise)', async () => {
+    mockDb.getSendResourceIds.mockResolvedValueOnce([]);
+
+    await revokeAllLinks('send-44', 'sender-1', 'apikey');
+
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).not.toContain('revoke_success');
+    expect(events).not.toContain('revoke_failed');
+  });
 });
 
 // ===========================================================================
@@ -824,6 +861,49 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
     // updateSendDMStatus called once per recipient with SENT.
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledTimes(2);
+    // Audit emission: upload_success + dispatch_sent (×2 recipients).
+    // mint_* is intentionally not emitted from the bot — see
+    // constants.js AUDIT_EVENTS comment.
+    const emitted = logger.audit.mock.calls.map(c => c[0]);
+    expect(emitted).toEqual(expect.arrayContaining(['upload_success', 'dispatch_sent']));
+    expect(logger.audit).toHaveBeenCalledWith('upload_success', expect.objectContaining({
+      send_id: 'send-1', kind: 'location',
+    }));
+    expect(emitted.filter(e => e === 'dispatch_sent')).toHaveLength(2);
+    expect(emitted).not.toContain('mint_success');
+    expect(emitted).not.toContain('mint_failed');
+  });
+
+  // Locks the single-emission contract: a sendConfig with both file
+  // AND location must NOT fire upload_success twice (would double-count
+  // UploadCount in CloudWatch). The kind field must be 'mixed'.
+  it('emits exactly ONE upload_success with kind=mixed when both file + location prep paths run', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-orig', expires_in: '5m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      // Both paths active.
+      actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower',
+    });
+    // File path succeeds.
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
+    // mintLinks called twice (once per kind).
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/file', resource_id: 'res-file-new' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/loc', resource_id: 'res-loc-new' }]);
+    // Location path succeeds.
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
+    mockSendDM.mockResolvedValue(true);
+
+    await handleAddRecipients(
+      'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const uploadEvents = logger.audit.mock.calls.filter(c => c[0] === 'upload_success');
+    expect(uploadEvents).toHaveLength(1);
+    expect(uploadEvents[0][1]).toEqual({ send_id: 'send-mixed', kind: 'mixed' });
   });
 
   it('reports failed DMs as failed in the return value', async () => {

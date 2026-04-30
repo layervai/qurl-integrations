@@ -15,7 +15,7 @@ jest.mock('../src/config', () => ({
 }));
 
 jest.mock('../src/logger', () => ({
-  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
 }));
 
 jest.mock('../src/discord', () => ({

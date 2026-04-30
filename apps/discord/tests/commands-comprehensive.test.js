@@ -40,6 +40,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 // Track EmbedBuilder instances for assertions
@@ -101,6 +102,7 @@ jest.mock('discord.js', () => ({
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
+    setEmoji: jest.fn().mockReturnThis(),
     setStyle: jest.fn().mockReturnThis(),
     setURL: jest.fn().mockReturnThis(),
   })),

@@ -26,6 +26,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 // Mock crypto wrapper: pass-through so tests can assert on

@@ -28,6 +28,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 // Mock dns.lookup so createOneTimeLink's DNS-rebinding guard doesn't hit
@@ -74,6 +75,7 @@ jest.mock('discord.js', () => ({
   ButtonBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setLabel: jest.fn().mockReturnThis(),
+    setEmoji: jest.fn().mockReturnThis(),
     setStyle: jest.fn().mockReturnThis(),
     setURL: jest.fn().mockReturnThis(),
   })),
@@ -510,6 +512,7 @@ describe('qURL client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
 
     qurl = require('../src/qurl');
@@ -615,6 +618,7 @@ describe('Connector client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
     jest.mock('form-data', () => {
       return jest.fn().mockImplementation(() => ({
@@ -778,6 +782,7 @@ describe('Places client', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
   });
 
@@ -1279,6 +1284,7 @@ describe('handleAddRecipients', () => {
       warn: jest.fn(),
       error: jest.fn(),
       debug: jest.fn(),
+      audit: jest.fn(),
     }));
 
     // Mock discord.js
@@ -1319,6 +1325,7 @@ describe('handleAddRecipients', () => {
       ButtonBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setLabel: jest.fn().mockReturnThis(),
+        setEmoji: jest.fn().mockReturnThis(),
         setStyle: jest.fn().mockReturnThis(),
         setURL: jest.fn().mockReturnThis(),
       })),

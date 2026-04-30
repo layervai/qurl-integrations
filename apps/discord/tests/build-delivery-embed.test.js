@@ -46,11 +46,11 @@ jest.mock('discord.js', () => {
     ActionRowBuilder: jest.fn().mockImplementation(() => ({ addComponents: jest.fn().mockReturnThis() })),
     ButtonBuilder: jest.fn().mockImplementation(() => {
       const btn = {
-        _style: null, _label: null, _url: null, _customId: null,
+        _style: null, _label: null, _url: null, _customId: null, _emoji: null,
         setCustomId: jest.fn(function (id) { btn._customId = id; return btn; }),
         setLabel: jest.fn(function (l) { btn._label = l; return btn; }),
         setStyle: jest.fn(function (s) { btn._style = s; return btn; }),
-        setEmoji: jest.fn().mockReturnThis(),
+        setEmoji: jest.fn(function (e) { btn._emoji = e; return btn; }),
         setURL: jest.fn(function (u) { btn._url = u; return btn; }),
       };
       capturedButtons.push(btn);
@@ -108,7 +108,7 @@ jest.mock('../src/config', () => ({
 }));
 
 jest.mock('../src/logger', () => ({
-  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
 }));
 
 jest.mock('../src/database', () => ({
@@ -246,13 +246,16 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // Locks the Step Through button shape: a future refactor that drops
   // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave
   // recipients with a button that doesn't navigate anywhere. This test
-  // asserts the button is built as Link-style with the supplied qURL.
+  // asserts the button is built as Link-style with the supplied qURL,
+  // and that the 🔗 emoji prefix survives — Link buttons render gray
+  // and the emoji is what carries the "this is a button" affordance.
   it('builds the Step Through button as a Link-style button with the qURL as its URL', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink: 'https://qurl.link/#at_unique_token' });
     // Last button constructed in the buildDeliveryPayload call is the Step Through.
     const stepThrough = capturedButtons[capturedButtons.length - 1];
     expect(stepThrough).toBeDefined();
-    expect(stepThrough._label).toBe('Step Through →');
+    expect(stepThrough._label).toBe('Step Through');
+    expect(stepThrough._emoji).toBe('🔗');
     expect(stepThrough._style).toBe(5); // ButtonStyle.Link
     expect(stepThrough._url).toBe('https://qurl.link/#at_unique_token');
     expect(stepThrough.setURL).toHaveBeenCalledWith('https://qurl.link/#at_unique_token');

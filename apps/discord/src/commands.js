@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -267,7 +267,7 @@ function resolveSenderAlias(interaction) {
 // "what's on the other side is invisible to … scanners, bots, crawlers,
 // strangers") rather than literal ("shared a file with you") — the brand
 // goal is to convey the qURL hidden-layer model, not just announce a
-// file transfer. The qURL link is rendered as a `Step Through →` Link
+// file transfer. The qURL link is rendered as a `🔗 Step Through` Link
 // button rather than a bare URL field; recipients click the button to
 // open the link in their default browser.
 //
@@ -302,7 +302,7 @@ function resolveSenderAlias(interaction) {
 //     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
-//     │  │   Step Through →         │  (Link button — opens qURL)
+//     │  │   🔗 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
@@ -389,11 +389,21 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     },
   );
 
-  // Link button: grey, single-click opens qurlLink in the recipient's
-  // browser. No interaction handler needed — Discord handles the redirect.
+  // Link button: opens qurlLink in the recipient's browser on a
+  // single click. No interaction handler needed — Discord handles
+  // the redirect.
+  //
+  // Style is `ButtonStyle.Link` because Discord requires URL buttons
+  // to be Link-style (Primary/Success/Danger/Secondary cannot carry
+  // a URL — they only fire interaction handlers). Link buttons render
+  // gray, which can read as "text" rather than a clickable affordance.
+  // The leading 🔗 emoji adds visual weight so the recipient sees a
+  // clear button shape; arrow `→` dropped from the label since the
+  // emoji conveys the same "go elsewhere" intent.
   const stepThrough = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setLabel('Step Through →')
+    .setEmoji('🔗')
+    .setLabel('Step Through')
     .setURL(qurlLink);
   const components = [new ActionRowBuilder().addComponents(stepThrough)];
 
@@ -1498,6 +1508,7 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
     } else {
       // Location send — upload JSON payload to connector, then mint in batches
       // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
@@ -1525,6 +1536,7 @@ async function handleSend(interaction, apiKey) {
         qurlLink: allLinks[i].qurl_link,
         resourceId: allLinks[i].resourceId,
       }));
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
@@ -1594,17 +1606,29 @@ async function handleSend(interaction, apiKey) {
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
-    const dmPayload = buildDeliveryPayload({
-      // member.displayName resolves to nickname || globalName || username,
-      // so it works whether the sender has a per-guild nickname, only a
-      // global display name, or just the legacy @-handle.
-      senderAlias: resolveSenderAlias(interaction),
-      qurlLink: link.qurlLink,
-      expiresAt,
-      personalMessage,
-    });
-
-    const sent = await sendDM(link.recipientId, dmPayload);
+    // Audit in `finally` so the metric fires for every recipient regardless
+    // of where the dispatch fails — sendDM resolving to false, sendDM
+    // throwing (against contract — see apps/discord/src/discord.js), OR
+    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
+    // it either — that's the failure mode the audit metric exists to
+    // measure. Coverage spans the entire dispatch attempt, not just the
+    // network leg.
+    let sent = false;
+    try {
+      const dmPayload = buildDeliveryPayload({
+        // member.displayName resolves to nickname || globalName || username,
+        // so it works whether the sender has a per-guild nickname, only a
+        // global display name, or just the legacy @-handle.
+        senderAlias: resolveSenderAlias(interaction),
+        qurlLink: link.qurlLink,
+        expiresAt,
+        personalMessage,
+      });
+      sent = await sendDM(link.recipientId, dmPayload);
+    } finally {
+      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    }
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
@@ -1928,6 +1952,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
+  // Tracks which prep paths actually completed so we can emit a single
+  // upload_success per send (not one per kind). A sendConfig with both
+  // file + location would otherwise fire two events for the same send,
+  // which double-counts UploadCount in CloudWatch unless the metric
+  // filter dimensions on `kind` (it doesn't, currently — see
+  // qurl-integrations-infra#309). The collapsed event keeps UploadCount
+  // = "number of fully-prepared sends" regardless of kind composition.
+  const preparedKinds = [];
   try {
     if (hasFile) {
       // Re-download from the stored Discord CDN URL, then upload a fresh
@@ -2004,6 +2036,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       }
+      preparedKinds.push('file');
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
@@ -2029,6 +2062,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
       });
+      preparedKinds.push('location');
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
@@ -2037,6 +2071,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
     return { msg, newResourceIds: [], delivered: 0, failed: 0 };
+  }
+
+  // Single emission per send. `kind` carries the composition so a future
+  // CloudWatch dimension on it can break the count down per kind without
+  // double-counting mixed sends. Values: 'file' | 'location' | 'mixed'.
+  if (preparedKinds.length > 0) {
+    const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
+    logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
   }
 
   const recipientIds = Object.keys(recipientLinks);
@@ -2077,6 +2119,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   const dmResults = await batchSettled(newRecipients, async (recipient) => {
     const links = recipientLinks[recipient.id];
+    // Defensive guard: recipientLinks is populated above for every newRecipient,
+    // so reaching this branch means an upstream invariant broke (recipient
+    // present in the loop input but missing from the link map). We skip
+    // both the network call AND the audit emission — the metric represents
+    // actual dispatch attempts, not "recipients listed in the input." A
+    // dropped audit here is correct: there is no transport leg to count.
     if (!links || links.length === 0) return { sent: false, username: recipient.username };
 
     // links.slice(0, 10) caps at Discord's 10-embed-per-message limit.
@@ -2086,39 +2134,51 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // with their corresponding embed. Multi-link UX would benefit from
     // per-link button labels (e.g. "Step Through · report.pdf"), but
     // today links.length is always 1 so labels are uniform.
-    // Same Unix-seconds expiry computation as handleSend — see comment
-    // there. Computed once per recipient (cheap; the alternative would
-    // be threading a single timestamp through sendConfig).
-    const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
-    const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-      // Same alias resolution as handleSend — see comment there for
-      // the nickname > globalName > username fallback rationale.
-      senderAlias: resolveSenderAlias(originalInteraction),
-      qurlLink: link.qurlLink,
-      expiresAt,
-      personalMessage: sendConfig.personal_message,
-    }));
-    // Contract with buildDeliveryPayload: each payload's `components`
-    // array contains exactly one ActionRow whose `components` are the
-    // per-link buttons. We pull each payload's first row's children
-    // (one Step Through button per link) and re-pack into 5-per-row
-    // ActionRows since Discord caps at 5 buttons per ActionRow.
-    const allEmbeds = payloads.flatMap(p => p.embeds);
-    const allButtons = payloads.flatMap(p => {
-      // Hard fail rather than silently drop buttons if the contract
-      // ever changes — easier to catch than a button quietly missing
-      // from a recipient's DM.
-      if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
-        throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
+    // try/finally + before-DB-write — see handleSend's batchSettled
+    // callback for the full rationale (payload-build, sendDM-throws,
+    // AND DB-throw must all still emit the metric). Wraps the entire
+    // dispatch attempt — payload assembly, button re-packing, network
+    // call — so a malformed sendConfig (e.g. pathological
+    // personalMessage that throws inside buildDeliveryPayload) still
+    // counts as dispatch_failed instead of disappearing from CloudWatch.
+    let sent = false;
+    try {
+      // Same Unix-seconds expiry computation as handleSend — see comment
+      // there. Computed once per recipient (cheap; the alternative would
+      // be threading a single timestamp through sendConfig).
+      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+      const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
+        // Same alias resolution as handleSend — see comment there for
+        // the nickname > globalName > username fallback rationale.
+        senderAlias: resolveSenderAlias(originalInteraction),
+        qurlLink: link.qurlLink,
+        expiresAt,
+        personalMessage: sendConfig.personal_message,
+      }));
+      // Contract with buildDeliveryPayload: each payload's `components`
+      // array contains exactly one ActionRow whose `components` are the
+      // per-link buttons. We pull each payload's first row's children
+      // (one Step Through button per link) and re-pack into 5-per-row
+      // ActionRows since Discord caps at 5 buttons per ActionRow.
+      const allEmbeds = payloads.flatMap(p => p.embeds);
+      const allButtons = payloads.flatMap(p => {
+        // Hard fail rather than silently drop buttons if the contract
+        // ever changes — easier to catch than a button quietly missing
+        // from a recipient's DM.
+        if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
+          throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
+        }
+        return p.components[0].components;
+      });
+      const allComponents = [];
+      for (let i = 0; i < allButtons.length; i += 5) {
+        allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
       }
-      return p.components[0].components;
-    });
-    const allComponents = [];
-    for (let i = 0; i < allButtons.length; i += 5) {
-      allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
-    }
 
-    const sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+      sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+    } finally {
+      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    }
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
@@ -2278,6 +2338,16 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // partial failures are surfaced in the reply message ("Revoked X/Y"),
   // and re-picking the same send from the dropdown wouldn't help anyway
   // since the failed resource_ids are the same.
+  // Emit BEFORE markSendRevoked for the same reason the dispatch
+  // emissions fire before updateSendDMStatus — a DB write throw must
+  // not suppress the audit metric, which is exactly the failure mode
+  // we're trying to measure. Distinguish all-failed (success === 0)
+  // from at-least-partial (success > 0) so the dashboard isn't
+  // misled into counting fully-failed revokes as successes.
+  if (resourceIds.length > 0) {
+    const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
+    logger.audit(event, { send_id: sendId, success, total: resourceIds.length });
+  }
   await db.markSendRevoked(sendId, senderDiscordId);
 
   logger.info('Revoked send', { sendId, success, total: resourceIds.length });

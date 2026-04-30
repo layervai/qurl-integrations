@@ -78,6 +78,71 @@ const GOOD_FIRST_ISSUE_PATTERNS = [
   'help wanted',
 ];
 
+// Canonical event names emitted via logger.audit(). The CloudWatch metric
+// filters at qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// pattern-match these strings, so a typo at a call site silently disables
+// the metric. Always import from here rather than passing literal strings.
+// Adding a new event: add the constant here, the call site, AND the
+// terraform filter (in the same merge train, since the filter is a no-op
+// without the emission and vice versa).
+//
+// Scope: this set covers events the qURL service cannot see — transport-
+// layer (DM dispatch), bulk-revoke outcomes (per-link API calls happen
+// at the service but the all-or-partial-success tally lives here), and
+// upload-to-connector results. Mint counts (`mint_success` / `mint_failed`)
+// are intentionally NOT here — they belong at the qURL service layer
+// with an `agent` dimension fed by an X-QURL-Agent header so every
+// integration (Discord, Slack, Teams, CLI, web/portal) gets them for
+// free without each re-implementing emission. Tracked separately; see
+// Justin's review comment on qurl-integrations-infra#309.
+//
+// SECRETS CONTRACT: callers SHOULD pass only non-sensitive meta values
+// from a small, pre-vetted vocabulary: `send_id`, `kind`, `count`,
+// `expires_in`, `api_code`, `success`, `total`. logger.audit()
+// defends in two layers if a caller still slips a secret-shaped key
+// in (top-level OR nested):
+//   1. The value is redacted to '[REDACTED]' in the emitted payload.
+//   2. A CloudWatch-visible `console.error` line names the offending
+//      key so the call site is grep-able from the dashboard.
+// Sibling keys are unaffected, so legitimate dimensions still flow.
+// Detection uses an EXACT-MATCH set (AUDIT_SECRET_KEYS in logger.js),
+// not the top-level logger's substring-based REDACT_SUBSTRINGS — that
+// way `tokens_minted` / `token_count` / similar legitimate dimensions
+// don't trigger false-positive redactions. The substring approach
+// would have made the redaction unsafe; exact-match makes it safe.
+const AUDIT_EVENTS = {
+  // UPLOAD_SUCCESS fires after upload + mintLinksInBatches + sufficiency
+  // check all succeed — i.e. when the send is fully prepared and ready
+  // to dispatch. It's not just the connector POST. Name is kept literal
+  // ("upload_success") for back-compat with the upload_count terraform
+  // filter; semantically closer to "prepare_success" or "links_ready".
+  //
+  // Emitted EXACTLY ONCE per send, even when handleAddRecipients runs
+  // both file and location prep paths. The meta `kind` field carries
+  // the composition: 'file' | 'location' | 'mixed'. Collapsing to one
+  // event prevents UploadCount from double-counting mixed sends if the
+  // CloudWatch filter doesn't dimension on kind. handleSend's branches
+  // are mutually exclusive so 'mixed' only ever shows up from
+  // handleAddRecipients on a sendConfig that has both file + location.
+  UPLOAD_SUCCESS: 'upload_success',
+  DISPATCH_SENT: 'dispatch_sent',
+  DISPATCH_FAILED: 'dispatch_failed',
+  // REVOKE_SUCCESS fires when at least one per-link delete succeeded;
+  // REVOKE_FAILED fires when every per-link delete threw (success === 0
+  // && total > 0). When total === 0 (nothing to revoke — already-revoked
+  // or unknown sendId) neither event fires. Splitting the two stops a
+  // dashboard from counting all-failed revokes as successes.
+  REVOKE_SUCCESS: 'revoke_success',
+  REVOKE_FAILED: 'revoke_failed',
+};
+
+// Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at
+// runtime can't silently break a CloudWatch metric (the literal string
+// would still work but the filter would stop matching). The other
+// constant objects in this file aren't frozen, but AUDIT_EVENTS is the
+// only one whose mutation is undetectable by tests.
+Object.freeze(AUDIT_EVENTS);
+
 module.exports = {
   COLORS,
   RESOURCE_TYPES,
@@ -89,4 +154,5 @@ module.exports = {
   MAX_CONCURRENT_MONITORS,
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
+  AUDIT_EVENTS,
 };

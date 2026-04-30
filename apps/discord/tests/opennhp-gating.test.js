@@ -41,7 +41,7 @@ jest.mock('../src/config', () => ({
 }));
 
 const mockLogger = {
-  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
 };
 jest.mock('../src/logger', () => mockLogger);
 
