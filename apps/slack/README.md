@@ -11,22 +11,30 @@ Slack bot for creating and managing qURLs via slash commands, with link unfurlin
 
 ## Architecture
 
-- **Runtime:** AWS Lambda (arm64) behind API Gateway
-- **Auth:** Workspace API key (per-user OAuth planned)
+- **Runtime:** AWS Fargate (arm64, distroless container) behind an
+  ALB that terminates TLS and routes `/slack/*` + `/health`.
+- **Auth:** Workspace API key (per-user OAuth planned, Phase 4).
 - **Endpoints:**
-  - `POST /slack/commands` — Slash command handler
-  - `POST /slack/events` — Event subscriptions (link unfurling)
-  - `POST /slack/interactions` — Interactive components
-  - `GET /health` — Health check
+  - `POST /slack/commands` — Slash command handler (ack-then-async)
+  - `POST /slack/events` — Event subscriptions (link unfurling planned)
+  - `POST /slack/interactions` — Interactive components (planned)
+  - `GET /health` — ALB target-group health probe
 
 ## Development
 
 ```bash
 # Run tests
-go test -count=1 ./apps/slack/...
+go test -race -count=1 ./apps/slack/...
 
-# Build
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+# Run locally (uses host networking; no AWS dependencies)
+QURL_ENDPOINT=https://api.layerv.xyz \
+SLACK_SIGNING_SECRET=... \
+QURL_API_KEY=... \
+  go run ./apps/slack/cmd/
+
+# Build the production container (linux/arm64 to match Fargate)
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
 ```
 
 ## Environment Variables

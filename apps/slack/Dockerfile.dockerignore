@@ -1,0 +1,40 @@
+.git
+.github
+.claude
+.DS_Store
+
+release
+*.test
+*.out
+
+# Sibling apps' source trees — irrelevant to the slack binary, and
+# keeps an unrelated app change from invalidating this Dockerfile's
+# cache. Allow-list pattern (vs explicit deny) so a fifth app added
+# later doesn't silently leak into the build context.
+apps/*
+!apps/slack
+
+e2e
+scripts
+docs
+man
+vendor
+go.work
+go.work.sum
+
+.vscode
+.idea
+*.swp
+
+# Defense-in-depth: never ship a local private key into the daemon.
+*.pem
+*.key
+
+# Scoped narrowly so a future `embed.FS` of a markdown asset under
+# `apps/slack/` (help text, error template) still works in the
+# container build. Repo-root prose + per-app READMEs + docs/ are
+# the only things that can never be embed-needed.
+/*.md
+apps/*/README.md
+docs/**/*.md
+LICENSE
