@@ -35,6 +35,11 @@ const (
 // slash-command and event payloads are well under 8 KiB; 1 MiB gives
 // generous headroom while keeping a single bad client from forcing the
 // task to allocate unbounded memory.
+//
+// HMAC verification needs the raw body, so we can't authenticate before
+// reading — a flood of cap-sized junk to /slack/* with bad signatures
+// will allocate up to 1 MiB per request. ALB-level rate-limiting / WAF
+// is the real defense; this cap bounds the per-request damage.
 const maxRequestBodyBytes = 1 << 20
 
 // internalErrorEnvelope is the fallback 500 body used when JSON marshal
@@ -74,8 +79,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
-
 	switch r.URL.Path {
 	case pathSlackCommands, pathSlackEvents, pathSlackInteractions:
 		if r.Method != http.MethodPost {
@@ -83,9 +86,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
+		// Silent on 404: ALB target groups are reachable to internet
+		// probes (/wp-login.php, /.env, etc.); logging each one would
+		// be noise. The slack and health paths are the only legitimate
+		// surface and they get their own log lines.
 		respondJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
+
+	slog.Info("received request", "path", r.URL.Path, "method", r.Method) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values, so tainted paths can't inject log lines.
 
 	// Honest oversize declarations get rejected before allocation.
 	// MaxBytesReader still catches dishonest senders during the read.

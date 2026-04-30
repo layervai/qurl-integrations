@@ -81,12 +81,15 @@ func run() error {
 	})
 
 	srv := &http.Server{
-		Addr:              listenAddr,
+		// Addr intentionally omitted: srv.Serve(ln) ignores it, and we
+		// bind via net.ListenConfig below. Setting it would mislead a
+		// future reader into thinking it controls the bind.
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Bind first so a port-already-in-use failure returns before the

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,20 @@ func noopQURLServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// countingQURLServer is like noopQURLServer but exposes the number of
+// requests it received. Used by negative-path tests that want to fence
+// "no upstream call leaked through" in addition to "401 returned".
+func countingQURLServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
 }
 
 // fixedNow pins the handler's clock so every signed-request test produces
@@ -176,7 +191,7 @@ func TestURLVerificationChallenge(t *testing.T) {
 // / interactions) ensure a future endpoint addition can't silently skip
 // signature verification.
 func TestSlackEndpoints_Reject401(t *testing.T) {
-	srv := noopQURLServer(t)
+	srv, hits := countingQURLServer(t)
 
 	body := url.Values{"command": {"/qurl"}, "text": {"help"}, "team_id": {"T123"}}.Encode()
 	tamperedBody := url.Values{"command": {"/qurl"}, "text": {"create https://evil.example"}, "team_id": {"T999"}}.Encode()
@@ -210,6 +225,13 @@ func TestSlackEndpoints_Reject401(t *testing.T) {
 				t.Errorf("status = %d, want 401", w.Code)
 			}
 		})
+	}
+
+	// Property fence: every 401 above means we rejected before
+	// dispatching to the qURL upstream. The status check alone wouldn't
+	// catch a regression that 401'd at the wire while leaking the call.
+	if got := hits.Load(); got != 0 {
+		t.Errorf("upstream qURL hits during auth-failure suite = %d, want 0", got)
 	}
 }
 
