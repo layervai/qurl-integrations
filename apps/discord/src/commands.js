@@ -1952,6 +1952,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
   }
 
+  // Tracks which prep paths actually completed so we can emit a single
+  // upload_success per send (not one per kind). A sendConfig with both
+  // file + location would otherwise fire two events for the same send,
+  // which double-counts UploadCount in CloudWatch unless the metric
+  // filter dimensions on `kind` (it doesn't, currently — see
+  // qurl-integrations-infra#309). The collapsed event keeps UploadCount
+  // = "number of fully-prepared sends" regardless of kind composition.
+  const preparedKinds = [];
   try {
     if (hasFile) {
       // Re-download from the stored Discord CDN URL, then upload a fresh
@@ -2028,7 +2036,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           label: `File (${sanitizeFilename(sendConfig.attachment_name || 'file')})`,
         });
       }
-      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
+      preparedKinds.push('file');
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
@@ -2054,7 +2062,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           resType: RESOURCE_TYPES.MAPS, label: sendConfig.location_name || 'Google Maps',
         });
       });
-      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
+      preparedKinds.push('location');
     }
   } catch (error) {
     logger.error('Failed to create links for additional recipients', { error: error.message });
@@ -2063,6 +2071,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
     return { msg, newResourceIds: [], delivered: 0, failed: 0 };
+  }
+
+  // Single emission per send. `kind` carries the composition so a future
+  // CloudWatch dimension on it can break the count down per kind without
+  // double-counting mixed sends. Values: 'file' | 'location' | 'mixed'.
+  if (preparedKinds.length > 0) {
+    const kind = preparedKinds.length === 1 ? preparedKinds[0] : 'mixed';
+    logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind });
   }
 
   const recipientIds = Object.keys(recipientLinks);

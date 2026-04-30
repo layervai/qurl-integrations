@@ -114,6 +114,14 @@ const AUDIT_EVENTS = {
   // to dispatch. It's not just the connector POST. Name is kept literal
   // ("upload_success") for back-compat with the upload_count terraform
   // filter; semantically closer to "prepare_success" or "links_ready".
+  //
+  // Emitted EXACTLY ONCE per send, even when handleAddRecipients runs
+  // both file and location prep paths. The meta `kind` field carries
+  // the composition: 'file' | 'location' | 'mixed'. Collapsing to one
+  // event prevents UploadCount from double-counting mixed sends if the
+  // CloudWatch filter doesn't dimension on kind. handleSend's branches
+  // are mutually exclusive so 'mixed' only ever shows up from
+  // handleAddRecipients on a sendConfig that has both file + location.
   UPLOAD_SUCCESS: 'upload_success',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',

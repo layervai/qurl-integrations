@@ -874,6 +874,38 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(emitted).not.toContain('mint_failed');
   });
 
+  // Locks the single-emission contract: a sendConfig with both file
+  // AND location must NOT fire upload_success twice (would double-count
+  // UploadCount in CloudWatch). The kind field must be 'mixed'.
+  it('emits exactly ONE upload_success with kind=mixed when both file + location prep paths run', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-orig', expires_in: '5m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      // Both paths active.
+      actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower',
+    });
+    // File path succeeds.
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-file-new', fileBuffer: Buffer.from('x') });
+    // mintLinks called twice (once per kind).
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/file', resource_id: 'res-file-new' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/loc', resource_id: 'res-loc-new' }]);
+    // Location path succeeds.
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
+    mockSendDM.mockResolvedValue(true);
+
+    await handleAddRecipients(
+      'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    const uploadEvents = logger.audit.mock.calls.filter(c => c[0] === 'upload_success');
+    expect(uploadEvents).toHaveLength(1);
+    expect(uploadEvents[0][1]).toEqual({ send_id: 'send-mixed', kind: 'mixed' });
+  });
+
   it('reports failed DMs as failed in the return value', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',

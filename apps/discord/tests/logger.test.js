@@ -206,6 +206,36 @@ describe('logger', () => {
       expect(parsed.audit.auth_token).toBe('sk-abc123');
     });
 
+    it('warns on secret-shaped keys nested inside a meta object', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      // Top-level-only iteration would miss this. Recursion is the
+      // whole point of the defense-in-depth — a caller passing
+      // `{ context: { auth_token: '...' } }` is the most realistic
+      // accidental-leak path (e.g., dumping an error context object).
+      logger.audit('upload_success', { send_id: 's1', context: { auth_token: 'sk-nested' } });
+
+      expect(consoleSpy.error).toHaveBeenCalled();
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
+      // Value still emits — audit doesn't redact, by contract.
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.context.auth_token).toBe('sk-nested');
+    });
+
+    it('warns on secret-shaped keys nested inside an array element', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.audit('upload_success', {
+        send_id: 's1',
+        history: [{ ts: 1, password: 'p1' }],
+      });
+
+      expect(consoleSpy.error).toHaveBeenCalled();
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('password');
+    });
+
     it('does NOT warn for legitimate dimension keys that contain "token" as a substring', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');

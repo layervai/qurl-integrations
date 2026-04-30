@@ -45,6 +45,29 @@ function isAuditSecretKey(key) {
   return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
 }
 
+// Walks a meta value recursively looking for any object key in
+// AUDIT_SECRET_KEYS. Returns the offending key name on first hit, or
+// null. Matches redact()'s depth cap (5) and array handling. Used by
+// audit() to surface a CloudWatch-visible warn when a caller buries a
+// secret inside a nested object — top-level-only iteration would miss
+// `{ context: { auth_token: '...' } }`.
+function findAuditSecretKey(value, depth = 0) {
+  if (depth > 5 || value == null || typeof value !== 'object') return null;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const found = findAuditSecretKey(v, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [k, v] of Object.entries(value)) {
+    if (isAuditSecretKey(k)) return k;
+    const found = findAuditSecretKey(v, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 function redact(value, depth = 0) {
   if (depth > 5 || value == null) return value;
   if (Array.isArray(value)) return value.map(v => redact(v, depth + 1));
@@ -132,19 +155,18 @@ const logger = {
     // try/catch around JSON.stringify, defeating the "audit never
     // breaks user flow" contract. Coerce to {} for any non-object.
     if (meta == null || typeof meta !== 'object') meta = {};
-    // Defense-in-depth: warn if a meta key matches the exact-match
-    // AUDIT_SECRET_KEYS set (auth_token, api_key, password, ...). We
-    // don't redact (would corrupt dimensions) and we don't drop the
-    // value (audit must always emit), but we surface the violation
-    // as a CloudWatch-visible error log so a misbehaving caller is
-    // catchable in dashboards rather than failing silently. Uses
-    // exact-match instead of REDACT_SUBSTRINGS's includes() check
-    // so legitimate dimensions like `tokens_minted` don't trigger.
-    for (const key of Object.keys(meta)) {
-      if (isAuditSecretKey(key)) {
-        console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(key)}" in event=${sanitizeMessage(event)}; emitting unredacted per audit contract — caller must remove from meta`);
-        break;
-      }
+    // Defense-in-depth: warn if any object key (top-level OR nested)
+    // in meta matches AUDIT_SECRET_KEYS (auth_token, api_key, password,
+    // ...). Recurses to depth 5 so a buried `{ context: { auth_token } }`
+    // still surfaces. Audit doesn't redact (would corrupt dimensions)
+    // and doesn't drop (must always emit), so we surface the violation
+    // as a CloudWatch-visible error log to make a misbehaving caller
+    // catchable in dashboards rather than silent. Exact-match (not
+    // substring) so legitimate dimensions like `tokens_minted` don't
+    // trigger false-positive warns.
+    const secretKey = findAuditSecretKey(meta);
+    if (secretKey) {
+      console.error(`[${formatTimestamp()}] ERROR: logger.audit received secret-shaped key "${sanitizeMessage(secretKey)}" in event=${sanitizeMessage(event)}; emitting unredacted per audit contract — caller must remove from meta`);
     }
     // Spread meta first, then pin event + agent last so a caller passing
     // `agent` or `event` in meta cannot overwrite the canonical value the
