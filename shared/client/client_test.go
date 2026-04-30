@@ -1,11 +1,14 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -499,5 +502,162 @@ func TestDelete(t *testing.T) {
 	c := testClient(srv.URL, "test-key")
 	if err := c.Delete(context.Background(), "r_abc123test"); err != nil {
 		t.Fatalf("Delete: %v", err)
+	}
+}
+
+func TestCreateIdempotencyKeyHeaderSet(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get(HeaderIdempotencyKey)
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_idem_test",
+			"qurl_link":   "https://qurl.link/idem",
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: "slack:T123:trig_456",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if gotHeader != "slack:T123:trig_456" {
+		t.Errorf("Idempotency-Key header: got %q, want %q", gotHeader, "slack:T123:trig_456")
+	}
+}
+
+func TestCreateIdempotencyKeyAbsentWhenEmpty(t *testing.T) {
+	var headerSeen, headerValue string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Distinguish absent vs empty-string: net/http treats Get on a
+		// missing header as "" — so we check the canonical header map
+		// directly to know if it was sent at all.
+		if vs, ok := r.Header[http.CanonicalHeaderKey(HeaderIdempotencyKey)]; ok {
+			headerSeen = "present"
+			if len(vs) > 0 {
+				headerValue = vs[0]
+			}
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_no_idem"})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if headerSeen != "" {
+		t.Errorf("Idempotency-Key header should be absent when IdempotencyKey is empty; got value %q", headerValue)
+	}
+}
+
+func TestCreateBodyByteIdenticalWithAndWithoutIdempotencyKey(t *testing.T) {
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		bodies = append(bodies, b)
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_body_test"})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.Create(context.Background(), CreateInput{TargetURL: "https://example.com"}); err != nil {
+		t.Fatalf("Create #1: %v", err)
+	}
+	if _, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: "slack:T999:trig_xyz",
+	}); err != nil {
+		t.Fatalf("Create #2: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 bodies, got %d", len(bodies))
+	}
+	if !bytes.Equal(bodies[0], bodies[1]) {
+		t.Errorf("request bodies should be byte-identical regardless of IdempotencyKey (json:\"-\" tag).\n#1: %s\n#2: %s", bodies[0], bodies[1])
+	}
+}
+
+func TestCreateIdempotencyKeyPreservedAcrossRetry(t *testing.T) {
+	var attempts atomic.Int32
+	var sawKeyOnAttempts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		sawKeyOnAttempts = append(sawKeyOnAttempts, r.Header.Get(HeaderIdempotencyKey))
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_retry_idem"})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		func(cl *Client) { cl.baseDelay = 1; cl.maxDelay = 1 },
+	)
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: "slack:T1:trig_retry",
+	})
+	if err != nil {
+		t.Fatalf("Create after retries: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	for i, k := range sawKeyOnAttempts {
+		if k != "slack:T1:trig_retry" {
+			t.Errorf("attempt %d: Idempotency-Key got %q, want %q", i+1, k, "slack:T1:trig_retry")
+		}
+	}
+}
+
+func TestCreateIdempotencyKeyTooLong(t *testing.T) {
+	// Server should never be hit — fail-fast is the contract.
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	tooLong := strings.Repeat("a", MaxIdempotencyKeyLength+1)
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: tooLong,
+	})
+	if !errors.Is(err, ErrIdempotencyKeyTooLong) {
+		t.Fatalf("expected ErrIdempotencyKeyTooLong, got %v", err)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("server should not be hit on too-long key; got %d hits", hits.Load())
+	}
+
+	// Boundary: exactly MaxIdempotencyKeyLength is allowed.
+	atRoot := strings.Repeat("b", MaxIdempotencyKeyLength)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(HeaderIdempotencyKey); got != atRoot {
+			t.Errorf("boundary case: header got %q, want length %d", got, len(atRoot))
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_boundary"})
+	}))
+	defer srv2.Close()
+
+	c2 := testClient(srv2.URL, "test-key")
+	if _, err := c2.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		IdempotencyKey: atRoot,
+	}); err != nil {
+		t.Errorf("boundary case (256 chars exactly): unexpected error %v", err)
 	}
 }

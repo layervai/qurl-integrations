@@ -23,6 +23,20 @@ const (
 	defaultMaxDelay   = 30 * time.Second
 )
 
+// HeaderIdempotencyKey is the request header the qURL API reads to dedupe
+// retried writes (the partition key on `qurl-service`'s
+// idempotency-store table is `hash(owner_id:idempotency_key:method:path)`).
+const HeaderIdempotencyKey = "Idempotency-Key"
+
+// MaxIdempotencyKeyLength matches the qURL API's stored cap. Values longer
+// than this would round-trip as a 400 Bad Request — we reject client-side
+// so the caller fails fast instead of consuming a network round-trip.
+const MaxIdempotencyKeyLength = 256
+
+// ErrIdempotencyKeyTooLong is returned by Create when CreateInput.IdempotencyKey
+// exceeds MaxIdempotencyKeyLength.
+var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 characters")
+
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
@@ -150,6 +164,13 @@ type CreateInput struct {
 	OneTimeUse   bool          `json:"one_time_use,omitempty"`
 	MaxSessions  int           `json:"max_sessions,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+
+	// IdempotencyKey, when non-empty, is sent as the `Idempotency-Key`
+	// request header so the API dedupes retried writes against an
+	// already-completed Create. Caller-chosen — must be unique to the
+	// logical operation (e.g. a Slack `trigger_id` hashed with the team
+	// id). `json:"-"` keeps it off the wire body.
+	IdempotencyKey string `json:"-"`
 }
 
 // CreateOutput is the response from creating a qURL.
@@ -161,7 +182,18 @@ type CreateOutput struct {
 }
 
 // Create creates a new qURL.
+//
+// CreateInput is passed by value here to keep the API stable for existing
+// callers (apps/cli, apps/slack/internal). Migrating to *CreateInput is the
+// right idiomatic fix once the struct keeps growing — tracked separately so
+// the cross-package change can ship as its own reviewable refactor.
+//
+//nolint:gocritic // hugeParam: 88 bytes after IdempotencyKey; see comment above.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
+	if len(input.IdempotencyKey) > MaxIdempotencyKeyLength {
+		return nil, ErrIdempotencyKeyTooLong
+	}
+
 	body, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("marshal create input: %w", err)
@@ -170,6 +202,9 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurl", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if input.IdempotencyKey != "" {
+		req.Header.Set(HeaderIdempotencyKey, input.IdempotencyKey)
 	}
 
 	var out CreateOutput
