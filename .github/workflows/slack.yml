@@ -1,13 +1,29 @@
-name: Slack Integration
+name: "slack: Build and Test"
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'apps/slack/**'
+      - 'shared/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/slack.yml'
   pull_request:
+    branches: [main]
+    paths:
+      - 'apps/slack/**'
+      - 'shared/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/slack.yml'
 
 permissions:
   contents: read
-  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -96,29 +112,61 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
-  build:
-    name: Build
+  docker-check:
+    name: Docker
     runs-on: ubuntu-latest
-    needs: [changes, lint, test]
+    needs: changes
     if: needs.changes.outputs.app == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      # Verify the Dockerfile builds end-to-end on the same arm64
+      # platform Fargate runs. Buildx is preinstalled on
+      # ubuntu-latest; QEMU emulates arm64 cleanly for the build
+      # since we don't run the binary here. The ECR push happens in
+      # qurl-integrations-infra's deploy workflow — this job only
+      # fences "Dockerfile is buildable from main" so a regression
+      # is caught at PR time, not at deploy time.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
-      - name: Build Lambda binary
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: arm64
-        run: go build -o bootstrap ./apps/slack/cmd/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Build slack bot image (linux/arm64)
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
-          name: slack-lambda
-          path: bootstrap
-          retention-days: 7
+          context: .
+          file: apps/slack/Dockerfile
+          platforms: linux/arm64
+          push: false
+          # `load: false` would skip writing to the local daemon, which
+          # we don't need anyway — the build succeeding is the test.
+          # Cache via GHA backend so subsequent PR pushes don't repay
+          # the full module-download + compile cost.
+          cache-from: type=gha,scope=slack-docker
+          cache-to: type=gha,mode=max,scope=slack-docker
+          build-args: |
+            VERSION=${{ github.sha }}
+
+  trigger-deploy:
+    needs: [changes, lint, test, vulnerability-scan, docker-check]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.changes.outputs.app == 'true'
+    # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
+    # isn't read by any step, so deny everything.
+    permissions: {}
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0 # v0.5.0
+    with:
+      target_repo: qurl-integrations-infra
+      # `event_type` must match the receiver's `repository_dispatch.types`
+      # at qurl-integrations-infra/.github/workflows/qurl-bot-slack-deploy.yml.
+      # That receiver lands in Phase 3 of the master plan; until then this
+      # dispatch is a no-op (HTTP 204 from the dispatch API but no workflow
+      # fires receiver-side). Mirrors the discord-bot-deploy pattern.
+      event_type: slack-bot-deploy
+      client_payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'
+    # Explicit `secrets:` map (not `inherit`) keeps the reusable's surface
+    # to the two named App secrets even as more secrets get added here.
+    secrets:
+      app_id: ${{ secrets.DEPLOY_DISPATCHER_APP_ID }}
+      app_private_key: ${{ secrets.DEPLOY_DISPATCHER_APP_PRIVATE_KEY }}

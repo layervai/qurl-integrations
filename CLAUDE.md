@@ -104,7 +104,7 @@ make check          # Full CI parity: fmt + vet + lint + test
 make lint           # golangci-lint only
 make test           # go test (no race)
 make test-race      # go test -race
-make build-slack    # Build Slack Lambda binary
+make build-slack    # Build Slack bot binary (also bundled into apps/slack/Dockerfile)
 make security       # govulncheck
 make fmt            # gofmt + goimports
 ```
@@ -120,14 +120,22 @@ go test -count=1 ./...             # Skip cache
 
 ## Build
 
-Lambda apps use `CGO_ENABLED=0 GOOS=linux GOARCH=arm64`:
+Production builds target `linux/arm64` (Graviton on Fargate). The
+canonical build path is the per-app Dockerfile (e.g. `apps/slack/Dockerfile`):
+
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
+```
+
+For a local Go binary outside Docker (development, debugging):
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/qurl-bot-slack ./apps/slack/cmd/
 ```
 
 ## Key Architecture Decisions
 
 - **Auth:** Start with workspace API keys (qurl-api-keys table exists). Per-user OAuth later.
-- **Runtime (Slack):** AWS Lambda behind API Gateway. Event-driven, scales to zero.
+- **Runtime (Slack):** AWS Fargate (arm64, distroless container) behind an ALB. Always-on; the steady enterprise workload makes Lambda cold starts the wrong shape (memory: feedback_provisioned_concurrency_smell).
 - **Shared client:** `shared/client/` wraps the qURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.
