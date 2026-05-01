@@ -27,18 +27,24 @@ const intents = [
 // and fails loud if the intent has been removed from `intents` above —
 // converting silent-feature-break (e.g., voice-channel /qurl send
 // returning empty) into a startup error with a clear cause.
-function assertIntent(bit, requiredFor) {
+//
+// `assertIntent` takes the intents list as its first argument (rather
+// than closing over the module-level `intents`) so it's directly
+// testable: a unit test can pass an intents-with-one-stripped array and
+// verify the throw, locking in the assertion's purpose against a future
+// "let's downgrade to a warn" refactor.
+function assertIntent(intentsList, bit, requiredFor) {
   // Belt-and-suspenders: in test environments where GatewayIntentBits
   // is partially mocked, `bit` may be undefined; treat undefined as
   // "intent not declared" rather than "intent silently missing."
-  if (bit === undefined || !intents.includes(bit)) {
+  if (bit === undefined || !intentsList.includes(bit)) {
     throw new Error(`Missing required Discord intent for ${requiredFor}. Add the intent back to the \`intents\` array in apps/discord/src/discord.js.`);
   }
 }
-assertIntent(GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
-assertIntent(GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
-assertIntent(GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
+assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
+assertIntent(intents, GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
 
 const client = new Client({ intents });
 
@@ -899,6 +905,10 @@ module.exports = {
   refreshCache,
   shutdown,
   getChannelMembers,
+  // Exported only for unit tests to verify the boot canary throws on
+  // a missing intent. Production callers don't need it — the module-
+  // level invocations above are the load-bearing assertions.
+  assertIntent,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,

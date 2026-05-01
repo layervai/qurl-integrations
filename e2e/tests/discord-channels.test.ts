@@ -92,24 +92,23 @@ describe('Discord: Voice State', () => {
     // default servers and were the source of the prior "sends to entire
     // guild" bug.
     //
-    // The Discord REST API's `voice_states` endpoint is the canonical
-    // source of "currently connected to voice in this channel" — same
+    // The Discord REST API's `voice_states` field on GET /guilds/:id is
+    // the canonical source of "currently connected to voice" — same
     // signal the bot's voice state cache exposes via channel.members.
-    // This test asserts the bot can read voice states for the test
-    // guild and that the channel-scoped subset is what would feed the
-    // recipient pool.
+    // This test pins TWO real invariants:
+    //   1. Every entry in voice_states has a channel_id — i.e., voice
+    //      states are always channel-scoped (not guild-scoped).
+    //   2. Every voice_state.channel_id resolves to a voice or stage-
+    //      voice channel in the same guild — never to a text channel,
+    //      DM, or unknown ID. A future Discord API shape change that
+    //      broke this would surface here, not silently in the bot.
     const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
     const voiceChannels = channels.filter((c: any) => c.type === 2 || c.type === 13);
     if (voiceChannels.length === 0) {
       console.log('No voice/stage channels in test guild — skipping invariant check');
       return;
     }
-    const voiceChannel = voiceChannels[0];
 
-    // GET /guilds/:id returns current voice_states inline. Filter for
-    // the target voice channel — that subset is exactly what /qurl
-    // send target=channel would resolve to in voice context, minus
-    // sender + bot filtering applied client-side.
     let guildSnapshot: any;
     try {
       guildSnapshot = await discordApi('GET', `/guilds/${env.GUILD_ID}?with_counts=true`);
@@ -119,16 +118,16 @@ describe('Discord: Voice State', () => {
     }
 
     const voiceStates: any[] = guildSnapshot.voice_states || [];
-    const inThisChannel = voiceStates.filter((vs: any) => vs.channel_id === voiceChannel.id);
-    // The set CAN legitimately be empty (nobody currently connected) —
-    // the invariant we're pinning is the SCOPE, not a non-empty count.
-    // The regression we'd catch is e.g. inThisChannel returning all
-    // guild members instead of voice-connected ones, which would surface
-    // as inThisChannel.length > voiceStates.length (impossible) or as
-    // entries with mismatched channel_id (caught by the filter shape).
-    inThisChannel.forEach((vs: any) => {
-      expect(vs.channel_id).toBe(voiceChannel.id);
+    const voiceChannelIds = new Set(voiceChannels.map((c: any) => c.id));
+    voiceStates.forEach((vs: any) => {
+      // Invariant 1: every voice state has a channel_id.
+      expect(typeof vs.channel_id).toBe('string');
+      // Invariant 2: voice states only reference voice / stage-voice
+      // channels in this guild — pins the API shape the bot relies on.
+      expect(voiceChannelIds.has(vs.channel_id)).toBe(true);
     });
+    const voiceChannel = voiceChannels[0];
+    const inThisChannel = voiceStates.filter((vs: any) => vs.channel_id === voiceChannel.id);
     console.log(
       `Voice channel #${voiceChannel.name}: ${inThisChannel.length} voice-connected member(s) ` +
       `would be in the "Everyone in this voice channel" recipient pool ` +

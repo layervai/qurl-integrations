@@ -133,7 +133,7 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetTextChannelMembers = jest.fn();
+const mockGetChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -143,7 +143,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getChannelMembers: mockGetTextChannelMembers,
+  getChannelMembers: mockGetChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -733,7 +733,7 @@ describe('handleSend — Step 3: final form', () => {
   });
 
   it('target=channel resolves text-channel members', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -747,12 +747,12 @@ describe('handleSend — Step 3: final form', () => {
       awaitQueue: [locInitBtn(), targetChannel, sendBtn],
     });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalled();
+    expect(mockGetChannelMembers).toHaveBeenCalled();
     expect(sendBtn.update).toHaveBeenCalled();
   });
 
   it('target=channel re-prompts when channel has no other members', async () => {
-    mockGetTextChannelMembers.mockReturnValue([]);
+    mockGetChannelMembers.mockReturnValue([]);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -772,7 +772,7 @@ describe('handleSend — Step 3: final form', () => {
   // for voice/stage-voice channels. Also: no fetchGuildMembers call needed
   // (voice state cache populates automatically via gateway events).
   it('voice-channel invocation skips fetchGuildMembers and uses voice-connected only', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const guildFetch = jest.fn().mockResolvedValue(undefined);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
@@ -782,12 +782,12 @@ describe('handleSend — Step 3: final form', () => {
       guild: { members: { fetch: guildFetch } },
     });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalled();
+    expect(mockGetChannelMembers).toHaveBeenCalled();
     expect(guildFetch).not.toHaveBeenCalled();
   });
 
   it('voice-channel empty re-prompt names the voice context', async () => {
-    mockGetTextChannelMembers.mockReturnValue([]);
+    mockGetChannelMembers.mockReturnValue([]);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -895,7 +895,7 @@ describe('handleSend — recipients cap', () => {
     // targetSelect handler so the user isn't sandbagged after filling
     // in the rest of the form.
     const many = Array.from({ length: 51 }, (_, i) => ({ id: `u${i}`, username: `U${i}` }));
-    mockGetTextChannelMembers.mockReturnValue(many);
+    mockGetChannelMembers.mockReturnValue(many);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -963,7 +963,7 @@ describe('handleSend — end-to-end happy paths', () => {
     const err = new Error('upstream quota');
     err.apiCode = 'quota_exceeded';
     mockUploadJsonToConnector.mockRejectedValue(err);
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     const locInit = makeCompInt(ids.initLoc, {
@@ -985,7 +985,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('aborts when the DB write fails after mint, before any DM goes out', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
@@ -1010,7 +1010,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('reports failed DM delivery in the post-send confirmation', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1042,7 +1042,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('returns a friendly message when mintLinks underdelivers', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1104,7 +1104,7 @@ describe('handleSend — audit emission', () => {
   });
 
   it('emits dispatch_sent / dispatch_failed once per recipient, even on partial DM failure', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1134,7 +1134,7 @@ describe('handleSend — audit emission', () => {
   });
 
   it('emits dispatch_sent before the DB write, so a DDB throw cannot suppress the metric', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockSendDM.mockResolvedValue(true);
     // Make the DM-status DB write throw — audit must already have fired.
@@ -1162,7 +1162,7 @@ describe('handleSend — audit emission', () => {
   // must still fire as dispatch_failed (not silently disappear when the
   // promise rejection bubbles through batchSettled).
   it('emits dispatch_failed when sendDM itself throws (contract regression guard)', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockSendDM.mockRejectedValueOnce(new Error('Discord API 503'));
     const locInit = makeCompInt(ids.initLoc, {
@@ -1210,7 +1210,7 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
   }
 
   it('strips RLO (U+202E) and ZWSP (U+200B) before posting to channel', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
@@ -1245,7 +1245,7 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
   // user-visible signal that the link went to voice-connected members
   // only, not the entire view-perm scope.
   it('text-channel announcement says "all members of this channel"', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     const channelSend = jest.fn().mockResolvedValue(undefined);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
@@ -1262,7 +1262,7 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
   });
 
   it('voice-channel announcement says "currently connected to this voice channel"', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     const channelSend = jest.fn().mockResolvedValue(undefined);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
@@ -1375,19 +1375,19 @@ describe('handleSend — additional branch coverage', () => {
   // during the up-to-3-min form-loop window). Regression test for the
   // ghost-recipients bug Claude bot review flagged.
   it('re-resolves channel members on every channel re-select (no stale recipients)', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(2);
+    expect(mockGetChannelMembers).toHaveBeenCalledTimes(2);
   });
 
   // C5d — switching target across types resets recipients (no leakage
   // from a previously-picked user into a channel send, etc.).
   it('switches target across types and resets recipients each transition', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userPick = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
@@ -1475,7 +1475,7 @@ describe('handleSend — additional branch coverage', () => {
 
   // C9 — saveSendConfig failure is logged-and-swallowed; DMs still go out.
   it('logs but does not abort when saveSendConfig fails after delivery', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockDb.saveSendConfig.mockImplementationOnce(() => { throw new Error('disk full'); });
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
@@ -1493,7 +1493,7 @@ describe('handleSend — additional branch coverage', () => {
 
   // C10 — file-path mintLinks underdelivery (mirror of the location-path test).
   it('returns a friendly message when mintLinks underdelivers on the file path', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1520,7 +1520,7 @@ describe('handleSend — additional branch coverage', () => {
     mockDownloadAndUpload.mockRejectedValueOnce(err);
     const fileInit = makeCompInt(ids.initFile);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));

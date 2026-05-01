@@ -620,4 +620,29 @@ describe('discord module', () => {
       expect(typeof discord.getChannels).toBe('function');
     });
   });
+
+  describe('assertIntent (boot canary)', () => {
+    // The whole point of the per-feature canary is to fail loud at
+    // startup if an intent is removed; without a positive test for the
+    // throw path, a future "let's downgrade to a warn" refactor would
+    // silently degrade the assertion. These tests pin the contract.
+    it('throws when the required intent is not in the intents list', () => {
+      const intentsWithoutVoice = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
+      expect(() => discord.assertIntent(intentsWithoutVoice, 128, 'voice-channel /qurl send'))
+        .toThrow(/Missing required Discord intent for voice-channel \/qurl send/);
+    });
+
+    it('throws when the required intent is undefined (partially-mocked GatewayIntentBits)', () => {
+      // In a test env where GatewayIntentBits.SomeIntent === undefined,
+      // the assertion should still fail — undefined is treated as
+      // "not declared" rather than "silently missing."
+      expect(() => discord.assertIntent([1, 2, 128], undefined, 'feature X'))
+        .toThrow(/Missing required Discord intent for feature X/);
+    });
+
+    it('does not throw when the required intent is present', () => {
+      expect(() => discord.assertIntent([1, 2, 128, 4096], 128, 'voice-channel /qurl send'))
+        .not.toThrow();
+    });
+  });
 });

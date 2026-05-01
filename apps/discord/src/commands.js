@@ -1308,10 +1308,15 @@ async function handleSend(interaction, apiKey) {
     if (compInt.customId === ids.targetSelect) {
       const newTarget = compInt.values[0];
       // For user-target, re-selecting 'user' is a no-op (UserSelect drives
-      // the actual recipient pick). For channel, ALWAYS re-resolve —
-      // members can join/leave (or join/leave voice, in voice-channel
-      // context) during the up-to-3-minute form-loop window, and a stale
-      // recipients array would mint links for ghosts.
+      // the actual recipient pick). For channel, ALWAYS re-resolve.
+      // Staleness sources differ by context:
+      //   - text channel: members can join/leave the guild during the
+      //     up-to-3-min form-loop window; the guild member cache (warmed
+      //     by fetchGuildMembers below) goes stale.
+      //   - voice / stage-voice: users can join/leave voice during the
+      //     window; the gateway-driven voice state cache reflects this
+      //     live, but a captured recipients array snapshot would not.
+      // A stale recipients array would mint links for ghosts.
       if (newTarget !== target || newTarget === 'channel') {
         target = newTarget;
         recipients = [];
@@ -1333,8 +1338,8 @@ async function handleSend(interaction, apiKey) {
           if (recipients.length === 0) {
             target = null;
             const warning = isVoiceContext
-              ? 'No other users currently connected to this voice channel. Pick another option.'
-              : 'No other members in this channel. Pick another option.';
+              ? 'No other users currently connected to this voice channel. Pick **A specific user** instead.'
+              : 'No other members in this channel. Pick **A specific user** instead.';
             await safeCompUpdate(compInt, { content: formContent({ warning }), components: formRows() });
             continue;
           }

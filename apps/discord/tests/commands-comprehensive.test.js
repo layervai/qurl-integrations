@@ -168,7 +168,7 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetText = jest.fn();
+const mockGetChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -178,7 +178,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getChannelMembers: mockGetText,
+  getChannelMembers: mockGetChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
