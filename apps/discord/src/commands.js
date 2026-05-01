@@ -734,6 +734,15 @@ async function handleSend(interaction, apiKey) {
   // Set cooldown immediately to prevent concurrent request bypass
   setCooldown(interaction.user.id);
 
+  // Hoisted once for reuse across the form (dropdown labels, channel-target
+  // resolution, fetchGuildMembers skip) and the back-half (channel-
+  // announcement wording). The invocation channel type is fixed for the
+  // lifetime of this handler — Discord doesn't reroute live interactions.
+  const isVoiceContext = (
+    interaction.channel.type === ChannelType.GuildVoice
+    || interaction.channel.type === ChannelType.GuildStageVoice
+  );
+
   const sendNonce = crypto.randomBytes(8).toString('hex');
 
   // ── Step 1: Initial 2-button reply (Send File / Send Location) ──
@@ -1166,9 +1175,8 @@ async function handleSend(interaction, apiKey) {
   // members only — anything broader expands to ViewChannel-perm scope
   // (often @everyone, i.e. the whole guild) and was the source of the
   // prior "sends to entire server" bug. The dropdown surfaces this
-  // explicitly with a voice-specific label.
-  const isVoiceContext = interaction.channel.type === ChannelType.GuildVoice ||
-                          interaction.channel.type === ChannelType.GuildStageVoice;
+  // explicitly with a voice-specific label. (`isVoiceContext` hoisted
+  // at the top of handleSend.)
   const channelOptionLabel = isVoiceContext
     ? 'Everyone in this voice channel'
     : 'Everyone in this channel';
@@ -1747,9 +1755,7 @@ async function handleSend(interaction, apiKey) {
     // the same spoof defense here is critical — without it a display name
     // with a leading U+202E flips text direction in the public announcement.
     const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
-    const isVoiceChannelInvocation = interaction.channel.type === ChannelType.GuildVoice ||
-                                      interaction.channel.type === ChannelType.GuildStageVoice;
-    const notifyMsg = isVoiceChannelInvocation
+    const notifyMsg = isVoiceContext
       ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
       : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
     try {

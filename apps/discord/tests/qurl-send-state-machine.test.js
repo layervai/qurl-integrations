@@ -1231,6 +1231,45 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
     // The sanitized name should appear (NFKC + strip leaves "Adminbob")
     expect(msg).toMatch(/Adminbob/);
   });
+
+  // Voice context wording diverges from the text-channel announcement.
+  // Pin both branches so a future operator-readability tweak doesn't
+  // regress one path silently. The wording difference is the only
+  // user-visible signal that the link went to voice-connected members
+  // only, not the entire view-perm scope.
+  it('text-channel announcement says "all members of this channel"', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    const channelSend = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      channel: { type: 0, send: channelSend }, // GuildText
+    });
+    await cmd.execute(interaction);
+    expect(channelSend).toHaveBeenCalledTimes(1);
+    const msg = channelSend.mock.calls[0][0].content;
+    expect(msg).toContain('all members of this channel');
+    expect(msg).not.toContain('voice channel');
+  });
+
+  it('voice-channel announcement says "currently connected to this voice channel"', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    const channelSend = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      channel: { type: 2, send: channelSend }, // GuildVoice
+    });
+    await cmd.execute(interaction);
+    expect(channelSend).toHaveBeenCalledTimes(1);
+    const msg = channelSend.mock.calls[0][0].content;
+    expect(msg).toContain('currently connected to this voice channel');
+    expect(msg).not.toContain('all members of this channel');
+  });
 });
 
 // ===========================================================================

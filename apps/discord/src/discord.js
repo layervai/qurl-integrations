@@ -805,7 +805,10 @@ async function sendDM(discordId, message) {
 //     first; see commands.js channel-target branch.
 //   - voice / stage-voice channels: GuildMembers CURRENTLY CONNECTED to
 //     voice. Sourced from voice state cache (populated automatically via
-//     gateway events; no fetch needed).
+//     gateway events; no fetch needed) — REQUIRES the GuildVoiceStates
+//     intent (declared in the Client config above). If that intent is
+//     ever trimmed, voice/stage-voice paths will silently return empty
+//     here.
 //
 // Both are the desired semantic for "Everyone in this channel." Voice
 // channels deliberately resolve to voice-connected only — anything broader
