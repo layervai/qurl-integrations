@@ -153,7 +153,7 @@ jest.mock('../src/discord', () => ({
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
   getVoiceChannelMembers: jest.fn(),
-  getTextChannelMembers: jest.fn(),
+  getChannelMembers: jest.fn(),
 }));
 
 jest.mock('../src/utils/admin', () => ({

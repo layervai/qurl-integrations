@@ -33,7 +33,7 @@ const TOKENS_PER_RESOURCE = 10;
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-const { getTextChannelMembers, sendDM } = require('./discord');
+const { getChannelMembers, sendDM } = require('./discord');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -1301,8 +1301,7 @@ async function handleSend(interaction, apiKey) {
       // members can join/leave (or join/leave voice, in voice-channel
       // context) during the up-to-3-minute form-loop window, and a stale
       // recipients array would mint links for ghosts.
-      const requiresFreshResolve = newTarget === 'channel';
-      if (newTarget !== target || requiresFreshResolve) {
+      if (newTarget !== target || newTarget === 'channel') {
         target = newTarget;
         recipients = [];
         if (target === 'channel') {
@@ -1319,7 +1318,7 @@ async function handleSend(interaction, apiKey) {
               return;
             }
           }
-          recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
+          recipients = getChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
             const warning = isVoiceContext

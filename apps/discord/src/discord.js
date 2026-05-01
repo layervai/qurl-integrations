@@ -5,20 +5,42 @@ const logger = require('./logger');
 const db = require('./store');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
-    // Needed for the /qurl send file path's DM-pivot: when the user
-    // clicks Send File from a guild channel, the bot DMs them and
-    // awaitMessages on that DM channel for the file drop. Without
-    // this intent the bot never sees DM messages and the awaitMessages
-    // call times out at 60s — even though the user dropped the file.
-    // Attachment metadata does NOT require MessageContent intent.
-    GatewayIntentBits.DirectMessages,
-  ],
-});
+// Required intents — single source of truth. Each feature that depends
+// on a specific intent has its own assertion below; if a future refactor
+// trims an entry from this array, the corresponding feature-specific
+// assertion fails at module load with a clear error pointing at the
+// broken feature.
+const intents = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildVoiceStates,
+  // Needed for the /qurl send file path's DM-pivot: when the user
+  // clicks Send File from a guild channel, the bot DMs them and
+  // awaitMessages on that DM channel for the file drop. Without
+  // this intent the bot never sees DM messages and the awaitMessages
+  // call times out at 60s — even though the user dropped the file.
+  // Attachment metadata does NOT require MessageContent intent.
+  GatewayIntentBits.DirectMessages,
+];
+
+// Per-feature intent canaries. Each line pins one intent to one feature
+// and fails loud if the intent has been removed from `intents` above —
+// converting silent-feature-break (e.g., voice-channel /qurl send
+// returning empty) into a startup error with a clear cause.
+function assertIntent(bit, requiredFor) {
+  // Belt-and-suspenders: in test environments where GatewayIntentBits
+  // is partially mocked, `bit` may be undefined; treat undefined as
+  // "intent not declared" rather than "intent silently missing."
+  if (bit === undefined || !intents.includes(bit)) {
+    throw new Error(`Missing required Discord intent for ${requiredFor}. Add the intent back to the \`intents\` array in apps/discord/src/discord.js.`);
+  }
+}
+assertIntent(GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
+assertIntent(GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
+assertIntent(GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
+assertIntent(GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
+
+const client = new Client({ intents });
 
 // Cache for quick lookups
 let guild = null;
@@ -808,13 +830,21 @@ async function sendDM(discordId, message) {
 //     gateway events; no fetch needed) — REQUIRES the GuildVoiceStates
 //     intent (declared in the Client config above). If that intent is
 //     ever trimmed, voice/stage-voice paths will silently return empty
-//     here.
+//     here. The boot-time assertion in this file's intent block fails
+//     loud at startup if anyone removes it without replacing the helper.
 //
 // Both are the desired semantic for "Everyone in this channel." Voice
 // channels deliberately resolve to voice-connected only — anything broader
 // expands to ViewChannel-perm scope, which on default servers is the
 // entire guild (the prior "sends to everyone in the server" bug).
-function getTextChannelMembers(channel, senderUserId) {
+//
+// Trust boundary: this helper assumes `channel` is a GuildText, GuildVoice,
+// or GuildStageVoice channel object with `.members` populated. It is NOT
+// safe to call with DM channels (no .members), partial cache entries, or
+// arbitrary unvalidated channel inputs. Today's only call site
+// (commands.js channel-target branch) is reached via interaction.channel
+// after a guild-context guard, so this contract holds.
+function getChannelMembers(channel, senderUserId) {
   return channel.members
     .filter(m => m.id !== senderUserId && !m.user.bot)
     .map(m => m.user);
@@ -849,7 +879,7 @@ module.exports = {
   sendDM,
   refreshCache,
   shutdown,
-  getTextChannelMembers,
+  getChannelMembers,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,

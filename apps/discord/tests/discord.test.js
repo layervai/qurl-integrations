@@ -2,7 +2,7 @@
  * Tests for src/discord.js — covers refreshCache, assignContributorRole,
  * notifyPRMerge, notifyBadgeEarned, postGoodFirstIssue, postReleaseAnnouncement,
  * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM,
- * getTextChannelMembers, shutdown, event handlers.
+ * getChannelMembers, shutdown, event handlers.
  */
 
 jest.mock('../src/config', () => ({
@@ -99,7 +99,7 @@ const mockClient = {
 
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
-  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128 },
+  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128, DirectMessages: 4096 },
   EmbedBuilder: jest.fn().mockImplementation(() => ({
     setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
     setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),
@@ -314,7 +314,7 @@ describe('discord module', () => {
     });
   });
 
-  describe('getTextChannelMembers', () => {
+  describe('getChannelMembers', () => {
     // Helper: turn a plain Map into something with .filter() returning an
     // array that also has .map (matches discord.js Collection enough for
     // these tests without pulling in the real class).
@@ -332,7 +332,7 @@ describe('discord module', () => {
         ['u2', { id: 'u2', user: { bot: false } }],
         ['b1', { id: 'b1', user: { bot: true } }],
       ]));
-      const result = discord.getTextChannelMembers({ members: membersMap }, 's1');
+      const result = discord.getChannelMembers({ members: membersMap }, 's1');
       expect(result).toHaveLength(1);
     });
 
@@ -351,7 +351,7 @@ describe('discord module', () => {
         type: 2, // GuildVoice — included for clarity; helper no longer branches on type
         members: connected,
       };
-      const result = discord.getTextChannelMembers(channel, 's1');
+      const result = discord.getChannelMembers(channel, 's1');
       expect(result.map(u => u.id)).toEqual(['u2']);
     });
 
@@ -363,7 +363,7 @@ describe('discord module', () => {
         type: 13, // GuildStageVoice
         members: connected,
       };
-      const result = discord.getTextChannelMembers(channel, 's1');
+      const result = discord.getChannelMembers(channel, 's1');
       expect(result.map(u => u.id)).toEqual(['u2']);
     });
 
@@ -371,7 +371,7 @@ describe('discord module', () => {
       const connected = asCollection(new Map([
         ['s1', { id: 's1', user: { id: 's1', bot: false } }], // only sender
       ]));
-      const result = discord.getTextChannelMembers({ type: 2, members: connected }, 's1');
+      const result = discord.getChannelMembers({ type: 2, members: connected }, 's1');
       expect(result).toEqual([]);
     });
   });
@@ -590,7 +590,7 @@ describe('discord module', () => {
   describe('exports', () => {
     it('exports all expected functions', () => {
       expect(typeof discord.sendDM).toBe('function');
-      expect(typeof discord.getTextChannelMembers).toBe('function');
+      expect(typeof discord.getChannelMembers).toBe('function');
       expect(typeof discord.assignContributorRole).toBe('function');
       expect(typeof discord.notifyPRMerge).toBe('function');
       expect(typeof discord.notifyBadgeEarned).toBe('function');

@@ -143,7 +143,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getTextChannelMembers: mockGetTextChannelMembers,
+  getChannelMembers: mockGetTextChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -765,7 +765,7 @@ describe('handleSend — Step 3: final form', () => {
   });
 
   // Voice-channel invocation: target=channel resolves to voice-connected
-  // members only (the prior bug was that getTextChannelMembers filtered
+  // members only (the prior bug was that getChannelMembers filtered
   // guild.members.cache by ViewChannel perm, which on default servers
   // expanded to @everyone — sending to the entire guild). The fix routes
   // through channel.members which discord.js v14 returns as voice-connected
@@ -816,8 +816,15 @@ describe('handleSend — Step 3: final form', () => {
     );
     expect(initialFormCall).toBeDefined();
     const targetSelect = initialFormCall[0].components[0].components[0];
-    const labels = targetSelect.addOptions.mock.calls[0].map((o) => o.label);
+    const options = targetSelect.addOptions.mock.calls[0];
+    const labels = options.map((o) => o.label);
+    const values = options.map((o) => o.value);
     expect(labels).toEqual(['A specific user', 'Everyone in this voice channel']);
+    // Pin values too — "no separate voice option" intent. A future
+    // regression that re-introduces a third dropdown entry under a
+    // different label would still pass labels.toEqual([...]) with an
+    // exact-match array, but values would catch the structural change.
+    expect(values).toEqual(['user', 'channel']);
   });
 
   it('expiry select updates the chosen expiry', async () => {
