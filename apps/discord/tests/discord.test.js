@@ -332,8 +332,22 @@ describe('discord module', () => {
         ['u2', { id: 'u2', user: { bot: false } }],
         ['b1', { id: 'b1', user: { bot: true } }],
       ]));
-      const result = discord.getChannelMembers({ members: membersMap }, 's1');
+      const result = discord.getChannelMembers({ type: 0, members: membersMap }, 's1'); // GuildText
       expect(result).toHaveLength(1);
+    });
+
+    it('returns empty + warns on unsupported channel types (thread, forum, DM)', () => {
+      // The helper supports only GuildText / GuildVoice / GuildStageVoice.
+      // Other types either lack `.members` entirely (DM=1, GuildForum=15,
+      // GuildMedia=16) or expose a different shape (thread types 10/11/12
+      // give a ThreadMemberManager of ThreadMember objects whose `.user`
+      // is lazily populated). The runtime guard returns [] safely.
+      const threadResult = discord.getChannelMembers({ type: 11, members: {}, id: 'th1' }, 's1');
+      expect(threadResult).toEqual([]);
+      const dmResult = discord.getChannelMembers({ type: 1, id: 'dm1' }, 's1');
+      expect(dmResult).toEqual([]);
+      const nullResult = discord.getChannelMembers(null, 's1');
+      expect(nullResult).toEqual([]);
     });
 
     it('on a voice channel, returns voice-connected members only (NOT the @everyone view-perm scope)', () => {

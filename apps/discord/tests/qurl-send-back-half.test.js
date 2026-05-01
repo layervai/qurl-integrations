@@ -152,7 +152,6 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-
   getChannelMembers: jest.fn(),
 }));
 

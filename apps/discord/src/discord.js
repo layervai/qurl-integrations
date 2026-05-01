@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -838,21 +838,32 @@ async function sendDM(discordId, message) {
 // expands to ViewChannel-perm scope, which on default servers is the
 // entire guild (the prior "sends to everyone in the server" bug).
 //
-// Trust boundary: this helper assumes `channel` is a GuildText, GuildVoice,
-// or GuildStageVoice channel object with `.members` populated. It is NOT
-// safe to call with:
-//   - DM channels (no `.members` property at all)
-//   - thread channels (PublicThread=11, PrivateThread=12, AnnouncementThread=10):
-//     `.members` here is a ThreadMemberManager of ThreadMember objects
-//     (thread participants, not channel viewers) — different shape and
-//     different semantic from "Everyone who can view this channel."
-//   - forum / media channels (GuildForum=15, GuildMedia=16): no `.members`
-//   - partial cache entries or arbitrary unvalidated channel inputs.
-// Today's only call site (commands.js channel-target branch) is reached
-// via interaction.channel from /qurl send, which the slash-command
-// registration only allows in guild text + guild voice + stage-voice
-// contexts (no thread/forum/media exposure), so the contract holds.
+// Trust boundary: this helper supports GuildText, GuildVoice, and
+// GuildStageVoice channels — the three types where `channel.members` is
+// the right "Everyone in this channel" set under discord.js v14
+// (viewer set for text; voice-connected for voice/stage-voice). The
+// helper REJECTS other types via SUPPORTED_CHANNEL_TYPES rather than
+// trusting a documented contract, because /qurl send's slash-command
+// registration does not currently restrict invocation context — a user
+// COULD trigger this helper from a thread / forum / DM today, where
+// `channel.members` either has the wrong shape (thread:
+// ThreadMemberManager of ThreadMember; user lazily populated) or
+// doesn't exist at all (forum / media / DM). Returning [] (with a
+// warn log so the call site's "no recipients" branch surfaces clearly)
+// is safer than letting `.filter().map()` throw on an unexpected shape.
+const SUPPORTED_CHANNEL_TYPES = new Set([
+  ChannelType.GuildText,
+  ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice,
+]);
 function getChannelMembers(channel, senderUserId) {
+  if (!channel || !SUPPORTED_CHANNEL_TYPES.has(channel.type)) {
+    logger.warn('getChannelMembers called with unsupported channel type', {
+      channelId: channel?.id,
+      channelType: channel?.type,
+    });
+    return [];
+  }
   return channel.members
     .filter(m => m.id !== senderUserId && !m.user.bot)
     .map(m => m.user);

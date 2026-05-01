@@ -747,9 +747,14 @@ async function handleSend(interaction, apiKey) {
   // resolution, fetchGuildMembers skip) and the back-half (channel-
   // announcement wording). The invocation channel type is fixed for the
   // lifetime of this handler — Discord doesn't reroute live interactions.
+  // `interaction.channel` was non-null-guarded above, but read .type
+  // through optional chaining as belt-and-suspenders so a future refactor
+  // that moves this above the guard doesn't strand a cooldown via a
+  // null-deref throw.
+  const channelType = interaction.channel?.type;
   const isVoiceContext = (
-    interaction.channel.type === ChannelType.GuildVoice
-    || interaction.channel.type === ChannelType.GuildStageVoice
+    channelType === ChannelType.GuildVoice
+    || channelType === ChannelType.GuildStageVoice
   );
 
   const sendNonce = crypto.randomBytes(8).toString('hex');
@@ -1180,12 +1185,9 @@ async function handleSend(interaction, apiKey) {
     return content;
   };
 
-  // Voice / stage-voice channels resolve "channel" to voice-connected
-  // members only — anything broader expands to ViewChannel-perm scope
-  // (often @everyone, i.e. the whole guild) and was the source of the
-  // prior "sends to entire server" bug. The dropdown surfaces this
-  // explicitly with a voice-specific label. (`isVoiceContext` hoisted
-  // at the top of handleSend.)
+  // Contextual label — voice/stage-voice paths resolve to voice-connected
+  // only (see `getChannelMembers`'s doc-comment in src/discord.js for
+  // the v14 polymorphism + the bug this avoids).
   const channelOptionLabel = isVoiceContext
     ? 'Everyone in this voice channel'
     : 'Everyone in this channel';
