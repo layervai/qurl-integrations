@@ -116,6 +116,10 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
   // Yellow when nothing ran AND when everything was skipped: in both
   // cases the suite produced zero pass/fail signal, so a green check
   // would be misleading. Green requires `passed > 0 && failed === 0`.
+  // Skipped count surfaces in the description suffix so the top-line
+  // matches the per-file `⏭ N` display below it.
+  const skipped = total - passed - failed;
+  const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
   let color: number;
   let description: string;
   if (total === 0) {
@@ -126,10 +130,10 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
     description = `⚠️ All ${total} tests skipped · ${durationSec}s`;
   } else if (failed === 0) {
     color = COLOR_GREEN;
-    description = `✅ All ${passed} tests passed · ${durationSec}s`;
+    description = `✅ All ${passed} tests passed${skippedSuffix} · ${durationSec}s`;
   } else {
     color = COLOR_RED;
-    description = `❌ ${failed} failed, ✅ ${passed} passed (of ${total}) · ${durationSec}s`;
+    description = `❌ ${failed} failed, ✅ ${passed} passed${skippedSuffix} (of ${total}) · ${durationSec}s`;
   }
 
   // Build fields under the 6000-char total embed budget. Worst-case red
