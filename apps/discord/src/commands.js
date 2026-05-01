@@ -33,7 +33,7 @@ const TOKENS_PER_RESOURCE = 10;
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
+const { getTextChannelMembers, sendDM } = require('./discord');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -1162,6 +1162,20 @@ async function handleSend(interaction, apiKey) {
     return content;
   };
 
+  // Voice / stage-voice channels resolve "channel" to voice-connected
+  // members only — anything broader expands to ViewChannel-perm scope
+  // (often @everyone, i.e. the whole guild) and was the source of the
+  // prior "sends to entire server" bug. The dropdown surfaces this
+  // explicitly with a voice-specific label.
+  const isVoiceContext = interaction.channel.type === ChannelType.GuildVoice ||
+                          interaction.channel.type === ChannelType.GuildStageVoice;
+  const channelOptionLabel = isVoiceContext
+    ? 'Everyone in this voice channel'
+    : 'Everyone in this channel';
+  const channelOptionDescription = isVoiceContext
+    ? 'Members currently connected via voice (excl. bots and you)'
+    : 'All members of this text channel (excl. bots and you)';
+
   const formRows = () => {
     const rows = [];
 
@@ -1171,8 +1185,7 @@ async function handleSend(interaction, apiKey) {
         .setPlaceholder('Recipient(s) — choose type')
         .addOptions(
           { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
-          { label: 'Everyone in this channel', value: 'channel', description: 'All members of this text channel (excl. bots and you)', default: target === 'channel' },
-          { label: 'Everyone in your voice channel', value: 'voice', description: 'You must be in a voice channel', default: target === 'voice' },
+          { label: channelOptionLabel, value: 'channel', description: channelOptionDescription, default: target === 'channel' },
         )
     ));
 
@@ -1207,7 +1220,7 @@ async function handleSend(interaction, apiKey) {
     ));
 
     const recipientsResolved = (target === 'user' && recipients.length === 1)
-      || ((target === 'channel' || target === 'voice') && recipients.length > 0);
+      || (target === 'channel' && recipients.length > 0);
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.sendBtn)
@@ -1276,41 +1289,37 @@ async function handleSend(interaction, apiKey) {
     if (compInt.customId === ids.targetSelect) {
       const newTarget = compInt.values[0];
       // For user-target, re-selecting 'user' is a no-op (UserSelect drives
-      // the actual recipient pick). For channel and voice, ALWAYS re-resolve
-      // — members can join or leave during the up-to-3-minute form-loop
-      // window, and a stale recipients array would mint links for ghosts.
-      const requiresFreshResolve = newTarget === 'channel' || newTarget === 'voice';
+      // the actual recipient pick). For channel, ALWAYS re-resolve —
+      // members can join/leave (or join/leave voice, in voice-channel
+      // context) during the up-to-3-minute form-loop window, and a stale
+      // recipients array would mint links for ghosts.
+      const requiresFreshResolve = newTarget === 'channel';
       if (newTarget !== target || requiresFreshResolve) {
         target = newTarget;
         recipients = [];
         if (target === 'channel') {
-          try {
-            await fetchGuildMembers(interaction.guild);
-          } catch (err) {
-            logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
-            clearCooldown(interaction.user.id);
-            await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
-            return;
+          // Voice / stage-voice channels source members from the voice
+          // state cache (populated automatically via gateway events) — no
+          // guild.members.fetch needed. Text channels need the cache warm.
+          if (!isVoiceContext) {
+            try {
+              await fetchGuildMembers(interaction.guild);
+            } catch (err) {
+              logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
+              clearCooldown(interaction.user.id);
+              await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
+              return;
+            }
           }
           recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other members in this channel. Pick another option.' }), components: formRows() });
+            const warning = isVoiceContext
+              ? 'No other users currently connected to this voice channel. Pick another option.'
+              : 'No other members in this channel. Pick another option.';
+            await safeCompUpdate(compInt, { content: formContent({ warning }), components: formRows() });
             continue;
           }
-        } else if (target === 'voice') {
-          const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
-          if (result.error === 'not_in_voice') {
-            target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'You must be in a voice channel to use this option.' }), components: formRows() });
-            continue;
-          }
-          if (result.members.length === 0) {
-            target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other users in your voice channel.' }), components: formRows() });
-            continue;
-          }
-          recipients = result.members;
         }
         // Surface the per-send cap NOW, while the user can change targets,
         // not 3 minutes later after they've filled in the rest of the form.
@@ -1731,15 +1740,17 @@ async function handleSend(interaction, apiKey) {
   // archived mid-send, DM-channel dispatch) the channel object can be
   // null — and `.send()` on null throws synchronously, before the
   // try/catch can see it.
-  if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
+  if (interaction.channel && target === 'channel' && delivered > 0) {
     // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
     // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
     // fallback). Channel-post is a wider blast radius than DM, so applying
     // the same spoof defense here is critical — without it a display name
     // with a leading U+202E flips text direction in the public announcement.
     const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
-    const notifyMsg = target === 'voice'
-      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
+    const isVoiceChannelInvocation = interaction.channel.type === ChannelType.GuildVoice ||
+                                      interaction.channel.type === ChannelType.GuildStageVoice;
+    const notifyMsg = isVoiceChannelInvocation
+      ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
       : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });

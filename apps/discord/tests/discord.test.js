@@ -2,7 +2,7 @@
  * Tests for src/discord.js — covers refreshCache, assignContributorRole,
  * notifyPRMerge, notifyBadgeEarned, postGoodFirstIssue, postReleaseAnnouncement,
  * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM,
- * getVoiceChannelMembers, getTextChannelMembers, shutdown, event handlers.
+ * getTextChannelMembers, shutdown, event handlers.
  */
 
 jest.mock('../src/config', () => ({
@@ -314,28 +314,6 @@ describe('discord module', () => {
     });
   });
 
-  describe('getVoiceChannelMembers', () => {
-    it('returns not_in_voice when no voice state', () => {
-      const guild = { voiceStates: { cache: new Map() } };
-      expect(discord.getVoiceChannelMembers(guild, 's1').error).toBe('not_in_voice');
-    });
-
-    it('returns members', () => {
-      const membersMap = new Map([
-        ['s1', { id: 's1', user: { bot: false } }],
-        ['u2', { id: 'u2', user: { bot: false, username: 'U2' } }],
-      ]);
-      membersMap.filter = (fn) => {
-        const r = []; for (const [k, v] of membersMap) if (fn(v)) r.push(v);
-        r.map = Array.prototype.map.bind(r); return r;
-      };
-      const guild = { voiceStates: { cache: new Map([['s1', { channel: { members: membersMap, name: 'VC' } }]]) } };
-      const result = discord.getVoiceChannelMembers(guild, 's1');
-      expect(result.error).toBeNull();
-      expect(result.members).toHaveLength(1);
-    });
-  });
-
   describe('getTextChannelMembers', () => {
     // Helper: turn a plain Map into something with .filter() returning an
     // array that also has .map (matches discord.js Collection enough for
@@ -354,93 +332,47 @@ describe('discord module', () => {
         ['u2', { id: 'u2', user: { bot: false } }],
         ['b1', { id: 'b1', user: { bot: true } }],
       ]));
-      // Omit `type` so it falls through the isVoice branch — text channel
-      // semantics: channel.members is the viewer set by Discord's rules.
       const result = discord.getTextChannelMembers({ members: membersMap }, 's1');
       expect(result).toHaveLength(1);
     });
 
-    it('on a voice channel, returns all guild members who CAN VIEW — not just voice-connected', () => {
-      // Regression for "target=channel from a voice channel only sent to
-      // voice-connected users." The bug was that channel.members on a
-      // voice channel returns currently-connected members only; we must
-      // instead compute viewers from guild.members.cache + permissionsFor.
+    it('on a voice channel, returns voice-connected members only (NOT the @everyone view-perm scope)', () => {
+      // Regression: the prior implementation enumerated guild.members.cache
+      // filtered by ViewChannel perm, which on default servers (where
+      // @everyone has view) expanded to the entire guild — the
+      // "sends to everyone in the server" bug. Voice channels now resolve
+      // to channel.members (the voice-connected set in discord.js v14).
       const connected = asCollection(new Map([
         ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
+        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // sender — filtered
+        ['b1', { id: 'b1', user: { id: 'b1', bot: true } }],  // bot — filtered
       ]));
-      const allGuildMembers = asCollection(new Map([
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }],
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }], // connected
-        ['u3', { id: 'u3', user: { id: 'u3', bot: false } }], // not connected but can view
-        ['b1', { id: 'b1', user: { id: 'b1', bot: true } }],  // bot, filtered out
-        ['u4', { id: 'u4', user: { id: 'u4', bot: false } }], // no perms — filtered out
-      ]));
-
       const channel = {
-        type: 2, // GuildVoice
-        members: connected, // would return only u2 if we used this
-        guild: { members: { cache: allGuildMembers } },
-        permissionsFor: (m) => {
-          // Everyone can view except u4
-          if (m.id === 'u4') return { has: () => false };
-          return { has: () => true };
-        },
+        type: 2, // GuildVoice — included for clarity; helper no longer branches on type
+        members: connected,
       };
-
       const result = discord.getTextChannelMembers(channel, 's1');
-      // Pin identity, not just count — a swap of u2/u4 or inclusion of a
-      // bot would also give length 2 but wrong users.
-      const returnedIds = result.map(u => u.id).sort();
-      expect(returnedIds).toEqual(['u2', 'u3']);
+      expect(result.map(u => u.id)).toEqual(['u2']);
     });
 
-    it('on a stage-voice channel, also uses the guild-viewer path', () => {
-      const allGuildMembers = asCollection(new Map([
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }],
+    it('on a stage-voice channel, also returns voice-connected only', () => {
+      const connected = asCollection(new Map([
         ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
       ]));
       const channel = {
         type: 13, // GuildStageVoice
-        members: asCollection(new Map()), // zero voice-connected
-        guild: { members: { cache: allGuildMembers } },
-        permissionsFor: () => ({ has: () => true }),
-      };
-      const result = discord.getTextChannelMembers(channel, 's1');
-      expect(result.map(u => u.id)).toEqual(['u2']); // sender excluded
-    });
-
-    it('voice channel with missing .guild returns empty (does NOT fall back to broken channel.members)', () => {
-      // Defense-in-depth: if a voice-typed channel somehow lacks .guild
-      // (partial cache / unusual gateway state), the helper must not
-      // silently fall through to channel.members — that's the
-      // voice-connected-only set this function exists to avoid.
-      const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-      ]));
-      const channel = {
-        type: 2,           // GuildVoice
-        members: connected, // would be returned if the fallback kicked in
-        guild: undefined,
-      };
-      const result = discord.getTextChannelMembers(channel, 's1');
-      expect(result).toEqual([]);
-    });
-
-    it('voice channel — members with null permissionsFor are excluded cleanly', () => {
-      // permissionsFor can return null for partially-cached / unresolvable
-      // members. The filter must not throw and must not include such users.
-      const allGuildMembers = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-        ['u3', { id: 'u3', user: { id: 'u3', bot: false } }], // null perms
-      ]));
-      const channel = {
-        type: 2,
-        members: asCollection(new Map()),
-        guild: { members: { cache: allGuildMembers } },
-        permissionsFor: (m) => (m.id === 'u3' ? null : { has: () => true }),
+        members: connected,
       };
       const result = discord.getTextChannelMembers(channel, 's1');
       expect(result.map(u => u.id)).toEqual(['u2']);
+    });
+
+    it('returns empty when nobody else is connected to the voice channel', () => {
+      const connected = asCollection(new Map([
+        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // only sender
+      ]));
+      const result = discord.getTextChannelMembers({ type: 2, members: connected }, 's1');
+      expect(result).toEqual([]);
     });
   });
 
@@ -658,7 +590,6 @@ describe('discord module', () => {
   describe('exports', () => {
     it('exports all expected functions', () => {
       expect(typeof discord.sendDM).toBe('function');
-      expect(typeof discord.getVoiceChannelMembers).toBe('function');
       expect(typeof discord.getTextChannelMembers).toBe('function');
       expect(typeof discord.assignContributorRole).toBe('function');
       expect(typeof discord.notifyPRMerge).toBe('function');

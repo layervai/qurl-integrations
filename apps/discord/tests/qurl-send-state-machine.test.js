@@ -133,7 +133,6 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetVoiceChannelMembers = jest.fn();
 const mockGetTextChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
@@ -144,7 +143,6 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getVoiceChannelMembers: mockGetVoiceChannelMembers,
   getTextChannelMembers: mockGetTextChannelMembers,
 }));
 
@@ -766,30 +764,60 @@ describe('handleSend — Step 3: final form', () => {
     }));
   });
 
-  it('target=voice re-prompts when sender is not in a voice channel', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ error: 'not_in_voice' });
-    const targetVoice = makeCompInt(ids.targetSelect, { values: ['voice'] });
+  // Voice-channel invocation: target=channel resolves to voice-connected
+  // members only (the prior bug was that getTextChannelMembers filtered
+  // guild.members.cache by ViewChannel perm, which on default servers
+  // expanded to @everyone — sending to the entire guild). The fix routes
+  // through channel.members which discord.js v14 returns as voice-connected
+  // for voice/stage-voice channels. Also: no fetchGuildMembers call needed
+  // (voice state cache populates automatically via gateway events).
+  it('voice-channel invocation skips fetchGuildMembers and uses voice-connected only', async () => {
+    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const guildFetch = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), targetVoice, cancel],
+      awaitQueue: [locInitBtn(), targetChannel, cancel],
+      channel: { type: 2 }, // GuildVoice
+      guild: { members: { fetch: guildFetch } },
     });
     await cmd.execute(interaction);
-    expect(targetVoice.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('must be in a voice channel'),
+    expect(mockGetTextChannelMembers).toHaveBeenCalled();
+    expect(guildFetch).not.toHaveBeenCalled();
+  });
+
+  it('voice-channel empty re-prompt names the voice context', async () => {
+    mockGetTextChannelMembers.mockReturnValue([]);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, cancel],
+      channel: { type: 2 }, // GuildVoice
+    });
+    await cmd.execute(interaction);
+    expect(targetChannel.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('currently connected to this voice channel'),
     }));
   });
 
-  it('target=voice re-prompts when voice channel has no other members', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ members: [] });
-    const targetVoice = makeCompInt(ids.targetSelect, { values: ['voice'] });
+  it('voice-channel form shows the collapsed "Everyone in this voice channel" label', async () => {
+    // The 1a + 1b collapse: voice context shows two options (user +
+    // "Everyone in this voice channel" → voice-connected only).
+    // Pin the label, the option count, and the absence of a separate
+    // "voice" option.
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), targetVoice, cancel],
+      awaitQueue: [locInitBtn(), cancel],
+      channel: { type: 2 }, // GuildVoice
     });
     await cmd.execute(interaction);
-    expect(targetVoice.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('No other users in your voice channel'),
-    }));
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetSelect = initialFormCall[0].components[0].components[0];
+    const labels = targetSelect.addOptions.mock.calls[0].map((o) => o.label);
+    expect(labels).toEqual(['A specific user', 'Everyone in this voice channel']);
   });
 
   it('expiry select updates the chosen expiry', async () => {
@@ -1154,7 +1182,7 @@ describe('handleSend — audit emission', () => {
 // 7b. Channel-announcement post — sender displayName sanitization
 // ===========================================================================
 // The /qurl send back-half posts a public announcement in the channel
-// when target is 'channel' or 'voice'. Because that post is wider blast
+// when target is 'channel'. Because that post is wider blast
 // radius than a DM, sanitizeDisplayName MUST strip bidi (U+202E) and
 // zero-width (U+200B) chars from the sender's displayName before it
 // goes out. This regression test was ported from the deleted
@@ -1308,17 +1336,6 @@ describe('handleSend — additional branch coverage', () => {
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
     await cmd.execute(interaction);
     expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(2);
-  });
-
-  // C5b — voice re-select also re-resolves (same staleness concern).
-  it('re-resolves voice members on every voice re-select', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ members: [{ id: 'u2', username: 'Alice' }] });
-    const target1 = makeCompInt(ids.targetSelect, { values: ['voice'] });
-    const target2 = makeCompInt(ids.targetSelect, { values: ['voice'] });
-    const cancel = makeCompInt(ids.cancelBtn);
-    const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
-    await cmd.execute(interaction);
-    expect(mockGetVoiceChannelMembers).toHaveBeenCalledTimes(2);
   });
 
   // C5d — switching target across types resets recipients (no leakage
