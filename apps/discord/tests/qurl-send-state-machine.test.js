@@ -191,7 +191,7 @@ const randomUUIDSpy = jest.spyOn(crypto, 'randomUUID').mockReturnValue('mock-sen
 
 const { commands, _test } = require('../src/commands');
 const logger = require('../src/logger');
-const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache } = _test;
+const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache, lateDropGenerations } = _test;
 
 afterAll(() => {
   randomBytesSpy.mockRestore();
@@ -309,6 +309,7 @@ function makeAttachmentMessage(attachment) {
 beforeEach(() => {
   jest.clearAllMocks();
   sendCooldowns.clear();
+  if (lateDropGenerations) lateDropGenerations.clear();
   if (memberFetchCache) memberFetchCache.clear();
   if (typeof setActiveFileSends === 'function') setActiveFileSends(0);
   // Default happy-path mints / uploads — individual tests override.
@@ -602,6 +603,74 @@ describe('handleSend — Step 2: file path', () => {
       expect.stringContaining('reattach'),
       expect.any(Object),
     );
+  });
+
+  it('only the newest late-drop catcher fires when multiple stack on the same DM', async () => {
+    // Repeated 60s timeouts within 5 min would otherwise stack catchers
+    // — a single late drop would fire each one's .then() and produce N
+    // copies of the reattach reply. The per-userId generation counter
+    // ensures only the newest catcher's .then() fires the reply; older
+    // catchers see a newer generation and bail.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let resolveOldest;
+    let resolveNewest;
+    const dmAwaitMessages = jest.fn()
+      // First /qurl send: 60s window timeout → oldest catcher armed
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldest = resolve; }))
+      // Second /qurl send: 60s window timeout → newest catcher armed (supersedes oldest)
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNewest = resolve; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction1 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction1);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2); // first 60s + first late-drop arm
+
+    const interaction2 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction2);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(4); // second 60s + second late-drop arm
+
+    // Resolve OLDEST first — it should bail because the newer generation
+    // has already been recorded.
+    resolveOldest({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).not.toHaveBeenCalled();
+
+    // Resolve NEWEST — it's the live one, fires the reply.
+    resolveNewest({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).toHaveBeenCalledTimes(1);
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('60 seconds expired'));
+  });
+
+  it('does not arm the late-drop catcher on a non-timeout awaitMessages error', async () => {
+    // discord.js v14: awaitMessages with errors:['time'] rejects with a
+    // Collection on timeout, but rejects with an Error if the channel
+    // got destroyed mid-await / perms revoked / gateway disconnected.
+    // In that case the capture path was already broken — arming a fresh
+    // 5-min listener on the same channel would just fail again. The
+    // catcher is gated on !isUnexpected for that reason.
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const dmAwaitMessages = jest.fn().mockRejectedValueOnce(new Error('Channel destroyed'));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    // Only the original 60s capture attempted; no late-drop arm.
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(1);
+    expect(lateDropGenerations.has('user-1')).toBe(false);
   });
 
   it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
