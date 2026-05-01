@@ -877,6 +877,26 @@ async function handleSend(interaction, apiKey) {
           sendNonce, userId: interaction.user.id, error: dErr?.message,
         }));
       }
+      // Late-drop catcher: users routinely come back to the DM and drop
+      // the file after the 60s window has already passed, then wonder
+      // why nothing happened. Set up a fire-and-forget listener for the
+      // next 5 min on the DM channel and reply once with a reattach
+      // hint if a late attachment arrives. Single-shot (max:1) so it
+      // auto-tears down.
+      if (captureChannel.type === ChannelType.DM) {
+        captureChannel.awaitMessages({
+          filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
+          max: 1,
+          time: 5 * 60000,
+        }).then((late) => {
+          const lateMsg = late.first();
+          if (lateMsg) {
+            lateMsg.reply('⏳ 60 seconds expired — please run `/qurl send` again to reattach.').catch((rErr) => logger.warn('Failed to send late-drop reattach hint', {
+              sendNonce, userId: interaction.user.id, error: rErr?.message,
+            }));
+          }
+        }).catch(() => { /* timed out without a late drop — expected */ });
+      }
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
     }
@@ -1162,18 +1182,29 @@ async function handleSend(interaction, apiKey) {
     return content;
   };
 
+  // The voice-target option only makes sense from a voice / stage-voice
+  // channel (it routes through the sender's voiceState — there's nothing
+  // for it to resolve to from a text channel). Conditional inclusion
+  // keeps the text-channel dropdown to two options instead of dangling
+  // a third "You must be in a voice channel" option that always errors.
+  const isVoiceContext = interaction.channel.type === ChannelType.GuildVoice ||
+                          interaction.channel.type === ChannelType.GuildStageVoice;
+
   const formRows = () => {
     const rows = [];
 
+    const targetOptions = [
+      { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
+      { label: 'Everyone in this channel', value: 'channel', description: 'All members of this text channel (excl. bots and you)', default: target === 'channel' },
+    ];
+    if (isVoiceContext) {
+      targetOptions.push({ label: 'Everyone on voice', value: 'voice', description: 'Members currently connected via voice (excl. bots and you)', default: target === 'voice' });
+    }
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.targetSelect)
         .setPlaceholder('Recipient(s) — choose type')
-        .addOptions(
-          { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
-          { label: 'Everyone in this channel', value: 'channel', description: 'All members of this text channel (excl. bots and you)', default: target === 'channel' },
-          { label: 'Everyone in your voice channel', value: 'voice', description: 'You must be in a voice channel', default: target === 'voice' },
-        )
+        .addOptions(...targetOptions)
     ));
 
     if (target === 'user') {

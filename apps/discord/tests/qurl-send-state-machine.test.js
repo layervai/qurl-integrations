@@ -504,6 +504,42 @@ describe('handleSend — Step 2: file path', () => {
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
+  it('replies to a late attachment drop in DM after the 60s window with a reattach hint', async () => {
+    // After the 60s file-capture window times out, the bot's slash-command
+    // interaction is gone — but users routinely come back and drop the
+    // file anyway. Without a follow-up listener the late drop disappears
+    // into the void and the user wonders why nothing happened. The
+    // fire-and-forget late-drop catcher in the awaitMessages timeout path
+    // listens for the next ~5 min and replies once with a clear next step.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let lateResolved;
+    const lateCapturePromise = new Promise((resolve) => { lateResolved = resolve; });
+    const dmAwaitMessages = jest.fn()
+      // First call (the 60s window) — Collection-shaped timeout.
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      // Second call (the 5-min late-drop catcher) — resolve with one
+      // late attachment, recording resolution so the test can await it.
+      .mockImplementationOnce(() => {
+        const result = { first: () => lateAttachmentMessage };
+        lateResolved();
+        return Promise.resolve(result);
+      });
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    // Wait for the fire-and-forget listener's .then() to settle.
+    await lateCapturePromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('60 seconds expired'));
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('reattach'));
+  });
+
   it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
     // Regression guard: without the cleanup in the awaitMessages catch
     // path, a timeout would leave the bot's "Ready! Drop your file
@@ -751,6 +787,52 @@ describe('handleSend — Step 3: final form', () => {
     await cmd.execute(interaction);
     expect(mockGetTextChannelMembers).toHaveBeenCalled();
     expect(sendBtn.update).toHaveBeenCalled();
+  });
+
+  it('hides the voice-target option from the dropdown when invoked from a text channel', async () => {
+    // Voice-target only resolves via the sender's voiceState — there is
+    // nothing for it to do from a text channel. Showing a permanently-
+    // erroring "You must be in a voice channel" option is dead weight;
+    // text-channel context drops to two options (user + channel).
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), cancel],
+      // Default channel.type is 0 (GuildText) — text-channel context.
+    });
+    await cmd.execute(interaction);
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetRow = initialFormCall[0].components[0];
+    const targetSelect = targetRow.components[0];
+    const optionsArg = targetSelect.addOptions.mock.calls[0];
+    const labels = optionsArg.map((o) => o.label);
+    expect(labels).toEqual(['A specific user', 'Everyone in this channel']);
+    expect(labels).not.toContain(expect.stringContaining('voice'));
+  });
+
+  it('shows the voice-target option (renamed to "Everyone on voice") when invoked from a voice channel', async () => {
+    // Inverse of the text-channel test — and pins the renamed label
+    // ("Everyone on voice", was "Everyone in your voice channel"). The
+    // shorter label is less ambiguous about the recipient set being the
+    // currently-connected voice members rather than "members of the voice
+    // channel" in some broader sense.
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), cancel],
+      channel: { type: 2 }, // GuildVoice
+    });
+    await cmd.execute(interaction);
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetRow = initialFormCall[0].components[0];
+    const targetSelect = targetRow.components[0];
+    const optionsArg = targetSelect.addOptions.mock.calls[0];
+    const labels = optionsArg.map((o) => o.label);
+    expect(labels).toEqual(['A specific user', 'Everyone in this channel', 'Everyone on voice']);
   });
 
   it('target=channel re-prompts when channel has no other members', async () => {
