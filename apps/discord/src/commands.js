@@ -645,14 +645,14 @@ const memberFetchCache = new Map(); // guildId -> { timestamp, inFlight }
 // within the same minute. 60s is still short enough that a user who just
 // joined/left won't be missed for long.
 //
-// Caveat for guilds >1000 members: Discord caps the unprivileged
-// guild.members.fetch() call at 1000 members per chunk. Without the
-// GUILD_PRESENCES privileged intent (which the bot does not declare),
-// guilds larger than that may have some viewers missing from the cache,
-// and the downstream channel-target recipient resolution will then miss
-// those users. If the bot grows into >1000-member servers, declare
-// GUILD_PRESENCES (Discord verification required at 100+ guilds) and
-// add it to the asserted intents in src/discord.js.
+// Intent dependency: this fetch relies on the GuildMembers privileged
+// intent (declared in src/discord.js — boot-time assertion guards against
+// removal). With that intent, guild.members.fetch() handles gateway
+// pagination transparently and returns the full member list regardless
+// of guild size. Without it, the call is rejected by Discord. The
+// 100-guild verification gate is for the GuildMembers intent itself
+// (the "Server Members Intent" toggle in the dev portal) — not a
+// per-call cap.
 const MEMBER_FETCH_TTL = 60000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();

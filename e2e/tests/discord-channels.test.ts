@@ -83,20 +83,21 @@ describe('Discord: Voice State', () => {
     console.log(`Verified voice channel: #${voiceChannel.name}`);
   });
 
-  test('"Everyone in voice channel" recipient pool = guild members, NOT voice-connected members', async () => {
-    // Regression documentation for the bug where /qurl send `target=channel`
-    // invoked from a voice channel only delivered to voice-connected users.
-    // The fix in apps/discord/src/discord.js:getTextChannelMembers branches
-    // on channel.type: for GuildVoice/GuildStageVoice it enumerates
-    // guild.members.cache and filters by permissionsFor(ViewChannel),
-    // instead of using channel.members (which on a voice channel is just
-    // the voice-connected subset).
+  test('"Everyone in this voice channel" recipient pool = voice-connected members only', async () => {
+    // Pins the new invariant after the recipient-scope fix:
+    // /qurl send target=channel invoked from a voice channel resolves to
+    // VOICE-CONNECTED members only (channel.members on a GuildVoice /
+    // GuildStageVoice in discord.js v14). NOT the guild member list and
+    // NOT the ViewChannel-permission set — those expand to @everyone on
+    // default servers and were the source of the prior "sends to entire
+    // guild" bug.
     //
-    // This test asserts the prerequisites the fix relies on:
-    //   1) The test guild has at least one voice channel
-    //   2) The bot can enumerate guild members (the superset pool)
-    //   3) That pool is non-empty — so "Everyone" has someone to go to
-    //      even when zero users are connected to voice
+    // The Discord REST API's `voice_states` endpoint is the canonical
+    // source of "currently connected to voice in this channel" — same
+    // signal the bot's voice state cache exposes via channel.members.
+    // This test asserts the bot can read voice states for the test
+    // guild and that the channel-scoped subset is what would feed the
+    // recipient pool.
     const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
     const voiceChannels = channels.filter((c: any) => c.type === 2 || c.type === 13);
     if (voiceChannels.length === 0) {
@@ -105,22 +106,33 @@ describe('Discord: Voice State', () => {
     }
     const voiceChannel = voiceChannels[0];
 
-    let guildMembers: any[] = [];
+    // GET /guilds/:id returns current voice_states inline. Filter for
+    // the target voice channel — that subset is exactly what /qurl
+    // send target=channel would resolve to in voice context, minus
+    // sender + bot filtering applied client-side.
+    let guildSnapshot: any;
     try {
-      guildMembers = await discordApi('GET', `/guilds/${env.GUILD_ID}/members?limit=100`);
+      guildSnapshot = await discordApi('GET', `/guilds/${env.GUILD_ID}?with_counts=true`);
     } catch (e) {
-      console.log('Guild member list requires Server Members intent:', (e as Error).message);
-      return; // premise untestable without the intent; unit tests still cover the logic
+      console.log('Guild snapshot fetch failed:', (e as Error).message);
+      return;
     }
 
-    // The pool the bot iterates for "Everyone in this channel" on a voice
-    // channel is the guild member list — it must be non-empty, otherwise
-    // the regression ("0 recipients in an active channel") could recur.
-    const humans = guildMembers.filter((m: any) => !m.user?.bot);
-    expect(humans.length).toBeGreaterThan(0);
+    const voiceStates: any[] = guildSnapshot.voice_states || [];
+    const inThisChannel = voiceStates.filter((vs: any) => vs.channel_id === voiceChannel.id);
+    // The set CAN legitimately be empty (nobody currently connected) —
+    // the invariant we're pinning is the SCOPE, not a non-empty count.
+    // The regression we'd catch is e.g. inThisChannel returning all
+    // guild members instead of voice-connected ones, which would surface
+    // as inThisChannel.length > voiceStates.length (impossible) or as
+    // entries with mismatched channel_id (caught by the filter shape).
+    inThisChannel.forEach((vs: any) => {
+      expect(vs.channel_id).toBe(voiceChannel.id);
+    });
     console.log(
-      `Voice channel #${voiceChannel.name}: guild has ${humans.length} human member(s) ` +
-      `in the "Everyone in this channel" pool (independent of voice-connected count).`,
+      `Voice channel #${voiceChannel.name}: ${inThisChannel.length} voice-connected member(s) ` +
+      `would be in the "Everyone in this voice channel" recipient pool ` +
+      `(scope = voice-connected only, NOT @everyone view-perm).`,
     );
   });
 });

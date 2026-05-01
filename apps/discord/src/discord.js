@@ -840,10 +840,18 @@ async function sendDM(discordId, message) {
 //
 // Trust boundary: this helper assumes `channel` is a GuildText, GuildVoice,
 // or GuildStageVoice channel object with `.members` populated. It is NOT
-// safe to call with DM channels (no .members), partial cache entries, or
-// arbitrary unvalidated channel inputs. Today's only call site
-// (commands.js channel-target branch) is reached via interaction.channel
-// after a guild-context guard, so this contract holds.
+// safe to call with:
+//   - DM channels (no `.members` property at all)
+//   - thread channels (PublicThread=11, PrivateThread=12, AnnouncementThread=10):
+//     `.members` here is a ThreadMemberManager of ThreadMember objects
+//     (thread participants, not channel viewers) — different shape and
+//     different semantic from "Everyone who can view this channel."
+//   - forum / media channels (GuildForum=15, GuildMedia=16): no `.members`
+//   - partial cache entries or arbitrary unvalidated channel inputs.
+// Today's only call site (commands.js channel-target branch) is reached
+// via interaction.channel from /qurl send, which the slash-command
+// registration only allows in guild text + guild voice + stage-voice
+// contexts (no thread/forum/media exposure), so the contract holds.
 function getChannelMembers(channel, senderUserId) {
   return channel.members
     .filter(m => m.id !== senderUserId && !m.user.bot)
