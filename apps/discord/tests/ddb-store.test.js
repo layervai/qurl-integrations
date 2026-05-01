@@ -1009,14 +1009,14 @@ describe('milestones', () => {
 // ── Health check ──
 
 describe('healthCheck', () => {
-  test('issues a single GetItem against pending_links sentinel key', async () => {
+  test('issues a single GetItem against guild_configs sentinel key', async () => {
     ddbMock.on(GetCommand).resolves({}); // sentinel key never exists
     const result = await store.healthCheck();
     expect(result).toEqual({ ok: true });
     const calls = ddbMock.commandCalls(GetCommand);
     expect(calls).toHaveLength(1);
-    expect(calls[0].args[0].input.TableName).toBe('test-prefix-pending-links');
-    expect(calls[0].args[0].input.Key).toEqual({ state: '__healthcheck__' });
+    expect(calls[0].args[0].input.TableName).toBe('test-prefix-guild-configs');
+    expect(calls[0].args[0].input.Key).toEqual({ guild_id: '__healthcheck__' });
   });
 
   test('does NOT touch any user-data table (no Scan, no leaderboard read)', async () => {

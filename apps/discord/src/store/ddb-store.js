@@ -1436,11 +1436,10 @@ async function deleteOrphanedToken(id) {
 // ── Lifecycle ──
 
 // Cheap "is the data layer functional" probe for /health. Single
-// GetItem against a sentinel key on the smallest table (pending_links
-// — short TTL, low cardinality) verifies SDK init, network path,
-// IAM, and that the table exists, in one ~1-RCU round-trip. Throws
-// if any of those are broken so the orchestrator replaces the
-// container.
+// GetItem against a sentinel key on a low-cardinality table verifies
+// SDK init, network path, IAM, and that the table exists, in one
+// ~1-RCU round-trip. Throws if any of those are broken so the
+// orchestrator replaces the container.
 //
 // Why not Scan/getStats(): /health is hit at LB cadence (10–30s).
 // SqliteStore's old getStats() probe was constant-time aggregation
@@ -1450,9 +1449,24 @@ async function deleteOrphanedToken(id) {
 // any fleet. /metrics keeps the full aggregation — that's the right
 // home for it.
 async function healthCheck() {
+  // Probe `guild_configs` rather than `pending_links`. The latter was
+  // removed by qurl-integrations-infra PR #372 (the OpenNHP-only tables
+  // — pending_links, github_links, contributions, badges, streaks,
+  // milestones, weekly_stats, orphaned_oauth_tokens — were dropped as
+  // unused after audit). With pending_links gone, GetItem returned
+  // ResourceNotFoundException on every ALB probe → /health 503 → ECS
+  // circuit-breaker rolls back the deployment.
+  //
+  // Surviving tables are qurl_sends, qurl_send_configs, guild_configs.
+  // guild_configs is the right pick: lowest write rate (configured per
+  // guild, not per send), simplest key schema (just `guild_id` HASH),
+  // and exists in every env regardless of OpenNHP-feature flagging.
+  // GetItem on a missing key returns an empty result (no exception),
+  // so a sentinel `__healthcheck__` guild_id is safe and never collides
+  // with a real Discord guild snowflake (numeric only).
   await ddb.send(new GetCommand({
-    TableName: TABLES.pending_links,
-    Key: { state: '__healthcheck__' },
+    TableName: TABLES.guild_configs,
+    Key: { guild_id: '__healthcheck__' },
   }));
   return { ok: true };
 }
