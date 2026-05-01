@@ -204,6 +204,15 @@ const sendCooldowns = new Map();
 // stale catcher whose .then() never fires before the user is
 // forgotten will just see a future (unrelated) catcher's increment
 // and bail naturally on its own resolution.
+//
+// No eviction ceiling here (unlike sendCooldowns above): the Map is
+// bounded to at most one entry per user with an active catcher,
+// because each new arm both increments the user's entry and the
+// catcher's terminal .then()/.catch() deletes it. A user with a
+// pending catcher contributes exactly one entry; a user with no
+// active catcher contributes zero. So the steady-state size is
+// bounded by the number of users currently inside their 5-min
+// late-drop window, which is naturally small.
 const lateDropGenerations = new Map();
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
 // them) can't grow the Map beyond this. Above this, the 10%-drop eviction
@@ -925,6 +934,12 @@ async function handleSend(interaction, apiKey) {
       // gateway disconnect, perms revoked). In those cases there was
       // never a working capture path, so a fresh awaitMessages on the
       // same channel would just fail again.
+      //
+      // The DM-type check is belt-and-suspenders: both branches that
+      // assign captureChannel above today set a DM channel, so this is
+      // effectively always true. The gate pins the invariant against a
+      // future refactor that introduces a non-DM capture path (e.g. a
+      // staff-only ephemeral capture in a guild channel).
       if (!isUnexpected && captureChannel.type === ChannelType.DM) {
         const senderUserId = interaction.user.id;
         const myGeneration = (lateDropGenerations.get(senderUserId) || 0) + 1;

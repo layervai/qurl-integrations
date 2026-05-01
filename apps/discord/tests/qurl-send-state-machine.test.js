@@ -651,6 +651,12 @@ describe('handleSend — Step 2: file path', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(lateReply).toHaveBeenCalledTimes(1);
     expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('60 seconds expired'));
+    // Cleanup invariant: lateDropGenerations is bounded to one entry
+    // per user with an active catcher. After the live catcher fires,
+    // the user's entry must be removed so the Map can't accumulate
+    // — this is what justifies the "no eviction ceiling" choice on
+    // the Map declaration.
+    expect(lateDropGenerations.has('user-1')).toBe(false);
   });
 
   it('does not arm the late-drop catcher on a non-timeout awaitMessages error', async () => {
