@@ -540,6 +540,70 @@ describe('handleSend — Step 2: file path', () => {
     expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('reattach'));
   });
 
+  it('skips the late-drop reply when a fresh /qurl send is in flight (concurrency guard)', async () => {
+    // discord.js MessageCollectors do NOT consume — both a stale late-drop
+    // collector and a fresh /qurl send's 60s collector observe the same
+    // DM message when filters match. Without the sendCooldowns.has guard
+    // inside .then(), a user who retries within the 5-min window would
+    // see their successful retry produce a contradictory "60 seconds
+    // expired" reply right after sending. This test pins the guard:
+    // populate sendCooldowns AFTER cmd.execute returns (its clearCooldown
+    // ran during teardown) and BEFORE resolving the late-drop promise,
+    // simulating a fresh /qurl send racing with the stale catcher.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let resolveLate;
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveLate = resolve; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    // Simulate the user retrying /qurl send within the 5-min window —
+    // setCooldown fires synchronously at the top of handleSend, so by the
+    // time the stale catcher's .then() runs, sendCooldowns.has(userId)
+    // is true.
+    sendCooldowns.set('user-1', Date.now());
+    resolveLate({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).not.toHaveBeenCalled();
+  });
+
+  it('does not reply when the 5-min late-drop window itself times out cleanly (no late drop)', async () => {
+    // Common path: 60s window times out, user never returns, 5 min pass,
+    // late-drop awaitMessages resolves with an empty Collection. The
+    // catcher must early-return on `!lateMsg` without attempting any
+    // .reply or logging a warning.
+    let lateResolved;
+    const lateCapturePromise = new Promise((resolve) => { lateResolved = resolve; });
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => {
+        lateResolved();
+        return Promise.resolve({ first: () => null }); // empty Collection
+      });
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    await lateCapturePromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('reattach'),
+      expect.any(Object),
+    );
+  });
+
   it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
     // Regression guard: without the cleanup in the awaitMessages catch
     // path, a timeout would leave the bot's "Ready! Drop your file
@@ -809,15 +873,16 @@ describe('handleSend — Step 3: final form', () => {
     const optionsArg = targetSelect.addOptions.mock.calls[0];
     const labels = optionsArg.map((o) => o.label);
     expect(labels).toEqual(['A specific user', 'Everyone in this channel']);
-    expect(labels).not.toContain(expect.stringContaining('voice'));
   });
 
-  it('shows the voice-target option (renamed to "Everyone on voice") when invoked from a voice channel', async () => {
-    // Inverse of the text-channel test — and pins the renamed label
-    // ("Everyone on voice", was "Everyone in your voice channel"). The
-    // shorter label is less ambiguous about the recipient set being the
-    // currently-connected voice members rather than "members of the voice
-    // channel" in some broader sense.
+  it('shows the voice-target option when invoked from a voice channel (label unchanged in this PR)', async () => {
+    // Inverse of the text-channel test. The voice-target label stays
+    // "Everyone in your voice channel" in this PR — the destination
+    // wording (a single collapsed "Everyone in this voice channel")
+    // is owned by the follow-up that fixes the recipient-scope bug.
+    // Doing the rename twice (once here, once on collapse) shifts UX
+    // in close succession; landing the final phrasing in one place is
+    // less churn for users.
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
       awaitQueue: [locInitBtn(), cancel],
@@ -832,7 +897,26 @@ describe('handleSend — Step 3: final form', () => {
     const targetSelect = targetRow.components[0];
     const optionsArg = targetSelect.addOptions.mock.calls[0];
     const labels = optionsArg.map((o) => o.label);
-    expect(labels).toEqual(['A specific user', 'Everyone in this channel', 'Everyone on voice']);
+    expect(labels).toEqual(['A specific user', 'Everyone in this channel', 'Everyone in your voice channel']);
+  });
+
+  it('shows the voice-target option from a stage-voice channel too', async () => {
+    // GuildStageVoice (type 13) is in the same isVoiceContext branch as
+    // GuildVoice (type 2). Pin both so a future tightening of the type
+    // check doesn't silently drop the option for stage-voice users.
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), cancel],
+      channel: { type: 13 }, // GuildStageVoice
+    });
+    await cmd.execute(interaction);
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetSelect = initialFormCall[0].components[0].components[0];
+    const labels = targetSelect.addOptions.mock.calls[0].map((o) => o.label);
+    expect(labels).toContain('Everyone in your voice channel');
   });
 
   it('target=channel re-prompts when channel has no other members', async () => {
