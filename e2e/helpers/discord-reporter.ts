@@ -29,9 +29,15 @@ interface DiscordEmbed {
   timestamp?: string;
 }
 
-// Discord embed limits: field value 1024, field count 25.
+// Discord embed limits: field value 1024, field count 25,
+// total payload 6000. Per-field cap clamped below; total tracked
+// during field construction so worst-case red runs don't 400.
 const FIELD_VALUE_MAX = 1024;
 const FIELD_COUNT_MAX = 25;
+const TOTAL_EMBED_MAX = 6000;
+// Leave 500 chars of headroom for title + description + footer +
+// JSON envelope; trip the budget while building fields, not after.
+const FIELDS_BUDGET = TOTAL_EMBED_MAX - 500;
 const MAX_FAILING_TESTS_PER_FILE = 5;
 const COLOR_GREEN = 0x2ecc71;
 const COLOR_RED = 0xe74c3c;
@@ -42,6 +48,8 @@ const COLOR_YELLOW = 0xf1c40f;
 const POST_TIMEOUT_MS = 8_000;
 
 // `MINT_API_URL` host disambiguates env without a new env var.
+// Substring match is fine while domains are `layerv.ai` / `layerv.xyz`;
+// reconsider if a `staging.layerv.ai`-style host ever lands.
 function envLabel(): string {
   const url = process.env.MINT_API_URL ?? '';
   if (url.includes('layerv.ai')) return 'prod';
@@ -49,17 +57,25 @@ function envLabel(): string {
   return '';
 }
 
-// GH Actions auto-populates these. Footer links the run page so
-// operators can click through from Discord; falls back to suite
-// name when running locally.
-function footerText(): string {
+// Discord footer text isn't auto-linkified — return the run URL for
+// the description (where Discord renders it as a clickable link).
+// Falls back to empty when running locally.
+function runUrl(): string {
   const runId = process.env.GITHUB_RUN_ID;
   const repo = process.env.GITHUB_REPOSITORY;
   const server = process.env.GITHUB_SERVER_URL;
-  const sha = process.env.GITHUB_SHA;
   if (runId && repo && server) {
+    return `${server}/${repo}/actions/runs/${runId}`;
+  }
+  return '';
+}
+
+function footerText(): string {
+  const runId = process.env.GITHUB_RUN_ID;
+  const sha = process.env.GITHUB_SHA;
+  if (runId) {
     const shortSha = sha ? ` · ${sha.slice(0, 7)}` : '';
-    return `${server}/${repo}/actions/runs/${runId}${shortSha}`;
+    return `run #${runId}${shortSha}`;
   }
   return 'qURL E2E Test Suite';
 }
@@ -97,14 +113,17 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
   const label = envLabel();
   const title = `qURL E2E Test Suite${label ? ` — ${label}` : ''}`;
 
-  // Yellow on no-tests-ran (config error / wrong matcher) so a
-  // misconfigured run doesn't ship a green checkmark with zero
-  // signal behind it.
+  // Yellow when nothing ran AND when everything was skipped: in both
+  // cases the suite produced zero pass/fail signal, so a green check
+  // would be misleading. Green requires `passed > 0 && failed === 0`.
   let color: number;
   let description: string;
   if (total === 0) {
     color = COLOR_YELLOW;
     description = `⚠️ No tests ran · ${durationSec}s`;
+  } else if (passed === 0 && failed === 0) {
+    color = COLOR_YELLOW;
+    description = `⚠️ All ${total} tests skipped · ${durationSec}s`;
   } else if (failed === 0) {
     color = COLOR_GREEN;
     description = `✅ All ${passed} tests passed · ${durationSec}s`;
@@ -113,15 +132,35 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
     description = `❌ ${failed} failed, ✅ ${passed} passed (of ${total}) · ${durationSec}s`;
   }
 
-  const fields = results.testResults
-    .slice(0, FIELD_COUNT_MAX)
-    .map(buildField);
+  // Build fields under the 6000-char total embed budget. Worst-case red
+  // run with 25 files × ~1024-char failure expansions blows the cap and
+  // Discord 400s the whole POST. Stop adding fields once the running
+  // total crosses FIELDS_BUDGET; surface the cutoff in the title-line
+  // truncation note. Test-titles flow into embed values unescaped:
+  // they originate in our own test code, not user input — Discord
+  // embeds don't render markdown the way messages do, so this is the
+  // intended trust boundary.
+  const fields: EmbedField[] = [];
+  let usedBytes = title.length + description.length + footerText().length;
+  for (const suite of results.testResults) {
+    if (fields.length >= FIELD_COUNT_MAX) break;
+    const field = buildField(suite);
+    const fieldBytes = field.name.length + field.value.length;
+    if (usedBytes + fieldBytes > FIELDS_BUDGET) break;
+    fields.push(field);
+    usedBytes += fieldBytes;
+  }
   const truncated = results.testResults.length - fields.length;
   const truncatedNote = truncated > 0 ? ` (showing ${fields.length}/${results.testResults.length} files)` : '';
 
+  // Run URL belongs in the description, not the footer — Discord
+  // doesn't linkify footer text (per claude-review pass 2).
+  const url = runUrl();
+  const linkLine = url ? `\n[View run on GitHub](${url})` : '';
+
   return {
     title,
-    description: description + truncatedNote,
+    description: description + truncatedNote + linkLine,
     color,
     fields,
     footer: { text: footerText() },
