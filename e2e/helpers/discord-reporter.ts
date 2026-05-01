@@ -1,30 +1,10 @@
 /**
- * Custom Jest reporter that posts a per-file E2E result summary to the
- * test Discord channel after every run.
+ * Posts a per-file E2E result summary embed to the test Discord
+ * channel after every run.
  *
- * Replaces the runtime signal previously carried by the static "embed
- * delivery" test in `tests/discord-channels.test.ts`: that test posted
- * a hardcoded `Status: Passing` embed regardless of whether other tests
- * passed, so an operator scrolling Discord could not tell at a glance
- * whether a run was actually green. This reporter posts one embed per
- * run with the real per-file rollup.
- *
- * Per-file rather than per-test: today there are ~39 tests across 4
- * files; per-test would burn the 25-field embed limit and force
- * truncation. Per-file rolls cleanly to 1 field per file with a small
- * pass/fail count, and only the failing file expands to show its
- * failing test names.
- *
- * Reporter is configured in `jest.config.ts`'s `reporters` array. It
- * runs in BOTH sandbox and prod (no env gating) — the test channel
- * routing already differs by env (sandbox = `vars.E2E_CHANNEL_ID`,
- * prod = SSM `/qurl-bot-e2e-smoke-production/CHANNEL_ID`), so each
- * env's embed lands in its own channel.
- *
- * Failure handling is deliberately defensive: a missing env var or a
- * Discord API hiccup posts a `[discord-reporter]` warning to stderr
- * but never throws. The reporter is informational; it must not turn a
- * green test run red just because Discord happens to be flaky.
+ * Resilience contract: missing env vars / Discord errors / timeouts
+ * warn under `[discord-reporter]` but never throw. Reporter is a
+ * status surface, not a test gate.
  */
 import * as path from 'node:path';
 import type {
@@ -49,30 +29,19 @@ interface DiscordEmbed {
   timestamp?: string;
 }
 
-// Discord embed hard limits (kept here so the truncation calls below
-// read against a documented constant rather than a magic number).
-//   - Field value: 1024 chars
-//   - Field count: 25
-//   - Footer text: 2048 chars
-// We size well under the per-field cap; the per-file rollup is short
-// by construction and even a fully-expanded failure block sits
-// comfortably below 1024.
+// Discord embed limits: field value 1024, field count 25.
 const FIELD_VALUE_MAX = 1024;
 const FIELD_COUNT_MAX = 25;
-
-// Show at most this many failing test titles per file. Beyond this,
-// append a `… and N more` line. Five is enough to communicate scope
-// without exhausting the field-value budget.
 const MAX_FAILING_TESTS_PER_FILE = 5;
-
-// Green / red Discord embed colors. Fixed integers; Discord renders
-// the left-side stripe in this color.
 const COLOR_GREEN = 0x2ecc71;
 const COLOR_RED = 0xe74c3c;
+const COLOR_YELLOW = 0xf1c40f;
 
-// Sniff the env label from MINT_API_URL rather than introducing a new
-// required env var. `api.layerv.ai` → prod, `api.layerv.xyz` →
-// sandbox; anything else → empty string (the title omits the dash).
+// Discord POST timeout. Reporter must never hold CI hostage on a
+// hung connection.
+const POST_TIMEOUT_MS = 8_000;
+
+// `MINT_API_URL` host disambiguates env without a new env var.
 function envLabel(): string {
   const url = process.env.MINT_API_URL ?? '';
   if (url.includes('layerv.ai')) return 'prod';
@@ -80,26 +49,31 @@ function envLabel(): string {
   return '';
 }
 
-// GitHub Actions auto-populates `GITHUB_RUN_ID`, `GITHUB_SERVER_URL`,
-// `GITHUB_REPOSITORY`, and `GITHUB_SHA` for every workflow run. When
-// running locally (no GH context) the footer falls back to the suite
-// name only.
+// GH Actions auto-populates these. Footer links the run page so
+// operators can click through from Discord; falls back to suite
+// name when running locally.
 function footerText(): string {
   const runId = process.env.GITHUB_RUN_ID;
   const repo = process.env.GITHUB_REPOSITORY;
+  const server = process.env.GITHUB_SERVER_URL;
   const sha = process.env.GITHUB_SHA;
-  if (runId && repo) {
+  if (runId && repo && server) {
     const shortSha = sha ? ` · ${sha.slice(0, 7)}` : '';
-    return `run #${runId}${shortSha}`;
+    return `${server}/${repo}/actions/runs/${runId}${shortSha}`;
   }
   return 'qURL E2E Test Suite';
 }
 
 function buildField(suite: TestResult): EmbedField {
   const file = path.basename(suite.testFilePath);
-  const total = suite.numPassingTests + suite.numFailingTests;
+  // `numTotalTests` includes pending/todo, not just pass+fail. Using
+  // the partial sum was misleading: a `3 passes + 1 it.skip` file
+  // would have rendered `✅ 3/3` despite running 4. Per claude-review.
+  const ran = suite.numPassingTests + suite.numFailingTests;
+  const skipped = suite.numTotalTests - ran;
   const icon = suite.numFailingTests === 0 ? '✅' : '❌';
-  let value = `${icon} ${suite.numPassingTests}/${total}`;
+  const skippedSuffix = skipped > 0 ? ` ⏭ ${skipped}` : '';
+  let value = `${icon} ${suite.numPassingTests}/${suite.numTotalTests}${skippedSuffix}`;
 
   if (suite.numFailingTests > 0) {
     const failing = suite.testResults
@@ -118,34 +92,41 @@ function buildField(suite: TestResult): EmbedField {
 function buildEmbed(results: AggregatedResult): DiscordEmbed {
   const passed = results.numPassedTests;
   const failed = results.numFailedTests;
+  const total = results.numTotalTests;
   const durationSec = ((Date.now() - results.startTime) / 1000).toFixed(1);
   const label = envLabel();
   const title = `qURL E2E Test Suite${label ? ` — ${label}` : ''}`;
 
-  const description =
-    failed === 0
-      ? `✅ All ${passed} tests passed · ${durationSec}s`
-      : `❌ ${failed} failed, ✅ ${passed} passed · ${durationSec}s`;
+  // Yellow on no-tests-ran (config error / wrong matcher) so a
+  // misconfigured run doesn't ship a green checkmark with zero
+  // signal behind it.
+  let color: number;
+  let description: string;
+  if (total === 0) {
+    color = COLOR_YELLOW;
+    description = `⚠️ No tests ran · ${durationSec}s`;
+  } else if (failed === 0) {
+    color = COLOR_GREEN;
+    description = `✅ All ${passed} tests passed · ${durationSec}s`;
+  } else {
+    color = COLOR_RED;
+    description = `❌ ${failed} failed, ✅ ${passed} passed (of ${total}) · ${durationSec}s`;
+  }
 
-  // Stable order: input is already sorted by file path in jest's
-  // results; basename ordering is deterministic across runs.
   const fields = results.testResults
     .slice(0, FIELD_COUNT_MAX)
     .map(buildField);
-
-  // If the suite ever grows past 25 files, the truncation slice above
-  // hides files past the limit. Surface that fact loudly in the
-  // description so the reader doesn't get a misleadingly-small list.
   const truncated = results.testResults.length - fields.length;
   const truncatedNote = truncated > 0 ? ` (showing ${fields.length}/${results.testResults.length} files)` : '';
 
   return {
     title,
     description: description + truncatedNote,
-    color: failed === 0 ? COLOR_GREEN : COLOR_RED,
+    color,
     fields,
     footer: { text: footerText() },
-    timestamp: new Date().toISOString(),
+    // Run-start time, not post time — matches what's on the GH run page.
+    timestamp: new Date(results.startTime).toISOString(),
   };
 }
 
@@ -160,34 +141,43 @@ async function postEmbed(embed: DiscordEmbed): Promise<void> {
     return;
   }
 
-  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bot ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ embeds: [embed] }),
-  });
+  // AbortController bounds the POST so a hung connection can't hold
+  // CI minutes hostage past the configured timeout.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bot ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ embeds: [embed] }),
+      signal: controller.signal,
+    });
 
-  if (!res.ok) {
-    const body = await res.text();
+    if (!res.ok) {
+      const body = await res.text();
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[discord-reporter] Discord POST returned ${res.status}: ${body.slice(0, 200)} (test results NOT affected).`,
+      );
+    }
+  } catch (err) {
+    const isAbort = err instanceof Error && err.name === 'AbortError';
+    const msg = isAbort
+      ? `timeout after ${POST_TIMEOUT_MS}ms`
+      : err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
-    console.warn(
-      `[discord-reporter] Discord POST returned ${res.status}: ${body.slice(0, 200)} (test results NOT affected).`,
-    );
+    console.warn(`[discord-reporter] Discord POST ${msg} (test results NOT affected).`);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 export default class DiscordReporter implements Reporter {
-  // Jest constructs reporters with `(globalConfig, options)`. We don't
-  // need either; declare them with underscore prefix so the linter
-  // doesn't flag the unused parameters.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(_globalConfig: unknown, _reporterOptions: unknown) {}
 
-  // `_contexts` is unused (we read everything from `results`). Jest
-  // requires the parameter even when unused — drop into the leading
-  // underscore convention so noUnusedParameters is happy.
   async onRunComplete(_contexts: Set<TestContext>, results: AggregatedResult): Promise<void> {
     try {
       const embed = buildEmbed(results);
@@ -199,9 +189,8 @@ export default class DiscordReporter implements Reporter {
     }
   }
 
-  // Required by the Reporter interface but not used here. Returning
-  // null tells jest "no error from this reporter" — failing tests are
-  // still surfaced via jest's own exit code, independent of this hook.
+  // Returning `undefined` signals "no reporter-side error." Test
+  // failures surface via jest's own exit code, independent of this hook.
   getLastError(): Error | undefined {
     return undefined;
   }
