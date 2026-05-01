@@ -574,6 +574,12 @@ describe('handleSend — Step 2: file path', () => {
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
     expect(lateReply).not.toHaveBeenCalled();
+    // Cleanup invariant on the cooldown-bail path: even when the reply
+    // is suppressed, the user's lateDropGenerations entry must be
+    // removed. Pinned so a future refactor that moves the cooldown
+    // check above the delete doesn't silently leak Map entries on
+    // every cooldown-bail.
+    expect(lateDropGenerations.has('user-1')).toBe(false);
   });
 
   it('does not reply when the 5-min late-drop window itself times out cleanly (no late drop)', async () => {
@@ -657,6 +663,45 @@ describe('handleSend — Step 2: file path', () => {
     // — this is what justifies the "no eviction ceiling" choice on
     // the Map declaration.
     expect(lateDropGenerations.has('user-1')).toBe(false);
+  });
+
+  it('stacking + simultaneous channel failure: only the newest catcher logs the warn', async () => {
+    // Pairs with the stacking-dedupe test above. Under stacking, a
+    // gateway disconnect / channel destroy can reject ALL armed
+    // late-drop awaitMessages at once. Without the .catch generation
+    // gate, that produces N warn lines for the same incident — only
+    // the newest catcher should log.
+    let rejectOldest;
+    let rejectNewest;
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null }) // first 60s window timeout
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectOldest = rej; }))
+      .mockRejectedValueOnce({ size: 0, first: () => null }) // second 60s window timeout
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectNewest = rej; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+
+    const interaction1 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction1);
+    const interaction2 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction2);
+
+    // Reject both simultaneously (channel destroyed).
+    rejectOldest(new Error('Channel destroyed'));
+    rejectNewest(new Error('Channel destroyed'));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Only the newest catcher should have warned. Filter the calls
+    // because earlier file-capture awaitMessages may also produce warns.
+    const lateWarns = logger.warn.mock.calls.filter((args) => args[0] === 'Late-drop awaitMessages rejected (non-timeout)');
+    expect(lateWarns).toHaveLength(1);
   });
 
   it('does not arm the late-drop catcher on a non-timeout awaitMessages error', async () => {
@@ -936,7 +981,7 @@ describe('handleSend — Step 3: final form', () => {
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
       awaitQueue: [locInitBtn(), cancel],
-      // Default channel.type is 0 (GuildText) — text-channel context.
+      channel: { type: 0 }, // GuildText — explicit so a future helper-default change doesn't silently flip the test's premise.
     });
     await cmd.execute(interaction);
     const initialFormCall = interaction.editReply.mock.calls.find(

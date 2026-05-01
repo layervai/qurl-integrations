@@ -965,9 +965,13 @@ async function handleSend(interaction, apiKey) {
           // reaching this catch is an actual fetch / permission failure,
           // which means the late-drop feature is non-functional for this
           // user this session. logger.warn (not debug) so it surfaces.
-          if (lateDropGenerations.get(senderUserId) === myGeneration) {
-            lateDropGenerations.delete(senderUserId);
-          }
+          //
+          // Mirror the .then() generation gate: under stacking, N stale
+          // catchers can reject simultaneously on a real channel failure
+          // (gateway disconnect drops them all). Without this gate, that
+          // produces N warn lines for the same incident.
+          if (lateDropGenerations.get(senderUserId) !== myGeneration) return;
+          lateDropGenerations.delete(senderUserId);
           logger.warn('Late-drop awaitMessages rejected (non-timeout)', {
             sendNonce, userId: senderUserId, error: err?.message,
           });
