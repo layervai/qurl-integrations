@@ -177,7 +177,6 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetVoice = jest.fn();
 const mockGetText = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
@@ -188,7 +187,6 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getVoiceChannelMembers: mockGetVoice,
   getChannelMembers: mockGetText,
 }));
 

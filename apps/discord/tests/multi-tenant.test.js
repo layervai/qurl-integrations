@@ -347,7 +347,7 @@ describe('handleCommand dispatch-time filter', () => {
     }));
     jest.doMock('../src/discord', () => ({
       sendDM: jest.fn(), assignContributorRole: jest.fn(),
-      notifyBadgeEarned: jest.fn(), getVoiceChannelMembers: jest.fn(),
+      notifyBadgeEarned: jest.fn(),
       getChannelMembers: jest.fn(), client: { user: { id: 'bot' } },
     }));
     jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
@@ -389,7 +389,7 @@ describe('handleCommand dispatch-time filter', () => {
     }));
     jest.doMock('../src/discord', () => ({
       sendDM: jest.fn(), assignContributorRole: jest.fn(),
-      notifyBadgeEarned: jest.fn(), getVoiceChannelMembers: jest.fn(),
+      notifyBadgeEarned: jest.fn(),
       getChannelMembers: jest.fn(), client: { user: { id: 'bot' } },
     }));
     jest.doMock('../src/qurl', () => ({ mintLink: jest.fn() }));
