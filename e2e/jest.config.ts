@@ -14,7 +14,10 @@ const config: Config = {
   // delivery" signal that didn't reflect actual results). Reporter is
   // resilient: missing env vars / Discord errors warn but never throw,
   // so a broken reporter cannot turn a green run red.
-  reporters: ['default', '<rootDir>/helpers/discord-reporter.ts'],
+  // `.js` (not `.ts`): Jest's reporter loader uses Node `require()`
+  // directly with no ts-jest hook, so a TS reporter SyntaxErrors at
+  // load. See discord-reporter.js header for the full rationale.
+  reporters: ['default', '<rootDir>/helpers/discord-reporter.js'],
 };
 
 export default config;
