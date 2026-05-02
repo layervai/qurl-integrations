@@ -993,17 +993,6 @@ describe('handleSend — Step 3: final form', () => {
     expect(labels).toEqual(['A specific user', 'Everyone in this channel']);
   });
 
-  // Removed in this PR: two tests asserting the previous 3-option
-  // layout (`'Everyone in your voice channel'` as a separate option
-  // alongside text "Everyone in this channel"). Their own comment at
-  // the time of authoring named this PR ("the follow-up that fixes
-  // the recipient-scope bug") as the place to land the collapse.
-  // The collapsed design's voice-channel form is covered by
-  // `voice-channel form shows the collapsed "Everyone in this voice
-  // channel" label` below — same intent (the dropdown contains the
-  // voice path), shape that matches the now-canonical 2-option
-  // layout.
-
   it('target=channel re-prompts when channel has no other members', async () => {
     mockGetChannelMembers.mockReturnValue([]);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });

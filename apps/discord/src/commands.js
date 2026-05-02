@@ -1288,15 +1288,6 @@ async function handleSend(interaction, apiKey) {
   // Contextual label — voice/stage-voice paths resolve to voice-connected
   // only (see `getChannelMembers`'s doc-comment in src/discord.js for
   // the v14 polymorphism + the bug this avoids).
-  //
-  // Merge-conflict resolution (vs. origin/main): this branch's design
-  // collapses the previous user/channel/voice triple into user/channel,
-  // where the "channel" option's label/description adapts to the
-  // invocation channel type. Main's parallel work added a separate
-  // voice option via a conditional `targetOptions.push` — that
-  // approach is superseded by this collapse (see the PR title +
-  // description). `isVoiceContext` is already hoisted at line ~779;
-  // main's redefinition here is dropped.
   const channelOptionLabel = isVoiceContext
     ? 'Everyone in this voice channel'
     : 'Everyone in this channel';
