@@ -254,7 +254,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 		return nil, fmt.Errorf("marshal create input: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurl", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/qurls", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -267,7 +267,7 @@ func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, 
 	}
 
 	var out CreateOutput
-	if _, err := c.do(req, &out, "POST /v1/qurl"); err != nil {
+	if _, err := c.do(req, &out, "POST /v1/qurls"); err != nil {
 		return nil, err
 	}
 	return &out, nil

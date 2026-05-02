@@ -50,8 +50,8 @@ func TestCreate(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/qurl" {
-			t.Errorf("expected /v1/qurl, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/qurls" {
+			t.Errorf("expected /v1/qurls, got %s", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("expected Bearer test-key, got %s", r.Header.Get("Authorization"))
