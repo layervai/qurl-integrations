@@ -189,7 +189,7 @@ const randomUUIDSpy = jest.spyOn(crypto, 'randomUUID').mockReturnValue('mock-sen
 
 const { commands, _test } = require('../src/commands');
 const logger = require('../src/logger');
-const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache } = _test;
+const { sendCooldowns, setCooldown, setActiveFileSends, memberFetchCache, lateDropGenerations } = _test;
 
 afterAll(() => {
   randomBytesSpy.mockRestore();
@@ -307,6 +307,7 @@ function makeAttachmentMessage(attachment) {
 beforeEach(() => {
   jest.clearAllMocks();
   sendCooldowns.clear();
+  if (lateDropGenerations) lateDropGenerations.clear();
   if (memberFetchCache) memberFetchCache.clear();
   if (typeof setActiveFileSends === 'function') setActiveFileSends(0);
   // Default happy-path mints / uploads — individual tests override.
@@ -500,6 +501,225 @@ describe('handleSend — Step 2: file path', () => {
       content: expect.stringContaining('No file received'),
     }));
     expect(sendCooldowns.has('user-1')).toBe(false);
+  });
+
+  it('replies to a late attachment drop in DM after the 60s window with a reattach hint', async () => {
+    // After the 60s file-capture window times out, the bot's slash-command
+    // interaction is gone — but users routinely come back and drop the
+    // file anyway. Without a follow-up listener the late drop disappears
+    // into the void and the user wonders why nothing happened. The
+    // fire-and-forget late-drop catcher in the awaitMessages timeout path
+    // listens for the next ~5 min and replies once with a clear next step.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let lateResolved;
+    const lateCapturePromise = new Promise((resolve) => { lateResolved = resolve; });
+    const dmAwaitMessages = jest.fn()
+      // First call (the 60s window) — Collection-shaped timeout.
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      // Second call (the 5-min late-drop catcher) — resolve with one
+      // late attachment, recording resolution so the test can await it.
+      .mockImplementationOnce(() => {
+        const result = { first: () => lateAttachmentMessage };
+        lateResolved();
+        return Promise.resolve(result);
+      });
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    // Wait for the fire-and-forget listener's .then() to settle.
+    await lateCapturePromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('60 seconds expired'));
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('reattach'));
+  });
+
+  it('skips the late-drop reply when a fresh /qurl send is in flight (concurrency guard)', async () => {
+    // discord.js MessageCollectors do NOT consume — both a stale late-drop
+    // collector and a fresh /qurl send's 60s collector observe the same
+    // DM message when filters match. Without the sendCooldowns.has guard
+    // inside .then(), a user who retries within the 5-min window would
+    // see their successful retry produce a contradictory "60 seconds
+    // expired" reply right after sending. This test pins the guard:
+    // populate sendCooldowns AFTER cmd.execute returns (its clearCooldown
+    // ran during teardown) and BEFORE resolving the late-drop promise,
+    // simulating a fresh /qurl send racing with the stale catcher.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let resolveLate;
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveLate = resolve; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    // Simulate the user retrying /qurl send within the 5-min window —
+    // setCooldown fires synchronously at the top of handleSend, so by the
+    // time the stale catcher's .then() runs, sendCooldowns.has(userId)
+    // is true.
+    sendCooldowns.set('user-1', Date.now());
+    resolveLate({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).not.toHaveBeenCalled();
+    // Cleanup invariant on the cooldown-bail path: even when the reply
+    // is suppressed, the user's lateDropGenerations entry must be
+    // removed. Pinned so a future refactor that moves the cooldown
+    // check above the delete doesn't silently leak Map entries on
+    // every cooldown-bail.
+    expect(lateDropGenerations.has('user-1')).toBe(false);
+  });
+
+  it('does not reply when the 5-min late-drop window itself times out cleanly (no late drop)', async () => {
+    // Common path: 60s window times out, user never returns, 5 min pass,
+    // late-drop awaitMessages resolves with an empty Collection. The
+    // catcher must early-return on `!lateMsg` without attempting any
+    // .reply or logging a warning.
+    let lateResolved;
+    const lateCapturePromise = new Promise((resolve) => { lateResolved = resolve; });
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => {
+        lateResolved();
+        return Promise.resolve({ first: () => null }); // empty Collection
+      });
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    await lateCapturePromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('reattach'),
+      expect.any(Object),
+    );
+  });
+
+  it('only the newest late-drop catcher fires when multiple stack on the same DM', async () => {
+    // Repeated 60s timeouts within 5 min would otherwise stack catchers
+    // — a single late drop would fire each one's .then() and produce N
+    // copies of the reattach reply. The per-userId generation counter
+    // ensures only the newest catcher's .then() fires the reply; older
+    // catchers see a newer generation and bail.
+    const lateReply = jest.fn().mockResolvedValue(undefined);
+    const lateAttachmentMessage = { reply: lateReply };
+    let resolveOldest;
+    let resolveNewest;
+    const dmAwaitMessages = jest.fn()
+      // First /qurl send: 60s window timeout → oldest catcher armed
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveOldest = resolve; }))
+      // Second /qurl send: 60s window timeout → newest catcher armed (supersedes oldest)
+      .mockRejectedValueOnce({ size: 0, first: () => null })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveNewest = resolve; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const interaction1 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction1);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(2); // first 60s + first late-drop arm
+
+    const interaction2 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction2);
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(4); // second 60s + second late-drop arm
+
+    // Resolve OLDEST first — it should bail because the newer generation
+    // has already been recorded.
+    resolveOldest({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).not.toHaveBeenCalled();
+
+    // Resolve NEWEST — it's the live one, fires the reply.
+    resolveNewest({ first: () => lateAttachmentMessage });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lateReply).toHaveBeenCalledTimes(1);
+    expect(lateReply).toHaveBeenCalledWith(expect.stringContaining('60 seconds expired'));
+    // Cleanup invariant: lateDropGenerations is bounded to one entry
+    // per user with an active catcher. After the live catcher fires,
+    // the user's entry must be removed so the Map can't accumulate
+    // — this is what justifies the "no eviction ceiling" choice on
+    // the Map declaration.
+    expect(lateDropGenerations.has('user-1')).toBe(false);
+  });
+
+  it('stacking + simultaneous channel failure: only the newest catcher logs the warn', async () => {
+    // Pairs with the stacking-dedupe test above. Under stacking, a
+    // gateway disconnect / channel destroy can reject ALL armed
+    // late-drop awaitMessages at once. Without the .catch generation
+    // gate, that produces N warn lines for the same incident — only
+    // the newest catcher should log.
+    let rejectOldest;
+    let rejectNewest;
+    const dmAwaitMessages = jest.fn()
+      .mockRejectedValueOnce({ size: 0, first: () => null }) // first 60s window timeout
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectOldest = rej; }))
+      .mockRejectedValueOnce({ size: 0, first: () => null }) // second 60s window timeout
+      .mockImplementationOnce(() => new Promise((_, rej) => { rejectNewest = rej; }));
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+
+    const interaction1 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction1);
+    const interaction2 = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction2);
+
+    // Reject both simultaneously (channel destroyed).
+    rejectOldest(new Error('Channel destroyed'));
+    rejectNewest(new Error('Channel destroyed'));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Only the newest catcher should have warned. Filter the calls
+    // because earlier file-capture awaitMessages may also produce warns.
+    const lateWarns = logger.warn.mock.calls.filter((args) => args[0] === 'Late-drop awaitMessages rejected (non-timeout)');
+    expect(lateWarns).toHaveLength(1);
+  });
+
+  it('does not arm the late-drop catcher on a non-timeout awaitMessages error', async () => {
+    // discord.js v14: awaitMessages with errors:['time'] rejects with a
+    // Collection on timeout, but rejects with an Error if the channel
+    // got destroyed mid-await / perms revoked / gateway disconnected.
+    // In that case the capture path was already broken — arming a fresh
+    // 5-min listener on the same channel would just fail again. The
+    // catcher is gated on !isUnexpected for that reason.
+    const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
+    const dmSend = jest.fn().mockResolvedValue({ delete: dmPromptDelete });
+    const dmAwaitMessages = jest.fn().mockRejectedValueOnce(new Error('Channel destroyed'));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInitBtn()],
+      dm: { send: dmSend, awaitMessages: dmAwaitMessages },
+    });
+    await cmd.execute(interaction);
+    // Only the original 60s capture attempted; no late-drop arm.
+    expect(dmAwaitMessages).toHaveBeenCalledTimes(1);
+    expect(lateDropGenerations.has('user-1')).toBe(false);
   });
 
   it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
@@ -750,6 +970,39 @@ describe('handleSend — Step 3: final form', () => {
     expect(mockGetChannelMembers).toHaveBeenCalled();
     expect(sendBtn.update).toHaveBeenCalled();
   });
+
+  it('hides the voice-target option from the dropdown when invoked from a text channel', async () => {
+    // Voice-target only resolves via the sender's voiceState — there is
+    // nothing for it to do from a text channel. Showing a permanently-
+    // erroring "You must be in a voice channel" option is dead weight;
+    // text-channel context drops to two options (user + channel).
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), cancel],
+      channel: { type: 0 }, // GuildText — explicit so a future helper-default change doesn't silently flip the test's premise.
+    });
+    await cmd.execute(interaction);
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetRow = initialFormCall[0].components[0];
+    const targetSelect = targetRow.components[0];
+    const optionsArg = targetSelect.addOptions.mock.calls[0];
+    const labels = optionsArg.map((o) => o.label);
+    expect(labels).toEqual(['A specific user', 'Everyone in this channel']);
+  });
+
+  // Removed in this PR: two tests asserting the previous 3-option
+  // layout (`'Everyone in your voice channel'` as a separate option
+  // alongside text "Everyone in this channel"). Their own comment at
+  // the time of authoring named this PR ("the follow-up that fixes
+  // the recipient-scope bug") as the place to land the collapse.
+  // The collapsed design's voice-channel form is covered by
+  // `voice-channel form shows the collapsed "Everyone in this voice
+  // channel" label` below — same intent (the dropdown contains the
+  // voice path), shape that matches the now-canonical 2-option
+  // layout.
 
   it('target=channel re-prompts when channel has no other members', async () => {
     mockGetChannelMembers.mockReturnValue([]);

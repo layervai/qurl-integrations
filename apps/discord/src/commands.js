@@ -190,6 +190,30 @@ function isAllowedFileType(contentType) {
 const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();
+
+// Per-userId generation counter for the DM late-drop catcher. Each
+// time the 60s file-capture window times out, we arm a fire-and-
+// forget 5-min awaitMessages on the DM channel. discord.js
+// MessageCollectors do NOT consume — multiple stale catchers from
+// repeated timeouts (default cooldown 30s, capture window 60s, so
+// stacking is realistic) would all observe the same late drop and
+// each fire a "60 seconds expired" reply. Counter approach: each
+// new catcher captures the post-increment value and bails in its
+// .then() if a newer catcher has been armed. The Map is cleaned in
+// the catcher's .then() (whether or not it fires the reply); a
+// stale catcher whose .then() never fires before the user is
+// forgotten will just see a future (unrelated) catcher's increment
+// and bail naturally on its own resolution.
+//
+// No eviction ceiling here (unlike sendCooldowns above): the Map is
+// bounded to at most one entry per user with an active catcher,
+// because each new arm both increments the user's entry and the
+// catcher's terminal .then()/.catch() deletes it. A user with a
+// pending catcher contributes exactly one entry; a user with no
+// active catcher contributes zero. So the steady-state size is
+// bounded by the number of users currently inside their 5-min
+// late-drop window, which is naturally small.
+const lateDropGenerations = new Map();
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
 // them) can't grow the Map beyond this. Above this, the 10%-drop eviction
 // still fires; if that fails to reclaim, setCooldown drops the oldest
@@ -900,6 +924,82 @@ async function handleSend(interaction, apiKey) {
           sendNonce, userId: interaction.user.id, error: dErr?.message,
         }));
       }
+      // Late-drop catcher: users routinely come back to the DM and drop
+      // the file after the 60s window has already passed, then wonder
+      // why nothing happened. Set up a fire-and-forget listener for the
+      // next 5 min on the DM channel and reply once with a reattach
+      // hint if a late attachment arrives. Single-shot (max:1) so it
+      // auto-tears down.
+      //
+      // Two concurrency hazards both apply, both guarded:
+      //
+      // 1. STACKING — repeated timeouts within 5 min (achievable since
+      //    QURL_SEND_COOLDOWN_MS defaults to 30s while the capture window
+      //    is 60s) would otherwise arm multiple catchers; a single late
+      //    drop would fire each catcher's .then() and produce N reply
+      //    messages. lateDropGenerations bumps a per-userId counter on
+      //    each arm; each catcher captures its own generation and bails
+      //    if a newer one has been armed.
+      //
+      // 2. RACE WITH FRESH SEND — discord.js MessageCollectors do NOT
+      //    consume, so a stale catcher and a fresh /qurl send's 60s
+      //    collector both observe the same DM message. Without a guard,
+      //    a user who retries inside the 5-min window would see their
+      //    successful retry produce a contradictory "60 seconds expired"
+      //    reply. setCooldown fires synchronously at handleSend entry,
+      //    so sendCooldowns.has(userId) is true while a fresh send is
+      //    in flight (entry is removed by clearCooldown on every exit
+      //    path — the guard window is the in-flight duration only, NOT
+      //    the full QURL_SEND_COOLDOWN_MS). The fresh flow's own
+      //    collector handles the attachment in that case.
+      //
+      // Catcher is NOT armed on non-timeout errors (channel destroyed,
+      // gateway disconnect, perms revoked). In those cases there was
+      // never a working capture path, so a fresh awaitMessages on the
+      // same channel would just fail again.
+      //
+      // The DM-type check is belt-and-suspenders: both branches that
+      // assign captureChannel above today set a DM channel, so this is
+      // effectively always true. The gate pins the invariant against a
+      // future refactor that introduces a non-DM capture path (e.g. a
+      // staff-only ephemeral capture in a guild channel).
+      if (!isUnexpected && captureChannel.type === ChannelType.DM) {
+        const senderUserId = interaction.user.id;
+        const myGeneration = (lateDropGenerations.get(senderUserId) || 0) + 1;
+        lateDropGenerations.set(senderUserId, myGeneration);
+        captureChannel.awaitMessages({
+          filter: (m) => m.author.id === senderUserId && m.attachments.size > 0,
+          max: 1,
+          time: 5 * 60000,
+        }).then((late) => {
+          // Stale-catcher bail: a newer late-drop catcher has been armed
+          // (user timed out again). Only the newest catcher fires.
+          if (lateDropGenerations.get(senderUserId) !== myGeneration) return;
+          lateDropGenerations.delete(senderUserId);
+          const lateMsg = late.first();
+          if (!lateMsg) return;
+          if (sendCooldowns.has(senderUserId)) return;
+          lateMsg.reply('⏳ 60 seconds expired — please run `/qurl send` again to reattach.').catch((rErr) => logger.warn('Failed to send late-drop reattach hint', {
+            sendNonce, userId: senderUserId, error: rErr?.message,
+          }));
+        }).catch((err) => {
+          // awaitMessages without errors:['time'] resolves with an empty
+          // Collection on timeout (handled above as !lateMsg) — anything
+          // reaching this catch is an actual fetch / permission failure,
+          // which means the late-drop feature is non-functional for this
+          // user this session. logger.warn (not debug) so it surfaces.
+          //
+          // Mirror the .then() generation gate: under stacking, N stale
+          // catchers can reject simultaneously on a real channel failure
+          // (gateway disconnect drops them all). Without this gate, that
+          // produces N warn lines for the same incident.
+          if (lateDropGenerations.get(senderUserId) !== myGeneration) return;
+          lateDropGenerations.delete(senderUserId);
+          logger.warn('Late-drop awaitMessages rejected (non-timeout)', {
+            sendNonce, userId: senderUserId, error: err?.message,
+          });
+        });
+      }
       clearCooldown(interaction.user.id);
       return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
     }
@@ -1188,6 +1288,15 @@ async function handleSend(interaction, apiKey) {
   // Contextual label — voice/stage-voice paths resolve to voice-connected
   // only (see `getChannelMembers`'s doc-comment in src/discord.js for
   // the v14 polymorphism + the bug this avoids).
+  //
+  // Merge-conflict resolution (vs. origin/main): this branch's design
+  // collapses the previous user/channel/voice triple into user/channel,
+  // where the "channel" option's label/description adapts to the
+  // invocation channel type. Main's parallel work added a separate
+  // voice option via a conditional `targetOptions.push` — that
+  // approach is superseded by this collapse (see the PR title +
+  // description). `isVoiceContext` is already hoisted at line ~779;
+  // main's redefinition here is dropped.
   const channelOptionLabel = isVoiceContext
     ? 'Everyone in this voice channel'
     : 'Everyone in this channel';
@@ -3433,6 +3542,7 @@ module.exports = {
       batchSettled,
       expiryToISO,
       sendCooldowns,
+      lateDropGenerations,
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,
