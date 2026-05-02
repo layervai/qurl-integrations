@@ -2,32 +2,20 @@
  * Posts a per-file E2E result summary embed to the test Discord
  * channel after every run.
  *
+ * Plain `.js` (not `.ts`) by deliberate choice: Jest's reporter
+ * loader uses Node's `require()` directly, with no `ts-jest` hook
+ * applied (the preset only transforms test files). A `.ts` reporter
+ * SyntaxErrors in CI on the first non-JS token. The logic is
+ * straightforward enough that JSDoc types on the load-bearing inputs
+ * are sufficient; converting back to TS would require either
+ * pre-compiling or a Node-level loader hook, both of which are heavier
+ * than the value provided.
+ *
  * Resilience contract: missing env vars / Discord errors / timeouts
  * warn under `[discord-reporter]` but never throw. Reporter is a
  * status surface, not a test gate.
  */
-import * as path from 'node:path';
-import type {
-  AggregatedResult,
-  Reporter,
-  TestContext,
-  TestResult,
-} from '@jest/reporters';
-
-interface EmbedField {
-  name: string;
-  value: string;
-  inline?: boolean;
-}
-
-interface DiscordEmbed {
-  title: string;
-  description: string;
-  color: number;
-  fields: EmbedField[];
-  footer?: { text: string };
-  timestamp?: string;
-}
+const path = require('node:path');
 
 // Discord embed limits: field value 1024, field count 25,
 // total payload 6000. Per-field cap clamped below; total tracked
@@ -50,7 +38,7 @@ const POST_TIMEOUT_MS = 8_000;
 // `MINT_API_URL` host disambiguates env without a new env var.
 // Substring match is fine while domains are `layerv.ai` / `layerv.xyz`;
 // reconsider if a `staging.layerv.ai`-style host ever lands.
-function envLabel(): string {
+function envLabel() {
   const url = process.env.MINT_API_URL ?? '';
   if (url.includes('layerv.ai')) return 'prod';
   if (url.includes('layerv.xyz')) return 'sandbox';
@@ -60,7 +48,7 @@ function envLabel(): string {
 // Discord footer text isn't auto-linkified — return the run URL for
 // the description (where Discord renders it as a clickable link).
 // Falls back to empty when running locally.
-function runUrl(): string {
+function runUrl() {
   const runId = process.env.GITHUB_RUN_ID;
   const repo = process.env.GITHUB_REPOSITORY;
   const server = process.env.GITHUB_SERVER_URL;
@@ -70,7 +58,7 @@ function runUrl(): string {
   return '';
 }
 
-function footerText(): string {
+function footerText() {
   const runId = process.env.GITHUB_RUN_ID;
   const sha = process.env.GITHUB_SHA;
   if (runId) {
@@ -80,7 +68,11 @@ function footerText(): string {
   return 'qURL E2E Test Suite';
 }
 
-function buildField(suite: TestResult): EmbedField {
+/**
+ * @param {{ testFilePath: string, numPassingTests: number, numFailingTests: number, numTotalTests: number, testResults: Array<{ status: string, title: string }> }} suite
+ * @returns {{ name: string, value: string }}
+ */
+function buildField(suite) {
   const file = path.basename(suite.testFilePath);
   // `numTotalTests` includes pending/todo, not just pass+fail. Using
   // the partial sum was misleading: a `3 passes + 1 it.skip` file
@@ -105,7 +97,10 @@ function buildField(suite: TestResult): EmbedField {
   return { name: file, value };
 }
 
-function buildEmbed(results: AggregatedResult): DiscordEmbed {
+/**
+ * @param {{ numPassedTests: number, numFailedTests: number, numTotalTests: number, startTime: number, testResults: Array }} results
+ */
+function buildEmbed(results) {
   const passed = results.numPassedTests;
   const failed = results.numFailedTests;
   const total = results.numTotalTests;
@@ -120,8 +115,8 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
   // matches the per-file `⏭ N` display below it.
   const skipped = total - passed - failed;
   const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
-  let color: number;
-  let description: string;
+  let color;
+  let description;
   if (total === 0) {
     color = COLOR_YELLOW;
     description = `⚠️ No tests ran · ${durationSec}s`;
@@ -144,21 +139,21 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
   // they originate in our own test code, not user input — Discord
   // embeds don't render markdown the way messages do, so this is the
   // intended trust boundary.
-  const fields: EmbedField[] = [];
-  let usedBytes = title.length + description.length + footerText().length;
+  const fields = [];
+  let usedChars = title.length + description.length + footerText().length;
   for (const suite of results.testResults) {
     if (fields.length >= FIELD_COUNT_MAX) break;
     const field = buildField(suite);
-    const fieldBytes = field.name.length + field.value.length;
-    if (usedBytes + fieldBytes > FIELDS_BUDGET) break;
+    const fieldChars = field.name.length + field.value.length;
+    if (usedChars + fieldChars > FIELDS_BUDGET) break;
     fields.push(field);
-    usedBytes += fieldBytes;
+    usedChars += fieldChars;
   }
   const truncated = results.testResults.length - fields.length;
   const truncatedNote = truncated > 0 ? ` (showing ${fields.length}/${results.testResults.length} files)` : '';
 
   // Run URL belongs in the description, not the footer — Discord
-  // doesn't linkify footer text (per claude-review pass 2).
+  // doesn't linkify footer text.
   const url = runUrl();
   const linkLine = url ? `\n[View run on GitHub](${url})` : '';
 
@@ -173,11 +168,10 @@ function buildEmbed(results: AggregatedResult): DiscordEmbed {
   };
 }
 
-async function postEmbed(embed: DiscordEmbed): Promise<void> {
+async function postEmbed(embed) {
   const token = process.env.BOT_TOKEN;
   const channelId = process.env.CHANNEL_ID;
   if (!token || !channelId) {
-    // eslint-disable-next-line no-console
     console.warn(
       '[discord-reporter] BOT_TOKEN or CHANNEL_ID unset — skipping Discord post (test results NOT affected).',
     );
@@ -201,7 +195,6 @@ async function postEmbed(embed: DiscordEmbed): Promise<void> {
 
     if (!res.ok) {
       const body = await res.text();
-      // eslint-disable-next-line no-console
       console.warn(
         `[discord-reporter] Discord POST returned ${res.status}: ${body.slice(0, 200)} (test results NOT affected).`,
       );
@@ -211,30 +204,30 @@ async function postEmbed(embed: DiscordEmbed): Promise<void> {
     const msg = isAbort
       ? `timeout after ${POST_TIMEOUT_MS}ms`
       : err instanceof Error ? err.message : String(err);
-    // eslint-disable-next-line no-console
     console.warn(`[discord-reporter] Discord POST ${msg} (test results NOT affected).`);
   } finally {
     clearTimeout(timer);
   }
 }
 
-export default class DiscordReporter implements Reporter {
-  constructor(_globalConfig: unknown, _reporterOptions: unknown) {}
+class DiscordReporter {
+  constructor(_globalConfig, _reporterOptions) {}
 
-  async onRunComplete(_contexts: Set<TestContext>, results: AggregatedResult): Promise<void> {
+  async onRunComplete(_contexts, results) {
     try {
       const embed = buildEmbed(results);
       await postEmbed(embed);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // eslint-disable-next-line no-console
       console.warn(`[discord-reporter] failed to post embed: ${msg} (test results NOT affected).`);
     }
   }
 
   // Returning `undefined` signals "no reporter-side error." Test
   // failures surface via jest's own exit code, independent of this hook.
-  getLastError(): Error | undefined {
+  getLastError() {
     return undefined;
   }
 }
+
+module.exports = DiscordReporter;
