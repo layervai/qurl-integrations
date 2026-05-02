@@ -33,7 +33,7 @@ const TOKENS_PER_RESOURCE = 10;
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-const { getVoiceChannelMembers, getTextChannelMembers, sendDM } = require('./discord');
+const { getChannelMembers, sendDM } = require('./discord');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -668,6 +668,15 @@ const memberFetchCache = new Map(); // guildId -> { timestamp, inFlight }
 // paginates) so a longer cache reduces latency on repeat /qurl send calls
 // within the same minute. 60s is still short enough that a user who just
 // joined/left won't be missed for long.
+//
+// Intent dependency: this fetch relies on the GuildMembers privileged
+// intent (declared in src/discord.js — boot-time assertion guards against
+// removal). With that intent, guild.members.fetch() handles gateway
+// pagination transparently and returns the full member list regardless
+// of guild size. Without it, the call is rejected by Discord. The
+// 100-guild verification gate is for the GuildMembers intent itself
+// (the "Server Members Intent" toggle in the dev portal) — not a
+// per-call cap.
 const MEMBER_FETCH_TTL = 60000;
 async function fetchGuildMembers(guild) {
   const now = Date.now();
@@ -757,6 +766,20 @@ async function handleSend(interaction, apiKey) {
   }
   // Set cooldown immediately to prevent concurrent request bypass
   setCooldown(interaction.user.id);
+
+  // Hoisted once for reuse across the form (dropdown labels, channel-target
+  // resolution, fetchGuildMembers skip) and the back-half (channel-
+  // announcement wording). The invocation channel type is fixed for the
+  // lifetime of this handler — Discord doesn't reroute live interactions.
+  // `interaction.channel` was non-null-guarded above, but read .type
+  // through optional chaining as belt-and-suspenders so a future refactor
+  // that moves this above the guard doesn't strand a cooldown via a
+  // null-deref throw.
+  const channelType = interaction.channel?.type;
+  const isVoiceContext = (
+    channelType === ChannelType.GuildVoice
+    || channelType === ChannelType.GuildStageVoice
+  );
 
   const sendNonce = crypto.randomBytes(8).toString('hex');
 
@@ -1262,31 +1285,27 @@ async function handleSend(interaction, apiKey) {
     return content;
   };
 
-  // The voice-target option only makes sense from a voice / stage-voice
-  // channel (it routes through the sender's voiceState — there's nothing
-  // for it to resolve to from a text channel). Conditional inclusion
-  // keeps the text-channel dropdown to two options instead of dangling
-  // a third "You must be in a voice channel" option that always errors.
-  const isVoiceContext = (
-    interaction.channel.type === ChannelType.GuildVoice
-    || interaction.channel.type === ChannelType.GuildStageVoice
-  );
+  // Contextual label — voice/stage-voice paths resolve to voice-connected
+  // only (see `getChannelMembers`'s doc-comment in src/discord.js for
+  // the v14 polymorphism + the bug this avoids).
+  const channelOptionLabel = isVoiceContext
+    ? 'Everyone in this voice channel'
+    : 'Everyone in this channel';
+  const channelOptionDescription = isVoiceContext
+    ? 'Members currently connected via voice (excl. bots and you)'
+    : 'All members of this text channel (excl. bots and you)';
 
   const formRows = () => {
     const rows = [];
 
-    const targetOptions = [
-      { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
-      { label: 'Everyone in this channel', value: 'channel', description: 'All members of this text channel (excl. bots and you)', default: target === 'channel' },
-    ];
-    if (isVoiceContext) {
-      targetOptions.push({ label: 'Everyone in your voice channel', value: 'voice', description: 'Members currently connected via voice (excl. bots and you)', default: target === 'voice' });
-    }
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.targetSelect)
         .setPlaceholder('Recipient(s) — choose type')
-        .addOptions(...targetOptions)
+        .addOptions(
+          { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
+          { label: channelOptionLabel, value: 'channel', description: channelOptionDescription, default: target === 'channel' },
+        )
     ));
 
     if (target === 'user') {
@@ -1320,7 +1339,7 @@ async function handleSend(interaction, apiKey) {
     ));
 
     const recipientsResolved = (target === 'user' && recipients.length === 1)
-      || ((target === 'channel' || target === 'voice') && recipients.length > 0);
+      || (target === 'channel' && recipients.length > 0);
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.sendBtn)
@@ -1389,41 +1408,41 @@ async function handleSend(interaction, apiKey) {
     if (compInt.customId === ids.targetSelect) {
       const newTarget = compInt.values[0];
       // For user-target, re-selecting 'user' is a no-op (UserSelect drives
-      // the actual recipient pick). For channel and voice, ALWAYS re-resolve
-      // — members can join or leave during the up-to-3-minute form-loop
-      // window, and a stale recipients array would mint links for ghosts.
-      const requiresFreshResolve = newTarget === 'channel' || newTarget === 'voice';
-      if (newTarget !== target || requiresFreshResolve) {
+      // the actual recipient pick). For channel, ALWAYS re-resolve.
+      // Staleness sources differ by context:
+      //   - text channel: members can join/leave the guild during the
+      //     up-to-3-min form-loop window; the guild member cache (warmed
+      //     by fetchGuildMembers below) goes stale.
+      //   - voice / stage-voice: users can join/leave voice during the
+      //     window; the gateway-driven voice state cache reflects this
+      //     live, but a captured recipients array snapshot would not.
+      // A stale recipients array would mint links for ghosts.
+      if (newTarget !== target || newTarget === 'channel') {
         target = newTarget;
         recipients = [];
         if (target === 'channel') {
-          try {
-            await fetchGuildMembers(interaction.guild);
-          } catch (err) {
-            logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
-            clearCooldown(interaction.user.id);
-            await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
-            return;
+          // Voice / stage-voice channels source members from the voice
+          // state cache (populated automatically via gateway events) — no
+          // guild.members.fetch needed. Text channels need the cache warm.
+          if (!isVoiceContext) {
+            try {
+              await fetchGuildMembers(interaction.guild);
+            } catch (err) {
+              logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
+              clearCooldown(interaction.user.id);
+              await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
+              return;
+            }
           }
-          recipients = getTextChannelMembers(interaction.channel, interaction.user.id);
+          recipients = getChannelMembers(interaction.channel, interaction.user.id);
           if (recipients.length === 0) {
             target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other members in this channel. Pick another option.' }), components: formRows() });
+            const warning = isVoiceContext
+              ? 'No other users currently connected to this voice channel. Pick **A specific user** instead.'
+              : 'No other members in this channel. Pick **A specific user** instead.';
+            await safeCompUpdate(compInt, { content: formContent({ warning }), components: formRows() });
             continue;
           }
-        } else if (target === 'voice') {
-          const result = getVoiceChannelMembers(interaction.guild, interaction.user.id);
-          if (result.error === 'not_in_voice') {
-            target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'You must be in a voice channel to use this option.' }), components: formRows() });
-            continue;
-          }
-          if (result.members.length === 0) {
-            target = null;
-            await safeCompUpdate(compInt, { content: formContent({ warning: 'No other users in your voice channel.' }), components: formRows() });
-            continue;
-          }
-          recipients = result.members;
         }
         // Surface the per-send cap NOW, while the user can change targets,
         // not 3 minutes later after they've filled in the rest of the form.
@@ -1844,15 +1863,15 @@ async function handleSend(interaction, apiKey) {
   // archived mid-send, DM-channel dispatch) the channel object can be
   // null — and `.send()` on null throws synchronously, before the
   // try/catch can see it.
-  if (interaction.channel && (target === 'channel' || target === 'voice') && delivered > 0) {
+  if (interaction.channel && target === 'channel' && delivered > 0) {
     // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
     // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
     // fallback). Channel-post is a wider blast radius than DM, so applying
     // the same spoof defense here is critical — without it a display name
     // with a leading U+202E flips text direction in the public announcement.
     const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
-    const notifyMsg = target === 'voice'
-      ? `📩 **${safeName}** has shared something with users currently on voice via **qURL Bot** — if you're on voice, check your DMs from qURL Bot.`
+    const notifyMsg = isVoiceContext
+      ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
       : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
     try {
       await interaction.channel.send({ content: notifyMsg });

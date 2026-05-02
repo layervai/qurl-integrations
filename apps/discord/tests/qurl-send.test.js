@@ -118,8 +118,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: jest.fn(),
-  getVoiceChannelMembers: jest.fn(),
-  getTextChannelMembers: jest.fn(),
+  getChannelMembers: jest.fn(),
 }));
 
 // Mock admin util
@@ -1381,8 +1380,7 @@ describe('handleAddRecipients', () => {
       postStarMilestone: jest.fn(),
       postToGitHubFeed: jest.fn(),
       sendDM: mockSendDM,
-      getVoiceChannelMembers: jest.fn(),
-      getTextChannelMembers: jest.fn(),
+      getChannelMembers: jest.fn(),
     }));
 
     // Mock admin util

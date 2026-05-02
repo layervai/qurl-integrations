@@ -84,7 +84,7 @@ jest.mock('discord.js', () => {
     ChannelType: { GuildText: 0, GuildVoice: 2 },
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
     Client: jest.fn().mockImplementation(() => ({ on: jest.fn(), once: jest.fn(), login: jest.fn() })),
-    GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 4, GuildMessages: 8 },
+    GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 4, GuildMessages: 8, DirectMessages: 4096 },
     Partials: { Channel: 0, Message: 1 },
     Events: { ClientReady: 'ready', InteractionCreate: 'interactionCreate' },
   };

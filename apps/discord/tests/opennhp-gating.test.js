@@ -96,7 +96,7 @@ const mockClient = {
 
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
-  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128 },
+  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128, DirectMessages: 4096 },
   EmbedBuilder: jest.fn().mockImplementation(() => ({
     setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
     setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),

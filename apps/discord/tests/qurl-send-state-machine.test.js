@@ -133,8 +133,7 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetVoiceChannelMembers = jest.fn();
-const mockGetTextChannelMembers = jest.fn();
+const mockGetChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -144,8 +143,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getVoiceChannelMembers: mockGetVoiceChannelMembers,
-  getTextChannelMembers: mockGetTextChannelMembers,
+  getChannelMembers: mockGetChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -955,7 +953,7 @@ describe('handleSend — Step 3: final form', () => {
   });
 
   it('target=channel resolves text-channel members', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -969,7 +967,7 @@ describe('handleSend — Step 3: final form', () => {
       awaitQueue: [locInitBtn(), targetChannel, sendBtn],
     });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalled();
+    expect(mockGetChannelMembers).toHaveBeenCalled();
     expect(sendBtn.update).toHaveBeenCalled();
   });
 
@@ -995,52 +993,8 @@ describe('handleSend — Step 3: final form', () => {
     expect(labels).toEqual(['A specific user', 'Everyone in this channel']);
   });
 
-  it('shows the voice-target option when invoked from a voice channel (label unchanged in this PR)', async () => {
-    // Inverse of the text-channel test. The voice-target label stays
-    // "Everyone in your voice channel" in this PR — the destination
-    // wording (a single collapsed "Everyone in this voice channel")
-    // is owned by the follow-up that fixes the recipient-scope bug.
-    // Doing the rename twice (once here, once on collapse) shifts UX
-    // in close succession; landing the final phrasing in one place is
-    // less churn for users.
-    const cancel = makeCompInt(ids.cancelBtn);
-    const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), cancel],
-      channel: { type: 2 }, // GuildVoice
-    });
-    await cmd.execute(interaction);
-    const initialFormCall = interaction.editReply.mock.calls.find(
-      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
-    );
-    expect(initialFormCall).toBeDefined();
-    const targetRow = initialFormCall[0].components[0];
-    const targetSelect = targetRow.components[0];
-    const optionsArg = targetSelect.addOptions.mock.calls[0];
-    const labels = optionsArg.map((o) => o.label);
-    expect(labels).toEqual(['A specific user', 'Everyone in this channel', 'Everyone in your voice channel']);
-  });
-
-  it('shows the voice-target option from a stage-voice channel too', async () => {
-    // GuildStageVoice (type 13) is in the same isVoiceContext branch as
-    // GuildVoice (type 2). Pin both so a future tightening of the type
-    // check doesn't silently drop the option for stage-voice users.
-    const cancel = makeCompInt(ids.cancelBtn);
-    const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), cancel],
-      channel: { type: 13 }, // GuildStageVoice
-    });
-    await cmd.execute(interaction);
-    const initialFormCall = interaction.editReply.mock.calls.find(
-      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
-    );
-    expect(initialFormCall).toBeDefined();
-    const targetSelect = initialFormCall[0].components[0].components[0];
-    const labels = targetSelect.addOptions.mock.calls[0].map((o) => o.label);
-    expect(labels).toContain('Everyone in your voice channel');
-  });
-
   it('target=channel re-prompts when channel has no other members', async () => {
-    mockGetTextChannelMembers.mockReturnValue([]);
+    mockGetChannelMembers.mockReturnValue([]);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -1052,30 +1006,67 @@ describe('handleSend — Step 3: final form', () => {
     }));
   });
 
-  it('target=voice re-prompts when sender is not in a voice channel', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ error: 'not_in_voice' });
-    const targetVoice = makeCompInt(ids.targetSelect, { values: ['voice'] });
+  // Voice-channel invocation: target=channel resolves to voice-connected
+  // members only (the prior bug was that getChannelMembers filtered
+  // guild.members.cache by ViewChannel perm, which on default servers
+  // expanded to @everyone — sending to the entire guild). The fix routes
+  // through channel.members which discord.js v14 returns as voice-connected
+  // for voice/stage-voice channels. Also: no fetchGuildMembers call needed
+  // (voice state cache populates automatically via gateway events).
+  it('voice-channel invocation skips fetchGuildMembers and uses voice-connected only', async () => {
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const guildFetch = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), targetVoice, cancel],
+      awaitQueue: [locInitBtn(), targetChannel, cancel],
+      channel: { type: 2 }, // GuildVoice
+      guild: { members: { fetch: guildFetch } },
     });
     await cmd.execute(interaction);
-    expect(targetVoice.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('must be in a voice channel'),
+    expect(mockGetChannelMembers).toHaveBeenCalled();
+    expect(guildFetch).not.toHaveBeenCalled();
+  });
+
+  it('voice-channel empty re-prompt names the voice context', async () => {
+    mockGetChannelMembers.mockReturnValue([]);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, cancel],
+      channel: { type: 2 }, // GuildVoice
+    });
+    await cmd.execute(interaction);
+    expect(targetChannel.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('currently connected to this voice channel'),
     }));
   });
 
-  it('target=voice re-prompts when voice channel has no other members', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ members: [] });
-    const targetVoice = makeCompInt(ids.targetSelect, { values: ['voice'] });
+  it('voice-channel form shows the collapsed "Everyone in this voice channel" label', async () => {
+    // The 1a + 1b collapse: voice context shows two options (user +
+    // "Everyone in this voice channel" → voice-connected only).
+    // Pin the label, the option count, and the absence of a separate
+    // "voice" option.
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(), targetVoice, cancel],
+      awaitQueue: [locInitBtn(), cancel],
+      channel: { type: 2 }, // GuildVoice
     });
     await cmd.execute(interaction);
-    expect(targetVoice.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringContaining('No other users in your voice channel'),
-    }));
+    const initialFormCall = interaction.editReply.mock.calls.find(
+      (c) => c[0] && Array.isArray(c[0].components) && c[0].components.length > 0,
+    );
+    expect(initialFormCall).toBeDefined();
+    const targetSelect = initialFormCall[0].components[0].components[0];
+    const options = targetSelect.addOptions.mock.calls[0];
+    const labels = options.map((o) => o.label);
+    const values = options.map((o) => o.value);
+    expect(labels).toEqual(['A specific user', 'Everyone in this voice channel']);
+    // Pin values too — "no separate voice option" intent. A future
+    // regression that re-introduces a third dropdown entry under a
+    // different label would still pass labels.toEqual([...]) with an
+    // exact-match array, but values would catch the structural change.
+    expect(values).toEqual(['user', 'channel']);
   });
 
   it('expiry select updates the chosen expiry', async () => {
@@ -1146,7 +1137,7 @@ describe('handleSend — recipients cap', () => {
     // targetSelect handler so the user isn't sandbagged after filling
     // in the rest of the form.
     const many = Array.from({ length: 51 }, (_, i) => ({ id: `u${i}`, username: `U${i}` }));
-    mockGetTextChannelMembers.mockReturnValue(many);
+    mockGetChannelMembers.mockReturnValue(many);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -1214,7 +1205,7 @@ describe('handleSend — end-to-end happy paths', () => {
     const err = new Error('upstream quota');
     err.apiCode = 'quota_exceeded';
     mockUploadJsonToConnector.mockRejectedValue(err);
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     const locInit = makeCompInt(ids.initLoc, {
@@ -1236,7 +1227,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('aborts when the DB write fails after mint, before any DM goes out', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
@@ -1261,7 +1252,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('reports failed DM delivery in the post-send confirmation', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1293,7 +1284,7 @@ describe('handleSend — end-to-end happy paths', () => {
   });
 
   it('returns a friendly message when mintLinks underdelivers', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1355,7 +1346,7 @@ describe('handleSend — audit emission', () => {
   });
 
   it('emits dispatch_sent / dispatch_failed once per recipient, even on partial DM failure', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1385,7 +1376,7 @@ describe('handleSend — audit emission', () => {
   });
 
   it('emits dispatch_sent before the DB write, so a DDB throw cannot suppress the metric', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockSendDM.mockResolvedValue(true);
     // Make the DM-status DB write throw — audit must already have fired.
@@ -1413,7 +1404,7 @@ describe('handleSend — audit emission', () => {
   // must still fire as dispatch_failed (not silently disappear when the
   // promise rejection bubbles through batchSettled).
   it('emits dispatch_failed when sendDM itself throws (contract regression guard)', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockSendDM.mockRejectedValueOnce(new Error('Discord API 503'));
     const locInit = makeCompInt(ids.initLoc, {
@@ -1440,7 +1431,7 @@ describe('handleSend — audit emission', () => {
 // 7b. Channel-announcement post — sender displayName sanitization
 // ===========================================================================
 // The /qurl send back-half posts a public announcement in the channel
-// when target is 'channel' or 'voice'. Because that post is wider blast
+// when target is 'channel'. Because that post is wider blast
 // radius than a DM, sanitizeDisplayName MUST strip bidi (U+202E) and
 // zero-width (U+200B) chars from the sender's displayName before it
 // goes out. This regression test was ported from the deleted
@@ -1461,7 +1452,7 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
   }
 
   it('strips RLO (U+202E) and ZWSP (U+200B) before posting to channel', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
     ]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
@@ -1488,6 +1479,45 @@ describe('handleSend — channel-announcement post sanitizes sender displayName'
     expect(msg).not.toContain('​');
     // The sanitized name should appear (NFKC + strip leaves "Adminbob")
     expect(msg).toMatch(/Adminbob/);
+  });
+
+  // Voice context wording diverges from the text-channel announcement.
+  // Pin both branches so a future operator-readability tweak doesn't
+  // regress one path silently. The wording difference is the only
+  // user-visible signal that the link went to voice-connected members
+  // only, not the entire view-perm scope.
+  it('text-channel announcement says "all members of this channel"', async () => {
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    const channelSend = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      channel: { type: 0, send: channelSend }, // GuildText
+    });
+    await cmd.execute(interaction);
+    expect(channelSend).toHaveBeenCalledTimes(1);
+    const msg = channelSend.mock.calls[0][0].content;
+    expect(msg).toContain('all members of this channel');
+    expect(msg).not.toContain('voice channel');
+  });
+
+  it('voice-channel announcement says "currently connected to this voice channel"', async () => {
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
+    const channelSend = jest.fn().mockResolvedValue(undefined);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetChannel, sendBtn],
+      channel: { type: 2, send: channelSend }, // GuildVoice
+    });
+    await cmd.execute(interaction);
+    expect(channelSend).toHaveBeenCalledTimes(1);
+    const msg = channelSend.mock.calls[0][0].content;
+    expect(msg).toContain('currently connected to this voice channel');
+    expect(msg).not.toContain('all members of this channel');
   });
 });
 
@@ -1587,30 +1617,19 @@ describe('handleSend — additional branch coverage', () => {
   // during the up-to-3-min form-loop window). Regression test for the
   // ghost-recipients bug Claude bot review flagged.
   it('re-resolves channel members on every channel re-select (no stale recipients)', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
     await cmd.execute(interaction);
-    expect(mockGetTextChannelMembers).toHaveBeenCalledTimes(2);
-  });
-
-  // C5b — voice re-select also re-resolves (same staleness concern).
-  it('re-resolves voice members on every voice re-select', async () => {
-    mockGetVoiceChannelMembers.mockReturnValue({ members: [{ id: 'u2', username: 'Alice' }] });
-    const target1 = makeCompInt(ids.targetSelect, { values: ['voice'] });
-    const target2 = makeCompInt(ids.targetSelect, { values: ['voice'] });
-    const cancel = makeCompInt(ids.cancelBtn);
-    const interaction = makeInteraction({ awaitQueue: [locInitBtn(), target1, target2, cancel] });
-    await cmd.execute(interaction);
-    expect(mockGetVoiceChannelMembers).toHaveBeenCalledTimes(2);
+    expect(mockGetChannelMembers).toHaveBeenCalledTimes(2);
   });
 
   // C5d — switching target across types resets recipients (no leakage
   // from a previously-picked user into a channel send, etc.).
   it('switches target across types and resets recipients each transition', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userPick = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
@@ -1698,7 +1717,7 @@ describe('handleSend — additional branch coverage', () => {
 
   // C9 — saveSendConfig failure is logged-and-swallowed; DMs still go out.
   it('logs but does not abort when saveSendConfig fails after delivery', async () => {
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/a' }]);
     mockDb.saveSendConfig.mockImplementationOnce(() => { throw new Error('disk full'); });
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
@@ -1716,7 +1735,7 @@ describe('handleSend — additional branch coverage', () => {
 
   // C10 — file-path mintLinks underdelivery (mirror of the location-path test).
   it('returns a friendly message when mintLinks underdelivers on the file path', async () => {
-    mockGetTextChannelMembers.mockReturnValue([
+    mockGetChannelMembers.mockReturnValue([
       { id: 'u2', username: 'Alice' },
       { id: 'u3', username: 'Bob' },
     ]);
@@ -1743,7 +1762,7 @@ describe('handleSend — additional branch coverage', () => {
     mockDownloadAndUpload.mockRejectedValueOnce(err);
     const fileInit = makeCompInt(ids.initFile);
     const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
-    mockGetTextChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));

@@ -1,24 +1,52 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
 const db = require('./store');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
-    // Needed for the /qurl send file path's DM-pivot: when the user
-    // clicks Send File from a guild channel, the bot DMs them and
-    // awaitMessages on that DM channel for the file drop. Without
-    // this intent the bot never sees DM messages and the awaitMessages
-    // call times out at 60s — even though the user dropped the file.
-    // Attachment metadata does NOT require MessageContent intent.
-    GatewayIntentBits.DirectMessages,
-  ],
-});
+// Required intents — single source of truth. Each feature that depends
+// on a specific intent has its own assertion below; if a future refactor
+// trims an entry from this array, the corresponding feature-specific
+// assertion fails at module load with a clear error pointing at the
+// broken feature.
+const intents = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildVoiceStates,
+  // Needed for the /qurl send file path's DM-pivot: when the user
+  // clicks Send File from a guild channel, the bot DMs them and
+  // awaitMessages on that DM channel for the file drop. Without
+  // this intent the bot never sees DM messages and the awaitMessages
+  // call times out at 60s — even though the user dropped the file.
+  // Attachment metadata does NOT require MessageContent intent.
+  GatewayIntentBits.DirectMessages,
+];
+
+// Per-feature intent canaries. Each line pins one intent to one feature
+// and fails loud if the intent has been removed from `intents` above —
+// converting silent-feature-break (e.g., voice-channel /qurl send
+// returning empty) into a startup error with a clear cause.
+//
+// `assertIntent` takes the intents list as its first argument (rather
+// than closing over the module-level `intents`) so it's directly
+// testable: a unit test can pass an intents-with-one-stripped array and
+// verify the throw, locking in the assertion's purpose against a future
+// "let's downgrade to a warn" refactor.
+function assertIntent(intentsList, bit, requiredFor) {
+  // Belt-and-suspenders: in test environments where GatewayIntentBits
+  // is partially mocked, `bit` may be undefined; treat undefined as
+  // "intent not declared" rather than "intent silently missing."
+  if (bit === undefined || !intentsList.includes(bit)) {
+    throw new Error(`Missing required Discord intent for ${requiredFor}. Add the intent back to the \`intents\` array in apps/discord/src/discord.js.`);
+  }
+}
+assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
+assertIntent(intents, GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
+
+const client = new Client({ intents });
 
 // Cache for quick lookups
 let guild = null;
@@ -797,69 +825,52 @@ async function sendDM(discordId, message) {
   }
 }
 
-// Depends on guild.members.cache being populated (caller must fetch first).
-// Discord limits fetch to ~1000 members without GUILD_PRESENCES intent.
-// For guilds >1000 members, some viewers may be missed.
-
-// Get members in the sender's voice channel (excludes bots and the sender)
-function getVoiceChannelMembers(guildObj, senderUserId) {
-  const senderState = guildObj.voiceStates.cache.get(senderUserId);
-  if (!senderState || !senderState.channel) {
-    return { error: 'not_in_voice', members: [] };
-  }
-
-  const members = senderState.channel.members
-    .filter(m => m.id !== senderUserId && !m.user.bot)
-    .map(m => m.user);
-
-  return {
-    error: null,
-    members,
-    channelName: senderState.channel.name,
-  };
-}
-
-// Get non-bot members who can view a channel (excludes the sender).
+// Get non-bot members in a channel, excluding the sender.
 //
-// Voice/stage-voice channels have a gotcha: in discord.js, `channel.members`
-// returns members CURRENTLY CONNECTED to voice — NOT everyone who can see
-// the channel. For text channels `channel.members` is computed off guild
-// members + ViewChannel permission, which is the semantic we want for
-// "Everyone in this channel." So for voice/stage-voice we compute the
-// viewer set explicitly from guild.members.cache.
+// channel.members semantics in discord.js v14:
+//   - text channels: GuildMembers with ViewChannel perm (viewer set).
+//     Caller must populate guild.members.cache via guild.members.fetch()
+//     first; see commands.js channel-target branch.
+//   - voice / stage-voice channels: GuildMembers CURRENTLY CONNECTED to
+//     voice. Sourced from voice state cache (populated automatically via
+//     gateway events; no fetch needed) — REQUIRES the GuildVoiceStates
+//     intent (declared in the Client config above). If that intent is
+//     ever trimmed, voice/stage-voice paths will silently return empty
+//     here. The boot-time assertion in this file's intent block fails
+//     loud at startup if anyone removes it without replacing the helper.
 //
-// Callers rely on the sender having already done `guild.members.fetch()`
-// so the cache is warm; see the `target === 'channel'` branch in
-// handleSend (commands.js) for the fetch + call site pairing.
-function getTextChannelMembers(channel, senderUserId) {
-  const isVoice = channel.type === ChannelType.GuildVoice ||
-                  channel.type === ChannelType.GuildStageVoice;
-
-  let source;
-  if (isVoice) {
-    // Voice path: enumerate guild viewers via permissionsFor. If the
-    // channel is voice-typed but `.guild` is somehow missing (partial
-    // cache / unusual gateway state), do NOT silently fall back to
-    // `channel.members` — that's the voice-connected-only set which
-    // is exactly the bug this helper exists to avoid. Return empty and
-    // log so a caller's "no recipients" branch triggers loudly instead
-    // of shipping to a wrong subset.
-    if (!channel.guild) {
-      logger.warn('getTextChannelMembers: voice channel missing .guild; returning empty', {
-        channelId: channel.id, channelType: channel.type,
-      });
-      return [];
-    }
-    source = channel.guild.members.cache.filter(m => {
-      const perms = channel.permissionsFor(m);
-      return perms && perms.has(PermissionFlagsBits.ViewChannel);
+// Both are the desired semantic for "Everyone in this channel." Voice
+// channels deliberately resolve to voice-connected only — anything broader
+// expands to ViewChannel-perm scope, which on default servers is the
+// entire guild (the prior "sends to everyone in the server" bug).
+//
+// Trust boundary: this helper supports GuildText, GuildVoice, and
+// GuildStageVoice channels — the three types where `channel.members` is
+// the right "Everyone in this channel" set under discord.js v14
+// (viewer set for text; voice-connected for voice/stage-voice). The
+// helper REJECTS other types via SUPPORTED_CHANNEL_TYPES rather than
+// trusting a documented contract, because /qurl send's slash-command
+// registration does not currently restrict invocation context — a user
+// COULD trigger this helper from a thread / forum / DM today, where
+// `channel.members` either has the wrong shape (thread:
+// ThreadMemberManager of ThreadMember; user lazily populated) or
+// doesn't exist at all (forum / media / DM). Returning [] (with a
+// warn log so the call site's "no recipients" branch surfaces clearly)
+// is safer than letting `.filter().map()` throw on an unexpected shape.
+const SUPPORTED_CHANNEL_TYPES = new Set([
+  ChannelType.GuildText,
+  ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice,
+]);
+function getChannelMembers(channel, senderUserId) {
+  if (!channel || !SUPPORTED_CHANNEL_TYPES.has(channel.type)) {
+    logger.warn('getChannelMembers called with unsupported channel type', {
+      channelId: channel?.id,
+      channelType: channel?.type,
     });
-  } else {
-    // Text channel: `channel.members` is already the viewer set.
-    source = channel.members;
+    return [];
   }
-
-  return source
+  return channel.members
     .filter(m => m.id !== senderUserId && !m.user.bot)
     .map(m => m.user);
 }
@@ -893,8 +904,11 @@ module.exports = {
   sendDM,
   refreshCache,
   shutdown,
-  getVoiceChannelMembers,
-  getTextChannelMembers,
+  getChannelMembers,
+  // Exported only for unit tests to verify the boot canary throws on
+  // a missing intent. Production callers don't need it — the module-
+  // level invocations above are the load-bearing assertions.
+  assertIntent,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,
