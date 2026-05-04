@@ -12,6 +12,15 @@ export interface E2EEnv {
   CHANNEL_ID: string;
 }
 
+export interface E2EOptionalEnv {
+  // Public HTTPS host for the bot's Express server (e.g.
+  // https://discord-bot-sandbox.layerv.ai). Used by the qURL-OAuth smoke
+  // test to hit /oauth/qurl/start. Optional — tests gracefully skip when
+  // unset. Production sandbox/prod values come from the same SSM source
+  // as the bot's BASE_URL config.
+  BOT_HTTP_URL?: string;
+}
+
 const REQUIRED: (keyof E2EEnv)[] = [
   'BOT_TOKEN', 'BOT_CLIENT_ID', 'QURL_API_KEY',
   'UPLOAD_API_URL', 'MINT_API_URL', 'GUILD_ID', 'CHANNEL_ID',
@@ -32,4 +41,11 @@ export function loadEnv(): E2EEnv {
     throw new Error(`Missing env vars: ${missing.join(', ')}`);
   }
   return env as unknown as E2EEnv;
+}
+
+/** Loads optional env vars without throwing on missing. */
+export function loadOptionalEnv(): E2EOptionalEnv {
+  return {
+    BOT_HTTP_URL: process.env.BOT_HTTP_URL,
+  };
 }

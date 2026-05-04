@@ -7,6 +7,7 @@ const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
 const oauthRouter = require('./routes/oauth');
+const qurlOAuthRouter = require('./routes/qurl-oauth');
 const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
@@ -186,6 +187,19 @@ if (config.isOpenNHPActive) {
   logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
 } else {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
+}
+
+// qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback) — separate
+// from the OpenNHP gate above. These always mount because /qurl setup is
+// the canonical path for any guild (multi-tenant or single-guild) to
+// configure a qURL API key, and the route gates internally on
+// config.isQurlOAuthConfigured (returns 503 with a "not configured yet"
+// page when AUTH0_* env vars are unset, rather than a hard 404). That way
+// flipping the AUTH0_* secrets in SSM is the only step needed to turn
+// OAuth on — no code change or env-flag re-flip required.
+app.use('/oauth/qurl', qurlOAuthRouter);
+if (!config.isQurlOAuthConfigured) {
+  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)

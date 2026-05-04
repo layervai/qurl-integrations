@@ -99,6 +99,18 @@ if (!normalizedGuildId && enableOpenNHPFeatures) {
 // what "multi-tenant" means — only touches this file.
 const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
 
+// True when all four Auth0 env vars are present — `/qurl setup` then
+// uses the OAuth-redirect flow. False = degrade to the legacy modal-paste
+// flow (kept until Justin registers the Auth0 app + sets prod SSM secrets).
+// Single derivation point so commands.js + routes/qurl-oauth.js + server.js
+// agree on what "configured" means.
+const isQurlOAuthConfigured = Boolean(
+  process.env.AUTH0_DOMAIN
+  && process.env.AUTH0_CLIENT_ID
+  && process.env.AUTH0_CLIENT_SECRET
+  && process.env.AUTH0_AUDIENCE,
+);
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -108,6 +120,7 @@ module.exports = {
   isMultiTenant,
   ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
   isOpenNHPActive,
+  isQurlOAuthConfigured,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',
@@ -131,6 +144,17 @@ module.exports = {
   GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
+
+  // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
+  // When unset, /qurl setup falls back to the legacy modal-paste path so the
+  // bot stays usable until Justin registers the Auth0 application + drops
+  // these into prod SSM. See project_qurl_bot_onboarding_model.md memory for
+  // the OAuth-app shape (Regular Web Application, callback URL = BASE_URL +
+  // /oauth/qurl/callback, scopes qurl:write + qurl:read).
+  AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
+  AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
+  AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
+  AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
 
   // Allowed GitHub organizations (comma-separated)
   ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),

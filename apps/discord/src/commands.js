@@ -3113,7 +3113,19 @@ const commands = [
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
-      // /qurl setup — admin-only, configure API key for this server
+      // /qurl setup — admin-only, configure API key for this server.
+      //
+      // Default flow (when AUTH0_* env vars are configured): replies with
+      // a one-shot OAuth-redirect link. Admin clicks → Auth0 sign-in +
+      // consent → server-side callback mints a guild-scoped API key on
+      // qurl-service (admin-owned, billed to the admin's qURL account)
+      // and persists it via the Store abstraction. NO API key paste.
+      //
+      // Fallback flow (AUTH0_* unset, e.g. early sandbox before Justin
+      // registers the Auth0 app): reverts to the legacy modal-paste UX
+      // so the bot stays usable until OAuth is wired end-to-end. The
+      // fallback can be removed in a follow-up once the OAuth path is
+      // live in prod.
       if (sub === 'setup') {
         if (!interaction.guildId) {
           return interaction.reply({ content: 'This command can only be used in a server, not in DMs.', ephemeral: true });
@@ -3121,9 +3133,30 @@ const commands = [
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
           return interaction.reply({ content: 'Only server administrators can configure qURL.', ephemeral: true });
         }
-        // Refuse to accept a guild API key unless encryption-at-rest is
-        // configured. Falling through to the crypto module's plaintext
-        // fallback would silently store a billing-sensitive secret on disk.
+
+        // OAuth path — preferred when configured.
+        if (config.isQurlOAuthConfigured) {
+          // Lazy-require to avoid a circular dependency in the test harness:
+          // qurl-oauth-state.js → config.js, which is already required at
+          // the top of commands.js.
+          const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
+          const state = signQurlOAuthState(interaction.guildId, interaction.user.id);
+          const startUrl = `${config.BASE_URL}/oauth/qurl/start?state=${encodeURIComponent(state)}`;
+          return interaction.reply({
+            content: '🔐 **Connect qURL to this server**\n\n'
+              + `**[Click here to authorize qURL](${startUrl})**\n\n`
+              + 'Sign in with your layerv.ai account and consent. The bot will mint a qURL '
+              + 'API key owned by your account — all usage on this server will bill to you. '
+              + 'No copy-paste needed.\n\n'
+              + '_This link expires in 5 minutes and can only be used once._',
+            ephemeral: true,
+          });
+        }
+
+        // Legacy modal-paste fallback. Refuse to accept a guild API key
+        // unless encryption-at-rest is configured. Falling through to the
+        // crypto module's plaintext fallback would silently store a
+        // billing-sensitive secret on disk.
         if (!process.env.KEY_ENCRYPTION_KEY) {
           logger.error('Refusing /qurl setup: KEY_ENCRYPTION_KEY is not set');
           return interaction.reply({
