@@ -39,6 +39,11 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
+  // Default: pretend a prior config exists, so existing tests cover the
+  // re-run path (prompt=consent set). First-install behavior (no prior
+  // configured_by → prompt omitted) is exercised by an explicit override
+  // via .mockResolvedValueOnce(undefined) in its own test.
+  getGuildConfig: jest.fn().mockResolvedValue({ guild_id: 'guild-1', configured_by: 'admin-2' }),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
@@ -50,6 +55,17 @@ jest.mock('../src/commands', () => ({
   handleCommand: jest.fn(),
   commands: [],
   registerCommands: jest.fn(),
+}));
+
+// Mock the JWKS-backed id_token verifier so tests don't need a real Auth0
+// HTTPS endpoint. Default returns ok with the email claim for the happy
+// path; specific tests override via .mockResolvedValueOnce when they
+// want to exercise the verification-failure branch.
+jest.mock('../src/utils/auth0-jwks', () => ({
+  verifyAuth0IdToken: jest.fn().mockResolvedValue({
+    ok: true, payload: { email: 'alice@layerv.test', sub: 'auth0|abc' },
+  }),
+  _setJwksFnForTesting: jest.fn(),
 }));
 
 const request = require('supertest');
@@ -152,6 +168,20 @@ describe('qurl-oauth routes', () => {
       const tampered = state.slice(0, -1) + (state.slice(-1) === '0' ? '1' : '0');
       const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(tampered)}`);
       expect(res.status).toBe(400);
+    });
+
+    it('omits prompt=consent on first install (no prior guild config)', async () => {
+      // C.8: first-time setup should let Auth0's default flow run —
+      // no redundant consent screen stacked on sign-in. Re-runs (prior
+      // configured_by present) DO get prompt=consent so key rotation
+      // works; that's the default mock and is covered by the happy-path
+      // assertion above.
+      db.getGuildConfig.mockResolvedValueOnce(undefined);
+      const state = signQurlOAuthState('guild-fresh', 'admin-fresh');
+      const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(302);
+      const loc = new URL(res.headers.location);
+      expect(loc.searchParams.get('prompt')).toBeNull();
     });
   });
 
@@ -270,17 +300,14 @@ describe('qurl-oauth routes', () => {
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
 
       // Confused-deputy mitigation: the success page must surface the
-      // bound (guild_id, qURL email, key prefix) tuple as readable
-      // text — NOT escaped HTML angle brackets. This is the load-
-      // bearing visual cue the admin uses to spot a mismatched
-      // binding before closing the tab.
-      expect(res.text).toContain('Discord guild: guild-1');
-      expect(res.text).toContain('qURL account: alice@layerv.test');
-      expect(res.text).toContain('API key prefix: lv_live_abc1');
-      // Belt-and-suspenders: assert NO literal escaped HTML lands in
-      // the subtext (e.g. `&lt;code&gt;...&lt;/code&gt;`) — that would
-      // mean we accidentally double-escaped the binding values.
-      expect(res.text).not.toMatch(/&lt;code&gt;/);
+      // bound (guild_id, qURL email, key prefix) tuple as a structured
+      // label/value list. C.5 upgraded this from grey prose subtext to
+      // a `details` block (label in <dt>, value in <dd>) so the binding
+      // readout is visually prominent — load-bearing UI against
+      // confused-deputy attacks.
+      expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
+      expect(res.text).toMatch(/<dt>qURL account<\/dt>\s*<dd>alice@layerv\.test<\/dd>/);
+      expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_abc1<\/dd>/);
     });
 
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
@@ -318,6 +345,81 @@ describe('qurl-oauth routes', () => {
       const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
       expect(deleteCall).toBeDefined();
       expect(deleteCall[0]).toContain('/v1/api-keys/key-orphan-1');
+    });
+
+    it('renders success without qURL-account-email line when id_token verification fails', async () => {
+      // Forged / wrong-issuer / wrong-audience / expired id_token must
+      // be rejected by the JWKS verifier — falling back to "decode
+      // without verification" would leak a forged email onto the
+      // load-bearing confused-deputy mitigation. Success page should
+      // still render (the API-key mint already succeeded), just
+      // without the qURL-account line.
+      const { verifyAuth0IdToken } = require('../src/utils/auth0-jwks');
+      verifyAuth0IdToken.mockResolvedValueOnce({ ok: false, reason: 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED' });
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: 'tampered.jwt.sig' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('qURL is connected');
+      expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
+      expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
+      // No qURL account line — verifier rejected the forged token.
+      expect(res.text).not.toContain('qURL account');
+    });
+
+    it('renders success without qURL-account-email line when id_token field is absent from the Auth0 response', async () => {
+      // Auth0 may legitimately omit id_token if openid scope wasn't
+      // granted; success page should still render.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          // Note: NO id_token field
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-123', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('qURL is connected');
+      expect(res.text).not.toContain('qURL account');
+    });
+
+    it('502s when qurl-service mint response has api_key but missing key_id (orphan-cleanup contract)', async () => {
+      // Both fields are required — without key_id, the orphan-key
+      // DELETE on persist failure can't target the right key. Fail
+      // upfront rather than mint+persist+then-fail-to-cleanup.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          // api_key present, key_id missing
+          json: () => Promise.resolve({ data: { api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(502);
+      expect(res.text).toContain('Could not provision qURL key');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
     it('clears the qurl_setup_session cookie on successful callback (one-shot binding)', async () => {

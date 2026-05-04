@@ -38,10 +38,16 @@
 
 const express = require('express');
 const config = require('../config');
+const db = require('../store');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
+const {
+  QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_COOKIE_PATH,
+  QURL_OAUTH_COOKIE_TTL_SECONDS,
+} = require('../utils/oauth-cookies');
 
 // Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
 // so a future "Discord OAuth2 is slow under load" tuning is one constant
@@ -57,6 +63,13 @@ function renderNotConfigured(res, reason) {
   // When AUTH0_* itself is unset, /qurl setup falls back to modal-paste
   // and the admin needs an out-of-band channel to layerv.ai. Branch the
   // remediation copy on `reason`.
+  //
+  // SECURITY: `reason` is logged but NOT rendered to the page. Echoing
+  // 'AUTH0_* unset' or 'DISCORD_CLIENT_SECRET unset' to the browser
+  // would tell a probing attacker exactly which secret an operator
+  // hasn't provisioned yet. Match qurl-oauth.js renderNotConfigured's
+  // generic wire shape. PR #177 follow-up C.4.
+  logger.info('renderNotConfigured', { reason });
   const remediation = reason && reason.startsWith('AUTH0')
     ? 'The bot was added to your server. Contact your layerv.ai admin to finish setup once the qURL OAuth application is registered.'
     : 'The bot was added to your server successfully — run /qurl setup in-Discord once the operator finishes provisioning.';
@@ -64,7 +77,7 @@ function renderNotConfigured(res, reason) {
     title: 'qURL Setup Not Configured',
     icon: '⚠️',
     heading: 'qURL setup is not configured yet',
-    message: `${remediation} (Reason: ${reason})`,
+    message: remediation,
     type: 'warning',
   }));
 }
@@ -202,26 +215,40 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Auth0-redirect URL to victim — see PR #177 review item 3 + the
   // success-page binding readout that surfaces guild + qURL email
   // for visual sanity-check before the admin closes the tab.
-  res.cookie('qurl_setup_session', qurlState, {
+  res.cookie(QURL_OAUTH_SESSION_COOKIE, qurlState, {
     httpOnly: true,
     secure: req.protocol === 'https',
     sameSite: 'lax',
-    maxAge: 5 * 60 * 1000,
-    path: '/oauth',
+    maxAge: QURL_OAUTH_COOKIE_TTL_SECONDS * 1000,
+    path: QURL_OAUTH_COOKIE_PATH,
   });
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
   authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  // offline_access dropped per PR #177 review item 5 — no refresh-token use.
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid profile email');
+  // offline_access dropped per PR #177 review item 5 — no refresh-token
+  // use. `profile` dropped per follow-up C.2 — only the `email` claim
+  // is read from the id_token.
+  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  // prompt=consent so re-installing via "Add to Discord" actually re-
-  // prompts the admin at Auth0 — without it, Auth0 silently re-uses
-  // the prior consent and a re-mint can't be triggered. Same rationale
-  // as the /oauth/qurl/start path; keeping the two flows symmetric.
-  authorizeUrl.searchParams.set('prompt', 'consent');
+  // prompt=consent only on re-install (guild_configs row already has
+  // a `configured_by`). For a true first install — the bot has never
+  // touched this guild before — let Auth0's default flow run so the
+  // admin doesn't see a redundant consent screen stacked on the
+  // standard sign-in. On re-install, force consent so the admin can
+  // rotate the key. Mirrors /oauth/qurl/start. PR #177 follow-up C.8.
+  let isReInstall = false;
+  try {
+    const existing = await db.getGuildConfig(guildId);
+    isReInstall = Boolean(existing && existing.configured_by);
+  } catch (err) {
+    logger.warn('Failed to read guild config for prompt=consent gating; defaulting to re-install path', {
+      error: err?.message, guildId,
+    });
+    isReInstall = true;
+  }
+  if (isReInstall) authorizeUrl.searchParams.set('prompt', 'consent');
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });

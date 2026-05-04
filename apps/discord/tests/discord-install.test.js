@@ -35,6 +35,10 @@ jest.mock('../src/discord', () => ({
 jest.mock('../src/store', () => ({
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
   getGuildApiKey: jest.fn(),
+  // Default: no prior config — Stage 2 is normally a first install.
+  // Re-install path (prior `configured_by` present → prompt=consent set
+  // on the chained Auth0 redirect) gets its own test below.
+  getGuildConfig: jest.fn().mockResolvedValue(undefined),
   getPendingLink: jest.fn(),
   consumePendingLink: jest.fn(),
 }));
@@ -48,6 +52,7 @@ jest.mock('../src/commands', () => ({
 
 const request = require('supertest');
 const { app } = require('../src/server');
+const db = require('../src/store');
 const { verifyQurlOAuthState } = require('../src/utils/qurl-oauth-state');
 
 const originalFetch = globalThis.fetch;
@@ -139,6 +144,11 @@ describe('Discord install callback', () => {
       // Auth0 scope must NOT include offline_access (refresh tokens not
       // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
+      // C.8: Stage-2 first install (default mock returns no prior
+      // guild config) should NOT set prompt=consent — the admin's
+      // already going through one Auth0 sign-in screen, no need to
+      // stack a redundant consent screen on top.
+      expect(loc.searchParams.get('prompt')).toBeNull();
 
       // The state Discord callback minted must round-trip through the
       // qURL OAuth state verifier with the right guild + discord-user
@@ -185,6 +195,27 @@ describe('Discord install callback', () => {
       expect(res.status).toBe(302);
       const cookieHeader = (Array.isArray(res.headers['set-cookie']) ? res.headers['set-cookie'].join('\n') : res.headers['set-cookie']) || '';
       expect(cookieHeader).toMatch(/Secure/);
+    });
+
+    it('sets prompt=consent on re-install (guild already has a configured_by)', async () => {
+      // C.8: bot was previously installed and uninstalled; reinstalling
+      // should force prompt=consent so the admin can rotate the key
+      // (without it Auth0 silently re-uses prior consent and re-mint
+      // can't be triggered).
+      db.getGuildConfig.mockResolvedValueOnce({ guild_id: 'guild-1', configured_by: '111' });
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'disc-token' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      expect(res.status).toBe(302);
+      const loc = new URL(res.headers.location);
+      expect(loc.searchParams.get('prompt')).toBe('consent');
     });
 
     it('uses the right Discord token-exchange body shape (form-urlencoded with client creds)', async () => {

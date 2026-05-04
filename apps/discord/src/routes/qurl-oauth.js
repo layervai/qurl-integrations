@@ -27,8 +27,9 @@ const db = require('../store');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { sendDM } = require('../discord');
-const { verifyQurlOAuthState, b64urlDecode } = require('../utils/qurl-oauth-state');
+const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
+const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -47,8 +48,16 @@ const router = express.Router();
 // before reaching Auth0 — narrows the leaked-URL window from "5 minutes
 // to anyone with a layerv.ai login" to "5 minutes AND the same browser
 // that opened the link."
-const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
-const COOKIE_TTL_SECONDS = 5 * 60;
+//
+// Cookie name + path constants live in utils/oauth-cookies.js so the
+// Stage-2 chain (routes/discord-install.js sets the same cookie before
+// chaining to Auth0) can't drift — single source of truth. PR #177
+// follow-up C.1.
+const {
+  QURL_OAUTH_SESSION_COOKIE,
+  QURL_OAUTH_COOKIE_PATH,
+  QURL_OAUTH_COOKIE_TTL_SECONDS: COOKIE_TTL_SECONDS,
+} = require('../utils/oauth-cookies');
 
 function readCookie(req, name) {
   const header = req.headers.cookie;
@@ -87,37 +96,25 @@ function renderNotConfigured(res) {
 }
 
 // Success page surfaces the guild ID, key prefix, and qURL account email
-// so the admin can sanity-check the binding before closing the tab. This
-// is the LOAD-BEARING user-visible mitigation against the Stage-2
-// confused-deputy class of attack flagged in the PR #177 review: in a
-// hypothetical attacker-pre-runs-the-Discord-callback scenario, the
-// state would carry the attacker's discord_user_id + guild_id while the
-// qURL account email is the victim's. Showing both halves of the
-// binding lets the admin spot a mismatch ("this isn't my server" /
-// "this isn't my qURL email") before usage starts.
-//
-// Subtext is plain prose — `renderPage` HTML-escapes the whole string at
-// render time, so any inline tags (<code>, <strong>, etc.) would render
-// as literal angle brackets. The values themselves still ride through
-// renderPage's escapeHtml so untrusted input can't smuggle script tags;
-// the trade-off is that the values aren't visually distinguished
-// (no monospace formatting). That's an acceptable cost for the
-// security guarantee: the goal is "admin reads the values" not
-// "admin enjoys nice typography."
+// as a structured label/value list (renderPage `details`) — the LOAD-
+// BEARING visual mitigation against the Stage-2 confused-deputy class:
+// if attacker pre-runs Discord install in their browser then forwards
+// the chained Auth0-redirect URL to a victim, the readout shows
+// (attacker's guild + victim's qURL email) so the victim can spot the
+// mismatch before /qurl send usage starts. PR #177 follow-up C.5 —
+// upgraded from the prior grey-prose subtext for visual prominence.
 function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
-  const detailLines = [];
-  if (guildId) detailLines.push(`Discord guild: ${guildId}`);
-  if (qurlAccountEmail) detailLines.push(`qURL account: ${qurlAccountEmail}`);
-  if (keyPrefix) detailLines.push(`API key prefix: ${keyPrefix}`);
-  const subtext = detailLines.length > 0
-    ? detailLines.join(' · ') + ' — confirm these match before closing.'
-    : undefined;
+  const details = [];
+  if (guildId) details.push({ label: 'Discord guild', value: guildId });
+  if (qurlAccountEmail) details.push({ label: 'qURL account', value: qurlAccountEmail });
+  if (keyPrefix) details.push({ label: 'API key prefix', value: keyPrefix });
   return res.status(200).send(renderPage({
     title: 'qURL Connected',
     icon: '✅',
     heading: 'qURL is connected to your Discord server.',
     message: 'You can close this tab and return to Discord. /qurl send is ready.',
-    subtext,
+    details,
+    subtext: details.length > 0 ? 'Confirm these match before closing.' : undefined,
     type: 'success',
   }));
 }
@@ -139,7 +136,7 @@ function renderError(res, statusCode, headline, detail) {
 // classic double-submit CSRF binding. If the link leaks and is opened
 // in a different browser, the cookie is absent and /callback rejects
 // before any Auth0 token exchange or qurl-service mint runs.
-router.get('/start', rateLimit, (req, res) => {
+router.get('/start', rateLimit, async (req, res) => {
   if (!config.isQurlOAuthConfigured) {
     logger.warn('qURL OAuth start hit but Auth0 not configured', { ip: req.ip });
     return renderNotConfigured(res);
@@ -161,6 +158,26 @@ router.get('/start', rateLimit, (req, res) => {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 5 minutes).');
   }
+  // First-install vs re-run gate for prompt=consent. If the guild has
+  // never been configured (no `configured_by`), let Auth0's default
+  // behavior decide whether to show the consent screen — most admins
+  // see it once. On a re-run, force prompt=consent so the admin can
+  // rotate the key or switch qURL accounts (without it Auth0 silently
+  // re-uses the prior consent and a re-mint can't be triggered).
+  // PR #177 follow-up C.8.
+  let isReRun = false;
+  try {
+    const existing = await db.getGuildConfig(verified.payload.guildId);
+    isReRun = Boolean(existing && existing.configured_by);
+  } catch (err) {
+    // DDB blip: bias toward the safer-for-rotation path (prompt=consent).
+    // Re-prompting an already-consenting admin is mildly annoying;
+    // skipping consent on what is actually a re-run blocks key rotation.
+    logger.warn('Failed to read guild config for prompt=consent gating; defaulting to re-run path', {
+      error: err?.message,
+    });
+    isReRun = true;
+  }
   // Double-submit CSRF cookie: cookie value is the same state token the
   // URL carries to Auth0. /callback re-checks (timing-safe) that
   // cookie === query.state. Same-browser flows have both; leaked URLs
@@ -177,7 +194,7 @@ router.get('/start', rateLimit, (req, res) => {
     secure: req.protocol === 'https',
     sameSite: 'lax',
     maxAge: COOKIE_TTL_SECONDS * 1000,
-    path: '/oauth',
+    path: QURL_OAUTH_COOKIE_PATH,
   });
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
@@ -186,14 +203,20 @@ router.get('/start', rateLimit, (req, res) => {
   // Drop offline_access — we don't store/use refresh tokens (the API key
   // mint is one-shot), so requesting them is unnecessary attack surface
   // per PR #177 review.
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid profile email');
+  // Scope set: qurl:write + qurl:read for the API-key mint, openid +
+  // email for the id_token's email claim (used by the success-page
+  // binding readout). `profile` was previously requested but never
+  // read — narrowing per PR #177 follow-up C.2 to tighten the
+  // consent-screen "what is this app asking for?" UX.
+  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', state);
-  // prompt=consent so re-running /qurl setup actually re-prompts, even if
-  // the admin already authorized — otherwise Auth0 silently re-uses the
-  // prior consent and a re-mint can't be triggered by an admin who wants
-  // to rotate the key.
-  authorizeUrl.searchParams.set('prompt', 'consent');
+  // prompt=consent only on re-run (key-rotation flow) — without it
+  // Auth0 silently re-uses prior consent and re-running /qurl setup
+  // can't actually issue a new key. On first install, omit so the
+  // admin doesn't see a redundant "are you sure?" screen on top of
+  // the standard sign-in. Gate evaluated above. PR #177 follow-up C.8.
+  if (isReRun) authorizeUrl.searchParams.set('prompt', 'consent');
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -262,8 +285,11 @@ router.get('/callback', rateLimit, async (req, res) => {
   }
   // Cookie is consumed — clear it so a refreshed callback URL can't
   // re-bind. Fresh /qurl setup runs mint a new state and set a new
-  // cookie.
-  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: '/oauth' });
+  // cookie. Path MUST match the /start + /oauth/discord/callback
+  // Set-Cookie path (/oauth, the shared constant) — clearing with a
+  // mismatched path is a no-op and the browser keeps the cookie alive
+  // until TTL.
+  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
   const { guildId, discordUserId } = verified.payload;
 
   // 1. Exchange the code for an access_token + id_token (Auth0 token
@@ -300,26 +326,27 @@ router.get('/callback', rateLimit, async (req, res) => {
       logger.error('Auth0 token response missing access_token');
       return renderError(res, 502, 'Authorization failed', 'Auth0 returned an unexpected response. Please run /qurl setup again.');
     }
-    // Best-effort id_token email extraction. JWT decode without
-    // signature verification — the id_token came from Auth0 over TLS
-    // in this same response, so signature verification is redundant
-    // for a display-only readout. (See PR #177 review note: the email
-    // becomes a load-bearing visual cue against confused-deputy on
-    // Stage 2, but the security claim of the readout is still "trust
-    // Auth0's TLS response" — full verification would require JWKS
-    // caching and is out of scope here.) Reuses b64urlDecode from
-    // utils/qurl-oauth-state.js for consistent base64-url handling.
-    try {
-      const idToken = tokenJson.id_token;
-      if (typeof idToken === 'string') {
-        const parts = idToken.split('.');
-        if (parts.length === 3) {
-          const payload = JSON.parse(b64urlDecode(parts[1]).toString('utf8'));
-          if (typeof payload.email === 'string') qurlAccountEmail = payload.email;
-        }
+    // id_token email extraction with full JWKS verification. The email
+    // is the load-bearing visual cue against the Stage-2 confused-
+    // deputy class — promoting the security claim from "trust Auth0's
+    // TLS response" to "verify the JWT signature against Auth0's
+    // JWKS" closes the asterisk on that mitigation. See PR #177
+    // follow-up issue #178 / section B.
+    //
+    // Failure to verify is non-fatal: the qURL key still gets minted
+    // (the access_token mint already succeeded above) and the success
+    // page renders without the qURL-account-email line. Ops sees a
+    // logger.debug for triage. We do NOT fall back to unverified
+    // decode — a forged email would be worse than no email.
+    if (tokenJson.id_token) {
+      const verified = await verifyAuth0IdToken(tokenJson.id_token);
+      if (verified.ok && typeof verified.payload?.email === 'string') {
+        qurlAccountEmail = verified.payload.email;
+      } else if (!verified.ok) {
+        logger.debug('id_token verification failed (non-fatal — success page renders without email)', {
+          reason: verified.reason,
+        });
       }
-    } catch (err) {
-      logger.debug('id_token email extraction failed (non-fatal)', { error: err?.message });
     }
   } catch (err) {
     logger.error('Auth0 token exchange threw', { error: err?.message });
@@ -355,8 +382,17 @@ router.get('/callback', rateLimit, async (req, res) => {
     apiKey = mintJson?.data?.api_key;
     keyId = mintJson?.data?.key_id;
     keyPrefix = mintJson?.data?.key_prefix;
-    if (!apiKey) {
-      logger.error('qURL API key response missing api_key', { guildId });
+    // Both api_key AND key_id are required: api_key is what we persist
+    // for the bot to use; key_id is what the orphan-cleanup DELETE
+    // below targets if persistence then fails. Treating a missing
+    // key_id as success would leave us unable to clean up an orphan
+    // billing-active key on the admin's account if DDB throws —
+    // safer to refuse upfront so the admin retries with a complete
+    // mint response. PR #177 follow-up C.3.
+    if (!apiKey || !keyId) {
+      logger.error('qURL API key response missing required fields', {
+        guildId, hasApiKey: Boolean(apiKey), hasKeyId: Boolean(keyId),
+      });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service returned an unexpected response. Please contact your layerv.ai admin.');
     }
