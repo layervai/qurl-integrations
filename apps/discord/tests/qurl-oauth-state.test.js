@@ -9,11 +9,14 @@
 //   4. cross-purpose — a state minted for a different `kind` rejects
 //      (defense-in-depth against replaying a GitHub-OAuth state here)
 
-// Set OAUTH_STATE_SECRET BEFORE requiring the module so stateSecret() picks
-// it up on first call. The module caches nothing, but the require chain
-// pulls in config which reads env on load.
-process.env.OAUTH_STATE_SECRET = 'a'.repeat(64);
+// Stable shared secret across the qurl-oauth-state and qurl-oauth route
+// suites. Both files set the SAME value so a Jest worker that loads the
+// state module from one test and uses it from the other doesn't see a
+// signature mismatch from the per-process cached fallback in the module
+// (cross-test leakage flagged in PR #177 review).
+process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
 
+const crypto = require('crypto');
 const { signQurlOAuthState, verifyQurlOAuthState, STATE_TTL_SECONDS } = require('../src/utils/qurl-oauth-state');
 
 describe('qurl-oauth-state', () => {
@@ -117,7 +120,6 @@ describe('qurl-oauth-state', () => {
     it('rejects a payload with a wrong `kind` field (defense vs GitHub-OAuth state replay)', () => {
       // Construct a GitHub-OAuth-shaped payload and sign it with the same
       // secret — the verifier must reject because `k` is not 'qurl-oauth'.
-      const crypto = require('crypto');
       const payload = { k: 'github-oauth', g: 'guild-1', u: 'user-2', n: 'abc', e: Math.floor(Date.now() / 1000) + 60 };
       const encoded = Buffer.from(JSON.stringify(payload)).toString('base64')
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

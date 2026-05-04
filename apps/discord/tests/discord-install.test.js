@@ -7,7 +7,7 @@
 //   - 302 happy path: redirects to Auth0 with a qURL OAuth state binding
 //     guild_id + discord_user_id
 
-process.env.OAUTH_STATE_SECRET = 'c'.repeat(64);
+process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';

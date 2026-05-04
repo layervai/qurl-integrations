@@ -3136,9 +3136,6 @@ const commands = [
 
         // OAuth path — preferred when configured.
         if (config.isQurlOAuthConfigured) {
-          // Lazy-require to avoid a circular dependency in the test harness:
-          // qurl-oauth-state.js → config.js, which is already required at
-          // the top of commands.js.
           const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
           const state = signQurlOAuthState(interaction.guildId, interaction.user.id);
           const startUrl = `${config.BASE_URL}/oauth/qurl/start?state=${encodeURIComponent(state)}`;
@@ -3148,7 +3145,8 @@ const commands = [
               + 'Sign in with your layerv.ai account and consent. The bot will mint a qURL '
               + 'API key owned by your account — all usage on this server will bill to you. '
               + 'No copy-paste needed.\n\n'
-              + '_This link expires in 5 minutes and can only be used once._',
+              + '_This link expires in 5 minutes and is bound to your browser session — '
+              + 'open it in the same tab where you ran `/qurl setup`._',
             ephemeral: true,
           });
         }

@@ -29,6 +29,7 @@ const config = require('../config');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { rateLimit } = require('../utils/oauth-rate-limit');
 
 const router = express.Router();
 
@@ -54,7 +55,7 @@ function renderError(res, statusCode, headline, detail) {
   }));
 }
 
-router.get('/callback', async (req, res) => {
+router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isDiscordInstallConfigured) {
     const reason = !config.isQurlOAuthConfigured ? 'AUTH0_* unset' : 'DISCORD_CLIENT_SECRET unset';
     logger.warn('Discord install callback hit but not configured', { reason, ip: req.ip });
@@ -139,11 +140,29 @@ router.get('/callback', async (req, res) => {
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);
+  // Set the same double-submit CSRF cookie that /oauth/qurl/start sets,
+  // so /oauth/qurl/callback's cookie === state check passes for the
+  // Stage-2 chain too. Path /oauth (not /oauth/discord) so the cookie
+  // is visible to /oauth/qurl/callback further along the chain.
+  // Mitigates leaked install-callback URL replay across browsers; does
+  // not fully prevent confused-deputy where attacker pre-runs
+  // /oauth/discord/callback in their own browser then forwards the
+  // Auth0-redirect URL to victim — see PR #177 review item 3 + the
+  // success-page binding readout that surfaces guild + qURL email
+  // for visual sanity-check before the admin closes the tab.
+  res.cookie('qurl_setup_session', qurlState, {
+    httpOnly: true,
+    secure: req.protocol === 'https',
+    sameSite: 'lax',
+    maxAge: 5 * 60 * 1000,
+    path: '/oauth',
+  });
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
   authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read offline_access openid profile email');
+  // offline_access dropped per PR #177 review item 5 — no refresh-token use.
+  authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid profile email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
   authorizeUrl.searchParams.set('prompt', 'consent');

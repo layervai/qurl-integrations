@@ -57,6 +57,10 @@ const SUITE_ENABLED = Boolean(optEnv.BOT_HTTP_URL);
     //   - 503 if Auth0 not configured (route checks config first, before state)
     //   - 400 if Auth0 configured but state is missing/invalid
     expect([400, 503]).toContain(res.status);
+    // The bot serves an HTML page on every error path through this
+    // route (via renderPage) so a future change that accidentally
+    // returns JSON or a plain string surfaces here.
+    expect(res.headers.get('content-type') || '').toMatch(/text\/html/i);
     const body = await res.text();
     if (res.status === 400) {
       expect(body).toMatch(/Invalid setup link|setup link is invalid|expired/i);

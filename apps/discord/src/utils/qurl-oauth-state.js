@@ -15,7 +15,16 @@
 //
 // 5-minute TTL. After Auth0 redirects back, the callback re-verifies the
 // signature, parses the payload, checks `kind === 'qurl-oauth'`, and asserts
-// expiry. Any tampering or replay across the boundary fails.
+// expiry. Tampering across the boundary fails.
+//
+// Replay protection note: within the 5-minute TTL the same signed state
+// CAN be presented to /callback multiple times by the same browser
+// session — there's no consumed-nonce store. The practical impact is
+// bounded because Auth0's `code` parameter is single-use and short-lived
+// (so the second presentation needs a fresh Auth0 grant), and a re-mint
+// on the bot side is an idempotent upsert in guild_configs. The signed
+// state is NOT a one-shot token; it's an integrity envelope. PR copy and
+// route comments avoid the "single-use" framing for that reason.
 const crypto = require('crypto');
 const config = require('../config');
 

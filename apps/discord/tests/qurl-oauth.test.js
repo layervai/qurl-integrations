@@ -1,19 +1,27 @@
 // Tests for src/routes/qurl-oauth.js — the OAuth-redirect setup flow that
 // replaces the API-key-paste modal in /qurl setup. Covers:
+//   - /start: 400 invalid-state, 302 redirect to Auth0, cookie set
+//   - /callback: 400 invalid state / missing cookie / cookie mismatch,
+//     502 Auth0 token-exchange failure, 502 qurl-service mint failure,
+//     200 happy path with mint + persist + DM, 500 + orphan-key cleanup
 //   - 503 not-configured response when AUTH0_* env vars are unset
-//   - /start: 400 invalid-state, 302 redirect to Auth0 on valid state
-//   - /callback: 400 invalid state, 502 Auth0 token-exchange failure,
-//     502 qurl-service mint failure, 200 happy path with mint + persist + DM
+//     (separate describe — uses jest.isolateModules to load the router
+//     with the env temporarily wiped).
 
 // Auth0 + state-secret env vars must be set BEFORE requiring the modules
-// that read them at load time.
-process.env.OAUTH_STATE_SECRET = 'b'.repeat(64);
+// that read them at load time. SAME OAUTH_STATE_SECRET as
+// qurl-oauth-state.test.js so cross-test ordering doesn't matter (per
+// PR #177 review on env-var leakage).
+process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-client-secret';
 process.env.AUTH0_AUDIENCE = 'https://api.layerv.test';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
+// KEY_ENCRYPTION_KEY required for the persist-time guard added in PR #177
+// review round 2; matches the legacy modal-paste path's existing check.
+process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 // /qurl-oauth router mounts always; OpenNHP is a different gate
 process.env.GUILD_ID = '123456789012345678';
 
@@ -69,8 +77,32 @@ describe('qurl-oauth routes', () => {
       // callback can re-verify the same binding.
       expect(loc.searchParams.get('scope')).toContain('qurl:write');
       expect(loc.searchParams.get('scope')).toContain('qurl:read');
+      // offline_access dropped per PR #177 review — no refresh-token use.
+      expect(loc.searchParams.get('scope')).not.toContain('offline_access');
+      // prompt=consent is load-bearing for key rotation — re-running
+      // /qurl setup must actually re-prompt. Pin it here so a future
+      // refactor doesn't silently drop it.
+      expect(loc.searchParams.get('prompt')).toBe('consent');
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
+    });
+
+    it('sets a HttpOnly session cookie binding the browser to this state (CSRF guard)', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(302);
+      const setCookie = res.headers['set-cookie'];
+      expect(setCookie).toBeDefined();
+      const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
+      expect(cookieHeader).toMatch(/qurl_setup_session=/);
+      expect(cookieHeader).toMatch(/HttpOnly/i);
+      expect(cookieHeader).toMatch(/SameSite=Lax/i);
+      // Cookie path /oauth (not /oauth/qurl) so it's also visible at
+      // /oauth/discord/callback for the Stage-2 chain.
+      expect(cookieHeader).toMatch(/Path=\/oauth(?:;|\s|$)/);
+      // Cookie value is the state itself (double-submit pattern); the
+      // callback re-checks cookie === query.state.
+      expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
     it('400s on missing state', async () => {
@@ -89,9 +121,17 @@ describe('qurl-oauth routes', () => {
   });
 
   describe('GET /oauth/qurl/callback', () => {
+    // Helper: build the Cookie header value the double-submit CSRF check
+    // expects on /callback. /start sets `qurl_setup_session=<state>`
+    // (URL-encoded so `.` and `=` survive); the verifier reads it back
+    // via decodeURIComponent. Tests skip the /start round-trip and set
+    // the cookie directly to keep each callback test independent.
+    const cookieFor = (state) => `qurl_setup_session=${encodeURIComponent(state)}`;
+
     it('400s on missing code', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      const res = await request(app).get(`/oauth/qurl/callback?state=${encodeURIComponent(state)}`);
+      const res = await request(app).get(`/oauth/qurl/callback?state=${encodeURIComponent(state)}`)
+        .set('Cookie', cookieFor(state));
       expect(res.status).toBe(400);
       expect(res.text).toContain('Missing authorization code');
     });
@@ -100,13 +140,33 @@ describe('qurl-oauth routes', () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       const res = await request(app).get(
         `/oauth/qurl/callback?state=${encodeURIComponent(state)}&error=access_denied&error_description=user+declined`,
-      );
+      ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(400);
       expect(res.text).toContain('Authorization declined');
     });
 
     it('400s on invalid state', async () => {
       const res = await request(app).get('/oauth/qurl/callback?code=auth0-code&state=garbage');
+      expect(res.status).toBe(400);
+    });
+
+    it('400s on missing CSRF cookie (leaked URL opened in different browser)', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      // No .set('Cookie', ...) — simulates a leaked URL opened in a fresh
+      // browser session. Must reject BEFORE any Auth0 token exchange.
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      );
+      expect(res.status).toBe(400);
+      expect(res.text).toMatch(/same browser tab/i);
+    });
+
+    it('400s on cookie/state mismatch (cookie from a different state)', async () => {
+      const stateA = signQurlOAuthState('guild-1', 'admin-2');
+      const stateB = signQurlOAuthState('guild-1', 'admin-2'); // different nonce → different state
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(stateA)}`,
+      ).set('Cookie', cookieFor(stateB));
       expect(res.status).toBe(400);
     });
 
@@ -119,7 +179,7 @@ describe('qurl-oauth routes', () => {
       });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
-      );
+      ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(502);
       expect(res.text).toContain('Authorization failed');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
@@ -128,19 +188,17 @@ describe('qurl-oauth routes', () => {
     it('502s when qurl-service mint fails', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       globalThis.fetch = jest.fn()
-        // Auth0 token exchange success
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
         })
-        // qurl-service mint failure
         .mockResolvedValueOnce({
           ok: false, status: 500,
           text: () => Promise.resolve('internal error'),
         });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
-      );
+      ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(502);
       expect(res.text).toContain('Could not provision qURL key');
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
@@ -164,32 +222,95 @@ describe('qurl-oauth routes', () => {
         });
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
-      );
+      ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      // Key persisted via Store abstraction (DDB in prod).
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
-      // Admin DM'd with confirmation (fire-and-forget).
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
     });
 
-    it('500s when persist fails after successful mint (key minted but not stored)', async () => {
+    it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
-      globalThis.fetch = jest.fn()
+      const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
           json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
-          json: () => Promise.resolve({ data: { api_key: 'lv_live_abc123', key_prefix: 'lv_live_abc1' } }),
-        });
+          json: () => Promise.resolve({ data: { key_id: 'key-orphan-1', api_key: 'lv_live_abc123', key_prefix: 'lv_live_abc1' } }),
+        })
+        // Best-effort orphan delete
+        .mockResolvedValueOnce({ ok: true, status: 204, text: () => Promise.resolve('') });
+      globalThis.fetch = fetchSpy;
       db.setGuildApiKey.mockRejectedValueOnce(new Error('DDB throttled'));
       const res = await request(app).get(
         `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
-      );
+      ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(500);
       expect(res.text).toContain('provisioned but not stored');
+      // .then() of the fire-and-forget delete may settle after the
+      // response goes out; await one event-loop turn so the assertion
+      // sees the third fetch call.
+      await new Promise((resolve) => setImmediate(resolve));
+      const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
+      expect(deleteCall).toBeDefined();
+      expect(deleteCall[0]).toContain('/v1/api-keys/key-orphan-1');
     });
+  });
+});
+
+// Separate describe — exercises the not-configured 503 path. Uses
+// jest.isolateModules with the AUTH0_* env vars temporarily wiped so
+// the route's `config.isQurlOAuthConfigured` evaluates false on this
+// branch only. Without isolateModules, unsetting env after `config.js`
+// has been required wouldn't change the cached `isQurlOAuthConfigured`.
+describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
+  it('returns 503 with a "not configured" page on /start', async () => {
+    const saved = {
+      AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
+      AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
+      AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
+      AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+    };
+    delete process.env.AUTH0_DOMAIN;
+    delete process.env.AUTH0_CLIENT_ID;
+    delete process.env.AUTH0_CLIENT_SECRET;
+    delete process.env.AUTH0_AUDIENCE;
+    try {
+      await jest.isolateModulesAsync(async () => {
+        // Re-mock dependencies inside the isolate so the freshly-loaded
+        // server.js + router pick them up.
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // Re-require everything against the freshened module cache.
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+        const res = await supertest(freshApp).get('/oauth/qurl/start?state=anything');
+        expect(res.status).toBe(503);
+        expect(res.text).toMatch(/not configured/i);
+      });
+    } finally {
+      // Restore env so subsequent tests run against the configured router.
+      Object.assign(process.env, saved);
+    }
   });
 });
