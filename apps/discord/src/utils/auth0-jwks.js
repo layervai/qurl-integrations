@@ -20,9 +20,9 @@ let _jwksFn = null;
 
 function getJwks() {
   if (_jwksFn) return _jwksFn;
-  if (!config.AUTH0_DOMAIN) {
-    throw new Error('AUTH0_DOMAIN is not configured — cannot build JWKS endpoint URL');
-  }
+  // verifyAuth0IdToken short-circuits on `!config.AUTH0_DOMAIN` BEFORE
+  // calling getJwks(), so the unset case is unreachable here. No
+  // defensive throw — dead code is worse than relying on the contract.
   // jose.createRemoteJWKSet returns a function that fetches + caches the
   // JWKS, with built-in key-id-miss refresh. Defaults: 5-min cache TTL,
   // 30-sec cooldown between refresh attempts on miss. Acceptable for our
@@ -64,9 +64,15 @@ async function verifyAuth0IdToken(idToken) {
     });
     return { ok: true, payload };
   } catch (err) {
-    logger.debug('Auth0 id_token verification failed', {
-      // jose error codes: ERR_JWS_SIGNATURE_VERIFICATION_FAILED,
-      // ERR_JWT_EXPIRED, ERR_JWT_CLAIM_VALIDATION_FAILED, ERR_JWKS_NO_MATCHING_KEY, etc.
+    // Severity split: signature/claim/JWKS failures are the only signal
+    // we have of a forged or wrong-tenant id_token — log warn so they
+    // surface above the default prod log filter. Expiry is benign clock
+    // skew and noisy under load — debug. jose error codes:
+    // ERR_JWS_SIGNATURE_VERIFICATION_FAILED, ERR_JWT_EXPIRED,
+    // ERR_JWT_CLAIM_VALIDATION_FAILED, ERR_JWKS_NO_MATCHING_KEY, etc.
+    const benign = err?.code === 'ERR_JWT_EXPIRED';
+    const log = benign ? logger.debug : logger.warn;
+    log('Auth0 id_token verification failed', {
       code: err?.code, message: err?.message,
     });
     return { ok: false, reason: err?.code || 'verify_failed' };
@@ -74,12 +80,15 @@ async function verifyAuth0IdToken(idToken) {
 }
 
 // Test seam — lets unit tests inject a JWKS mock without spinning up an
-// HTTPS endpoint. Production callers don't use this.
+// HTTPS endpoint. Exported only outside production so a misimport in
+// prod can't replace the verifier with a stub mid-request — same
+// pattern as `utils/crypto.js`'s `_resetKeyCache`.
 function _setJwksFnForTesting(fn) {
   _jwksFn = fn;
 }
 
-module.exports = {
-  verifyAuth0IdToken,
-  _setJwksFnForTesting,
-};
+const exports_ = { verifyAuth0IdToken };
+if (process.env.NODE_ENV !== 'production') {
+  exports_._setJwksFnForTesting = _setJwksFnForTesting;
+}
+module.exports = exports_;

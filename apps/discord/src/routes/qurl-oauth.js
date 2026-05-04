@@ -173,7 +173,9 @@ router.get('/start', rateLimit, async (req, res) => {
     // DDB blip: bias toward the safer-for-rotation path (prompt=consent).
     // Re-prompting an already-consenting admin is mildly annoying;
     // skipping consent on what is actually a re-run blocks key rotation.
-    logger.warn('Failed to read guild config for prompt=consent gating; defaulting to re-run path', {
+    // info-level — this is a benign fallback, not an error condition.
+    // A flaky DDB shouldn't spam warns (which on-call grep-tails).
+    logger.info('Failed to read guild config for prompt=consent gating; defaulting to re-run path', {
       error: err?.message,
     });
     isReRun = true;
@@ -339,12 +341,16 @@ router.get('/callback', rateLimit, async (req, res) => {
     // logger.debug for triage. We do NOT fall back to unverified
     // decode — a forged email would be worse than no email.
     if (tokenJson.id_token) {
-      const verified = await verifyAuth0IdToken(tokenJson.id_token);
-      if (verified.ok && typeof verified.payload?.email === 'string') {
-        qurlAccountEmail = verified.payload.email;
-      } else if (!verified.ok) {
+      // Distinct local — the outer `verified` (line ~258) carries the
+      // qURL-OAuth-state verification result; this one carries the
+      // Auth0 id_token JWKS verification result. Same shape, different
+      // payload — keep them lexically separate to avoid reader confusion.
+      const idTokenVerified = await verifyAuth0IdToken(tokenJson.id_token);
+      if (idTokenVerified.ok && typeof idTokenVerified.payload?.email === 'string') {
+        qurlAccountEmail = idTokenVerified.payload.email;
+      } else if (!idTokenVerified.ok) {
         logger.debug('id_token verification failed (non-fatal — success page renders without email)', {
-          reason: verified.reason,
+          reason: idTokenVerified.reason,
         });
       }
     }
@@ -406,6 +412,23 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    re-running /qurl setup overwrites the prior key — the previous
   //    key remains valid on qurl-service until the admin manually
   //    revokes it via layerv.ai.
+  //
+  //    Read the prior config row first so the completion log line can
+  //    distinguish first-install from rotation (`isReRun` field). The
+  //    /start (and discord-install) gate already evaluates this for
+  //    prompt=consent, but the callback doesn't see that decision —
+  //    re-querying here is the cheapest way to surface the distinction
+  //    in operational logs without threading state through the
+  //    signed state token. DDB blip → log without the field, don't
+  //    block the persist.
+  let isReRun = null;
+  try {
+    const existing = await db.getGuildConfig(guildId);
+    isReRun = Boolean(existing && existing.configured_by);
+  } catch {
+    // intentionally silent — the persist below is what matters; the
+    // log enrichment is best-effort.
+  }
   try {
     await db.setGuildApiKey(guildId, apiKey, discordUserId);
   } catch (err) {
@@ -439,7 +462,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       + 'If this keeps happening, contact your layerv.ai admin.');
   }
   logger.info('qURL OAuth setup complete', {
-    guildId, configuredBy: discordUserId, keyPrefix,
+    guildId, configuredBy: discordUserId, keyPrefix, isReRun,
   });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the

@@ -139,6 +139,28 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Bot install incomplete', 'Discord did not return the server you selected. Please click "Add to Discord" again.');
   }
 
+  // First-install vs re-install gate for prompt=consent. Hoisted above
+  // the Discord handshake on purpose — the lookup needs only `guildId`
+  // (already in req.query), not `discordUserId`, so doing it here means
+  // a slow-DDB blip can't delay the Discord token-exchange + /users/@me
+  // round-trips for an installer who's just sitting on the redirect
+  // page. The handshake-timeout window stays bounded by DISCORD_TIMEOUT_MS
+  // alone. PR #177 follow-up C.8 + post-round-8 review.
+  let isReInstall = false;
+  try {
+    const existing = await db.getGuildConfig(guildId);
+    isReInstall = Boolean(existing && existing.configured_by);
+  } catch (err) {
+    // Bias toward consent prompt on DDB failure — the cost is one extra
+    // click for an admin who just signed in (mild), versus silently
+    // skipping consent on a true re-install which blocks key rotation
+    // entirely (worse).
+    logger.info('Failed to read guild config for prompt=consent gating; defaulting to re-install path', {
+      error: err?.message, guildId,
+    });
+    isReInstall = true;
+  }
+
   // 1. Exchange code at Discord for an access_token. The token itself
   //    isn't long-lived state we keep — we only use it to call /users/@me
   //    once and learn the installing user's Discord ID, which we then
@@ -232,24 +254,11 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  // prompt=consent only on re-install (guild_configs row already has
-  // a `configured_by`). For a true first install — the bot has never
-  // touched this guild before — let Auth0's default flow run so the
-  // admin doesn't see a redundant consent screen stacked on the
-  // standard sign-in. On re-install, force consent so the admin can
-  // rotate the key. Mirrors /oauth/qurl/start. PR #177 follow-up C.8.
-  let isReInstall = false;
-  try {
-    const existing = await db.getGuildConfig(guildId);
-    isReInstall = Boolean(existing && existing.configured_by);
-  } catch (err) {
-    logger.warn('Failed to read guild config for prompt=consent gating; defaulting to re-install path', {
-      error: err?.message, guildId,
-    });
-    isReInstall = true;
-  }
+  // prompt=consent only on re-install — gate evaluated above the
+  // handshake. See the `isReInstall` block at the top of this handler
+  // for rationale.
   if (isReInstall) authorizeUrl.searchParams.set('prompt', 'consent');
-  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
+  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, isReInstall });
   return res.redirect(302, authorizeUrl.toString());
 });
 

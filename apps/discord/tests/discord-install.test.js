@@ -288,9 +288,16 @@ describe('discord-install — not configured', () => {
         const { app: freshApp } = require('../src/server');
         const res = await supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
         expect(res.status).toBe(503);
-        // Reason string mentions AUTH0 unset specifically (vs. the
-        // DISCORD_CLIENT_SECRET-unset case below).
-        expect(res.text).toMatch(/AUTH0_\* unset|not configured/i);
+        // Generic "not configured" copy on the wire (C.4); the env-var
+        // reason is logged but MUST NOT appear in the rendered HTML —
+        // echoing it would tell a probing attacker which secret an
+        // operator hasn't shipped yet. Env-var-shaped strings + the
+        // legacy "Reason:" prefix are the leak surfaces; the literal
+        // word "Auth0" alone is the user-visible service name and OK.
+        expect(res.text).toMatch(/not configured/i);
+        expect(res.text).not.toMatch(/AUTH0_[A-Z_]+/);
+        expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
+        expect(res.text).not.toMatch(/Reason:/i);
       });
     } finally {
       Object.assign(process.env, saved);
@@ -326,7 +333,11 @@ describe('discord-install — not configured', () => {
         const { app: freshApp } = require('../src/server');
         const res = await supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
         expect(res.status).toBe(503);
-        expect(res.text).toMatch(/DISCORD_CLIENT_SECRET unset|not configured/i);
+        // C.4: generic copy on the wire; reason logged only.
+        expect(res.text).toMatch(/not configured/i);
+        expect(res.text).not.toMatch(/AUTH0_[A-Z_]+/);
+        expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
+        expect(res.text).not.toMatch(/Reason:/i);
       });
     } finally {
       process.env.DISCORD_CLIENT_SECRET = saved;

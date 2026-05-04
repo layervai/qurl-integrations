@@ -183,6 +183,20 @@ describe('qurl-oauth routes', () => {
       const loc = new URL(res.headers.location);
       expect(loc.searchParams.get('prompt')).toBeNull();
     });
+
+    it('falls back to prompt=consent when getGuildConfig throws (DDB blip)', async () => {
+      // C.8 failsafe: if the lookup throws, bias toward the safer-for-
+      // rotation default. Re-prompting an already-consenting admin is
+      // mild friction; skipping consent on a real re-run blocks key
+      // rotation. Pin the bias direction here so a future refactor
+      // can't quietly flip it.
+      db.getGuildConfig.mockRejectedValueOnce(new Error('DDB throttled'));
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(302);
+      const loc = new URL(res.headers.location);
+      expect(loc.searchParams.get('prompt')).toBe('consent');
+    });
   });
 
   describe('GET /oauth/qurl/callback', () => {
@@ -374,7 +388,10 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toMatch(/<dt>Discord guild<\/dt>\s*<dd>guild-1<\/dd>/);
       expect(res.text).toMatch(/<dt>API key prefix<\/dt>\s*<dd>lv_live_a<\/dd>/);
       // No qURL account line — verifier rejected the forged token.
-      expect(res.text).not.toContain('qURL account');
+      // Tight match: must specifically not have the <dt> row, so a
+      // future template change that re-labels the email field would
+      // still surface the regression.
+      expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
     });
 
     it('renders success without qURL-account-email line when id_token field is absent from the Auth0 response', async () => {
@@ -396,7 +413,7 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(200);
       expect(res.text).toContain('qURL is connected');
-      expect(res.text).not.toContain('qURL account');
+      expect(res.text).not.toMatch(/<dt>qURL account<\/dt>/);
     });
 
     it('502s when qurl-service mint response has api_key but missing key_id (orphan-cleanup contract)', async () => {
@@ -497,6 +514,15 @@ describe('qurl-oauth — not configured (AUTH0_* env unset)', () => {
         const res = await supertest(freshApp).get('/oauth/qurl/start?state=anything');
         expect(res.status).toBe(503);
         expect(res.text).toMatch(/not configured/i);
+        // Defense-in-depth: qurl-oauth.js renderNotConfigured already
+        // doesn't include env-var names (unlike the legacy
+        // discord-install.js path that pre-C.4 leaked them). Pin here
+        // so a future refactor that adds a reason field can't regress.
+        // Env-var-shaped strings only — the literal word "Auth0" is the
+        // user-visible service name and is fine in copy.
+        expect(res.text).not.toMatch(/AUTH0_[A-Z_]+/);
+        expect(res.text).not.toMatch(/DISCORD_CLIENT_SECRET/);
+        expect(res.text).not.toMatch(/Reason:/i);
       });
     } finally {
       // Restore env so subsequent tests run against the configured router.
