@@ -43,6 +43,11 @@ const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 
+// Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
+// so a future "Discord OAuth2 is slow under load" tuning is one constant
+// to flip.
+const DISCORD_TIMEOUT_MS = 15000;
+
 const router = express.Router();
 
 function renderNotConfigured(res, reason) {
@@ -122,7 +127,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         code,
         redirect_uri: `${config.BASE_URL}/oauth/discord/callback`,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
     });
     if (!tokenResp.ok) {
       const errBody = await tokenResp.text().catch(() => '');
@@ -143,7 +148,7 @@ router.get('/callback', rateLimit, async (req, res) => {
     //    state can bind to it (matches the existing /qurl setup state).
     const userResp = await fetch('https://discord.com/api/users/@me', {
       headers: { 'Authorization': `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
     });
     if (!userResp.ok) {
       logger.error('Discord /users/@me failed', { status: userResp.status });

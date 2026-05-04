@@ -20,6 +20,10 @@ process.env.DISCORD_CLIENT_SECRET = 'test-discord-secret';
 process.env.QURL_ENDPOINT = 'http://localhost:9999';
 process.env.BASE_URL = 'http://localhost:3000';
 process.env.GUILD_ID = '123456789012345678';
+// Trust proxy so the Secure-cookie test can simulate ALB-fronted prod
+// via X-Forwarded-Proto: https (server.js reads TRUST_PROXY at module
+// load — must be set BEFORE require('../src/server') below).
+process.env.TRUST_PROXY = '1';
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
@@ -161,6 +165,28 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
+    it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
+      // Defense vs trust-proxy regression: server.js sets `trust proxy`
+      // so req.protocol reflects X-Forwarded-Proto from the ALB. Flipping
+      // that off would silently downgrade prod cookies to insecure. Pin
+      // the wire-level shape here.
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'disc-token' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      const res = await request(app)
+        .get('/oauth/discord/callback?code=ok-code&guild_id=guild-1')
+        .set('X-Forwarded-Proto', 'https');
+      expect(res.status).toBe(302);
+      const cookieHeader = (Array.isArray(res.headers['set-cookie']) ? res.headers['set-cookie'].join('\n') : res.headers['set-cookie']) || '';
+      expect(cookieHeader).toMatch(/Secure/);
+    });
+
     it('uses the right Discord token-exchange body shape (form-urlencoded with client creds)', async () => {
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
@@ -185,5 +211,94 @@ describe('Discord install callback', () => {
       expect(bodyParams.get('code')).toBe('ok-code');
       expect(bodyParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/discord/callback');
     });
+  });
+});
+
+// Separate describe — exercises the not-configured 503 paths that
+// `isDiscordInstallConfigured` gates. Uses jest.isolateModulesAsync so
+// the env-var unsetting on this branch doesn't leak into the
+// configured-flow describe above (it's already past). Mirrors the
+// equivalent suite in tests/qurl-oauth.test.js for AUTH0_* unset.
+describe('discord-install — not configured', () => {
+  it('returns 503 with the AUTH0-unset reason when Auth0 env is missing', async () => {
+    const saved = {
+      AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
+      AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
+      AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
+      AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
+    };
+    delete process.env.AUTH0_DOMAIN;
+    delete process.env.AUTH0_CLIENT_ID;
+    delete process.env.AUTH0_CLIENT_SECRET;
+    delete process.env.AUTH0_AUDIENCE;
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+        const res = await supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+        expect(res.status).toBe(503);
+        // Reason string mentions AUTH0 unset specifically (vs. the
+        // DISCORD_CLIENT_SECRET-unset case below).
+        expect(res.text).toMatch(/AUTH0_\* unset|not configured/i);
+      });
+    } finally {
+      Object.assign(process.env, saved);
+    }
+  });
+
+  it('returns 503 with the DISCORD_CLIENT_SECRET-unset reason when Auth0 is set but Discord secret is missing', async () => {
+    const saved = process.env.DISCORD_CLIENT_SECRET;
+    delete process.env.DISCORD_CLIENT_SECRET;
+    try {
+      await jest.isolateModulesAsync(async () => {
+        jest.doMock('../src/discord', () => ({
+          sendDM: jest.fn().mockResolvedValue(true),
+          assignContributorRole: jest.fn(),
+          notifyPRMerge: jest.fn(),
+          notifyBadgeEarned: jest.fn(),
+        }));
+        jest.doMock('../src/store', () => ({
+          setGuildApiKey: jest.fn(),
+          getGuildApiKey: jest.fn(),
+          getPendingLink: jest.fn(),
+          consumePendingLink: jest.fn(),
+        }));
+        jest.doMock('../src/commands', () => ({
+          verifyStateBinding: jest.fn().mockReturnValue(true),
+          handleCommand: jest.fn(),
+          commands: [],
+          registerCommands: jest.fn(),
+        }));
+        // eslint-disable-next-line global-require
+        const supertest = require('supertest');
+        // eslint-disable-next-line global-require
+        const { app: freshApp } = require('../src/server');
+        const res = await supertest(freshApp).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+        expect(res.status).toBe(503);
+        expect(res.text).toMatch(/DISCORD_CLIENT_SECRET unset|not configured/i);
+      });
+    } finally {
+      process.env.DISCORD_CLIENT_SECRET = saved;
+    }
   });
 });

@@ -27,8 +27,16 @@ const db = require('../store');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { sendDM } = require('../discord');
-const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
+const { verifyQurlOAuthState, b64urlDecode } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
+
+// Network-call timeouts. Centralized so a future tuning of "qurl-service
+// is slow under load" doesn't require a hunt-and-replace across both
+// route files. 15s matches the existing per-call budget; the 5s and 10s
+// values are for cleanup paths that should fail faster.
+const AUTH0_TIMEOUT_MS = 15000;
+const QURL_SERVICE_TIMEOUT_MS = 15000;
+const ORPHAN_DELETE_TIMEOUT_MS = 10000;
 
 const router = express.Router();
 
@@ -264,17 +272,22 @@ router.get('/callback', rateLimit, async (req, res) => {
   let accessToken;
   let qurlAccountEmail;
   try {
+    // OAuth2 spec is application/x-www-form-urlencoded for the token
+    // endpoint. Auth0 accepts JSON too, but form-urlencoded is the
+    // canonical shape and matches the Discord token-exchange call in
+    // routes/discord-install.js — symmetric across both providers
+    // removes a "why is this one different?" reader question.
     const tokenResp = await fetch(`https://${config.AUTH0_DOMAIN}/oauth/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
         grant_type: 'authorization_code',
         client_id: config.AUTH0_CLIENT_ID,
         client_secret: config.AUTH0_CLIENT_SECRET,
         code,
         redirect_uri: `${config.BASE_URL}/oauth/qurl/callback`,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(AUTH0_TIMEOUT_MS),
     });
     if (!tokenResp.ok) {
       const errBody = await tokenResp.text().catch(() => '');
@@ -290,14 +303,18 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Best-effort id_token email extraction. JWT decode without
     // signature verification — the id_token came from Auth0 over TLS
     // in this same response, so signature verification is redundant
-    // for a display-only readout. Wrap in try/catch because we do NOT
-    // want a malformed id_token to fail the whole setup flow.
+    // for a display-only readout. (See PR #177 review note: the email
+    // becomes a load-bearing visual cue against confused-deputy on
+    // Stage 2, but the security claim of the readout is still "trust
+    // Auth0's TLS response" — full verification would require JWKS
+    // caching and is out of scope here.) Reuses b64urlDecode from
+    // utils/qurl-oauth-state.js for consistent base64-url handling.
     try {
       const idToken = tokenJson.id_token;
       if (typeof idToken === 'string') {
         const parts = idToken.split('.');
         if (parts.length === 3) {
-          const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+          const payload = JSON.parse(b64urlDecode(parts[1]).toString('utf8'));
           if (typeof payload.email === 'string') qurlAccountEmail = payload.email;
         }
       }
@@ -324,7 +341,7 @@ router.get('/callback', rateLimit, async (req, res) => {
         'Accept': 'application/json',
       },
       body: JSON.stringify({ name: keyName, scopes: ['qurl:write', 'qurl:read'] }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(QURL_SERVICE_TIMEOUT_MS),
     });
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
@@ -368,7 +385,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
       })
         .then((r) => {
           if (!r.ok) {

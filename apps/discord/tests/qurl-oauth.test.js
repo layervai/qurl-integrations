@@ -24,6 +24,10 @@ process.env.BASE_URL = 'http://localhost:3000';
 process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 // /qurl-oauth router mounts always; OpenNHP is a different gate
 process.env.GUILD_ID = '123456789012345678';
+// Trust proxy so the Secure-cookie test can simulate ALB-fronted prod
+// via X-Forwarded-Proto: https (server.js reads TRUST_PROXY at module
+// load — must be set BEFORE require('../src/server') below).
+process.env.TRUST_PROXY = '1';
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
@@ -85,6 +89,20 @@ describe('qurl-oauth routes', () => {
       expect(loc.searchParams.get('prompt')).toBe('consent');
       expect(loc.searchParams.get('state')).toBe(state);
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
+    });
+
+    it('sets Secure flag on the cookie when behind a proxy that sets X-Forwarded-Proto: https', async () => {
+      // Defense vs trust-proxy regression: server.js sets `trust proxy`
+      // so req.protocol reflects X-Forwarded-Proto from the ALB. Flipping
+      // that off would silently downgrade prod cookies to insecure. Pin
+      // the wire-level shape here.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const res = await request(app)
+        .get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`)
+        .set('X-Forwarded-Proto', 'https');
+      expect(res.status).toBe(302);
+      const cookieHeader = (Array.isArray(res.headers['set-cookie']) ? res.headers['set-cookie'].join('\n') : res.headers['set-cookie']) || '';
+      expect(cookieHeader).toMatch(/Secure/);
     });
 
     it('sets a HttpOnly session cookie binding the browser to this state (CSRF guard)', async () => {
