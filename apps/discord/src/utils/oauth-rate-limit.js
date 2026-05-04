@@ -93,4 +93,14 @@ function rateLimit(req, res, next) {
   return next();
 }
 
-module.exports = { rateLimit, rateLimitStore };
+// Stop the background sweep timer. Useful for tests that re-import
+// this module within the same process (the .unref() above keeps it
+// from holding the event loop alive on shutdown, but doesn't prevent
+// timer accumulation across module-cache resets in test runners).
+// Production callers don't need this — Node exits when the process
+// dies.
+function stopRateLimitSweep() {
+  clearInterval(sweepHandle);
+}
+
+module.exports = { rateLimit, rateLimitStore, stopRateLimitSweep };

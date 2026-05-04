@@ -221,12 +221,18 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
-    it('200s on happy path: mints key, persists, DMs admin, renders success', async () => {
+    it('200s on happy path: mints key, persists, DMs admin, renders success with binding readout', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
+      // id_token with an `email` claim — base64url-encoded JSON, no
+      // signature verification needed for a display-only readout (token
+      // came from Auth0 over TLS in the same response).
+      const idTokenPayload = Buffer.from(JSON.stringify({ email: 'alice@layerv.test', sub: 'auth0|abc' })).toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const idToken = `header.${idTokenPayload}.sig`;
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
-          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', id_token: idToken, token_type: 'Bearer', expires_in: 3600 }),
         })
         .mockResolvedValueOnce({
           ok: true, status: 201,
@@ -244,6 +250,19 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('qURL is connected');
       expect(db.setGuildApiKey).toHaveBeenCalledWith('guild-1', 'lv_live_abc123', 'admin-2');
       expect(discord.sendDM).toHaveBeenCalledWith('admin-2', expect.stringContaining('qURL is connected'));
+
+      // Confused-deputy mitigation: the success page must surface the
+      // bound (guild_id, qURL email, key prefix) tuple as readable
+      // text — NOT escaped HTML angle brackets. This is the load-
+      // bearing visual cue the admin uses to spot a mismatched
+      // binding before closing the tab.
+      expect(res.text).toContain('Discord guild: guild-1');
+      expect(res.text).toContain('qURL account: alice@layerv.test');
+      expect(res.text).toContain('API key prefix: lv_live_abc1');
+      // Belt-and-suspenders: assert NO literal escaped HTML lands in
+      // the subtext (e.g. `&lt;code&gt;...&lt;/code&gt;`) — that would
+      // mean we accidentally double-escaped the binding values.
+      expect(res.text).not.toMatch(/&lt;code&gt;/);
     });
 
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {

@@ -115,7 +115,7 @@ describe('Discord install callback', () => {
       expect(res.text).toContain('Could not identify the installing user');
     });
 
-    it('302s to Auth0 on happy path with a valid qURL OAuth state', async () => {
+    it('302s to Auth0 on happy path with a valid qURL OAuth state and sets the CSRF cookie', async () => {
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -132,6 +132,9 @@ describe('Discord install callback', () => {
       expect(loc.pathname).toBe('/authorize');
       expect(loc.searchParams.get('client_id')).toBe('test-auth0-client-id');
       expect(loc.searchParams.get('redirect_uri')).toBe('http://localhost:3000/oauth/qurl/callback');
+      // Auth0 scope must NOT include offline_access (refresh tokens not
+      // stored/used; dropped per PR #177 review item 5).
+      expect(loc.searchParams.get('scope')).not.toContain('offline_access');
 
       // The state Discord callback minted must round-trip through the
       // qURL OAuth state verifier with the right guild + discord-user
@@ -142,6 +145,20 @@ describe('Discord install callback', () => {
       expect(verified.ok).toBe(true);
       expect(verified.payload.guildId).toBe('guild-1');
       expect(verified.payload.discordUserId).toBe('987654321098765432');
+
+      // Cookie binding — Stage-2 chain must set the same `qurl_setup_session`
+      // cookie that /oauth/qurl/start sets, at path=/oauth so it's also
+      // visible to /oauth/qurl/callback further along the chain. Without
+      // this, the qURL callback's cookie === state CSRF check would 400
+      // and the entire Stage-2 flow would fail at runtime in sandbox/prod.
+      const setCookie = res.headers['set-cookie'];
+      expect(setCookie).toBeDefined();
+      const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
+      expect(cookieHeader).toMatch(/qurl_setup_session=/);
+      expect(cookieHeader).toMatch(/HttpOnly/i);
+      expect(cookieHeader).toMatch(/SameSite=Lax/i);
+      expect(cookieHeader).toMatch(/Path=\/oauth(?:;|\s|$)/);
+      expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
     it('uses the right Discord token-exchange body shape (form-urlencoded with client creds)', async () => {

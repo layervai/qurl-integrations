@@ -13,9 +13,13 @@
 //      billed to the admin's qURL account), DMs the admin "qURL is ready",
 //      renders a success page.
 //
-// Stage 2 (new-install entry point — bot install + OAuth chained off the
-// "Add to Discord" link) is a follow-up: needs Discord developer-portal
-// redirect URI registration. Tracked in the PR description.
+// Stage 2 (new-install entry point — "Add to Discord" link → Discord
+// OAuth2 install → server pick → consent → chained Auth0 leg) ships in
+// this same PR via routes/discord-install.js, which terminates at the
+// same /oauth/qurl/callback handler below. Both flows share the cookie
+// (path=/oauth) and the qURL OAuth state shape, so the callback's
+// CSRF check, KEY_ENCRYPTION_KEY guard, mint, persist, and DM are
+// stage-agnostic.
 const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
@@ -76,18 +80,27 @@ function renderNotConfigured(res) {
 
 // Success page surfaces the guild ID, key prefix, and qURL account email
 // so the admin can sanity-check the binding before closing the tab. This
-// is a user-visible mitigation against the Stage-2 confused-deputy class
-// of attack flagged in the PR #177 review: in a hypothetical
-// attacker-pre-runs-the-Discord-callback scenario, the state would carry
-// the attacker's discord_user_id + guild_id while the qURL account is
-// the victim's. Showing both halves of the binding lets the admin spot a
-// mismatch ("this isn't my server name" / "this isn't my qURL email")
-// before usage starts.
+// is the LOAD-BEARING user-visible mitigation against the Stage-2
+// confused-deputy class of attack flagged in the PR #177 review: in a
+// hypothetical attacker-pre-runs-the-Discord-callback scenario, the
+// state would carry the attacker's discord_user_id + guild_id while the
+// qURL account email is the victim's. Showing both halves of the
+// binding lets the admin spot a mismatch ("this isn't my server" /
+// "this isn't my qURL email") before usage starts.
+//
+// Subtext is plain prose — `renderPage` HTML-escapes the whole string at
+// render time, so any inline tags (<code>, <strong>, etc.) would render
+// as literal angle brackets. The values themselves still ride through
+// renderPage's escapeHtml so untrusted input can't smuggle script tags;
+// the trade-off is that the values aren't visually distinguished
+// (no monospace formatting). That's an acceptable cost for the
+// security guarantee: the goal is "admin reads the values" not
+// "admin enjoys nice typography."
 function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   const detailLines = [];
-  if (guildId) detailLines.push(`Discord guild: <code>${escapeHtmlForRender(guildId)}</code>`);
-  if (qurlAccountEmail) detailLines.push(`qURL account: <code>${escapeHtmlForRender(qurlAccountEmail)}</code>`);
-  if (keyPrefix) detailLines.push(`API key prefix: <code>${escapeHtmlForRender(keyPrefix)}</code>`);
+  if (guildId) detailLines.push(`Discord guild: ${guildId}`);
+  if (qurlAccountEmail) detailLines.push(`qURL account: ${qurlAccountEmail}`);
+  if (keyPrefix) detailLines.push(`API key prefix: ${keyPrefix}`);
   const subtext = detailLines.length > 0
     ? detailLines.join(' · ') + ' — confirm these match before closing.'
     : undefined;
@@ -99,20 +112,6 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
     subtext,
     type: 'success',
   }));
-}
-
-// renderPage's `subtext` field is HTML-escaped at render-time per its
-// docstring, but the values we pass in (guildId, keyPrefix, email) are
-// directly interpolated into <code> tags above the renderPage call —
-// so we escape here too. Belt-and-suspenders against a future caller
-// passing untrusted input through this helper.
-function escapeHtmlForRender(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 function renderError(res, statusCode, headline, detail) {
