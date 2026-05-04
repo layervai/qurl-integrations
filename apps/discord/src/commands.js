@@ -3293,49 +3293,24 @@ const commands = [
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
-        // Rendered output (after Discord's markdown parser):
-        //
-        //   qURL Bot — Help
-        //
-        //   Getting started — Share resources securely via one-time links:
-        //     /qurl send — send a file or location to users
-        //     /qurl revoke — revoke links from a previous send
-        //     /qurl help — show this message
-        //
-        //   How it works:
-        //     1. Run /qurl send and pick "Send File" or "Send Location"
-        //     2. (Files only) I'll DM you privately — drop the file there,
-        //        not in the public channel
-        //     3. Choose recipient(s), expiry, and optionally a personal
-        //        message — then click Send
-        //     4. Recipients get a one-time link by DM that self-destructs
-        //        on first access (or when the expiry elapses)
-        //
-        //   Setting up (for Admins):
-        //     /qurl setup — configure your API key (admin only)
-        //     /qurl status — check if qURL is configured (admin only)
-        //
-        //   Terms: a protected resource is the file or location you're
-        //   sharing. A qurl (or access link) is the single-use URL that
-        //   delivers it. You create a qurl for a protected resource each
-        //   time you run /qurl send.
-        //
-        //   Large servers (~1000+ members): when sending to "Everyone in
-        //   this channel" or "Everyone in your voice channel", members
-        //   who appear offline in Discord may be skipped. If you need
-        //   to reach a specific person for sure, pick "A specific user".
-        //
-        //   Sign up at https://layerv.ai to get your API key.
-        //
-        // Section order (post-PR #124): user-facing flow first (Getting
-        // started → How it works), then admin-only setup, then glossary
-        // (Terms), then operational caveat (Large servers), then signup.
-        // PR #134 rewrote /qurl send as a button-driven flow — the
-        // "How it works" steps below describe the new shape (no slash
-        // options; pick Send File / Send Location → DM-pivot for files
-        // → recipient/expiry/message form → Send). If the flow changes
-        // again, update both the rendered-output ASCII above AND the
-        // string concatenation below to keep them in sync.
+        // Section order: user-facing flow first (Getting started → How it
+        // works), then admin-only setup (now the OAuth-redirect flow per
+        // PR #177), then glossary (Terms), then operational caveat
+        // (Large servers). The "Setting up" section pivots based on
+        // whether OAuth is configured — when it is, we describe the
+        // /qurl setup OAuth flow + the "Add to Discord" install-flow
+        // entry point. When unset (sandbox before Auth0 secrets land),
+        // we keep the legacy "API key paste" wording so the help text
+        // matches what /qurl setup actually does at that moment.
+        const oauthSetupSection = config.isQurlOAuthConfigured
+          ? '**Setting up (for Admins):**\n'
+            + '  `/qurl setup` — connect qURL via OAuth (admin only). Click the link, sign in to layerv.ai, consent. No API key paste.\n'
+            + '  `/qurl status` — check if qURL is configured (admin only)\n\n'
+            + '_Adding the bot to a new server?_ Use the "Add to Discord" link on **https://layerv.ai** — '
+            + 'it walks you through server selection, permissions consent, and qURL connection in one click chain.\n\n'
+          : '**Setting up (for Admins):**\n'
+            + '  `/qurl setup` — configure your API key (admin only)\n'
+            + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
@@ -3353,16 +3328,14 @@ const commands = [
             '  2. (Files only) I\'ll DM you privately — drop the file there, not in the public channel\n' +
             '  3. Choose recipient(s), expiry, and optionally a personal message — then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
-            '**Setting up (for Admins):**\n' +
-            '  `/qurl setup` — configure your API key (admin only)\n' +
-            '  `/qurl status` — check if qURL is configured (admin only)\n\n' +
+            oauthSetupSection +
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
             '**Large servers (~1000+ members):** when sending to **Everyone in this channel** ' +
             'or **Everyone in your voice channel**, members who appear offline in Discord may be skipped. ' +
             'If you need to reach a specific person for sure, pick **A specific user**.\n\n' +
-            'Sign up at **https://layerv.ai** to get your API key.',
+            'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });
       }

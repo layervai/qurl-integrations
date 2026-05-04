@@ -8,6 +8,7 @@ const logger = require('./logger');
 const { renderPage } = require('./templates/page');
 const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
+const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
@@ -200,6 +201,17 @@ if (config.isOpenNHPActive) {
 app.use('/oauth/qurl', qurlOAuthRouter);
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
+}
+
+// Stage-2 Discord install callback. Mounts at /oauth/discord/callback —
+// the redirect_uri Discord OAuth2 hits when an admin clicks "Add to
+// Discord" + selects a server. Always mount so the redirect URI is
+// stable regardless of config; the route gates internally on
+// config.isDiscordInstallConfigured (returns 503 when DISCORD_CLIENT_SECRET
+// or AUTH0_* unset).
+app.use('/oauth/discord', discordInstallRouter);
+if (!config.isDiscordInstallConfigured) {
+  logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)

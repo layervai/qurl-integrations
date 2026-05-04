@@ -111,16 +111,35 @@ const isQurlOAuthConfigured = Boolean(
   && process.env.AUTH0_AUDIENCE,
 );
 
+// True when the Stage-2 "Add to Discord, select server" install flow can
+// run end-to-end: needs the bot's Discord OAuth2 client secret (separate
+// from the bot token used for normal operations) on top of qURL OAuth.
+// The /oauth/discord/callback route gates on this; it returns 503 with a
+// "not configured" page when false, so the install link still completes
+// (bot lands in the server) but the chained Auth0 leg won't run until
+// Justin sets DISCORD_CLIENT_SECRET in SSM.
+const isDiscordInstallConfigured = Boolean(
+  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
+);
+
 // Configuration from environment variables
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  // Required for the Stage-2 "Add to Discord, select server" install
+  // callback (src/routes/discord-install.js). Not used by normal bot
+  // operations — only by the OAuth2 token exchange when an admin
+  // installs the bot via the install link. Optional: omit and the
+  // /oauth/discord/callback route will return 503 with a documented
+  // "not configured" page until Justin sets the secret.
+  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
   isOpenNHPActive,
   isQurlOAuthConfigured,
+  isDiscordInstallConfigured,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',
