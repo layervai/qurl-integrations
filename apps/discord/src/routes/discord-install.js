@@ -51,23 +51,38 @@ const DISCORD_TIMEOUT_MS = 15000;
 const router = express.Router();
 
 function renderNotConfigured(res, reason) {
+  // Wording: "/qurl setup later" is the right next step ONLY when this
+  // 503 is from a partial config (DISCORD_CLIENT_SECRET unset, but
+  // AUTH0_* set — the slash command would still take the OAuth path).
+  // When AUTH0_* itself is unset, /qurl setup falls back to modal-paste
+  // and the admin needs an out-of-band channel to layerv.ai. Branch the
+  // remediation copy on `reason`.
+  const remediation = reason && reason.startsWith('AUTH0')
+    ? 'The bot was added to your server. Contact your layerv.ai admin to finish setup once the qURL OAuth application is registered.'
+    : 'The bot was added to your server successfully — run /qurl setup in-Discord once the operator finishes provisioning.';
   return res.status(503).send(renderPage({
     title: 'qURL Setup Not Configured',
     icon: '⚠️',
     heading: 'qURL setup is not configured yet',
-    message: 'The Auth0 application or Discord OAuth secret has not been registered. '
-      + 'The bot was added to your server successfully — run /qurl setup later or '
-      + `contact your layerv.ai admin. (Reason: ${reason})`,
+    message: `${remediation} (Reason: ${reason})`,
     type: 'warning',
   }));
 }
 
-function renderError(res, statusCode, headline, detail) {
+// `detail` should describe the immediate failure; we append a remediation
+// hint specific to the surface the failure landed on. The default hint
+// ("run /qurl setup directly") makes sense after a Discord OAuth handshake
+// failure — bot is already installed, qURL setup can be retried in-Discord
+// — but DOESN'T make sense on the not-configured 503, where /qurl setup
+// would also fail because the same env vars are missing. The
+// `remediation` override lets the caller pick the right copy.
+function renderError(res, statusCode, headline, detail, remediation) {
+  const tail = remediation ?? ' If the bot is already in your server, run /qurl setup directly.';
   return res.status(statusCode).send(renderPage({
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: detail + ' If the bot is already in your server, run /qurl setup directly.',
+    message: detail + tail,
     type: 'error',
   }));
 }
@@ -88,8 +103,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
     return renderError(res, 503, 'qURL setup not provisioned',
-      'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY).'
-      + ' Once that\'s set, run /qurl setup in your server.');
+      'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY).',
+      ' Once that\'s set, run /qurl setup in your server.');
   }
   if (req.query.error) {
     logger.warn('Discord install callback received error from Discord', {
@@ -157,7 +172,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     const user = await userResp.json();
     discordUserId = user?.id;
     if (typeof discordUserId !== 'string' || !discordUserId) {
-      logger.error('Discord /users/@me returned no user id', { user });
+      // Log the response shape (key set) but NOT the values — Discord's
+      // /users/@me payload can include username, global_name, avatar
+      // hash, locale, and (with email scope) email. None of those are
+      // safe to retain in operational logs without an explicit infosec
+      // sign-off; key names alone tell us why the contract drifted.
+      logger.error('Discord /users/@me returned no user id', {
+        responseKeys: user ? Object.keys(user) : null,
+      });
       return renderError(res, 502, 'Authorization failed', 'Discord returned an unexpected response.');
     }
   } catch (err) {

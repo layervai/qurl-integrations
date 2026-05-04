@@ -3146,7 +3146,7 @@ const commands = [
               + 'API key owned by your account — all usage on this server will bill to you. '
               + 'No copy-paste needed.\n\n'
               + '_This link expires in 5 minutes and is bound to your browser session — '
-              + 'open it in the same tab where you ran `/qurl setup`._',
+              + 'open it in the same browser where you ran `/qurl setup`._',
             ephemeral: true,
           });
         }

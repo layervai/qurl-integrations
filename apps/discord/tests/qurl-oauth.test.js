@@ -285,6 +285,13 @@ describe('qurl-oauth routes', () => {
 
     it('500s when persist fails after successful mint, and best-effort deletes the orphan key', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
+      // Deterministic flush: the third fetch call (orphan DELETE) is
+      // fire-and-forget from the route handler, so the response can
+      // ship before .then() runs. Resolve a controlled promise from
+      // inside the third mock so the test can `await` exactly that
+      // signal — no setImmediate flake.
+      let resolveDeleteFired;
+      const deleteFired = new Promise((resolve) => { resolveDeleteFired = resolve; });
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({
           ok: true, status: 200,
@@ -294,8 +301,12 @@ describe('qurl-oauth routes', () => {
           ok: true, status: 201,
           json: () => Promise.resolve({ data: { key_id: 'key-orphan-1', api_key: 'lv_live_abc123', key_prefix: 'lv_live_abc1' } }),
         })
-        // Best-effort orphan delete
-        .mockResolvedValueOnce({ ok: true, status: 204, text: () => Promise.resolve('') });
+        // Third call = the orphan DELETE. Resolving the test-side
+        // promise here gives a precise "delete dispatched" signal.
+        .mockImplementationOnce(async () => {
+          resolveDeleteFired();
+          return { ok: true, status: 204, text: () => Promise.resolve('') };
+        });
       globalThis.fetch = fetchSpy;
       db.setGuildApiKey.mockRejectedValueOnce(new Error('DDB throttled'));
       const res = await request(app).get(
@@ -303,13 +314,36 @@ describe('qurl-oauth routes', () => {
       ).set('Cookie', cookieFor(state));
       expect(res.status).toBe(500);
       expect(res.text).toContain('provisioned but not stored');
-      // .then() of the fire-and-forget delete may settle after the
-      // response goes out; await one event-loop turn so the assertion
-      // sees the third fetch call.
-      await new Promise((resolve) => setImmediate(resolve));
+      await deleteFired;
       const deleteCall = fetchSpy.mock.calls.find((c) => typeof c[1]?.method === 'string' && c[1].method === 'DELETE');
       expect(deleteCall).toBeDefined();
       expect(deleteCall[0]).toContain('/v1/api-keys/key-orphan-1');
+    });
+
+    it('clears the qurl_setup_session cookie on successful callback (one-shot binding)', async () => {
+      // Regression pin — without res.clearCookie, a refreshed callback
+      // URL could re-bind silently. Cookie should be cleared via a
+      // Set-Cookie header that zeroes the value AND uses Path=/oauth so
+      // the browser actually forgets it (path mismatch = no clear).
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(200);
+      const setCookies = res.headers['set-cookie'] || [];
+      const headers = Array.isArray(setCookies) ? setCookies : [setCookies];
+      const clearCookie = headers.find((h) => h.startsWith('qurl_setup_session=') && /Expires=Thu, 01 Jan 1970|Max-Age=0/i.test(h));
+      expect(clearCookie).toBeDefined();
+      expect(clearCookie).toMatch(/Path=\/oauth(?:;|$)/);
     });
   });
 });
