@@ -136,7 +136,4 @@ module.exports = {
   verifyQurlOAuthState,
   STATE_KIND,
   STATE_TTL_SECONDS,
-  // Exported for reuse in qurl-oauth.js's id_token decode (avoids a
-  // second base64-url-decode implementation in this codebase).
-  b64urlDecode,
 };

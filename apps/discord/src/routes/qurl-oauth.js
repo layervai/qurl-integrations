@@ -15,6 +15,7 @@ const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie } = require('../utils/cookies');
 const { getIsReRun } = require('../utils/guild-config-state');
+const { singleStringParam } = require('../utils/query-params');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -118,7 +119,7 @@ router.get('/start', rateLimit, async (req, res) => {
     return renderError(res, 503, 'qURL setup not provisioned',
       'The bot operator needs to set KEY_ENCRYPTION_KEY (encryption-at-rest) before qURL setup can store keys safely.');
   }
-  const state = String(req.query.state || '');
+  const state = singleStringParam(req.query.state);
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
@@ -190,8 +191,8 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Auth0 returned an error.');
   }
-  const code = String(req.query.code || '');
-  const state = String(req.query.state || '');
+  const code = singleStringParam(req.query.code);
+  const state = singleStringParam(req.query.state);
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Auth0 did not return an authorization code.');
   }
@@ -343,11 +344,7 @@ router.get('/callback', rateLimit, async (req, res) => {
 
   // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
   //    previous key (if any) remains valid on qurl-service until the
-  //    admin manually revokes it via layerv.ai. Read the prior config
-  //    first so the completion log line can flag first-install vs
-  //    rotation (obs.M2). DDB blip biases isReRun toward `true` — fine
-  //    for log enrichment.
-  const isReRun = await getIsReRun(guildId, 'qurl-oauth /callback');
+  //    admin manually revokes it via layerv.ai.
   try {
     await db.setGuildApiKey(guildId, apiKey, discordUserId);
   } catch (err) {
@@ -381,7 +378,7 @@ router.get('/callback', rateLimit, async (req, res) => {
       + 'If this keeps happening, contact your layerv.ai admin.');
   }
   logger.info('qURL OAuth setup complete', {
-    guildId, configuredBy: discordUserId, keyPrefix, isReRun,
+    guildId, configuredBy: discordUserId, keyPrefix,
   });
 
   // 4. DM the admin so they have a confirmation that doesn't depend on the

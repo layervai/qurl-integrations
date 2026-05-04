@@ -44,6 +44,7 @@ const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
 const { getIsReRun } = require('../utils/guild-config-state');
+const { singleStringParam } = require('../utils/query-params');
 
 // Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
 // so a future "Discord OAuth2 is slow under load" tuning is one constant
@@ -113,8 +114,8 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Discord returned an error.');
   }
-  const code = String(req.query.code || '');
-  const guildId = String(req.query.guild_id || '');
+  const code = singleStringParam(req.query.code);
+  const guildId = singleStringParam(req.query.guild_id);
   if (!code) {
     return renderError(res, 400, 'Missing authorization code', 'Discord did not return an authorization code.');
   }

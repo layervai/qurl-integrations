@@ -25,6 +25,13 @@ const logger = require('../logger');
 async function getIsReRun(guildId, contextLabel) {
   try {
     const existing = await db.getGuildConfig(guildId);
+    // `configured_by` is the canonical "this guild has been set up
+    // before" signal — `setGuildApiKey` writes it atomically as part
+    // of the upsert that lands the API key, so the field is present
+    // iff a successful setup ran on this guild. Hand-edits or partial
+    // rollbacks could in theory leave a row with the api_key column
+    // but no `configured_by`; in that case we treat as first-install
+    // and let Auth0 default-flow run.
     return Boolean(existing && existing.configured_by);
   } catch (err) {
     // info-level — benign fallback, not an error condition. A flaky
