@@ -79,16 +79,9 @@ async function verifyAuth0IdToken(idToken) {
   }
 }
 
-// Test seam — lets unit tests inject a JWKS mock without spinning up an
-// HTTPS endpoint. Exported only outside production so a misimport in
-// prod can't replace the verifier with a stub mid-request — same
-// pattern as `utils/crypto.js`'s `_resetKeyCache`.
-function _setJwksFnForTesting(fn) {
-  _jwksFn = fn;
-}
-
-const exports_ = { verifyAuth0IdToken };
-if (process.env.NODE_ENV !== 'production') {
-  exports_._setJwksFnForTesting = _setJwksFnForTesting;
-}
-module.exports = exports_;
+// Tests mock at the `jose` boundary (jest.mock('jose')) rather than
+// reaching into this module's internal cache, so no test seam is
+// exported. Earlier rounds had a `_setJwksFnForTesting` escape hatch
+// that no test ever called — dropped per Justin's PR #177 round-9
+// review item #10.
+module.exports = { verifyAuth0IdToken };

@@ -14,8 +14,9 @@ const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
 const { readCookie } = require('../utils/cookies');
-const { getIsReRun } = require('../utils/guild-config-state');
+const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
+const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -45,19 +46,11 @@ const {
   clearQurlOAuthCookie,
 } = require('../utils/oauth-cookies');
 
-// Coarse-grained 503 page when AUTH0_* env vars aren't set yet (Auth0 app
-// not registered / Justin hasn't set the prod SSM secrets). Single source
-// of "not configured" surface so the start route + callback route surface
-// the same message and the same 503 status.
+// 503 not-configured surface — shared with discord-install.js via
+// utils/oauth-not-configured.js (single source of truth for the
+// wire-vs-log split per PR #177 / C.4).
 function renderNotConfigured(res) {
-  return res.status(503).send(renderPage({
-    title: 'qURL Setup Not Configured',
-    icon: '⚠️',
-    heading: 'qURL setup is not configured yet',
-    message: 'The Auth0 application for the qURL Discord bot has not been registered yet. '
-      + 'Run /qurl setup again later, or contact your layerv.ai admin.',
-    type: 'warning',
-  }));
+  return renderNotConfiguredPage(res, 'qurl-setup');
 }
 
 // Success page surfaces the guild ID, key prefix, and qURL account email
@@ -73,6 +66,12 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   if (guildId) details.push({ label: 'Discord guild', value: guildId });
   if (qurlAccountEmail) details.push({ label: 'qURL account', value: qurlAccountEmail });
   if (keyPrefix) details.push({ label: 'API key prefix', value: keyPrefix });
+  // Cache-Control: no-store keeps the binding readout (qURL email,
+  // key prefix) out of any intermediate cache — back/forward cache,
+  // browser disk cache, ALB cache. Low cost, prevents the tab from
+  // surfacing a stale binding readout if the admin closes and
+  // re-opens. PR #177 round-9 review item #1.
+  res.setHeader('Cache-Control', 'no-store');
   return res.status(200).send(renderPage({
     title: 'qURL Connected',
     icon: '✅',
@@ -130,7 +129,7 @@ router.get('/start', rateLimit, async (req, res) => {
   // skip the redundant screen. Failsafe + bias direction live in
   // utils/guild-config-state.js (re-run on DDB error — silently
   // skipping consent on a real re-run would block rotation).
-  const isReRun = await getIsReRun(verified.payload.guildId, 'qurl-oauth /start');
+  const promptConsent = await shouldPromptConsent(verified.payload.guildId, 'qurl-oauth /start');
   // Double-submit CSRF cookie: value is the same state token the URL
   // carries to Auth0. /callback re-checks cookie === query.state.
   // Same-browser flows pass; leaked URLs in other browsers fail.
@@ -157,7 +156,7 @@ router.get('/start', rateLimit, async (req, res) => {
   // can't actually issue a new key. On first install, omit so the
   // admin doesn't see a redundant "are you sure?" screen on top of
   // the standard sign-in. Gate evaluated above. PR #177 follow-up C.8.
-  if (isReRun) authorizeUrl.searchParams.set('prompt', 'consent');
+  if (promptConsent) authorizeUrl.searchParams.set('prompt', 'consent');
   return res.redirect(302, authorizeUrl.toString());
 });
 
@@ -258,8 +257,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     }
     const tokenJson = await tokenResp.json();
     accessToken = tokenJson.access_token;
-    if (!accessToken) {
-      logger.error('Auth0 token response missing access_token');
+    // Type-narrow before we consume the value: a non-string here would
+    // flow into the `Authorization: Bearer ${accessToken}` template
+    // literal of the qURL-service mint call (and the orphan-cleanup
+    // DELETE), corrupting the upstream auth header. Auth0's spec
+    // mandates string, but defense-in-depth — Justin's PR #177 review
+    // round 9 item #4.
+    if (typeof accessToken !== 'string' || !accessToken) {
+      logger.error('Auth0 token response missing or non-string access_token');
       return renderError(res, 502, 'Authorization failed', 'Auth0 returned an unexpected response. Please run /qurl setup again.');
     }
     // id_token email extraction with full JWKS verification. The email
@@ -274,7 +279,11 @@ router.get('/callback', rateLimit, async (req, res) => {
     // page renders without the qURL-account-email line. Ops sees a
     // logger.debug for triage. We do NOT fall back to unverified
     // decode — a forged email would be worse than no email.
-    if (tokenJson.id_token) {
+    // id_token is optional (Auth0 may legitimately omit on a non-openid
+    // grant); strict-string check prevents a numeric/null value from
+    // being passed into jose.jwtVerify which would surface as a
+    // confusing decode error rather than a clean "no email" path.
+    if (typeof tokenJson.id_token === 'string' && tokenJson.id_token) {
       // Distinct local — the outer `verified` (line ~258) carries the
       // qURL-OAuth-state verification result; this one carries the
       // Auth0 id_token JWKS verification result. Same shape, different
@@ -327,15 +336,25 @@ router.get('/callback', rateLimit, async (req, res) => {
     // below targets if persistence then fails. Treating a missing
     // key_id as success would leave us unable to clean up an orphan
     // billing-active key on the admin's account if DDB throws —
-    // safer to refuse upfront so the admin retries with a complete
-    // mint response. PR #177 follow-up C.3.
-    if (!apiKey || !keyId) {
-      logger.error('qURL API key response missing required fields', {
-        guildId, hasApiKey: Boolean(apiKey), hasKeyId: Boolean(keyId),
+    // safer to refuse upfront. Strict-string check (not just truthy)
+    // so an upstream contract drift to numeric/object can't poison
+    // db.setGuildApiKey or the encodeURIComponent in the DELETE URL.
+    // PR #177 follow-up C.3 + round-9 review item #4.
+    if (typeof apiKey !== 'string' || !apiKey
+        || typeof keyId !== 'string' || !keyId) {
+      logger.error('qURL API key response missing or non-string required fields', {
+        guildId,
+        apiKeyType: typeof apiKey,
+        keyIdType: typeof keyId,
       });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service returned an unexpected response. Please contact your layerv.ai admin.');
     }
+    // key_prefix is informational (used in the success readout + DM); a
+    // non-string value from a bad upstream would render as `[object
+    // Object]` in HTML. Coerce to undefined so renderSuccess simply
+    // skips the row rather than exposing a contract drift.
+    if (typeof keyPrefix !== 'string') keyPrefix = undefined;
   } catch (err) {
     logger.error('qURL API key mint threw', { error: err?.message, guildId });
     return renderError(res, 502, 'Could not provision qURL key',
@@ -356,23 +375,24 @@ router.get('/callback', rateLimit, async (req, res) => {
     // Fire-and-forget — even if the cleanup fails, the user-facing 500
     // response below is the right outcome (admin runs /qurl setup
     // again to retry; the orphan only persists if delete also fails).
-    if (keyId) {
-      fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
+    // `keyId` is guaranteed non-empty here — the missing-key_id 502
+    // earlier in the handler returned before this block can run, so
+    // the historical `if (keyId)` guard was dead code (round-9 #5).
+    fetch(`${config.QURL_ENDPOINT}/v1/api-keys/${encodeURIComponent(keyId)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(ORPHAN_DELETE_TIMEOUT_MS),
+    })
+      .then((r) => {
+        if (!r.ok) {
+          logger.warn('Best-effort orphan-key delete returned non-ok', {
+            status: r.status, keyId, guildId,
+          });
+        }
       })
-        .then((r) => {
-          if (!r.ok) {
-            logger.warn('Best-effort orphan-key delete returned non-ok', {
-              status: r.status, keyId, guildId,
-            });
-          }
-        })
-        .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
-          error: dErr?.message, keyId, guildId,
-        }));
-    }
+      .catch((dErr) => logger.warn('Best-effort orphan-key delete threw', {
+        error: dErr?.message, keyId, guildId,
+      }));
     return renderError(res, 500, 'qURL key provisioned but not stored',
       'Your qURL API key was created but the bot could not save it. Please run /qurl setup again. '
       + 'If this keeps happening, contact your layerv.ai admin.');

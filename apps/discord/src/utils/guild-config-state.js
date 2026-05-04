@@ -1,4 +1,4 @@
-// First-install vs re-run detection for the OAuth setup flows.
+// UX-gate decision for `prompt=consent` on the Auth0 redirect.
 //
 // Pattern was triplicated across qurl-oauth.js (`/start` + `/callback`
 // log enrichment) and discord-install.js (`/callback`). All three try
@@ -7,13 +7,21 @@
 // already-consenting admin is mild friction; silently skipping consent
 // on a true re-run blocks key rotation entirely. Single helper keeps
 // the bias direction in one place.
+//
+// Named for what it DOES (UX gate) rather than what it READS (re-run
+// detection) — the bias-on-throw policy means callers should treat
+// the return value as "should the consent screen fire?" not "is this
+// strictly a re-run?". Per Justin's PR #177 round-9 review item #9.
 const db = require('../store');
 const logger = require('../logger');
 
 /**
- * Returns true when the guild was previously configured (has a
- * `configured_by` field on its guild_configs row). On DDB error,
- * biases toward `true` — see header comment for rationale.
+ * Returns true when the Auth0 redirect should set `prompt=consent`.
+ * That happens when the guild was previously configured (has a
+ * `configured_by` field), OR when the DDB read fails — bias on
+ * throw goes toward "show consent" because re-prompting is mild
+ * friction while silently skipping consent on a real re-run blocks
+ * key rotation.
  *
  * @param {string} guildId
  * @param {string} contextLabel — short tag for the log line (e.g.
@@ -22,7 +30,7 @@ const logger = require('../logger');
  *                                source.
  * @returns {Promise<boolean>}
  */
-async function getIsReRun(guildId, contextLabel) {
+async function shouldPromptConsent(guildId, contextLabel) {
   try {
     const existing = await db.getGuildConfig(guildId);
     // `configured_by` is the canonical "this guild has been set up
@@ -36,11 +44,11 @@ async function getIsReRun(guildId, contextLabel) {
   } catch (err) {
     // info-level — benign fallback, not an error condition. A flaky
     // DDB shouldn't spam warns.
-    logger.info('Failed to read guild config for prompt=consent gating; defaulting to re-run path', {
+    logger.info('Failed to read guild config for prompt=consent gating; defaulting to consent-prompt', {
       context: contextLabel, error: err?.message, guildId,
     });
     return true;
   }
 }
 
-module.exports = { getIsReRun };
+module.exports = { shouldPromptConsent };

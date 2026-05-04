@@ -43,8 +43,9 @@ const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
-const { getIsReRun } = require('../utils/guild-config-state');
+const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
+const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 
 // Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
 // so a future "Discord OAuth2 is slow under load" tuning is one constant
@@ -53,18 +54,11 @@ const DISCORD_TIMEOUT_MS = 15000;
 
 const router = express.Router();
 
-// SECURITY (C.4): `reason` is logged but NOT rendered to the page.
-// Echoing 'AUTH0_* unset' or 'DISCORD_CLIENT_SECRET unset' would tell
-// a probing attacker which secret the operator hasn't shipped yet.
+// 503 surface delegates to the shared helper — single source of truth
+// for the wire-vs-log split (C.4 invariant). The `surface` arg picks
+// the discord-install-specific remediation copy.
 function renderNotConfigured(res, reason) {
-  logger.info('Discord install not configured', { reason });
-  return res.status(503).send(renderPage({
-    title: 'qURL Setup Not Configured',
-    icon: '⚠️',
-    heading: 'qURL setup is not configured yet',
-    message: 'The bot was added to your server. Setup will be available once your layerv.ai operator finishes provisioning — try /qurl setup in your server later, or contact them out of band.',
-    type: 'warning',
-  }));
+  return renderNotConfiguredPage(res, 'discord-install', reason);
 }
 
 // `detail` describes the immediate failure; we append a remediation
@@ -132,10 +126,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   // off in parallel with the Discord handshake below — the result is
   // only consumed at redirect time (it flips one query-param), so
   // serializing it would add DDB latency to every install with no
-  // user-facing benefit. getIsReRun's failsafe biases toward `true` on
+  // user-facing benefit. shouldPromptConsent's failsafe biases toward `true` on
   // throw — re-prompting an already-consenting admin is mild friction;
   // skipping consent on a true re-install blocks key rotation.
-  const isReInstallPromise = getIsReRun(guildId, 'discord-install /callback');
+  const promptConsentPromise = shouldPromptConsent(guildId, 'discord-install /callback');
 
   // 1. Exchange code at Discord for an access_token. The token itself
   //    isn't long-lived state we keep — we only use it to call /users/@me
@@ -212,8 +206,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   // surfaces (guild, qURL email) for visual sanity-check.
   setQurlOAuthCookie(res, req, qurlState);
   // Resolve the parallel DDB read kicked off above; bias toward consent
-  // on throw is built into getIsReRun.
-  const isReInstall = await isReInstallPromise;
+  // on throw is built into shouldPromptConsent.
+  const promptConsent = await promptConsentPromise;
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -223,8 +217,8 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  if (isReInstall) authorizeUrl.searchParams.set('prompt', 'consent');
-  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, isReInstall });
+  if (promptConsent) authorizeUrl.searchParams.set('prompt', 'consent');
+  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, promptConsent });
   return res.redirect(302, authorizeUrl.toString());
 });
 

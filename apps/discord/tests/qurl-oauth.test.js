@@ -65,7 +65,6 @@ jest.mock('../src/utils/auth0-jwks', () => ({
   verifyAuth0IdToken: jest.fn().mockResolvedValue({
     ok: true, payload: { email: 'alice@layerv.test', sub: 'auth0|abc' },
   }),
-  _setJwksFnForTesting: jest.fn(),
 }));
 
 const request = require('supertest');
@@ -160,6 +159,17 @@ describe('qurl-oauth routes', () => {
       } finally {
         process.env.KEY_ENCRYPTION_KEY = saved;
       }
+    });
+
+    it('rejects array-shaped state query (?state=a&state=b) via singleStringParam', async () => {
+      // Express parses repeated query params as arrays; `String([...])`
+      // would join with commas and pass through. singleStringParam
+      // returns '' for non-strings, which the verifier rejects upfront
+      // — pin the route-level wire shape so a future refactor that
+      // drops the helper still surfaces the regression.
+      const res = await request(app).get('/oauth/qurl/start?state=alpha&state=beta');
+      expect(res.status).toBe(400);
+      expect(res.text).toContain('Invalid setup link');
     });
 
     it('400s on tampered state', async () => {
