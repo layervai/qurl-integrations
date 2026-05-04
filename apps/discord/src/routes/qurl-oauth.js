@@ -160,6 +160,10 @@ router.get('/start', rateLimit, (req, res) => {
   // Path is /oauth (not /oauth/qurl) so the same cookie also covers the
   // Stage-2 "Add to Discord" entry path /oauth/discord/callback when
   // that flow chains through to /oauth/qurl/callback.
+  // `secure: req.protocol === 'https'` relies on `trust proxy` being set
+  // in server.js so req.protocol reflects the X-Forwarded-Proto header
+  // from the ALB. Flipping `trust proxy` off would silently downgrade
+  // production cookies to insecure.
   res.cookie(QURL_OAUTH_SESSION_COOKIE, state, {
     httpOnly: true,
     secure: req.protocol === 'https',

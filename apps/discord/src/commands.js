@@ -20,6 +20,7 @@ const logger = require('./logger');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
 const { expiryToISO, expiryToMs } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
+const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 
@@ -3136,7 +3137,6 @@ const commands = [
 
         // OAuth path — preferred when configured.
         if (config.isQurlOAuthConfigured) {
-          const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
           const state = signQurlOAuthState(interaction.guildId, interaction.user.id);
           const startUrl = `${config.BASE_URL}/oauth/qurl/start?state=${encodeURIComponent(state)}`;
           return interaction.reply({

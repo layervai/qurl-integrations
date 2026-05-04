@@ -190,6 +190,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid profile email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
+  // prompt=consent so re-installing via "Add to Discord" actually re-
+  // prompts the admin at Auth0 — without it, Auth0 silently re-uses
+  // the prior consent and a re-mint can't be triggered. Same rationale
+  // as the /oauth/qurl/start path; keeping the two flows symmetric.
   authorizeUrl.searchParams.set('prompt', 'consent');
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
