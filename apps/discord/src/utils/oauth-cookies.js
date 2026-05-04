@@ -13,8 +13,32 @@ const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
 const QURL_OAUTH_COOKIE_PATH = '/oauth';
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 
+// Single shape for the double-submit CSRF cookie set by both
+// /oauth/qurl/start (Stage 1) and /oauth/discord/callback (Stage 2).
+// `secure: req.protocol === 'https'` requires `trust proxy` to be on
+// in server.js so req.protocol reflects X-Forwarded-Proto from the ALB
+// — flipping that off would silently downgrade prod cookies. Keeping
+// the cookie shape in one place makes Stage-1/Stage-2 drift impossible.
+function setQurlOAuthCookie(res, req, value) {
+  res.cookie(QURL_OAUTH_SESSION_COOKIE, value, {
+    httpOnly: true,
+    secure: req.protocol === 'https',
+    sameSite: 'lax',
+    maxAge: QURL_OAUTH_COOKIE_TTL_SECONDS * 1000,
+    path: QURL_OAUTH_COOKIE_PATH,
+  });
+}
+
+// Path MUST match the Set-Cookie path or the browser keeps the cookie
+// alive until TTL — locking the path here removes that footgun.
+function clearQurlOAuthCookie(res) {
+  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
+}
+
 module.exports = {
   QURL_OAUTH_SESSION_COOKIE,
   QURL_OAUTH_COOKIE_PATH,
   QURL_OAUTH_COOKIE_TTL_SECONDS,
+  setQurlOAuthCookie,
+  clearQurlOAuthCookie,
 };

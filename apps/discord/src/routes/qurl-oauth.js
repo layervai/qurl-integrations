@@ -1,25 +1,8 @@
-// qURL OAuth routes — replaces the API-key-paste modal in /qurl setup.
-//
-// Flow (Stage 1 — existing-install entry point via /qurl setup):
-//   1. Admin runs /qurl setup in Discord → bot replies ephemerally with a
-//      one-shot link to /oauth/qurl/start?state=<signed JWT>.
-//   2. Admin clicks → /oauth/qurl/start verifies state, redirects to Auth0
-//      authorize URL (response_type=code, scope=qurl:write+qurl:read).
-//   3. Admin signs in to layerv.ai (Auth0) + consents.
-//   4. Auth0 → /oauth/qurl/callback?code=…&state=…
-//   5. Callback verifies state, exchanges code at Auth0 token endpoint for
-//      an access_token JWT, calls qurl-service POST /v1/api-keys with the
-//      JWT, persists the minted key in guild_configs (admin-owned —
-//      billed to the admin's qURL account), DMs the admin "qURL is ready",
-//      renders a success page.
-//
-// Stage 2 (new-install entry point — "Add to Discord" link → Discord
-// OAuth2 install → server pick → consent → chained Auth0 leg) ships in
-// this same PR via routes/discord-install.js, which terminates at the
-// same /oauth/qurl/callback handler below. Both flows share the cookie
-// (path=/oauth) and the qURL OAuth state shape, so the callback's
-// CSRF check, KEY_ENCRYPTION_KEY guard, mint, persist, and DM are
-// stage-agnostic.
+// qURL OAuth routes — Stage 1 entry (/oauth/qurl/start via /qurl setup)
+// and the shared callback (/oauth/qurl/callback) that Stage 2
+// (routes/discord-install.js) also chains into. Step-by-step user
+// experience and CSRF posture live in the PR #177 description; Stage-2
+// confused-deputy mitigation is documented in discord-install.js.
 const crypto = require('crypto');
 const express = require('express');
 const config = require('../config');
@@ -30,6 +13,8 @@ const { sendDM } = require('../discord');
 const { verifyQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { verifyAuth0IdToken } = require('../utils/auth0-jwks');
+const { readCookie } = require('../utils/cookies');
+const { getIsReRun } = require('../utils/guild-config-state');
 
 // Network-call timeouts. Centralized so a future tuning of "qurl-service
 // is slow under load" doesn't require a hunt-and-replace across both
@@ -49,36 +34,15 @@ const router = express.Router();
 // to anyone with a layerv.ai login" to "5 minutes AND the same browser
 // that opened the link."
 //
-// Cookie name + path constants live in utils/oauth-cookies.js so the
+// Cookie name + setter shape live in utils/oauth-cookies.js so the
 // Stage-2 chain (routes/discord-install.js sets the same cookie before
 // chaining to Auth0) can't drift — single source of truth. PR #177
 // follow-up C.1.
 const {
   QURL_OAUTH_SESSION_COOKIE,
-  QURL_OAUTH_COOKIE_PATH,
-  QURL_OAUTH_COOKIE_TTL_SECONDS: COOKIE_TTL_SECONDS,
+  setQurlOAuthCookie,
+  clearQurlOAuthCookie,
 } = require('../utils/oauth-cookies');
-
-function readCookie(req, name) {
-  const header = req.headers.cookie;
-  if (!header) return null;
-  // Reject duplicate cookies (browser extension / sibling-subdomain race) —
-  // ambiguity = no binding, treat as "no cookie".
-  const matches = [];
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    const k = part.slice(0, eq).trim();
-    if (k !== name) continue;
-    try {
-      matches.push(decodeURIComponent(part.slice(eq + 1).trim()));
-    } catch {
-      return null;
-    }
-    if (matches.length > 1) return null;
-  }
-  return matches.length === 1 ? matches[0] : null;
-}
 
 // Coarse-grained 503 page when AUTH0_* env vars aren't set yet (Auth0 app
 // not registered / Justin hasn't set the prod SSM secrets). Single source
@@ -112,9 +76,11 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
     title: 'qURL Connected',
     icon: '✅',
     heading: 'qURL is connected to your Discord server.',
-    message: 'You can close this tab and return to Discord. /qurl send is ready.',
+    // CTA folded into message so the "confirm before closing" cue
+    // always rides next to the binding readout, including when the
+    // qURL-account-email line is missing (JWKS verify failure).
+    message: 'Confirm the binding below matches your server, then close this tab and return to Discord. /qurl send is ready.',
     details,
-    subtext: details.length > 0 ? 'Confirm these match before closing.' : undefined,
     type: 'success',
   }));
 }
@@ -158,46 +124,18 @@ router.get('/start', rateLimit, async (req, res) => {
     logger.warn('qURL OAuth start rejected invalid state', { reason: verified.reason });
     return renderError(res, 400, 'Invalid setup link', 'This setup link is invalid or has expired (links last 5 minutes).');
   }
-  // First-install vs re-run gate for prompt=consent. If the guild has
-  // never been configured (no `configured_by`), let Auth0's default
-  // behavior decide whether to show the consent screen — most admins
-  // see it once. On a re-run, force prompt=consent so the admin can
-  // rotate the key or switch qURL accounts (without it Auth0 silently
-  // re-uses the prior consent and a re-mint can't be triggered).
-  // PR #177 follow-up C.8.
-  let isReRun = false;
-  try {
-    const existing = await db.getGuildConfig(verified.payload.guildId);
-    isReRun = Boolean(existing && existing.configured_by);
-  } catch (err) {
-    // DDB blip: bias toward the safer-for-rotation path (prompt=consent).
-    // Re-prompting an already-consenting admin is mildly annoying;
-    // skipping consent on what is actually a re-run blocks key rotation.
-    // info-level — this is a benign fallback, not an error condition.
-    // A flaky DDB shouldn't spam warns (which on-call grep-tails).
-    logger.info('Failed to read guild config for prompt=consent gating; defaulting to re-run path', {
-      error: err?.message,
-    });
-    isReRun = true;
-  }
-  // Double-submit CSRF cookie: cookie value is the same state token the
-  // URL carries to Auth0. /callback re-checks (timing-safe) that
-  // cookie === query.state. Same-browser flows have both; leaked URLs
-  // opened in other browsers don't have the cookie and fail.
-  // Path is /oauth (not /oauth/qurl) so the same cookie also covers the
-  // Stage-2 "Add to Discord" entry path /oauth/discord/callback when
-  // that flow chains through to /oauth/qurl/callback.
-  // `secure: req.protocol === 'https'` relies on `trust proxy` being set
-  // in server.js so req.protocol reflects the X-Forwarded-Proto header
-  // from the ALB. Flipping `trust proxy` off would silently downgrade
-  // production cookies to insecure.
-  res.cookie(QURL_OAUTH_SESSION_COOKIE, state, {
-    httpOnly: true,
-    secure: req.protocol === 'https',
-    sameSite: 'lax',
-    maxAge: COOKIE_TTL_SECONDS * 1000,
-    path: QURL_OAUTH_COOKIE_PATH,
-  });
+  // First-install vs re-run gate for prompt=consent (C.8). On re-run,
+  // force prompt=consent so admins can rotate keys; on first install,
+  // skip the redundant screen. Failsafe + bias direction live in
+  // utils/guild-config-state.js (re-run on DDB error — silently
+  // skipping consent on a real re-run would block rotation).
+  const isReRun = await getIsReRun(verified.payload.guildId, 'qurl-oauth /start');
+  // Double-submit CSRF cookie: value is the same state token the URL
+  // carries to Auth0. /callback re-checks cookie === query.state.
+  // Same-browser flows pass; leaked URLs in other browsers fail.
+  // Cookie shape (path=/oauth so it spans Stage-2 chain, HttpOnly,
+  // SameSite=Lax, Secure-when-HTTPS) lives in utils/oauth-cookies.js.
+  setQurlOAuthCookie(res, req, state);
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -272,26 +210,21 @@ router.get('/callback', rateLimit, async (req, res) => {
     logger.warn('qURL OAuth callback missing session cookie', { ip: req.ip });
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
-  let cookieMatches = false;
-  try {
-    const cookieBuf = Buffer.from(cookieState);
-    const stateBuf = Buffer.from(state);
-    cookieMatches = cookieBuf.length === stateBuf.length
-      && crypto.timingSafeEqual(cookieBuf, stateBuf);
-  } catch {
-    cookieMatches = false;
-  }
+  // Both inputs are strings (cookieState early-returned if null;
+  // state = String(req.query.state || '')), so Buffer.from doesn't
+  // throw. Length check before timingSafeEqual handles the only
+  // remaining failure mode.
+  const cookieBuf = Buffer.from(cookieState);
+  const stateBuf = Buffer.from(state);
+  const cookieMatches = cookieBuf.length === stateBuf.length
+    && crypto.timingSafeEqual(cookieBuf, stateBuf);
   if (!cookieMatches) {
     logger.warn('qURL OAuth callback cookie/state mismatch', { ip: req.ip });
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
   // Cookie is consumed — clear it so a refreshed callback URL can't
-  // re-bind. Fresh /qurl setup runs mint a new state and set a new
-  // cookie. Path MUST match the /start + /oauth/discord/callback
-  // Set-Cookie path (/oauth, the shared constant) — clearing with a
-  // mismatched path is a no-op and the browser keeps the cookie alive
-  // until TTL.
-  res.clearCookie(QURL_OAUTH_SESSION_COOKIE, { path: QURL_OAUTH_COOKIE_PATH });
+  // re-bind. Path-must-match invariant lives in clearQurlOAuthCookie.
+  clearQurlOAuthCookie(res);
   const { guildId, discordUserId } = verified.payload;
 
   // 1. Exchange the code for an access_token + id_token (Auth0 token
@@ -408,27 +341,13 @@ router.get('/callback', rateLimit, async (req, res) => {
       'A network error occurred while provisioning your qURL key. Please run /qurl setup again.');
   }
 
-  // 3. Persist the key. setGuildApiKey is idempotent (upsert), so
-  //    re-running /qurl setup overwrites the prior key — the previous
-  //    key remains valid on qurl-service until the admin manually
-  //    revokes it via layerv.ai.
-  //
-  //    Read the prior config row first so the completion log line can
-  //    distinguish first-install from rotation (`isReRun` field). The
-  //    /start (and discord-install) gate already evaluates this for
-  //    prompt=consent, but the callback doesn't see that decision —
-  //    re-querying here is the cheapest way to surface the distinction
-  //    in operational logs without threading state through the
-  //    signed state token. DDB blip → log without the field, don't
-  //    block the persist.
-  let isReRun = null;
-  try {
-    const existing = await db.getGuildConfig(guildId);
-    isReRun = Boolean(existing && existing.configured_by);
-  } catch {
-    // intentionally silent — the persist below is what matters; the
-    // log enrichment is best-effort.
-  }
+  // 3. Persist the key. setGuildApiKey is idempotent (upsert) — the
+  //    previous key (if any) remains valid on qurl-service until the
+  //    admin manually revokes it via layerv.ai. Read the prior config
+  //    first so the completion log line can flag first-install vs
+  //    rotation (obs.M2). DDB blip biases isReRun toward `true` — fine
+  //    for log enrichment.
+  const isReRun = await getIsReRun(guildId, 'qurl-oauth /callback');
   try {
     await db.setGuildApiKey(guildId, apiKey, discordUserId);
   } catch (err) {

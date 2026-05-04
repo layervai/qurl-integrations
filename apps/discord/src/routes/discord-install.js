@@ -38,16 +38,12 @@
 
 const express = require('express');
 const config = require('../config');
-const db = require('../store');
 const logger = require('../logger');
 const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
-const {
-  QURL_OAUTH_SESSION_COOKIE,
-  QURL_OAUTH_COOKIE_PATH,
-  QURL_OAUTH_COOKIE_TTL_SECONDS,
-} = require('../utils/oauth-cookies');
+const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
+const { getIsReRun } = require('../utils/guild-config-state');
 
 // Network-call timeouts — same shape as routes/qurl-oauth.js. Centralized
 // so a future "Discord OAuth2 is slow under load" tuning is one constant
@@ -56,46 +52,31 @@ const DISCORD_TIMEOUT_MS = 15000;
 
 const router = express.Router();
 
+// SECURITY (C.4): `reason` is logged but NOT rendered to the page.
+// Echoing 'AUTH0_* unset' or 'DISCORD_CLIENT_SECRET unset' would tell
+// a probing attacker which secret the operator hasn't shipped yet.
 function renderNotConfigured(res, reason) {
-  // Wording: "/qurl setup later" is the right next step ONLY when this
-  // 503 is from a partial config (DISCORD_CLIENT_SECRET unset, but
-  // AUTH0_* set — the slash command would still take the OAuth path).
-  // When AUTH0_* itself is unset, /qurl setup falls back to modal-paste
-  // and the admin needs an out-of-band channel to layerv.ai. Branch the
-  // remediation copy on `reason`.
-  //
-  // SECURITY: `reason` is logged but NOT rendered to the page. Echoing
-  // 'AUTH0_* unset' or 'DISCORD_CLIENT_SECRET unset' to the browser
-  // would tell a probing attacker exactly which secret an operator
-  // hasn't provisioned yet. Match qurl-oauth.js renderNotConfigured's
-  // generic wire shape. PR #177 follow-up C.4.
-  logger.info('renderNotConfigured', { reason });
-  const remediation = reason && reason.startsWith('AUTH0')
-    ? 'The bot was added to your server. Contact your layerv.ai admin to finish setup once the qURL OAuth application is registered.'
-    : 'The bot was added to your server successfully — run /qurl setup in-Discord once the operator finishes provisioning.';
+  logger.info('Discord install not configured', { reason });
   return res.status(503).send(renderPage({
     title: 'qURL Setup Not Configured',
     icon: '⚠️',
     heading: 'qURL setup is not configured yet',
-    message: remediation,
+    message: 'The bot was added to your server. Setup will be available once your layerv.ai operator finishes provisioning — try /qurl setup in your server later, or contact them out of band.',
     type: 'warning',
   }));
 }
 
-// `detail` should describe the immediate failure; we append a remediation
-// hint specific to the surface the failure landed on. The default hint
-// ("run /qurl setup directly") makes sense after a Discord OAuth handshake
-// failure — bot is already installed, qURL setup can be retried in-Discord
-// — but DOESN'T make sense on the not-configured 503, where /qurl setup
-// would also fail because the same env vars are missing. The
-// `remediation` override lets the caller pick the right copy.
-function renderError(res, statusCode, headline, detail, remediation) {
-  const tail = remediation ?? ' If the bot is already in your server, run /qurl setup directly.';
+// `detail` describes the immediate failure; we append a remediation
+// hint that fits AFTER a Discord OAuth handshake failure (bot is
+// already installed, retry through /qurl setup in-Discord). Other
+// surfaces (the encryption-at-rest 503) use renderPage directly with
+// surface-specific copy — see the inline call site.
+function renderError(res, statusCode, headline, detail) {
   return res.status(statusCode).send(renderPage({
     title: 'Discord Install Failed',
     icon: '❌',
     heading: headline,
-    message: detail + tail,
+    message: detail + ' If the bot is already in your server, run /qurl setup directly.',
     type: 'error',
   }));
 }
@@ -115,9 +96,16 @@ router.get('/callback', rateLimit, async (req, res) => {
   // callback's persist-time guard.
   if (!process.env.KEY_ENCRYPTION_KEY) {
     logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
-    return renderError(res, 503, 'qURL setup not provisioned',
-      'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY).',
-      ' Once that\'s set, run /qurl setup in your server.');
+    // Inline copy: the standard renderError tail ("run /qurl setup
+    // directly") would fail too — same env-var gap. Specific copy
+    // tells the admin to wait for the operator.
+    return res.status(503).send(renderPage({
+      title: 'Discord Install Failed',
+      icon: '❌',
+      heading: 'qURL setup not provisioned',
+      message: 'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY). Once that\'s set, run /qurl setup in your server.',
+      type: 'error',
+    }));
   }
   if (req.query.error) {
     logger.warn('Discord install callback received error from Discord', {
@@ -139,27 +127,14 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Bot install incomplete', 'Discord did not return the server you selected. Please click "Add to Discord" again.');
   }
 
-  // First-install vs re-install gate for prompt=consent. Hoisted above
-  // the Discord handshake on purpose — the lookup needs only `guildId`
-  // (already in req.query), not `discordUserId`, so doing it here means
-  // a slow-DDB blip can't delay the Discord token-exchange + /users/@me
-  // round-trips for an installer who's just sitting on the redirect
-  // page. The handshake-timeout window stays bounded by DISCORD_TIMEOUT_MS
-  // alone. PR #177 follow-up C.8 + post-round-8 review.
-  let isReInstall = false;
-  try {
-    const existing = await db.getGuildConfig(guildId);
-    isReInstall = Boolean(existing && existing.configured_by);
-  } catch (err) {
-    // Bias toward consent prompt on DDB failure — the cost is one extra
-    // click for an admin who just signed in (mild), versus silently
-    // skipping consent on a true re-install which blocks key rotation
-    // entirely (worse).
-    logger.info('Failed to read guild config for prompt=consent gating; defaulting to re-install path', {
-      error: err?.message, guildId,
-    });
-    isReInstall = true;
-  }
+  // First-install vs re-install gate for prompt=consent (C.8). Kicked
+  // off in parallel with the Discord handshake below — the result is
+  // only consumed at redirect time (it flips one query-param), so
+  // serializing it would add DDB latency to every install with no
+  // user-facing benefit. getIsReRun's failsafe biases toward `true` on
+  // throw — re-prompting an already-consenting admin is mild friction;
+  // skipping consent on a true re-install blocks key rotation.
+  const isReInstallPromise = getIsReRun(guildId, 'discord-install /callback');
 
   // 1. Exchange code at Discord for an access_token. The token itself
   //    isn't long-lived state we keep — we only use it to call /users/@me
@@ -227,36 +202,26 @@ router.get('/callback', rateLimit, async (req, res) => {
   //    redirect to Auth0; the existing /oauth/qurl/callback will finish
   //    the flow (mint qurl-service API key, persist, DM admin).
   const qurlState = signQurlOAuthState(guildId, discordUserId);
-  // Set the same double-submit CSRF cookie that /oauth/qurl/start sets,
-  // so /oauth/qurl/callback's cookie === state check passes for the
-  // Stage-2 chain too. Path /oauth (not /oauth/discord) so the cookie
-  // is visible to /oauth/qurl/callback further along the chain.
-  // Mitigates leaked install-callback URL replay across browsers; does
-  // not fully prevent confused-deputy where attacker pre-runs
-  // /oauth/discord/callback in their own browser then forwards the
-  // Auth0-redirect URL to victim — see PR #177 review item 3 + the
-  // success-page binding readout that surfaces guild + qURL email
-  // for visual sanity-check before the admin closes the tab.
-  res.cookie(QURL_OAUTH_SESSION_COOKIE, qurlState, {
-    httpOnly: true,
-    secure: req.protocol === 'https',
-    sameSite: 'lax',
-    maxAge: QURL_OAUTH_COOKIE_TTL_SECONDS * 1000,
-    path: QURL_OAUTH_COOKIE_PATH,
-  });
+  // Same double-submit CSRF cookie /oauth/qurl/start sets — Stage-2
+  // chain shares the cookie with the qurl-oauth callback. Mitigates
+  // leaked install-callback URL replay across browsers; does NOT fully
+  // close confused-deputy (attacker pre-runs /oauth/discord/callback in
+  // their own browser then forwards the Auth0-redirect URL to victim) —
+  // the success-page binding readout in qurl-oauth.js's renderSuccess
+  // surfaces (guild, qURL email) for visual sanity-check.
+  setQurlOAuthCookie(res, req, qurlState);
+  // Resolve the parallel DDB read kicked off above; bias toward consent
+  // on throw is built into getIsReRun.
+  const isReInstall = await isReInstallPromise;
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
   authorizeUrl.searchParams.set('redirect_uri', `${config.BASE_URL}/oauth/qurl/callback`);
-  // offline_access dropped per PR #177 review item 5 — no refresh-token
-  // use. `profile` dropped per follow-up C.2 — only the `email` claim
-  // is read from the id_token.
+  // offline_access dropped per PR #177 review item 5; `profile` dropped
+  // per follow-up C.2 — only the `email` claim is read from id_token.
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  // prompt=consent only on re-install — gate evaluated above the
-  // handshake. See the `isReInstall` block at the top of this handler
-  // for rationale.
   if (isReInstall) authorizeUrl.searchParams.set('prompt', 'consent');
   logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, isReInstall });
   return res.redirect(302, authorizeUrl.toString());

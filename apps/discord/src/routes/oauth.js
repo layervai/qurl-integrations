@@ -165,36 +165,7 @@ async function checkHistoricalContributions(discordId, githubUsername, accessTok
 // PR #177 review feedback. The `rateLimit` symbol below is a re-export
 // for backward compat with this file's existing call sites.
 const { rateLimit } = require('../utils/oauth-rate-limit');
-
-// Minimal cookie parse — avoids pulling in cookie-parser. Format is
-// `name=value; name=value; ...`; we only need one named cookie so tolerate
-// other pairs without depending on full RFC parsing.
-function readCookie(req, name) {
-  const header = req.headers.cookie;
-  if (!header) return null;
-  // Collect ALL values for `name` rather than returning the first match.
-  // A browser extension or a sibling-subdomain can legitimately produce
-  // duplicate cookies with the same name; rather than trust the first
-  // (browser-ordered) one, we require uniqueness — any ambiguity means
-  // we cannot safely bind the session, so treat it as "no cookie".
-  const matches = [];
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    const k = part.slice(0, eq).trim();
-    if (k !== name) continue;
-    // Attacker-controlled cookies can contain malformed %-encoding
-    // (e.g. `%ZZ`); decodeURIComponent would throw URIError and crash
-    // the request handler. Treat a malformed cookie as "no cookie".
-    try {
-      matches.push(decodeURIComponent(part.slice(eq + 1).trim()));
-    } catch {
-      return null;
-    }
-    if (matches.length > 1) return null;
-  }
-  return matches.length === 1 ? matches[0] : null;
-}
+const { readCookie } = require('../utils/cookies');
 
 const OAUTH_SESSION_COOKIE = 'qurl_oauth_session';
 const COOKIE_TTL_SECONDS = 15 * 60; // 15 minutes
