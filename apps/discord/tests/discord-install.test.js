@@ -8,6 +8,9 @@
 //     guild_id + discord_user_id
 
 process.env.OAUTH_STATE_SECRET = '0'.repeat(64);
+// KEY_ENCRYPTION_KEY required for the fail-fast guard added in PR #177
+// review round 3; matches the legacy modal-paste path's existing check.
+process.env.KEY_ENCRYPTION_KEY = '1'.repeat(64);
 process.env.AUTH0_DOMAIN = 'layerv-test.auth0.com';
 process.env.AUTH0_CLIENT_ID = 'test-auth0-client-id';
 process.env.AUTH0_CLIENT_SECRET = 'test-auth0-secret';
@@ -52,6 +55,22 @@ beforeEach(() => {
 
 describe('Discord install callback', () => {
   describe('GET /oauth/discord/callback', () => {
+    it('503s when KEY_ENCRYPTION_KEY is unset (fail-fast before Discord token exchange)', async () => {
+      // Bot is in the server already (Discord install ran), but the
+      // chained Auth0 leg can't safely proceed without encryption-at-
+      // rest configured. Failing here saves the Discord code from
+      // being burned on a doomed flow.
+      const saved = process.env.KEY_ENCRYPTION_KEY;
+      delete process.env.KEY_ENCRYPTION_KEY;
+      try {
+        const res = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+        expect(res.status).toBe(503);
+        expect(res.text).toMatch(/encryption-at-rest|KEY_ENCRYPTION_KEY/i);
+      } finally {
+        process.env.KEY_ENCRYPTION_KEY = saved;
+      }
+    });
+
     it('400s on missing code', async () => {
       const res = await request(app).get('/oauth/discord/callback?guild_id=guild-1');
       expect(res.status).toBe(400);

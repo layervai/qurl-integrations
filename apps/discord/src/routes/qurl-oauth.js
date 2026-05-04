@@ -137,6 +137,17 @@ router.get('/start', rateLimit, (req, res) => {
     logger.warn('qURL OAuth start hit but Auth0 not configured', { ip: req.ip });
     return renderNotConfigured(res);
   }
+  // Fail-fast: refuse the OAuth round-trip if KEY_ENCRYPTION_KEY is unset
+  // here rather than after the admin completes Auth0 sign-in + consent.
+  // The /callback path enforces the same guard, but reaching it burns
+  // Auth0's `code` for nothing and produces a confusing "Authorization
+  // failed at the very end" UX. Same principle as the legacy
+  // modal-paste path's pre-modal check (commands.js).
+  if (!process.env.KEY_ENCRYPTION_KEY) {
+    logger.error('Refusing /oauth/qurl/start: KEY_ENCRYPTION_KEY is not set');
+    return renderError(res, 503, 'qURL setup not provisioned',
+      'The bot operator needs to set KEY_ENCRYPTION_KEY (encryption-at-rest) before qURL setup can store keys safely.');
+  }
   const state = String(req.query.state || '');
   const verified = verifyQurlOAuthState(state);
   if (!verified.ok) {

@@ -15,14 +15,26 @@
 // One unbroken click chain from "Add to Discord" → "qURL is ready" — no
 // admin-visible step between Discord consent and Auth0 consent.
 //
-// CSRF posture:
+// CSRF posture (read together with qurl-oauth.js:renderSuccess):
 //   The `state` param Discord echoes is best-effort (admins paste the
 //   "Add to Discord" link from layerv.ai, not from a per-session form),
-//   so we don't validate it as a session-bound token. The CSRF guarantee
-//   comes from the Discord token-exchange step: only Discord can mint a
-//   `code` that pairs with our DISCORD_CLIENT_ID/SECRET, so an attacker
-//   forging a /oauth/discord/callback request without going through
-//   Discord OAuth2 can't get past the token exchange.
+//   so we don't validate it as a session-bound token. The defense
+//   stacks across two surfaces:
+//   1. Forged-callback rejection — only Discord can mint a `code` that
+//      pairs with our DISCORD_CLIENT_ID/SECRET, so an attacker forging
+//      a /oauth/discord/callback request without going through Discord
+//      OAuth2 can't get past the token exchange.
+//   2. Confused-deputy mitigation (LOAD-BEARING — do not remove without
+//      replacing) — an attacker who pre-runs Discord install in their
+//      own browser then forwards the chained Auth0-redirect URL to a
+//      victim WOULD pass step 1, because the Discord code is real.
+//      The success page in qurl-oauth.js's renderSuccess surfaces the
+//      bound (guildId, qurlAccountEmail, keyPrefix) tuple so the
+//      victim can spot the mismatch ("this isn't my server" / "this
+//      isn't my qURL email") before usage starts. This is the only
+//      thing standing between confused-deputy and a silent attacker
+//      key-bind, until the Auth0 consent screen is templated to show
+//      the target Discord guild (out of scope here — see PR #177).
 
 const express = require('express');
 const config = require('../config');
@@ -60,6 +72,19 @@ router.get('/callback', rateLimit, async (req, res) => {
     const reason = !config.isQurlOAuthConfigured ? 'AUTH0_* unset' : 'DISCORD_CLIENT_SECRET unset';
     logger.warn('Discord install callback hit but not configured', { reason, ip: req.ip });
     return renderNotConfigured(res, reason);
+  }
+  // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start.
+  // Bot is already in the server at this point (Discord install ran
+  // before this redirect), so failing here just blocks the chained
+  // qURL OAuth — admin can run /qurl setup later to retry. Without
+  // this, we'd burn the Discord code on a token exchange + a Users
+  // /@me round-trip + an Auth0 round-trip before failing at the qURL
+  // callback's persist-time guard.
+  if (!process.env.KEY_ENCRYPTION_KEY) {
+    logger.error('Refusing /oauth/discord/callback: KEY_ENCRYPTION_KEY is not set');
+    return renderError(res, 503, 'qURL setup not provisioned',
+      'The bot is in your server, but the operator hasn\'t configured encryption-at-rest yet (KEY_ENCRYPTION_KEY).'
+      + ' Once that\'s set, run /qurl setup in your server.');
   }
   if (req.query.error) {
     logger.warn('Discord install callback received error from Discord', {

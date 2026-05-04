@@ -111,6 +111,23 @@ describe('qurl-oauth routes', () => {
       expect(res.text).toContain('Invalid setup link');
     });
 
+    it('503s when KEY_ENCRYPTION_KEY is unset (fail-fast before Auth0 round-trip)', async () => {
+      // Pre-Auth0 guard — refusing here keeps the admin from completing
+      // the full sign-in + consent dance only to fail at the persist
+      // step. Mirrors the legacy modal-paste path's pre-modal guard.
+      const saved = process.env.KEY_ENCRYPTION_KEY;
+      delete process.env.KEY_ENCRYPTION_KEY;
+      try {
+        const { signQurlOAuthState: sign } = require('../src/utils/qurl-oauth-state');
+        const state = sign('guild-1', 'admin-2');
+        const res = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+        expect(res.status).toBe(503);
+        expect(res.text).toMatch(/qURL setup not provisioned|encryption-at-rest/i);
+      } finally {
+        process.env.KEY_ENCRYPTION_KEY = saved;
+      }
+    });
+
     it('400s on tampered state', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       // Flip the last char of the sig.
