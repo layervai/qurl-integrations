@@ -129,4 +129,51 @@ describe('qurl-oauth-state', () => {
       expect(result.reason).toBe('wrong_kind');
     });
   });
+
+  describe('secret precedence (#184)', () => {
+    // Pins QURL_OAUTH_STATE_SECRET > OAUTH_STATE_SECRET fallback chain.
+    // Uses jest.isolateModulesAsync so the cached `_warnedFallback`
+    // and `_testFallbackSecret` in the module don't leak across tests.
+    it('prefers QURL_OAUTH_STATE_SECRET when set (state signs with the new secret, NOT OAUTH_STATE_SECRET)', async () => {
+      const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
+      const savedShared = process.env.OAUTH_STATE_SECRET;
+      process.env.QURL_OAUTH_STATE_SECRET = 'q'.repeat(64);
+      process.env.OAUTH_STATE_SECRET = 's'.repeat(64);
+      try {
+        await jest.isolateModulesAsync(async () => {
+          // eslint-disable-next-line global-require
+          const { signQurlOAuthState: sign, verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
+          const state = sign('guild-1', 'user-2');
+          // The signature MUST be HMAC over the QURL_OAUTH_STATE_SECRET,
+          // not OAUTH_STATE_SECRET — verify it round-trips and that a
+          // payload signed with the SHARED secret no longer validates.
+          expect(verify(state).ok).toBe(true);
+          const [encoded] = state.split('.');
+          const wrongSig = crypto.createHmac('sha256', process.env.OAUTH_STATE_SECRET).update(encoded).digest('hex');
+          const forged = `${encoded}.${wrongSig}`;
+          expect(verify(forged).ok).toBe(false);
+        });
+      } finally {
+        if (savedQurl === undefined) delete process.env.QURL_OAUTH_STATE_SECRET;
+        else process.env.QURL_OAUTH_STATE_SECRET = savedQurl;
+        process.env.OAUTH_STATE_SECRET = savedShared;
+      }
+    });
+
+    it('falls back to OAUTH_STATE_SECRET when QURL_OAUTH_STATE_SECRET is unset', async () => {
+      const savedQurl = process.env.QURL_OAUTH_STATE_SECRET;
+      delete process.env.QURL_OAUTH_STATE_SECRET;
+      // Keep the shared secret set (the file-level default).
+      try {
+        await jest.isolateModulesAsync(async () => {
+          // eslint-disable-next-line global-require
+          const { signQurlOAuthState: sign, verifyQurlOAuthState: verify } = require('../src/utils/qurl-oauth-state');
+          const state = sign('guild-1', 'user-2');
+          expect(verify(state).ok).toBe(true);
+        });
+      } finally {
+        if (savedQurl !== undefined) process.env.QURL_OAUTH_STATE_SECRET = savedQurl;
+      }
+    });
+  });
 });

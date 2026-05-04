@@ -3252,11 +3252,38 @@ const commands = [
             .update(plaintextKey)
             .digest('hex')
             .slice(0, 8);
+
+          // #185 admin-offboarding nudge: the qURL key is owned by the
+          // admin who ran setup (Auth0 sub claim); usage bills to their
+          // qURL account even after they leave. Surface a passive notice
+          // so a remaining ManageGuild admin knows to rerun setup to
+          // take over billing. Best-effort — a Discord API blip just
+          // omits the notice rather than failing the whole status read.
+          let originalAdminLeftNotice = '';
+          if (guildConfig.configured_by) {
+            try {
+              await interaction.guild.members.fetch(guildConfig.configured_by);
+            } catch (err) {
+              // discord.js throws DiscordAPIError code 10007 ("Unknown
+              // Member") when the user is no longer in the guild. Any
+              // other error (rate limit, transient) → skip the nudge
+              // silently rather than mis-flag a present admin.
+              if (err?.code === 10007) {
+                originalAdminLeftNotice =
+                  '\n\n⚠️ The admin who originally ran `/qurl setup` (<@' +
+                  guildConfig.configured_by + '>) has left this server. ' +
+                  'qURL usage continues to bill to their layerv.ai account. ' +
+                  'A current `ManageGuild` admin can run `/qurl setup` again to take over billing.';
+              }
+            }
+          }
+
           return interaction.reply({
             content: `✅ **qURL is configured**\n` +
               `Key fingerprint: \`${keyFingerprint}\`\n` +
               `Configured by: <@${guildConfig.configured_by}>\n` +
-              `Last updated: ${guildConfig.updated_at}`,
+              `Last updated: ${guildConfig.updated_at}` +
+              originalAdminLeftNotice,
             ephemeral: true,
           });
         }

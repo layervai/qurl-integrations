@@ -34,22 +34,35 @@ const STATE_TTL_SECONDS = 5 * 60;
 let _warnedFallback = false;
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 
-// Mirrors stateSecret() in commands.js: prefer dedicated OAUTH_STATE_SECRET
-// so a compromised AUTH0_CLIENT_SECRET / GITHUB_CLIENT_SECRET can be rotated
-// independently. Falls back to GITHUB_CLIENT_SECRET for env-parity with the
-// existing GitHub OAuth flow; throws hard outside Jest if neither is set.
+// Secret precedence (highest first):
+//   1. QURL_OAUTH_STATE_SECRET — flow-dedicated, lets ops rotate the
+//      qURL OAuth signer without invalidating in-flight GitHub OAuth
+//      links. Preferred going forward.
+//   2. OAUTH_STATE_SECRET     — legacy shared secret (qURL + GitHub).
+//      kind-binding on the state token already prevents cross-purpose
+//      forgery, so sharing was secure; the precedence here is purely
+//      operational hygiene per PR #177 review (issue #184).
+//   3. GITHUB_CLIENT_SECRET   — last-ditch fallback for env-parity with
+//      the GitHub OAuth flow's signer.
+//   4. Test fallback          — per-process random secret for jest only.
+//
+// Rotation playbook: provision QURL_OAUTH_STATE_SECRET in SSM, deploy
+// (the dual-read happens automatically); once every replica has the
+// new var, drop OAUTH_STATE_SECRET. The 5-minute state TTL bounds the
+// "old links don't validate against the new key" window — no separate
+// dual-key reader needed.
 function stateSecret() {
-  const dedicated = process.env.OAUTH_STATE_SECRET;
+  const dedicated = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
   if (dedicated) return dedicated;
   if (!config.GITHUB_CLIENT_SECRET) {
     const inTestHarness = process.env.NODE_ENV === 'test'
       && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
     if (!inTestHarness) {
-      throw new Error('Refusing to mint qURL OAuth state: OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
+      throw new Error('Refusing to mint qURL OAuth state: QURL_OAUTH_STATE_SECRET or OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET must be set.');
     }
     if (!_warnedFallback) {
       // eslint-disable-next-line no-console
-      console.warn('qURL OAuth state HMAC using per-process random test fallback — set OAUTH_STATE_SECRET or GITHUB_CLIENT_SECRET');
+      console.warn('qURL OAuth state HMAC using per-process random test fallback — set QURL_OAUTH_STATE_SECRET');
       _warnedFallback = true;
     }
     return _testFallbackSecret;
