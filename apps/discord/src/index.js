@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
+const { startGatewayHealthServer } = require('./gateway-health');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
@@ -387,11 +388,21 @@ async function start() {
     }
   }
 
-  // HTTP listener — OAuth callback, webhooks, health, metrics.
-  // Skipped in `gateway`-only mode; the ALB targets HTTP replicas
-  // only. `combined` keeps the legacy single-process behavior.
+  // HTTP listener.
+  //   - isHttp / combined: full Express server (OAuth callback,
+  //     webhooks, /health, /metrics). The ALB targets HTTP replicas
+  //     only; gateway-only tasks aren't behind the ALB.
+  //   - gateway-only: minimal /health responder so the container-level
+  //     wget probe (re-added in qurl-integrations-infra follow-up to
+  //     #151) can catch WebSocket disconnect / event-loop wedge /
+  //     dispatch deadlock — failure modes the deployment_circuit_breaker
+  //     misses because the node process stays alive. Without this,
+  //     `desired_count=1` means one wedged gateway task = entire
+  //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
+  } else if (isGateway) {
+    httpServer = startGatewayHealthServer(() => client.isReady());
   }
 
   // Background retry-revoke for any OAuth tokens whose initial
