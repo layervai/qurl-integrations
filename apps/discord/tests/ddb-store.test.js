@@ -69,6 +69,10 @@ const store = require('../src/store/ddb-store');
 
 beforeEach(() => {
   ddbMock.reset();
+  // Reset any mockImplementation from prior tests. Today only
+  // mockImplementationOnce is used (auto-consumed), but a future test
+  // adding mockImplementation would otherwise leak across cases.
+  mockEncryptStrict.mockClear();
 });
 
 afterAll(async () => {

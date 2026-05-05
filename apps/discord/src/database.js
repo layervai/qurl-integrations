@@ -830,6 +830,11 @@ const dbModule = {
   },
 
   recordOrphanedToken(accessToken) {
+    // Caller invariant: accessToken is a non-empty string. encryptStrict
+    // passes null/undefined through unchanged (matching encrypt's
+    // ergonomics) and a NULL row would either store NULL or violate a
+    // future NOT NULL constraint silently — gate at the call site
+    // (oauth.js does this) rather than relying on the encryption layer.
     const stmt = db.prepare('INSERT INTO orphaned_oauth_tokens (access_token) VALUES (?)');
     stmt.run(encryptStrict(accessToken));
   },

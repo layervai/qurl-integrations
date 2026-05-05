@@ -409,7 +409,14 @@ describe('database module', () => {
         expect(() => db.recordOrphanedToken('gho_should_not_persist')).toThrow(/KEY_ENCRYPTION_KEY is required/);
         expect(db.countOrphanedTokens()).toBe(before);
       } finally {
-        process.env.KEY_ENCRYPTION_KEY = savedKey;
+        // Restore symmetrically — `process.env.X = undefined` would coerce
+        // to the literal string "undefined" and quietly poison sibling
+        // tests under --runInBand. Matches the afterAll cleanup pattern.
+        if (savedKey === undefined) {
+          delete process.env.KEY_ENCRYPTION_KEY;
+        } else {
+          process.env.KEY_ENCRYPTION_KEY = savedKey;
+        }
         require('../src/utils/crypto')._resetKeyCache();
       }
     });
