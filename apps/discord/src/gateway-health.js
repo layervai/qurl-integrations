@@ -1,11 +1,12 @@
 /**
  * Minimal HTTP listener for the gateway-only ECS task. Binds
- * `:${config.PORT}` (default 3000) and answers `/health` based on the
- * Discord.js client's connected state. The container-level wget probe
- * (re-added in a qurl-integrations-infra follow-up to #151) hits this
- * endpoint to detect WebSocket disconnect / event-loop wedge / dispatch
- * deadlock — failure modes the deployment_circuit_breaker can't see
- * because they don't terminate the node process.
+ * `127.0.0.1:${config.PORT}` (default 3000) and answers `/health`
+ * based on the Discord.js client's connected state. The container-
+ * level wget probe (re-added in a qurl-integrations-infra follow-up
+ * to #151) hits this endpoint to detect WebSocket disconnect /
+ * event-loop wedge / dispatch deadlock — failure modes the
+ * deployment_circuit_breaker can't see because they don't terminate
+ * the node process.
  *
  * Only the gateway-only path uses this. The full HTTP role
  * (`isHttp=true`) starts the Express server in `server.js` which has
@@ -16,6 +17,24 @@
  * shouldn't pull in OAuth handlers, db drivers, or rate-limit state
  * just to answer `GET /health`. Smaller surface = fewer ways to wedge
  * the very process this probe exists to detect wedging in.
+ *
+ * SIGTERM during the listen window — non-issue, but worth knowing:
+ * `startGatewayHealthServer` returns synchronously before the
+ * `listening` event fires. A SIGTERM landing in that window calls
+ * `httpServer.close()` on a not-yet-listening server, which surfaces
+ * its callback with `ERR_SERVER_NOT_RUNNING`. `gracefulShutdown` in
+ * index.js logs that as a warn ("HTTP server close reported error")
+ * and continues teardown. Tolerable; future debuggers shouldn't
+ * chase that warn line as a real bug.
+ *
+ * IPv4 loopback dependency: this binds `127.0.0.1` and the Dockerfile
+ * HEALTHCHECK probes `http://127.0.0.1:3000/health`. The Fargate
+ * distroless base (`gcr.io/distroless/nodejs*` ARM64) ships v4
+ * loopback enabled — if a future base-image swap ever strips IPv4
+ * loopback (or flips `localhost` resolution to `::1` first), the
+ * probe goes silent. Match address family on both sides if either
+ * ever changes; the Dockerfile comment about `::1` vs `127.0.0.1`
+ * mismatch is the same dependency from the other side.
  */
 const http = require('node:http');
 const config = require('./config');
@@ -47,6 +66,15 @@ const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
  * @returns {import('node:http').Server}
  */
 function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
+  // Per-listener readiness history. Set on each /health hit so we
+  // can log warn/info ONLY on transitions — operators get one warn
+  // at "ok → unhealthy" (the bot wedged) and one info at "unhealthy
+  // → ok" (it recovered), instead of a log line every 30 s of probe
+  // cadence. Initial `null` so the first observation is silent
+  // (we don't know what "previous" means at boot — the start-period
+  // window is allowed to flap freely without spamming on every flap).
+  let prevReady = null;
+
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
@@ -67,13 +95,24 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
 
     // Defensive: if the readiness closure throws (e.g. a future
     // composite signal derefs into something nullable), treat as
-    // unhealthy rather than surfacing a 500.
+    // unhealthy rather than surfacing a 500. Log at debug so an
+    // operator triaging an unexplained 503 rate has something to
+    // grep for — info-level would be too noisy at probe cadence.
     let ready;
     try {
       ready = isReady();
-    } catch {
+    } catch (err) {
+      logger.debug('Gateway health: isReady closure threw, treating as unhealthy', { error: err.message });
       ready = false;
     }
+
+    // Transition logging — fires once per state change, not per probe.
+    if (prevReady === true && !ready) {
+      logger.warn('Gateway health: ok → unhealthy');
+    } else if (prevReady === false && ready) {
+      logger.info('Gateway health: unhealthy → ok');
+    }
+    prevReady = ready;
 
     if (ready) {
       res.writeHead(200, { 'Content-Type': 'application/json' });

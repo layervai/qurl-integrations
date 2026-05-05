@@ -109,6 +109,7 @@ describe('gateway-health server', () => {
     // probe should immediately reflect the new state. The real
     // discord.js client.isReady() reads from the connection state on
     // every call, so the closure pattern guarantees no stale cache.
+    const mockLogger = require('../src/logger');
     let ready = true;
     const server = startGatewayHealthServer(() => ready, noopOnListenError);
     await waitForListening(server);
@@ -118,6 +119,36 @@ describe('gateway-health server', () => {
       ready = false;
       const fail = await request(server, '/health');
       expect(fail.status).toBe(503);
+      // ok → unhealthy transition pins the warn log shape so an
+      // operator can grep "Gateway health: ok → unhealthy" during
+      // triage without depending on the request that was lost.
+      expect(mockLogger.warn).toHaveBeenCalledWith('Gateway health: ok → unhealthy');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('unhealthy → ok transition logs info, recovery only fires once', async () => {
+    // Mirror of the flip test, but for the recovery direction. Also
+    // pins that subsequent ok-state probes don't re-log — the warn/
+    // info should fire once per transition, not once per probe.
+    const mockLogger = require('../src/logger');
+    let ready = true;
+    const server = startGatewayHealthServer(() => ready, noopOnListenError);
+    await waitForListening(server);
+    try {
+      await request(server, '/health'); // sets prevReady=true (silent)
+      ready = false;
+      await request(server, '/health'); // ok → unhealthy (warn)
+      ready = true;
+      await request(server, '/health'); // unhealthy → ok (info)
+      await request(server, '/health'); // still ok — no new log
+      expect(mockLogger.info).toHaveBeenCalledWith('Gateway health: unhealthy → ok');
+      // Exactly one info from the transition; the listen `info` log
+      // is also there, so we filter to just the transition message.
+      const transitionInfoCalls = mockLogger.info.mock.calls
+        .filter(([msg]) => msg === 'Gateway health: unhealthy → ok');
+      expect(transitionInfoCalls).toHaveLength(1);
     } finally {
       await closeServer(server);
     }
@@ -182,16 +213,23 @@ describe('gateway-health server', () => {
     }
   });
 
-  test('isReady() throwing returns 503 instead of 500', async () => {
+  test('isReady() throwing returns 503 instead of 500 and logs debug', async () => {
     // Future composite readiness closures might deref into something
     // nullable. The try/catch ensures a throw surfaces as 503
-    // (unhealthy) rather than an unhandled 500.
+    // (unhealthy) rather than an unhandled 500. Pinned at debug so
+    // an operator triaging an unexplained 503 rate has something to
+    // grep for without spamming logs at probe cadence.
+    const mockLogger = require('../src/logger');
     const server = startGatewayHealthServer(() => { throw new Error('boom'); }, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/health');
       expect(status).toBe(503);
       expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Gateway health: isReady closure threw, treating as unhealthy',
+        expect.objectContaining({ error: 'boom' }),
+      );
     } finally {
       await closeServer(server);
     }
