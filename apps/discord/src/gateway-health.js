@@ -34,20 +34,24 @@ const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
  *   Closure rather than direct client reference so this module
  *   doesn't need a discord.js dep just to type the parameter, and
  *   tests can pass a plain function.
+ * @param {(err: Error) => void} [onFatalError] - Called on a listen
+ *   error (e.g. EADDRINUSE). Defaults to `process.exit(1)`.
+ *   index.js passes `gracefulShutdown(1)` so the Discord WebSocket
+ *   and DB are torn down cleanly before exit.
  * @returns {import('node:http').Server}
  */
-function startGatewayHealthServer(isReady) {
+function startGatewayHealthServer(isReady, onFatalError) {
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
-    const path = req.url.split('?', 1)[0];
+    const { pathname } = new URL(req.url, 'http://127.0.0.1');
 
     // GET and HEAD only. Wget uses GET; HEAD is semantically
     // equivalent (RFC 9110 §9.3.2) and some load-balancer probes
     // default to it — accepting both avoids silent probe failure if
     // the infra follow-up specifies HEAD. Node automatically strips
     // the response body for HEAD requests.
-    if ((req.method !== 'GET' && req.method !== 'HEAD') || path !== '/health') {
+    if ((req.method !== 'GET' && req.method !== 'HEAD') || pathname !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(BODY_NOT_FOUND);
       return;
@@ -82,12 +86,13 @@ function startGatewayHealthServer(isReady) {
   server.headersTimeout = 5_000;
 
   // Surface EADDRINUSE (or any listen error) as a structured log line
-  // instead of an opaque uncaught-exception V8 stack trace. Exit so
-  // deployment_circuit_breaker replaces the task immediately rather
-  // than waiting for the next health-check interval.
+  // instead of an opaque uncaught-exception V8 stack trace. Route
+  // through the caller's fatal-error handler so index.js can tear
+  // down the Discord WebSocket + DB cleanly via gracefulShutdown.
+  const fatal = onFatalError || (() => process.exit(1));
   server.on('error', (err) => {
     logger.error('Gateway health listener failed', { error: err.message, code: err.code });
-    process.exit(1);
+    fatal(err);
   });
 
   // Bind to loopback only. The wget probe runs INSIDE the container,

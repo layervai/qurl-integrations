@@ -402,7 +402,7 @@ async function start() {
   if (isHttp) {
     httpServer = startServer();
   } else if (isGateway) {
-    httpServer = startGatewayHealthServer(() => client.isReady());
+    httpServer = startGatewayHealthServer(() => client.isReady(), () => gracefulShutdown(1));
   }
 
   // Background retry-revoke for any OAuth tokens whose initial

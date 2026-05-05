@@ -192,12 +192,13 @@ describe('gateway-health server', () => {
     expect(server.listening).toBe(false);
   });
 
-  test('EADDRINUSE surfaces as structured log and exits', async () => {
+  test('EADDRINUSE surfaces as structured log and calls onFatalError', async () => {
     // If config.PORT is already in use (e.g. a stray combined-mode
     // process), the error handler should log a structured message
-    // and exit so deployment_circuit_breaker replaces the task.
+    // and invoke onFatalError so index.js can route through
+    // gracefulShutdown.
     const mockLogger = require('../src/logger');
-    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    const onFatalError = jest.fn();
     const first = startGatewayHealthServer(() => true);
     await waitForListening(first);
 
@@ -207,7 +208,7 @@ describe('gateway-health server', () => {
     config.PORT = port;
 
     try {
-      const second = startGatewayHealthServer(() => true);
+      const second = startGatewayHealthServer(() => true, onFatalError);
       // Wait for the async listen error to fire.
       await new Promise((resolve) => { second.on('error', resolve); });
 
@@ -215,10 +216,11 @@ describe('gateway-health server', () => {
         'Gateway health listener failed',
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
-      expect(mockExit).toHaveBeenCalledWith(1);
+      expect(onFatalError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'EADDRINUSE' }),
+      );
       second.close();
     } finally {
-      mockExit.mockRestore();
       config.PORT = origPort;
       await closeServer(first);
     }
