@@ -21,6 +21,11 @@ const http = require('node:http');
 const config = require('./config');
 const logger = require('./logger');
 
+// Pre-computed — these never change, so avoid JSON.stringify per request.
+const BODY_OK = JSON.stringify({ status: 'ok' });
+const BODY_UNHEALTHY = JSON.stringify({ status: 'unhealthy' });
+const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
+
 /**
  * Start the gateway-only health listener.
  *
@@ -44,7 +49,7 @@ function startGatewayHealthServer(isReady) {
     // the response body for HEAD requests.
     if ((req.method !== 'GET' && req.method !== 'HEAD') || path !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'not_found' }));
+      res.end(BODY_NOT_FOUND);
       return;
     }
 
@@ -60,13 +65,13 @@ function startGatewayHealthServer(isReady) {
 
     if (ready) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok' }));
+      res.end(BODY_OK);
     } else {
       // 503 distinguishes "responding but not ready" from "not
       // responding at all" — the wget probe treats non-2xx as
       // unhealthy, so ECS replaces the task on either.
       res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'unhealthy' }));
+      res.end(BODY_UNHEALTHY);
     }
   });
 

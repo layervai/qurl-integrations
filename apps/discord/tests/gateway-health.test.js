@@ -35,15 +35,19 @@ jest.mock('../src/config', () => {
   return { ...actual, PORT: 0 }; // 0 = OS-assigned ephemeral port
 });
 
-function fetchJson(server, path) {
-  // `server.address().port` is only valid AFTER `listen` resolves.
+function request(server, path, method = 'GET') {
   const { port } = server.address();
   return new Promise((resolve, reject) => {
-    http.get(`http://127.0.0.1:${port}${path}`, (res) => {
-      let body = '';
-      res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    }).on('error', reject);
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path, method },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -63,7 +67,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
-      const { status, body } = await fetchJson(server, '/health');
+      const { status, body } = await request(server, '/health');
       expect(status).toBe(200);
       expect(JSON.parse(body)).toEqual({ status: 'ok' });
     } finally {
@@ -75,7 +79,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => false);
     await waitForListening(server);
     try {
-      const { status, body } = await fetchJson(server, '/health');
+      const { status, body } = await request(server, '/health');
       expect(status).toBe(503);
       expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
     } finally {
@@ -92,10 +96,10 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => ready);
     await waitForListening(server);
     try {
-      const ok = await fetchJson(server, '/health');
+      const ok = await request(server, '/health');
       expect(ok.status).toBe(200);
       ready = false;
-      const fail = await fetchJson(server, '/health');
+      const fail = await request(server, '/health');
       expect(fail.status).toBe(503);
     } finally {
       await closeServer(server);
@@ -109,7 +113,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
-      const { status, body } = await fetchJson(server, '/');
+      const { status, body } = await request(server, '/');
       expect(status).toBe(404);
       expect(JSON.parse(body)).toEqual({ status: 'not_found' });
     } finally {
@@ -124,18 +128,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
-      const { port } = server.address();
-      const head = await new Promise((resolve, reject) => {
-        const req = http.request({
-          hostname: '127.0.0.1', port, path: '/health', method: 'HEAD',
-        }, (res) => {
-          let body = '';
-          res.on('data', (c) => { body += c; });
-          res.on('end', () => resolve({ status: res.statusCode, body }));
-        });
-        req.on('error', reject);
-        req.end();
-      });
+      const head = await request(server, '/health', 'HEAD');
       expect(head.status).toBe(200);
       // Node strips the body for HEAD automatically.
       expect(head.body).toBe('');
@@ -150,18 +143,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
-      const { port } = server.address();
-      const post = await new Promise((resolve, reject) => {
-        const req = http.request({
-          hostname: '127.0.0.1', port, path: '/health', method: 'POST',
-        }, (res) => {
-          let body = '';
-          res.on('data', (c) => { body += c; });
-          res.on('end', () => resolve({ status: res.statusCode, body }));
-        });
-        req.on('error', reject);
-        req.end();
-      });
+      const post = await request(server, '/health', 'POST');
       expect(post.status).toBe(404);
     } finally {
       await closeServer(server);
@@ -175,7 +157,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
-      const { status, body } = await fetchJson(server, '/health?ts=123');
+      const { status, body } = await request(server, '/health?ts=123');
       expect(status).toBe(200);
       expect(JSON.parse(body)).toEqual({ status: 'ok' });
     } finally {
@@ -190,7 +172,7 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => { throw new Error('boom'); });
     await waitForListening(server);
     try {
-      const { status, body } = await fetchJson(server, '/health');
+      const { status, body } = await request(server, '/health');
       expect(status).toBe(503);
       expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
     } finally {
