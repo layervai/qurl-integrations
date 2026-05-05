@@ -38,6 +38,8 @@ USER node
 # Port is hardcoded at 3000: ${PORT:-3000} inside a Dockerfile CMD's exec
 # form doesn't interpolate at runtime, and EXPOSE is already 3000. If the
 # runtime overrides PORT, update EXPOSE + this line together.
+# start-period=30s matches the 30s client.login() timeout in index.js —
+# the /health endpoint returns 503 until the Discord gateway sends READY.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:3000/health" || exit 1
 

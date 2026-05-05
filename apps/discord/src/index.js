@@ -402,6 +402,9 @@ async function start() {
   if (isHttp) {
     httpServer = startServer();
   } else if (isGateway) {
+    // Returns 503 until client.isReady() flips true (after READY
+    // from the Discord gateway). Dockerfile --start-period=30s
+    // covers this boot window so ECS doesn't replace the task early.
     httpServer = startGatewayHealthServer(() => client.isReady(), () => gracefulShutdown(1));
   }
 

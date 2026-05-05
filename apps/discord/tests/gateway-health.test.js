@@ -219,7 +219,6 @@ describe('gateway-health server', () => {
       expect(onFatalError).toHaveBeenCalledWith(
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
-      second.close();
     } finally {
       config.PORT = origPort;
       await closeServer(first);
