@@ -15,6 +15,7 @@ const {
   prodRequired,
   missingBootKeys,
   missingProdKeys,
+  missingKekRequiredKeys,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -105,6 +106,32 @@ describe('missingProdKeys', () => {
     expect(missingProdKeys(env, true).sort()).toEqual([
       'KEY_ENCRYPTION_KEY', 'QURL_API_KEY',
     ]);
+  });
+});
+
+describe('missingKekRequiredKeys', () => {
+  it('returns empty when GITHUB_CLIENT_SECRET is unset (no token-issuing surface, no KEK demand)', () => {
+    expect(missingKekRequiredKeys({})).toEqual([]);
+    // Empty string also counts as unset — same as missingBootKeys's robustness.
+    expect(missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: '' })).toEqual([]);
+  });
+
+  it('flags KEY_ENCRYPTION_KEY when GITHUB_CLIENT_SECRET is set without KEK', () => {
+    expect(missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x' })).toEqual(['KEY_ENCRYPTION_KEY']);
+    // Empty-string KEK counts as missing (matches the
+    // boot-requirements `!env[k]` falsy treatment elsewhere).
+    expect(
+      missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: '' })
+    ).toEqual(['KEY_ENCRYPTION_KEY']);
+  });
+
+  it('returns empty when both are set, regardless of NODE_ENV', () => {
+    // Independent of NODE_ENV by design — staging/preview deploys with
+    // a real GitHub client secret must satisfy this gate even though
+    // missingProdKeys does not run for them.
+    expect(
+      missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: 'k' })
+    ).toEqual([]);
   });
 });
 

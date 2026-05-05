@@ -5,7 +5,7 @@ const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys, resolveProcessRole } = require('./boot-requirements');
+const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 
 // Process role — selects which subset of the bot runs in this
@@ -170,15 +170,31 @@ if (process.env.NODE_ENV === 'production') {
     logger.error('OAUTH_STATE_SECRET must be set in production. Generate with: openssl rand -hex 32');
     process.exit(1);
   }
+}
 
-  // Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot
-  // instead of on the first encrypt() call (which could be an OAuth token
-  // persist minutes into serving traffic). This validates the key material
-  // can both encrypt AND decrypt, not just decode as base64.
+// Any deploy that issues real GitHub OAuth tokens must encrypt persisted
+// credentials at rest, in any NODE_ENV — the orphan-token path uses
+// encryptStrict as a backstop, but failing closed at boot is the loud
+// signal. Smoke-test the key material so a malformed value is caught here
+// instead of on the first encrypt() call minutes into serving traffic.
+//
+// Role-agnostic by design: a `gateway`-role process doesn't mount the
+// OAuth callback, but env vars are uniform across roles in a single
+// deploy, so one role refusing to boot while another silently degrades
+// is worse than refusing both.
+const kekMissing = missingKekRequiredKeys(process.env);
+if (kekMissing.length > 0) {
+  logger.error(`GITHUB_CLIENT_SECRET is set but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that issues real GitHub OAuth tokens must encrypt persisted credentials at rest.`);
+  logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
+  process.exit(1);
+}
+if (process.env.KEY_ENCRYPTION_KEY) {
   try {
-    const { encrypt, decrypt } = require('./utils/crypto');
-    const probe = `boot-smoke-${Date.now()}`;
-    if (decrypt(encrypt(probe)) !== probe) {
+    // encryptStrict (not encrypt) so a future refactor that drops the
+    // outer env-var guard fails loudly here instead of silently falling
+    // through encrypt's plaintext-passthrough branch.
+    const { encryptStrict, decrypt } = require('./utils/crypto');
+    if (decrypt(encryptStrict('boot-smoke')) !== 'boot-smoke') {
       throw new Error('round-trip mismatch');
     }
   } catch (err) {

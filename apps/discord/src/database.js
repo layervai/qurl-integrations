@@ -1,5 +1,5 @@
 const Database = require('better-sqlite3');
-const { encrypt, decrypt } = require('./utils/crypto');
+const { encrypt, encryptStrict, decrypt } = require('./utils/crypto');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
@@ -830,8 +830,11 @@ const dbModule = {
   },
 
   recordOrphanedToken(accessToken) {
+    // Caller must gate non-null upstream — encryptStrict passes null
+    // through (see crypto.js for rationale), which would silently
+    // store NULL here. oauth.js's `if (accessToken)` is the gate.
     const stmt = db.prepare('INSERT INTO orphaned_oauth_tokens (access_token) VALUES (?)');
-    stmt.run(encrypt(accessToken));
+    stmt.run(encryptStrict(accessToken));
   },
 
   countOrphanedTokens() {

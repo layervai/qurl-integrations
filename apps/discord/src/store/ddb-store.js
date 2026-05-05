@@ -61,7 +61,7 @@ const {
   BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
 
@@ -1366,6 +1366,9 @@ async function getGuildConfigWithApiKey(guildId) {
 // ── Orphaned OAuth tokens ──
 
 async function recordOrphanedToken(accessToken) {
+  // Caller must gate non-null upstream — encryptStrict passes null
+  // through (see crypto.js for rationale), which would surface here
+  // as a confusing DDB ValidationException on access_token.
   const ttlDays = parseInt(process.env.ORPHAN_TOKEN_RETENTION_DAYS, 10) || (process.env.NODE_ENV === 'production' ? 7 : 1);
   const expiresAt = Math.floor((Date.now() + ttlDays * 24 * 60 * 60 * 1000) / 1000);
   // Dedup on token_hash. A retry / replay of the same plaintext
@@ -1381,7 +1384,7 @@ async function recordOrphanedToken(accessToken) {
       TableName: TABLES.orphaned_oauth_tokens,
       Item: {
         token_hash: sha256Hex(accessToken),
-        access_token: encrypt(accessToken),
+        access_token: encryptStrict(accessToken),
         recorded_at: nowIso(),
         expires_at: expiresAt,
       },

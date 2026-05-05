@@ -29,11 +29,15 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-// Mock crypto wrapper: pass-through so tests can assert on
-// plaintext that flows into the DDB Item. Real encryption is
-// exercised by crypto.test.js.
+// Mock crypto wrapper: pass-through so tests can assert on plaintext
+// that flows into the DDB Item. Real encryption + the encryptStrict
+// fail-closed behavior are exercised by crypto.test.js. encryptStrict
+// is a jest.fn so the no-KEK regression test below can override its
+// implementation per-call without a shared mutable flag.
+const mockEncryptStrict = jest.fn((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
 jest.mock('../src/utils/crypto', () => ({
   encrypt: (v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`,
+  encryptStrict: mockEncryptStrict,
   decrypt: (v) => {
     if (!v || !v.startsWith('enc:v1:')) return v;
     const parts = v.split(':');
@@ -65,6 +69,13 @@ const store = require('../src/store/ddb-store');
 
 beforeEach(() => {
   ddbMock.reset();
+  // mockReset (not mockClear) so a future test setting a sticky
+  // mockImplementation can't leak into the next case — mockClear only
+  // resets call history, leaving the implementation in place. Today
+  // only mockImplementationOnce is used (auto-consumed); the broader
+  // reset is the cheap defensive choice.
+  mockEncryptStrict.mockReset();
+  mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
 });
 
 afterAll(async () => {
@@ -433,6 +444,18 @@ describe('orphaned tokens', () => {
     err.name = 'ProvisionedThroughputExceededException';
     ddbMock.on(PutCommand).rejects(err);
     await expect(store.recordOrphanedToken('ghp_abc123')).rejects.toThrow(/throttled/);
+  });
+
+  test('recordOrphanedToken: refuses to issue a Put when KEY_ENCRYPTION_KEY is unset (fail-closed, defense-in-depth backstop for index.js boot gate)', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    mockEncryptStrict.mockImplementationOnce(() => {
+      throw new Error('KEY_ENCRYPTION_KEY is required to persist this value but is not set.');
+    });
+    await expect(store.recordOrphanedToken('ghp_should_not_persist'))
+      .rejects.toThrow(/KEY_ENCRYPTION_KEY is required/);
+    // Critical: no DDB write was issued — the credential never leaves
+    // process memory. A retry that gains a key would re-attempt cleanly.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
   test('decryptOrphanedToken: unwraps via crypto util (now async for contract parity)', async () => {

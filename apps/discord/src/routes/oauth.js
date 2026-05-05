@@ -507,7 +507,14 @@ router.get('/github/callback', rateLimit, async (req, res) => {
             orphanQueueDepth: orphanCount,
           });
         } catch (dbErr) {
-          // Don't fail the response; the error is logged above.
+          // Don't fail the response; the error is logged above. Note:
+          // when recordOrphanedToken throws (e.g. encryptStrict refusing
+          // a no-KEK persist), the token is *lost* — orphaned at GitHub
+          // with no local record, no future revoke retry. The boot gate
+          // in index.js (missingKekRequiredKeys) makes this unreachable
+          // in any deploy that issues real GitHub tokens; this branch is
+          // the defense-in-depth tail for a misconfigured deploy that
+          // bypasses the gate.
           logger.error('Failed to record orphaned token for later sweep', { error: dbErr.message });
         }
       }
