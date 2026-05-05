@@ -29,7 +29,7 @@ jest.mock('../src/logger', () => ({
 // runs or a real bot listening on 3000 during local dev. Override
 // `config.PORT` via env BEFORE require — `config.js` reads at module-
 // load time, and `startGatewayHealthServer` reads `config.PORT` on
-// every call, so this works.
+// every invocation, so this works.
 jest.mock('../src/config', () => {
   const actual = jest.requireActual('../src/config');
   return { ...actual, PORT: 0 }; // 0 = OS-assigned ephemeral port

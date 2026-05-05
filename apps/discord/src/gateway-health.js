@@ -33,6 +33,10 @@ const logger = require('./logger');
  */
 function startGatewayHealthServer(isReady) {
   const server = http.createServer((req, res) => {
+    // GET only by design. Wget uses GET, so the wget probe works
+    // unchanged. HEAD is rejected (rather than auto-handled) so a
+    // future probe-config drift to HEAD fails loud instead of
+    // silently — same intent as the 404 on a non-/health path.
     if (req.method !== 'GET' || req.url !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('{"status":"not_found"}');
@@ -50,8 +54,15 @@ function startGatewayHealthServer(isReady) {
     }
   });
 
-  server.listen(config.PORT, () => {
-    logger.info(`Gateway health listener on port ${config.PORT}`);
+  // Bind to loopback only. The wget probe runs INSIDE the container,
+  // so 127.0.0.1 is sufficient — and tighter than the all-interfaces
+  // default. Closes the only failure mode where this readiness probe
+  // could leak externally (a future ALB-target-group rewire). The
+  // full Express server in `server.js` correctly binds all interfaces
+  // because the ALB connects from outside the container; this
+  // listener has no such requirement.
+  server.listen(config.PORT, '127.0.0.1', () => {
+    logger.info(`Gateway health listener on 127.0.0.1:${config.PORT}`);
   });
 
   return server;
