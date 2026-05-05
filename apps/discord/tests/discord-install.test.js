@@ -144,11 +144,12 @@ describe('Discord install callback', () => {
       // Auth0 scope must NOT include offline_access (refresh tokens not
       // stored/used; dropped per PR #177 review item 5).
       expect(loc.searchParams.get('scope')).not.toContain('offline_access');
-      // C.8: Stage-2 first install (default mock returns no prior
-      // guild config) should NOT set prompt=consent — the admin's
-      // already going through one Auth0 sign-in screen, no need to
-      // stack a redundant consent screen on top.
-      expect(loc.searchParams.get('prompt')).toBeNull();
+      // Round-9 item #1: Stage-2 ALWAYS sets prompt=consent (independent
+      // of first-install vs re-install). Stage-2 is the URL-forwarding
+      // attack surface (forwarded /oauth/discord/callback → confused
+      // deputy); the explicit consent screen is one extra defense
+      // gate before the qURL key is bound to the admin's account.
+      expect(loc.searchParams.get('prompt')).toBe('consent');
 
       // The state Discord callback minted must round-trip through the
       // qURL OAuth state verifier with the right guild + discord-user
@@ -161,17 +162,18 @@ describe('Discord install callback', () => {
       expect(verified.payload.discordUserId).toBe('987654321098765432');
 
       // Cookie binding — Stage-2 chain must set the same `qurl_setup_session`
-      // cookie that /oauth/qurl/start sets, at path=/oauth so it's also
-      // visible to /oauth/qurl/callback further along the chain. Without
-      // this, the qURL callback's cookie === state CSRF check would 400
-      // and the entire Stage-2 flow would fail at runtime in sandbox/prod.
+      // cookie that /oauth/qurl/start sets — Stage-2 sets it at the
+      // discord-install handler so the chained /oauth/qurl/callback
+      // sees it. Path narrowed to /oauth/qurl per round-9 item #2 —
+      // the only reader is /oauth/qurl/callback so the broader /oauth
+      // was unnecessary scope.
       const setCookie = res.headers['set-cookie'];
       expect(setCookie).toBeDefined();
       const cookieHeader = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
       expect(cookieHeader).toMatch(/qurl_setup_session=/);
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      expect(cookieHeader).toMatch(/Path=\/oauth(?:;|\s|$)/);
+      expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
       expect(cookieHeader).toContain(encodeURIComponent(state));
     });
 
@@ -197,11 +199,11 @@ describe('Discord install callback', () => {
       expect(cookieHeader).toMatch(/Secure/);
     });
 
-    it('sets prompt=consent on re-install (guild already has a configured_by)', async () => {
-      // C.8: bot was previously installed and uninstalled; reinstalling
-      // should force prompt=consent so the admin can rotate the key
-      // (without it Auth0 silently re-uses prior consent and re-mint
-      // can't be triggered).
+    it('still sets prompt=consent on re-install (guild already has a configured_by) — Stage-2 always prompts', async () => {
+      // Round-9 item #1 says always-on for Stage-2; this test pins
+      // the re-install branch produces the same redirect shape as
+      // first-install. Mock returns a prior config row to exercise
+      // the previouslyConfigured=true code path.
       db.getGuildConfig.mockResolvedValueOnce({ guild_id: 'guild-1', configured_by: '111' });
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({

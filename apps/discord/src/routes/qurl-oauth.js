@@ -85,6 +85,12 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   }));
 }
 
+// Error pages intentionally do NOT set `Cache-Control: no-store`
+// (unlike renderSuccess) — the headline + detail strings here don't
+// surface secrets (no api_key / email / key prefix). If a future
+// edit adds key-prefix-leaking detail to an error path, set
+// `res.setHeader('Cache-Control', 'no-store')` at the call site.
+// Round-9 item #4 — explicit so the invariant is searchable.
 function renderError(res, statusCode, headline, detail) {
   return res.status(statusCode).send(renderPage({
     title: 'qURL Setup Failed',
@@ -104,7 +110,9 @@ function renderError(res, statusCode, headline, detail) {
 // before any Auth0 token exchange or qurl-service mint runs.
 router.get('/start', rateLimit, async (req, res) => {
   if (!config.isQurlOAuthConfigured) {
-    logger.warn('qURL OAuth start hit but Auth0 not configured', { ip: req.ip });
+    // Single log line per request lives in renderNotConfiguredPage —
+    // dropping the route-level warn (round-9 item #7 harmonization
+    // with discord-install.js's surface).
     return renderNotConfigured(res);
   }
   // Fail-fast: refuse the OAuth round-trip if KEY_ENCRYPTION_KEY is unset
@@ -165,7 +173,6 @@ router.get('/start', rateLimit, async (req, res) => {
 // key on qurl-service, persist it via the Store abstraction, DM the admin.
 router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isQurlOAuthConfigured) {
-    logger.warn('qURL OAuth callback hit but Auth0 not configured', { ip: req.ip });
     return renderNotConfigured(res);
   }
   // Same encryption-at-rest guard the legacy modal-paste path enforces in
@@ -184,9 +191,15 @@ router.get('/callback', rateLimit, async (req, res) => {
   // Surface Auth0 error_description verbatim only in logs — render a safe
   // generic message to the browser so an attacker can't smuggle HTML via
   // an error URL.
-  if (req.query.error) {
+  // Funnel error params through singleStringParam for symmetry with
+  // code/state — array shapes from `?error=a&error=b` log as empty
+  // strings rather than stringified arrays. Round-9 item #5.
+  const errorParam = singleStringParam(req.query.error);
+  if (errorParam) {
     logger.warn('qURL OAuth callback received error from Auth0', {
-      error: req.query.error, errorDescription: req.query.error_description, ip: req.ip,
+      error: errorParam,
+      errorDescription: singleStringParam(req.query.error_description),
+      ip: req.ip,
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Auth0 returned an error.');
   }
@@ -292,7 +305,14 @@ router.get('/callback', rateLimit, async (req, res) => {
       if (idTokenVerified.ok && typeof idTokenVerified.payload?.email === 'string') {
         qurlAccountEmail = idTokenVerified.payload.email;
       } else if (!idTokenVerified.ok) {
-        logger.debug('id_token verification failed (non-fatal — success page renders without email)', {
+        // Severity at this call site mirrors auth0-jwks.js's internal
+        // split (round-9 item #6): clock-skew expiry is benign + noisy;
+        // signature/claim/JWKS failures are the only signal of a forged
+        // or wrong-tenant id_token attempt and need to surface above
+        // default prod log filters.
+        const benign = idTokenVerified.reason === 'ERR_JWT_EXPIRED';
+        const log = benign ? logger.debug : logger.warn;
+        log('id_token verification failed (non-fatal — success page renders without email)', {
           reason: idTokenVerified.reason,
         });
       }

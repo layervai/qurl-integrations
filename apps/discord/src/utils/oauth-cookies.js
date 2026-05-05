@@ -4,13 +4,16 @@
 // MUST match exactly or the qurl-oauth callback's cookie/state CSRF
 // check 400s. PR #177 follow-up C.1.
 //
-// Path is intentionally `/oauth` (not `/oauth/qurl`) because Stage-2
-// chains across two callbacks under this prefix (/oauth/discord/callback
-// → /oauth/qurl/callback). If a third sibling router lands under
-// /oauth/… (say a Slack-link proxy), the session cookie will travel
-// there too — narrow the path or rename the cookie to scope away.
+// Path is `/oauth/qurl` (NOT the broader `/oauth`). The only reader
+// is the qurl-oauth callback at `/oauth/qurl/callback`; both Stage-1
+// (/oauth/qurl/start) and Stage-2 (/oauth/discord/callback) only
+// SET the cookie, so the Set-Cookie request URL doesn't constrain
+// the path attribute (the browser stores the cookie either way).
+// Narrow scope means a future router under `/oauth/...` (Slack link
+// proxy, Teams, etc.) won't silently inherit this cookie. Per
+// Justin's PR #177 round-9 item #2.
 const QURL_OAUTH_SESSION_COOKIE = 'qurl_setup_session';
-const QURL_OAUTH_COOKIE_PATH = '/oauth';
+const QURL_OAUTH_COOKIE_PATH = '/oauth/qurl';
 const QURL_OAUTH_COOKIE_TTL_SECONDS = 5 * 60;
 
 // Single shape for the double-submit CSRF cookie set by both

@@ -132,7 +132,10 @@ describe('qurl-oauth routes', () => {
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
       // Cookie path /oauth (not /oauth/qurl) so it's also visible at
       // /oauth/discord/callback for the Stage-2 chain.
-      expect(cookieHeader).toMatch(/Path=\/oauth(?:;|\s|$)/);
+      // Cookie path narrowed to /oauth/qurl (round-9 item #2): only
+      // the qurl-oauth callback reads it; broader /oauth was a future-
+      // router collision footgun.
+      expect(cookieHeader).toMatch(/Path=\/oauth\/qurl(?:;|\s|$)/);
       // Cookie value is the state itself (double-submit pattern); the
       // callback re-checks cookie === query.state.
       expect(cookieHeader).toContain(encodeURIComponent(state));
@@ -472,7 +475,7 @@ describe('qurl-oauth routes', () => {
       const headers = Array.isArray(setCookies) ? setCookies : [setCookies];
       const clearCookie = headers.find((h) => h.startsWith('qurl_setup_session=') && /Expires=Thu, 01 Jan 1970|Max-Age=0/i.test(h));
       expect(clearCookie).toBeDefined();
-      expect(clearCookie).toMatch(/Path=\/oauth(?:;|$)/);
+      expect(clearCookie).toMatch(/Path=\/oauth\/qurl(?:;|$)/);
     });
   });
 });

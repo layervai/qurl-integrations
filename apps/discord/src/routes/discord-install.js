@@ -78,8 +78,10 @@ function renderError(res, statusCode, headline, detail) {
 
 router.get('/callback', rateLimit, async (req, res) => {
   if (!config.isDiscordInstallConfigured) {
+    // Single log line lives in renderNotConfiguredPage (round-9 item
+    // #7). Reason is computed here because the helper would otherwise
+    // need access to two config flags.
     const reason = !config.isQurlOAuthConfigured ? 'AUTH0_* unset' : 'DISCORD_CLIENT_SECRET unset';
-    logger.warn('Discord install callback hit but not configured', { reason, ip: req.ip });
     return renderNotConfigured(res, reason);
   }
   // Fail-fast: same encryption-at-rest guard as /oauth/qurl/start.
@@ -102,9 +104,13 @@ router.get('/callback', rateLimit, async (req, res) => {
       type: 'error',
     }));
   }
-  if (req.query.error) {
+  // Round-9 item #5: funnel through singleStringParam for symmetry.
+  const errorParam = singleStringParam(req.query.error);
+  if (errorParam) {
     logger.warn('Discord install callback received error from Discord', {
-      error: req.query.error, errorDescription: req.query.error_description, ip: req.ip,
+      error: errorParam,
+      errorDescription: singleStringParam(req.query.error_description),
+      ip: req.ip,
     });
     return renderError(res, 400, 'Authorization declined', 'You declined consent or Discord returned an error.');
   }
@@ -122,14 +128,20 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Bot install incomplete', 'Discord did not return the server you selected. Please click "Add to Discord" again.');
   }
 
-  // First-install vs re-install gate for prompt=consent (C.8). Kicked
-  // off in parallel with the Discord handshake below — the result is
-  // only consumed at redirect time (it flips one query-param), so
-  // serializing it would add DDB latency to every install with no
-  // user-facing benefit. shouldPromptConsent's failsafe biases toward `true` on
-  // throw — re-prompting an already-consenting admin is mild friction;
-  // skipping consent on a true re-install blocks key rotation.
-  const promptConsentPromise = shouldPromptConsent(guildId, 'discord-install /callback');
+  // Stage-2 ALWAYS sets prompt=consent on the chained Auth0 redirect,
+  // independent of first-install vs re-install. Stage-2 is the
+  // confused-deputy attack surface (a forwarded /oauth/discord/callback
+  // URL); the explicit consent screen is one extra defense per
+  // Justin's PR #177 round-9 item #1. Stage-1 (/oauth/qurl/start)
+  // gates differently — it's reached from inside the guild via the
+  // /qurl setup slash command, so guild-membership-proof has already
+  // happened and the redundant consent screen on first install adds
+  // friction without security gain.
+  //
+  // We still kick off the guild-config read in parallel so the
+  // completion log line carries `previouslyConfigured` for ops
+  // (distinguishes a fresh-add from a re-install in metrics).
+  const previouslyConfiguredPromise = shouldPromptConsent(guildId, 'discord-install /callback');
 
   // 1. Exchange code at Discord for an access_token. The token itself
   //    isn't long-lived state we keep — we only use it to call /users/@me
@@ -205,9 +217,9 @@ router.get('/callback', rateLimit, async (req, res) => {
   // the success-page binding readout in qurl-oauth.js's renderSuccess
   // surfaces (guild, qURL email) for visual sanity-check.
   setQurlOAuthCookie(res, req, qurlState);
-  // Resolve the parallel DDB read kicked off above; bias toward consent
-  // on throw is built into shouldPromptConsent.
-  const promptConsent = await promptConsentPromise;
+  // Resolve the parallel DDB read for the completion log only; the
+  // Auth0 prompt=consent decision is fixed for Stage-2 above.
+  const previouslyConfigured = await previouslyConfiguredPromise;
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -217,8 +229,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  if (promptConsent) authorizeUrl.searchParams.set('prompt', 'consent');
-  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, promptConsent });
+  // ALWAYS prompt=consent on Stage-2 (per round-9 item #1) — see
+  // `previouslyConfiguredPromise` block at the top of this handler.
+  authorizeUrl.searchParams.set('prompt', 'consent');
+  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, previouslyConfigured });
   return res.redirect(302, authorizeUrl.toString());
 });
 
