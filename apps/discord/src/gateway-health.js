@@ -62,7 +62,7 @@ function startGatewayHealthServer(isReady) {
   // because the ALB connects from outside the container; this
   // listener has no such requirement.
   server.listen(config.PORT, '127.0.0.1', () => {
-    logger.info(`Gateway health listener on 127.0.0.1:${config.PORT}`);
+    logger.info(`Gateway health listener on 127.0.0.1:${server.address().port}`);
   });
 
   return server;
