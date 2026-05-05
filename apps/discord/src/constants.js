@@ -144,6 +144,29 @@ const AUDIT_EVENTS = {
   // qurl-bot-discord/terraform/monitoring.tf counts these so an
   // alarm can fire on >N unhealthy responses in a window.
   GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
+
+  // Phase 1 monitoring events — emitted by the gateway role only.
+  // Paired with terraform filters in qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf.
+
+  // Single emission per Discord interaction. `success: true|false`,
+  // `ack_latency_ms` (handler entry → first reply/defer/error), and
+  // `failure_type` ('ack_timeout' | 'handler_error' | 'unknown_command'
+  // | null) carry every dimension Phase 1 alarms need.
+  INTERACTION_HANDLED: 'interaction_handled',
+
+  // Positive-signal heartbeat. Emitted every 30 s when the composite
+  // readiness check passes (client.isReady() && ws.ping > 0 &&
+  // ack_age_ms < 60000). Missing emissions = wedge.
+  GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
+
+  // Bot added/removed from a guild. Single emission on the
+  // guildCreate / guildDelete event.
+  GUILD_INSTALL: 'guild_install',
+  GUILD_UNINSTALL: 'guild_uninstall',
+
+  // Periodic gauge of `client.guilds.cache.size`. Emitted every 60 s.
+  ACTIVE_GUILD_COUNT: 'active_guild_count',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

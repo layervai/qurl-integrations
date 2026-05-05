@@ -4,6 +4,7 @@ const { client, refreshCache, shutdown: discordShutdown } = require('./discord')
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
+const { startGatewayHeartbeat, startActiveGuildCount } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
@@ -288,6 +289,8 @@ process.on('uncaughtException', error => {
 // Graceful shutdown
 let httpServer = null;
 let httpRefreshTimer = null;
+let gatewayHeartbeatTimer = null;
+let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -320,6 +323,12 @@ async function gracefulShutdown(code = 0) {
     // last refresh firing mid-teardown.
     if (httpRefreshTimer) {
       clearInterval(httpRefreshTimer);
+    }
+    if (gatewayHeartbeatTimer) {
+      clearInterval(gatewayHeartbeatTimer);
+    }
+    if (activeGuildCountTimer) {
+      clearInterval(activeGuildCountTimer);
     }
     // Discord client shutdown only meaningful when we're the gateway
     // role. HTTP-only replicas never called login(), so there's no
@@ -447,6 +456,13 @@ async function start() {
         t.unref();
       }),
     ]);
+
+    // Phase 1 monitoring — periodic gateway heartbeat + active-guild-count.
+    // Started AFTER login so the first heartbeat sample sees a real ws.ping
+    // and shard.lastHeartbeatAcked rather than -1/0 from the pre-login
+    // client. Both .unref() inside the module so they don't pin shutdown.
+    gatewayHeartbeatTimer = startGatewayHeartbeat(client);
+    activeGuildCountTimer = startActiveGuildCount(client);
   }
 }
 

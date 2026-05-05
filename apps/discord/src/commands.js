@@ -3510,6 +3510,25 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
+  // Phase 1 monitoring instrumentation. handleCommand entry → first
+  // reply/defer/error is the user-perceived ACK latency. ack_latency_ms
+  // captures end-to-end (including stale-registration replies and the
+  // error-fallback path) so the dashboard reflects what the user sees.
+  // command_name is from the Discord-delivered field, low-cardinality
+  // (bounded by registered commands).
+  const ackStart = Date.now();
+  const command_name = interaction.commandName;
+  const emitInteractionMetric = (success, failure_type) => {
+    try {
+      logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
+        command_name,
+        success,
+        failure_type,
+        ack_latency_ms: Date.now() - ackStart,
+      });
+    } catch (_) { /* audit must never break user flow */ }
+  };
+
   // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
   // mode to customer-safe mode (flip GUILD_ID unset OR flip
   // ENABLE_OPENNHP_FEATURES to false), the prior guild-scoped /link,
@@ -3536,16 +3555,23 @@ async function handleCommand(interaction) {
         content: 'This command is no longer available in this server.',
         ephemeral: true,
       });
+      emitInteractionMetric(false, 'unknown_command');
     } catch (err) {
       logger.warn('Failed to reply to stale command interaction', {
         command: interaction.commandName, error: err.message,
       });
+      // Reply throw within Discord's 3 s window surfaces as the user-
+      // visible "did not respond" dialog. Tag it distinctly so the
+      // ack_timeout alarm catches it without being washed out by other
+      // failures.
+      emitInteractionMetric(false, isAckTimeoutError(err) ? 'ack_timeout' : 'reply_failed');
     }
     return;
   }
 
   try {
     await command.execute(interaction);
+    emitInteractionMetric(true, null);
   } catch (error) {
     logger.error(`Error executing ${interaction.commandName}`, { error: error.message });
     // Any throw after setCooldown (e.g. deferReply failure, modal timeout path
@@ -3558,6 +3584,7 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
+    let failure_type = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
@@ -3566,8 +3593,22 @@ async function handleCommand(interaction) {
       }
     } catch (replyError) {
       logger.error('Failed to send error response', { error: replyError.message });
+      if (isAckTimeoutError(replyError)) failure_type = 'ack_timeout';
     }
+    emitInteractionMetric(false, failure_type);
   }
+}
+
+// Discord's 3 s interaction-acknowledgement deadline surfaces as a
+// REST 10062 / "Unknown interaction" error from discord.js when the bot
+// tries to reply after the token has expired. Detect both the numeric
+// code (preferred) and the message text (fallback for shapes that don't
+// carry .code) so the ack_timeout alarm doesn't miss the variant.
+function isAckTimeoutError(err) {
+  if (!err) return false;
+  if (err.code === 10062) return true;
+  const msg = typeof err.message === 'string' ? err.message : '';
+  return /Unknown interaction/i.test(msg);
 }
 
 module.exports = {

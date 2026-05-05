@@ -412,6 +412,77 @@ describe('handleCommand', () => {
   });
 });
 
+// Phase 1 monitoring — handleCommand emits a single audit event per
+// interaction so the terraform metric filters can derive total /
+// failure / per-command latency without needing multiple events. Each
+// failure_type maps to a different alarm at the infra layer:
+//   - ack_timeout → user-visible "did not respond" cluster (count alarm)
+//   - handler_error → backend / dependency degradation (rate alarm)
+//   - unknown_command → stale-registration count (informational)
+describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
+  const { AUDIT_EVENTS } = require('../src/constants');
+  let logger;
+
+  beforeEach(() => {
+    logger = require('../src/logger');
+    logger.audit.mockClear();
+  });
+
+  it('emits success=true when command executes cleanly', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({
+        command_name: 'stats',
+        success: true,
+        failure_type: null,
+        ack_latency_ms: expect.any(Number),
+      }),
+    );
+  });
+
+  it('emits failure_type=handler_error when execute() throws', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+    );
+  });
+
+  it('emits failure_type=ack_timeout on Discord 10062 (Unknown interaction)', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    const ackErr = Object.assign(new Error('Unknown interaction'), { code: 10062 });
+    mockDb.getStats.mockImplementationOnce(() => { throw ackErr; });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'ack_timeout' }),
+    );
+  });
+
+  it('emits failure_type=unknown_command for stale-registration path', async () => {
+    const interaction = makeInteraction({ commandName: 'no-such-cmd' });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'unknown_command' }),
+    );
+  });
+
+  it('does not emit for autocomplete events (early-return path)', async () => {
+    const interaction = makeInteraction({
+      isChatInputCommand: jest.fn(() => false),
+      isAutocomplete: jest.fn(() => true),
+    });
+    await handleCommand(interaction);
+    const calls = logger.audit.mock.calls.filter(c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED);
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('/link command', () => {
   it('replies with OAuth link embed when not linked', async () => {
     mockDb.getLinkByDiscord.mockReturnValue(null);

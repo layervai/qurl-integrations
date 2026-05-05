@@ -2,6 +2,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discor
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
+const { AUDIT_EVENTS } = require('./constants');
 const db = require('./store');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
@@ -341,6 +342,36 @@ client.on('channelDelete', async (channel) => {
     }
   } catch (error) {
     logger.error('Error handling channelDelete event', { error: error.message });
+  }
+});
+
+// Phase 1 monitoring — bot install / uninstall lifecycle. These events
+// also fire on every shard ready burst (Discord re-sends guildCreate
+// for every guild the bot is already in), so the install dashboard
+// widget should view counts as a *trend*, not as "exactly N installs
+// happened today." A genuine install is the only path that fires
+// guildCreate while the client is already isReady(); we use that to
+// distinguish first-time joins from replay events.
+client.on('guildCreate', (guild) => {
+  try {
+    const replay = !client.isReady();
+    logger.audit(AUDIT_EVENTS.GUILD_INSTALL, {
+      guild_id: guild?.id,
+      member_count: guild?.memberCount,
+      replay,
+    });
+  } catch (error) {
+    logger.error('Error handling guildCreate event', { error: error.message });
+  }
+});
+
+client.on('guildDelete', (guild) => {
+  try {
+    logger.audit(AUDIT_EVENTS.GUILD_UNINSTALL, {
+      guild_id: guild?.id,
+    });
+  } catch (error) {
+    logger.error('Error handling guildDelete event', { error: error.message });
   }
 });
 
