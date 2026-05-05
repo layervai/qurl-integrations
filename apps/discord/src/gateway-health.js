@@ -33,25 +33,40 @@ const logger = require('./logger');
  */
 function startGatewayHealthServer(isReady) {
   const server = http.createServer((req, res) => {
+    // Strip query string before matching — some ECS/ALB probe configs
+    // append a cache-busting `?ts=…`; we don't want that to 404.
+    const path = req.url.split('?', 1)[0];
+
     // GET and HEAD only. Wget uses GET; HEAD is semantically
     // equivalent (RFC 9110 §9.3.2) and some load-balancer probes
     // default to it — accepting both avoids silent probe failure if
     // the infra follow-up specifies HEAD. Node automatically strips
     // the response body for HEAD requests.
-    if ((req.method !== 'GET' && req.method !== 'HEAD') || req.url !== '/health') {
+    if ((req.method !== 'GET' && req.method !== 'HEAD') || path !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end('{"status":"not_found"}');
+      res.end(JSON.stringify({ status: 'not_found' }));
       return;
     }
-    if (isReady()) {
+
+    // Defensive: if the readiness closure throws (e.g. a future
+    // composite signal derefs into something nullable), treat as
+    // unhealthy rather than surfacing a 500.
+    let ready;
+    try {
+      ready = isReady();
+    } catch {
+      ready = false;
+    }
+
+    if (ready) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('{"status":"ok"}');
+      res.end(JSON.stringify({ status: 'ok' }));
     } else {
       // 503 distinguishes "responding but not ready" from "not
       // responding at all" — the wget probe treats non-2xx as
       // unhealthy, so ECS replaces the task on either.
       res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end('{"status":"unhealthy"}');
+      res.end(JSON.stringify({ status: 'unhealthy' }));
     }
   });
 

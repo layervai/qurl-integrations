@@ -168,6 +168,36 @@ describe('gateway-health server', () => {
     }
   });
 
+  test('/health?ts=123 returns 200 (query string tolerance)', async () => {
+    // Some ECS/ALB probe configs append a cache-busting query string.
+    // The path match strips the query before comparing so this
+    // doesn't silently 404.
+    const server = startGatewayHealthServer(() => true);
+    await waitForListening(server);
+    try {
+      const { status, body } = await fetchJson(server, '/health?ts=123');
+      expect(status).toBe(200);
+      expect(JSON.parse(body)).toEqual({ status: 'ok' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('isReady() throwing returns 503 instead of 500', async () => {
+    // Future composite readiness closures might deref into something
+    // nullable. The try/catch ensures a throw surfaces as 503
+    // (unhealthy) rather than an unhandled 500.
+    const server = startGatewayHealthServer(() => { throw new Error('boom'); });
+    await waitForListening(server);
+    try {
+      const { status, body } = await fetchJson(server, '/health');
+      expect(status).toBe(503);
+      expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   test('server.close() drains and exits cleanly', async () => {
     // Pinned because index.js's gracefulShutdown awaits httpServer.close()
     // — if the listener doesn't drain, SIGTERM hangs until ECS sends
