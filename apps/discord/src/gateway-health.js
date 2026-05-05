@@ -98,7 +98,7 @@ function startGatewayHealthServer(isReady, onFatalError, port = config.PORT) {
     } else {
       // No handler — hard-exit so deployment_circuit_breaker replaces
       // the task. Callers should pass gracefulShutdown for clean teardown.
-      process.exit(1); // eslint-disable-line no-process-exit
+      process.exit(1);
     }
   });
 
