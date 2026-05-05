@@ -129,10 +129,14 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
   // Localhost-only probe surface — cap idle/header timeouts to bound
   // resource usage even though nothing hostile reaches loopback.
   // Prevents a stuck connection from holding an fd open indefinitely.
-  // 10s gives the Dockerfile HEALTHCHECK --timeout=5s room to be
-  // the binding constraint, not a near-coincident race.
+  // requestTimeout = 10 s gives the Dockerfile HEALTHCHECK --timeout=5s
+  // room to be the binding constraint. headersTimeout = 5 s satisfies
+  // Node's documented `headersTimeout < requestTimeout` constraint —
+  // a future refactor that accepts a request body here would otherwise
+  // race the two timers and surface a wedge as a header-timeout
+  // instead of the more accurate request-timeout.
   server.requestTimeout = 10_000;
-  server.headersTimeout = 10_000;
+  server.headersTimeout = 5_000;
 
   // Surface EADDRINUSE (or any listen error) as a structured log line
   // instead of an opaque uncaught-exception V8 stack trace. Route
