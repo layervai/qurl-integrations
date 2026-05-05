@@ -177,6 +177,11 @@ if (process.env.NODE_ENV === 'production') {
 // encryptStrict as a backstop, but failing closed at boot is the loud
 // signal. Smoke-test the key material so a malformed value is caught here
 // instead of on the first encrypt() call minutes into serving traffic.
+//
+// Role-agnostic by design: a `gateway`-role process doesn't mount the
+// OAuth callback, but env vars are uniform across roles in a single
+// deploy, so one role refusing to boot while another silently degrades
+// is worse than refusing both.
 const kekMissing = missingKekRequiredKeys(process.env);
 if (kekMissing.length > 0) {
   logger.error(`GITHUB_CLIENT_SECRET is set but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that issues real GitHub OAuth tokens must encrypt persisted credentials at rest.`);

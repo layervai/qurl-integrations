@@ -69,10 +69,13 @@ const store = require('../src/store/ddb-store');
 
 beforeEach(() => {
   ddbMock.reset();
-  // Reset any mockImplementation from prior tests. Today only
-  // mockImplementationOnce is used (auto-consumed), but a future test
-  // adding mockImplementation would otherwise leak across cases.
-  mockEncryptStrict.mockClear();
+  // mockReset (not mockClear) so a future test setting a sticky
+  // mockImplementation can't leak into the next case — mockClear only
+  // resets call history, leaving the implementation in place. Today
+  // only mockImplementationOnce is used (auto-consumed); the broader
+  // reset is the cheap defensive choice.
+  mockEncryptStrict.mockReset();
+  mockEncryptStrict.mockImplementation((v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`);
 });
 
 afterAll(async () => {
