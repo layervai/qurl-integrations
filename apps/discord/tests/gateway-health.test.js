@@ -35,6 +35,12 @@ jest.mock('../src/config', () => {
   return { ...actual, PORT: 0 }; // 0 = OS-assigned ephemeral port
 });
 
+// Default no-op listen-error handler for tests that don't exercise
+// the EADDRINUSE path. `onListenError` is required (no signature
+// default) so every test has to make this choice explicit. The
+// EADDRINUSE test passes its own jest.fn() to assert invocation.
+const noopOnListenError = () => {};
+
 function request(server, path, method = 'GET') {
   const { port } = server.address();
   return new Promise((resolve, reject) => {
@@ -69,7 +75,7 @@ function closeServer(server) {
 describe('gateway-health server', () => {
   beforeEach(() => jest.clearAllMocks());
   test('GET /health returns 200 ok when isReady() is true', async () => {
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/health');
@@ -81,7 +87,7 @@ describe('gateway-health server', () => {
   });
 
   test('GET /health returns 503 unhealthy when isReady() is false', async () => {
-    const server = startGatewayHealthServer(() => false);
+    const server = startGatewayHealthServer(() => false, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/health');
@@ -98,7 +104,7 @@ describe('gateway-health server', () => {
     // discord.js client.isReady() reads from the connection state on
     // every call, so the closure pattern guarantees no stale cache.
     let ready = true;
-    const server = startGatewayHealthServer(() => ready);
+    const server = startGatewayHealthServer(() => ready, noopOnListenError);
     await waitForListening(server);
     try {
       const ok = await request(server, '/health');
@@ -115,7 +121,7 @@ describe('gateway-health server', () => {
     // Probe-misconfiguration safety: if the wget probe ever drifts
     // off /health (typo, copy-paste from another service's
     // healthcheck), we want a clean 404 not a coincidental 200.
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/');
@@ -130,7 +136,7 @@ describe('gateway-health server', () => {
     // Some load-balancer probes default to HEAD. HEAD is semantically
     // GET-without-body (RFC 9110 §9.3.2), so accepting it avoids
     // silent probe failure if the infra follow-up specifies HEAD.
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
       const head = await request(server, '/health', 'HEAD');
@@ -145,7 +151,7 @@ describe('gateway-health server', () => {
   test('POST /health returns 404', async () => {
     // Only GET and HEAD are accepted. Any other method is a
     // misconfiguration; treat the same as a wrong path.
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
       const post = await request(server, '/health', 'POST');
@@ -159,7 +165,7 @@ describe('gateway-health server', () => {
     // Some ECS/ALB probe configs append a cache-busting query string.
     // The path match strips the query before comparing so this
     // doesn't silently 404.
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/health?ts=123');
@@ -174,7 +180,7 @@ describe('gateway-health server', () => {
     // Future composite readiness closures might deref into something
     // nullable. The try/catch ensures a throw surfaces as 503
     // (unhealthy) rather than an unhandled 500.
-    const server = startGatewayHealthServer(() => { throw new Error('boom'); });
+    const server = startGatewayHealthServer(() => { throw new Error('boom'); }, noopOnListenError);
     await waitForListening(server);
     try {
       const { status, body } = await request(server, '/health');
@@ -190,28 +196,29 @@ describe('gateway-health server', () => {
     // — if the listener doesn't drain, SIGTERM hangs until ECS sends
     // SIGKILL. Confirms the listener honors the Node http.Server
     // close contract.
-    const server = startGatewayHealthServer(() => true);
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     expect(server.listening).toBe(true);
     await closeServer(server);
     expect(server.listening).toBe(false);
   });
 
-  test('EADDRINUSE surfaces as structured log and calls onFatalError', async () => {
-    // If config.PORT is already in use (e.g. a stray combined-mode
+  test('EADDRINUSE surfaces as structured log and calls onListenError', async () => {
+    // If the bind port is already in use (e.g. a stray combined-mode
     // process), the error handler should log a structured message
-    // and invoke onFatalError so index.js can route through
+    // and invoke onListenError so index.js can route through
     // gracefulShutdown.
     const mockLogger = require('../src/logger');
-    const onFatalError = jest.fn();
-    const first = startGatewayHealthServer(() => true);
+    const onListenError = jest.fn();
+    const first = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(first);
+    let second;
 
     try {
       // Pass the occupied port directly instead of mutating the
       // shared config mock — avoids action-at-a-distance.
       const { port } = first.address();
-      const second = startGatewayHealthServer(() => true, onFatalError, port);
+      second = startGatewayHealthServer(() => true, onListenError, port);
       // Wait for the async listen error to fire.
       await new Promise((resolve) => { second.on('error', resolve); });
 
@@ -219,11 +226,15 @@ describe('gateway-health server', () => {
         'Gateway health listener failed',
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
-      expect(onFatalError).toHaveBeenCalledWith(
+      expect(onListenError).toHaveBeenCalledWith(
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
     } finally {
       await closeServer(first);
+      // `second` never bound, but the Server object retains the
+      // registered `error` listener — closing releases the handle so
+      // `jest --detectOpenHandles` stays clean.
+      if (second) await new Promise((resolve) => second.close(() => resolve()));
     }
   });
 });

@@ -34,15 +34,19 @@ const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
  *   Closure rather than direct client reference so this module
  *   doesn't need a discord.js dep just to type the parameter, and
  *   tests can pass a plain function.
- * @param {(err: Error) => void} onFatalError - Called on a listen
- *   error (e.g. EADDRINUSE). Pass `() => gracefulShutdown(1)` from
- *   index.js so the Discord WebSocket and DB are torn down cleanly.
+ * @param {(err: Error) => void} onListenError - Called on a listen
+ *   error (e.g. EADDRINUSE). Required — no default, so every caller
+ *   has to make an explicit choice about how a listen failure should
+ *   be handled. The original default of `process.exit(1)` silently
+ *   bypassed the Discord WebSocket + DB teardown that
+ *   `gracefulShutdown` performs; making it required closes that gap.
+ *   index.js passes `() => gracefulShutdown(1)`.
  * @param {number} [port=config.PORT] - Port to bind. Defaults to
  *   `config.PORT`. Tests pass an explicit port to avoid mutating
  *   shared mock state.
  * @returns {import('node:http').Server}
  */
-function startGatewayHealthServer(isReady, onFatalError, port = config.PORT) {
+function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
@@ -91,17 +95,11 @@ function startGatewayHealthServer(isReady, onFatalError, port = config.PORT) {
 
   // Surface EADDRINUSE (or any listen error) as a structured log line
   // instead of an opaque uncaught-exception V8 stack trace. Route
-  // through the caller's fatal-error handler so index.js can tear
+  // through the caller's listen-error handler so index.js can tear
   // down the Discord WebSocket + DB cleanly via gracefulShutdown.
   server.on('error', (err) => {
     logger.error('Gateway health listener failed', { error: err.message, code: err.code });
-    if (onFatalError) {
-      onFatalError(err);
-    } else {
-      // No handler — hard-exit so deployment_circuit_breaker replaces
-      // the task. Callers should pass gracefulShutdown for clean teardown.
-      process.exit(1);
-    }
+    onListenError(err);
   });
 
   // Bind to loopback only. The wget probe runs INSIDE the container,
