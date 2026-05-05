@@ -46,6 +46,10 @@ function request(server, path, method = 'GET') {
         res.on('end', () => resolve({ status: res.statusCode, body }));
       },
     );
+    // 2s cap so a wedged listener fails with a clear timeout rather
+    // than hanging until jest's outer 5s default kills the test with
+    // a generic message.
+    req.setTimeout(2000, () => req.destroy(new Error('request timeout')));
     req.on('error', reject);
     req.end();
   });
