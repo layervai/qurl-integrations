@@ -830,10 +830,6 @@ const dbModule = {
   },
 
   recordOrphanedToken(accessToken) {
-    // encryptStrict (not encrypt) so a missing KEY_ENCRYPTION_KEY refuses
-    // to persist instead of falling through to plaintext. The boot gate
-    // in index.js already blocks this path in any deploy that hands out
-    // real GitHub tokens; this is the in-process fail-closed backstop.
     const stmt = db.prepare('INSERT INTO orphaned_oauth_tokens (access_token) VALUES (?)');
     stmt.run(encryptStrict(accessToken));
   },

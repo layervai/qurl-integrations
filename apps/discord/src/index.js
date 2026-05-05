@@ -172,31 +172,21 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// KEY_ENCRYPTION_KEY is required outside NODE_ENV=production whenever
-// GITHUB_CLIENT_SECRET is set: staging/preview environments hand out
-// real GitHub `read:user` tokens, and the orphan-token persistence path
-// must never silently degrade to plaintext via crypto.encrypt's
-// dev-mode fallback. recordOrphanedToken uses encryptStrict() as the
-// in-process backstop, but failing closed at boot is the loud signal.
+// Any deploy that issues real GitHub OAuth tokens must encrypt persisted
+// credentials at rest, in any NODE_ENV — the orphan-token path uses
+// encryptStrict as a backstop, but failing closed at boot is the loud
+// signal. Smoke-test the key material so a malformed value is caught here
+// instead of on the first encrypt() call minutes into serving traffic.
 const kekMissing = missingKekRequiredKeys(process.env);
 if (kekMissing.length > 0) {
   logger.error(`GITHUB_CLIENT_SECRET is set but ${kekMissing.join(', ')} is missing — refusing to boot. Any deployment that issues real GitHub OAuth tokens must encrypt persisted credentials at rest.`);
   logger.error('Generate KEY_ENCRYPTION_KEY with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"');
   process.exit(1);
 }
-
-// Crypto smoke test: catch a misconfigured KEY_ENCRYPTION_KEY at boot
-// instead of on the first encrypt() call (which could be an OAuth token
-// persist minutes into serving traffic). This validates the key material
-// can both encrypt AND decrypt, not just decode as base64. Runs whenever
-// the key is set (in any NODE_ENV), since a malformed key in staging
-// would otherwise silently fall through to the dev plaintext branch in
-// crypto.encrypt — exactly the failure mode this gate exists to catch.
 if (process.env.KEY_ENCRYPTION_KEY) {
   try {
     const { encrypt, decrypt } = require('./utils/crypto');
-    const probe = `boot-smoke-${Date.now()}`;
-    if (decrypt(encrypt(probe)) !== probe) {
+    if (decrypt(encrypt('boot-smoke')) !== 'boot-smoke') {
       throw new Error('round-trip mismatch');
     }
   } catch (err) {
