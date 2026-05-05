@@ -1366,11 +1366,9 @@ async function getGuildConfigWithApiKey(guildId) {
 // ── Orphaned OAuth tokens ──
 
 async function recordOrphanedToken(accessToken) {
-  // Caller invariant: accessToken is a non-empty string. encryptStrict
-  // passes null/undefined through unchanged (matching encrypt's
-  // ergonomics); a null Item would surface as a confusing DDB
-  // ValidationException for the access_token attribute. Gate upstream
-  // (oauth.js does) rather than relying on the encryption layer.
+  // Caller must gate non-null upstream — encryptStrict passes null
+  // through (see crypto.js for rationale), which would surface here
+  // as a confusing DDB ValidationException on access_token.
   const ttlDays = parseInt(process.env.ORPHAN_TOKEN_RETENTION_DAYS, 10) || (process.env.NODE_ENV === 'production' ? 7 : 1);
   const expiresAt = Math.floor((Date.now() + ttlDays * 24 * 60 * 60 * 1000) / 1000);
   // Dedup on token_hash. A retry / replay of the same plaintext

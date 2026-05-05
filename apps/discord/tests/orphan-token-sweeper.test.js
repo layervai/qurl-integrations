@@ -31,8 +31,7 @@ const originalFetch = globalThis.fetch;
 afterAll(() => {
   globalThis.fetch = originalFetch;
   db.close();
-  // Restore the prior env state so a shared-runner setup can't leak
-  // this suite's key into a sibling test file.
+  // Symmetric env restore — see database-module.test.js afterAll for rationale.
   if (KEK_PRIOR === undefined) {
     delete process.env.KEY_ENCRYPTION_KEY;
   } else {

@@ -27,9 +27,11 @@ const db = require('../src/database');
 
 afterAll(() => {
   db.close();
-  // Restore the prior env state so a future shared-runner setup
-  // (e.g. --runInBand merging suites into one worker) can't leak this
-  // suite's key into a sibling test file.
+  // Restore the prior env state symmetrically — `process.env.X = undefined`
+  // coerces to the literal string "undefined" and would silently poison
+  // sibling tests under `--runInBand`. The `if undefined ? delete : assign`
+  // shape (used here, in this file's inner test, and in
+  // orphan-token-sweeper.test.js) is the established pattern.
   if (KEK_PRIOR === undefined) {
     delete process.env.KEY_ENCRYPTION_KEY;
   } else {
@@ -409,9 +411,7 @@ describe('database module', () => {
         expect(() => db.recordOrphanedToken('gho_should_not_persist')).toThrow(/KEY_ENCRYPTION_KEY is required/);
         expect(db.countOrphanedTokens()).toBe(before);
       } finally {
-        // Restore symmetrically — `process.env.X = undefined` would coerce
-        // to the literal string "undefined" and quietly poison sibling
-        // tests under --runInBand. Matches the afterAll cleanup pattern.
+        // Symmetric env restore — see this file's afterAll for rationale.
         if (savedKey === undefined) {
           delete process.env.KEY_ENCRYPTION_KEY;
         } else {
