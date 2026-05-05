@@ -34,13 +34,15 @@ const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
  *   Closure rather than direct client reference so this module
  *   doesn't need a discord.js dep just to type the parameter, and
  *   tests can pass a plain function.
- * @param {(err: Error) => void} [onFatalError] - Called on a listen
- *   error (e.g. EADDRINUSE). Defaults to `process.exit(1)`.
- *   index.js passes `gracefulShutdown(1)` so the Discord WebSocket
- *   and DB are torn down cleanly before exit.
+ * @param {(err: Error) => void} onFatalError - Called on a listen
+ *   error (e.g. EADDRINUSE). Pass `() => gracefulShutdown(1)` from
+ *   index.js so the Discord WebSocket and DB are torn down cleanly.
+ * @param {number} [port=config.PORT] - Port to bind. Defaults to
+ *   `config.PORT`. Tests pass an explicit port to avoid mutating
+ *   shared mock state.
  * @returns {import('node:http').Server}
  */
-function startGatewayHealthServer(isReady, onFatalError = () => process.exit(1)) {
+function startGatewayHealthServer(isReady, onFatalError, port = config.PORT) {
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
@@ -91,7 +93,13 @@ function startGatewayHealthServer(isReady, onFatalError = () => process.exit(1))
   // down the Discord WebSocket + DB cleanly via gracefulShutdown.
   server.on('error', (err) => {
     logger.error('Gateway health listener failed', { error: err.message, code: err.code });
-    onFatalError(err);
+    if (onFatalError) {
+      onFatalError(err);
+    } else {
+      // No handler — hard-exit so deployment_circuit_breaker replaces
+      // the task. Callers should pass gracefulShutdown for clean teardown.
+      process.exit(1); // eslint-disable-line no-process-exit
+    }
   });
 
   // Bind to loopback only. The wget probe runs INSIDE the container,
@@ -101,7 +109,7 @@ function startGatewayHealthServer(isReady, onFatalError = () => process.exit(1))
   // full Express server in `server.js` correctly binds all interfaces
   // because the ALB connects from outside the container; this
   // listener has no such requirement.
-  server.listen(config.PORT, '127.0.0.1', () => {
+  server.listen(port, '127.0.0.1', () => {
     logger.info('Gateway health listener listening', { addr: '127.0.0.1', port: server.address().port });
   });
 

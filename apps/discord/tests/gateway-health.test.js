@@ -202,13 +202,11 @@ describe('gateway-health server', () => {
     const first = startGatewayHealthServer(() => true);
     await waitForListening(first);
 
-    const { port } = first.address();
-    const config = require('../src/config');
-    const origPort = config.PORT;
-    config.PORT = port;
-
     try {
-      const second = startGatewayHealthServer(() => true, onFatalError);
+      // Pass the occupied port directly instead of mutating the
+      // shared config mock — avoids action-at-a-distance.
+      const { port } = first.address();
+      const second = startGatewayHealthServer(() => true, onFatalError, port);
       // Wait for the async listen error to fire.
       await new Promise((resolve) => { second.on('error', resolve); });
 
@@ -220,7 +218,6 @@ describe('gateway-health server', () => {
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
     } finally {
-      config.PORT = origPort;
       await closeServer(first);
     }
   });
