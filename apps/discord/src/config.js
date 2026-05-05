@@ -108,13 +108,18 @@ const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
 // path activates) instead of crashing mid-flow.
 function isValidAuth0DomainShape(d) {
   if (typeof d !== 'string' || !d) return false;
+  // DNS-shape cap: RFC 1035 maxes at 253 chars total. Auth0 domains in
+  // practice are short (e.g., layerv.us.auth0.com), but an explicit
+  // cap is clearer than relying on a regex bound.
+  if (d.length > 253) return false;
   // Reject any scheme prefix or path — domain only.
   if (/[:/?#]/.test(d)) return false;
-  // Bare hostname, lowercase letters/digits/dots/dashes, must contain
-  // at least one dot (rejects "placeholder" / "localhost" while
-  // permitting custom Auth0 domains like auth.layerv.ai). Length cap
-  // matches DNS label limits in aggregate.
-  return /^[a-z0-9][a-z0-9.-]{2,253}\.[a-z]{2,}$/i.test(d);
+  // Bare hostname, letters/digits/dots/dashes, must contain at least
+  // one dot (rejects "placeholder" / "localhost" while permitting
+  // custom Auth0 domains like auth.layerv.ai). Case-insensitive on
+  // input — Auth0 domains are canonically lowercase but we don't
+  // reject mixed case.
+  return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
 }
 
 // True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a

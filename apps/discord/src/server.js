@@ -204,8 +204,8 @@ if (config.isOpenNHPActive) {
 // could leak detail in the future; not-configured page is also OAuth-
 // adjacent. Applying as a router-level default removes a conditional
 // invariant per-handler (round-9 #6) and is zero-cost on these
-// low-traffic paths. Also vary on Set-Cookie so any intermediate that
-// honors Vary doesn't cross-cache between authenticated tabs.
+// low-traffic paths. `no-store` alone is sufficient — intermediates
+// MUST NOT cache regardless of any other header.
 function noStoreHeaders(req, res, next) {
   res.setHeader('Cache-Control', 'no-store');
   next();

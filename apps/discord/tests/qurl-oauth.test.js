@@ -130,8 +130,6 @@ describe('qurl-oauth routes', () => {
       expect(cookieHeader).toMatch(/qurl_setup_session=/);
       expect(cookieHeader).toMatch(/HttpOnly/i);
       expect(cookieHeader).toMatch(/SameSite=Lax/i);
-      // Cookie path /oauth (not /oauth/qurl) so it's also visible at
-      // /oauth/discord/callback for the Stage-2 chain.
       // Cookie path narrowed to /oauth/qurl (round-9 item #2): only
       // the qurl-oauth callback reads it; broader /oauth was a future-
       // router collision footgun.
