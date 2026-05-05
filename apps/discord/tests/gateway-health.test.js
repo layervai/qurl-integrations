@@ -117,10 +117,36 @@ describe('gateway-health server', () => {
     }
   });
 
-  test('non-GET method on /health returns 404', async () => {
-    // The wget probe uses GET. Any other method on /health is also a
-    // misconfiguration; treat the same as a wrong path so the failure
-    // mode is uniform.
+  test('HEAD /health returns 200 when isReady() is true', async () => {
+    // Some load-balancer probes default to HEAD. HEAD is semantically
+    // GET-without-body (RFC 9110 §9.3.2), so accepting it avoids
+    // silent probe failure if the infra follow-up specifies HEAD.
+    const server = startGatewayHealthServer(() => true);
+    await waitForListening(server);
+    try {
+      const { port } = server.address();
+      const head = await new Promise((resolve, reject) => {
+        const req = http.request({
+          hostname: '127.0.0.1', port, path: '/health', method: 'HEAD',
+        }, (res) => {
+          let body = '';
+          res.on('data', (c) => { body += c; });
+          res.on('end', () => resolve({ status: res.statusCode, body }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(head.status).toBe(200);
+      // Node strips the body for HEAD automatically.
+      expect(head.body).toBe('');
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('POST /health returns 404', async () => {
+    // Only GET and HEAD are accepted. Any other method is a
+    // misconfiguration; treat the same as a wrong path.
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);
     try {
@@ -152,5 +178,37 @@ describe('gateway-health server', () => {
     expect(server.listening).toBe(true);
     await closeServer(server);
     expect(server.listening).toBe(false);
+  });
+
+  test('EADDRINUSE surfaces as structured log and exits', async () => {
+    // If config.PORT is already in use (e.g. a stray combined-mode
+    // process), the error handler should log a structured message
+    // and exit so deployment_circuit_breaker replaces the task.
+    const mockLogger = require('../src/logger');
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => {});
+    const first = startGatewayHealthServer(() => true);
+    await waitForListening(first);
+
+    const { port } = first.address();
+    const config = require('../src/config');
+    const origPort = config.PORT;
+    config.PORT = port;
+
+    try {
+      const second = startGatewayHealthServer(() => true);
+      // Wait for the async listen error to fire.
+      await new Promise((resolve) => { second.on('error', resolve); });
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'Gateway health listener failed',
+        expect.objectContaining({ code: 'EADDRINUSE' }),
+      );
+      expect(mockExit).toHaveBeenCalledWith(1);
+      second.close();
+    } finally {
+      mockExit.mockRestore();
+      config.PORT = origPort;
+      await closeServer(first);
+    }
   });
 });

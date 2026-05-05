@@ -33,11 +33,12 @@ const logger = require('./logger');
  */
 function startGatewayHealthServer(isReady) {
   const server = http.createServer((req, res) => {
-    // GET only by design. Wget uses GET, so the wget probe works
-    // unchanged. HEAD is rejected (rather than auto-handled) so a
-    // future probe-config drift to HEAD fails loud instead of
-    // silently — same intent as the 404 on a non-/health path.
-    if (req.method !== 'GET' || req.url !== '/health') {
+    // GET and HEAD only. Wget uses GET; HEAD is semantically
+    // equivalent (RFC 9110 §9.3.2) and some load-balancer probes
+    // default to it — accepting both avoids silent probe failure if
+    // the infra follow-up specifies HEAD. Node automatically strips
+    // the response body for HEAD requests.
+    if ((req.method !== 'GET' && req.method !== 'HEAD') || req.url !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end('{"status":"not_found"}');
       return;
@@ -52,6 +53,21 @@ function startGatewayHealthServer(isReady) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end('{"status":"unhealthy"}');
     }
+  });
+
+  // Localhost-only probe surface — cap idle/header timeouts to bound
+  // resource usage even though nothing hostile reaches loopback.
+  // Prevents a stuck connection from holding an fd open indefinitely.
+  server.requestTimeout = 5_000;
+  server.headersTimeout = 5_000;
+
+  // Surface EADDRINUSE (or any listen error) as a structured log line
+  // instead of an opaque uncaught-exception V8 stack trace. Exit so
+  // deployment_circuit_breaker replaces the task immediately rather
+  // than waiting for the next health-check interval.
+  server.on('error', (err) => {
+    logger.error('Gateway health listener failed', { error: err.message, code: err.code });
+    process.exit(1);
   });
 
   // Bind to loopback only. The wget probe runs INSIDE the container,
