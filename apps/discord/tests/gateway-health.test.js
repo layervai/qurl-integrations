@@ -49,7 +49,11 @@ function request(server, path, method = 'GET') {
       (res) => {
         let body = '';
         res.on('data', (chunk) => { body += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('end', () => resolve({
+          status: res.statusCode,
+          body,
+          contentType: res.headers['content-type'],
+        }));
       },
     );
     // 2s cap so a wedged listener fails with a clear timeout rather
@@ -78,8 +82,9 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(server);
     try {
-      const { status, body } = await request(server, '/health');
+      const { status, body, contentType } = await request(server, '/health');
       expect(status).toBe(200);
+      expect(contentType).toBe('application/json');
       expect(JSON.parse(body)).toEqual({ status: 'ok' });
     } finally {
       await closeServer(server);
@@ -90,8 +95,9 @@ describe('gateway-health server', () => {
     const server = startGatewayHealthServer(() => false, noopOnListenError);
     await waitForListening(server);
     try {
-      const { status, body } = await request(server, '/health');
+      const { status, body, contentType } = await request(server, '/health');
       expect(status).toBe(503);
+      expect(contentType).toBe('application/json');
       expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
     } finally {
       await closeServer(server);
@@ -212,8 +218,8 @@ describe('gateway-health server', () => {
     const onListenError = jest.fn();
     const first = startGatewayHealthServer(() => true, noopOnListenError);
     await waitForListening(first);
-    let second;
 
+    let second;
     try {
       // Pass the occupied port directly instead of mutating the
       // shared config mock — avoids action-at-a-distance.
@@ -230,11 +236,11 @@ describe('gateway-health server', () => {
         expect.objectContaining({ code: 'EADDRINUSE' }),
       );
     } finally {
-      await closeServer(first);
       // `second` never bound, but the Server object retains the
       // registered `error` listener — closing releases the handle so
       // `jest --detectOpenHandles` stays clean.
-      if (second) await new Promise((resolve) => second.close(() => resolve()));
+      if (second) await closeServer(second).catch(() => {});
+      await closeServer(first);
     }
   });
 });

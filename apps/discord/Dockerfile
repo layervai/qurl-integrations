@@ -40,6 +40,9 @@ USER node
 # runtime overrides PORT, update EXPOSE + this line together.
 # start-period=30s matches the 30s client.login() timeout in index.js —
 # the /health endpoint returns 503 until the Discord gateway sends READY.
+# NOTE: On Fargate this Dockerfile HEALTHCHECK is cosmetic — ECS uses the
+# task-def `healthCheck` (re-added in the infra follow-up). Tune the
+# task-def values, not these, for production behavior.
 # The probe address (127.0.0.1) MUST match the listener's bind address in
 # gateway-health.js — binding ::1 while probing 127.0.0.1 (or vice versa)
 # is a classic silent-probe-failure mode.
