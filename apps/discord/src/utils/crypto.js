@@ -79,6 +79,26 @@ function encrypt(plaintext) {
     }
     return plaintext;
   }
+  return encryptWithKey(key, plaintext);
+}
+
+// Fail-closed variant of encrypt(): throws when KEY_ENCRYPTION_KEY is unset
+// instead of silently returning plaintext. Use this on persistence paths
+// that handle live third-party credentials (e.g. orphaned GitHub OAuth
+// access tokens) where a plaintext fallback is unacceptable even in
+// dev/test/staging — the boot gate in index.js already requires KEK in
+// any environment that hands out real GitHub tokens, so this is
+// defense-in-depth against a misconfigured deploy that bypasses the gate.
+function encryptStrict(plaintext) {
+  if (plaintext == null) return plaintext;
+  const key = getKey();
+  if (!key) {
+    throw new Error('KEY_ENCRYPTION_KEY is required to persist this value but is not set. Refusing to store sensitive data in plaintext.');
+  }
+  return encryptWithKey(key, plaintext);
+}
+
+function encryptWithKey(key, plaintext) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
   const ct = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
@@ -131,7 +151,7 @@ function decrypt(value) {
 // encrypt call mid-request).
 function _resetKeyCache() { cachedKey = null; cachedPrevKey = null; plaintextWarned = false; }
 
-const exports_ = { encrypt, decrypt };
+const exports_ = { encrypt, encryptStrict, decrypt };
 if (process.env.NODE_ENV !== 'production') {
   exports_._resetKeyCache = _resetKeyCache;
 }

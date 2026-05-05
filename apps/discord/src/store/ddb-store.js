@@ -61,7 +61,7 @@ const {
   BatchWriteCommand,
 } = require('@aws-sdk/lib-dynamodb');
 
-const { encrypt, decrypt } = require('../utils/crypto');
+const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
 
@@ -1381,7 +1381,11 @@ async function recordOrphanedToken(accessToken) {
       TableName: TABLES.orphaned_oauth_tokens,
       Item: {
         token_hash: sha256Hex(accessToken),
-        access_token: encrypt(accessToken),
+        // encryptStrict (not encrypt) so a missing KEY_ENCRYPTION_KEY refuses
+        // to persist instead of falling through to plaintext. The boot gate
+        // in index.js already blocks this path in any deploy that hands out
+        // real GitHub tokens; this is the in-process fail-closed backstop.
+        access_token: encryptStrict(accessToken),
         recorded_at: nowIso(),
         expires_at: expiresAt,
       },

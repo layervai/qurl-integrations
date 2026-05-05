@@ -31,9 +31,20 @@ jest.mock('../src/logger', () => ({
 
 // Mock crypto wrapper: pass-through so tests can assert on
 // plaintext that flows into the DDB Item. Real encryption is
-// exercised by crypto.test.js.
+// exercised by crypto.test.js. encryptStrict shares the encrypt
+// stub here — its fail-closed behavior is exercised in
+// crypto.test.js + database-module.test.js, and the
+// `mockFailClosed` toggle below lets this suite simulate the
+// throw without a process-wide env mutation.
+let mockFailClosed = false;
 jest.mock('../src/utils/crypto', () => ({
   encrypt: (v) => `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`,
+  encryptStrict: (v) => {
+    if (mockFailClosed) {
+      throw new Error('KEY_ENCRYPTION_KEY is required to persist this value but is not set.');
+    }
+    return `enc:v1:IV:TAG:${Buffer.from(v || '').toString('hex')}`;
+  },
   decrypt: (v) => {
     if (!v || !v.startsWith('enc:v1:')) return v;
     const parts = v.split(':');
@@ -433,6 +444,20 @@ describe('orphaned tokens', () => {
     err.name = 'ProvisionedThroughputExceededException';
     ddbMock.on(PutCommand).rejects(err);
     await expect(store.recordOrphanedToken('ghp_abc123')).rejects.toThrow(/throttled/);
+  });
+
+  test('recordOrphanedToken: refuses to issue a Put when KEY_ENCRYPTION_KEY is unset (fail-closed, defense-in-depth backstop for index.js boot gate)', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    mockFailClosed = true;
+    try {
+      await expect(store.recordOrphanedToken('ghp_should_not_persist'))
+        .rejects.toThrow(/KEY_ENCRYPTION_KEY is required/);
+      // Critical: no DDB write was issued — the credential never leaves
+      // process memory. A retry that gains a key would re-attempt cleanly.
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    } finally {
+      mockFailClosed = false;
+    }
   });
 
   test('decryptOrphanedToken: unwraps via crypto util (now async for contract parity)', async () => {

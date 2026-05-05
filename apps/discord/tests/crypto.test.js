@@ -12,7 +12,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 const nodeCrypto = require('crypto');
-const { encrypt, decrypt, _resetKeyCache } = require('../src/utils/crypto');
+const { encrypt, encryptStrict, decrypt, _resetKeyCache } = require('../src/utils/crypto');
 
 const VALID_KEY = nodeCrypto.randomBytes(32).toString('base64');
 
@@ -104,6 +104,34 @@ describe('utils/crypto', () => {
       delete process.env.KEY_ENCRYPTION_KEY;
       _resetKeyCache();
       expect(() => decrypt(ct)).toThrow(/KEY_ENCRYPTION_KEY is not set/);
+    });
+  });
+
+  describe('encryptStrict (fail-closed variant for sensitive persistence)', () => {
+    it('produces ciphertext indistinguishable from encrypt() when KEK is set', () => {
+      process.env.KEY_ENCRYPTION_KEY = VALID_KEY;
+      _resetKeyCache();
+      const ct = encryptStrict('github-oauth-token');
+      expect(ct.startsWith('enc:v1:')).toBe(true);
+      expect(decrypt(ct)).toBe('github-oauth-token');
+    });
+
+    it('passes through null/undefined unchanged (matches encrypt() ergonomics)', () => {
+      process.env.KEY_ENCRYPTION_KEY = VALID_KEY;
+      _resetKeyCache();
+      expect(encryptStrict(null)).toBeNull();
+      expect(encryptStrict(undefined)).toBeUndefined();
+    });
+
+    it('throws — never returns plaintext — when KEY_ENCRYPTION_KEY is unset', () => {
+      _resetKeyCache();
+      expect(() => encryptStrict('github-oauth-token')).toThrow(/KEY_ENCRYPTION_KEY is required/);
+    });
+
+    it('throws on a malformed KEY_ENCRYPTION_KEY (no silent fallback)', () => {
+      process.env.KEY_ENCRYPTION_KEY = Buffer.from('too-short').toString('base64');
+      _resetKeyCache();
+      expect(() => encryptStrict('x')).toThrow(/KEY_ENCRYPTION_KEY is malformed/);
     });
   });
 });

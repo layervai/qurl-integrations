@@ -16,6 +16,12 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
+// recordOrphanedToken uses encryptStrict which throws when KEY_ENCRYPTION_KEY
+// is unset. The orphaned-token test below requires a real key; the
+// fail-closed-without-KEK behavior is asserted in tests/crypto.test.js +
+// the dedicated test at the end of this file.
+process.env.KEY_ENCRYPTION_KEY = require('crypto').randomBytes(32).toString('base64');
+
 const db = require('../src/database');
 
 afterAll(() => {
@@ -378,6 +384,25 @@ describe('database module', () => {
       db.recordOrphanedToken('gho_fakefake1');
       db.recordOrphanedToken('gho_fakefake2');
       expect(db.countOrphanedTokens()).toBe(2);
+    });
+
+    it('refuses to persist when KEY_ENCRYPTION_KEY is unset (fail-closed, no plaintext fallback)', () => {
+      // Defense-in-depth backstop: the boot gate in index.js already
+      // refuses to start when GITHUB_CLIENT_SECRET is set without KEK,
+      // but if a misconfigured deploy ever bypasses that, the data
+      // layer must still refuse to write the token in the clear.
+      const before = db.countOrphanedTokens();
+      const savedKey = process.env.KEY_ENCRYPTION_KEY;
+      delete process.env.KEY_ENCRYPTION_KEY;
+      try {
+        const { _resetKeyCache } = require('../src/utils/crypto');
+        _resetKeyCache();
+        expect(() => db.recordOrphanedToken('gho_should_not_persist')).toThrow(/KEY_ENCRYPTION_KEY is required/);
+        expect(db.countOrphanedTokens()).toBe(before);
+      } finally {
+        process.env.KEY_ENCRYPTION_KEY = savedKey;
+        require('../src/utils/crypto')._resetKeyCache();
+      }
     });
   });
 });

@@ -48,6 +48,19 @@ function missingProdKeys(env, isOpenNHPActive) {
   return prodRequired(isOpenNHPActive).filter(k => !env[k]);
 }
 
+// KEY_ENCRYPTION_KEY is independently required in any environment that
+// hands out real GitHub OAuth tokens — i.e. when GITHUB_CLIENT_SECRET is
+// set — even outside NODE_ENV=production. Without this gate, a staging
+// or preview deploy would pass index.js's prod block, hand out
+// `read:user` tokens, and then silently persist orphaned tokens in the
+// clear via crypto.encrypt's plaintext fallback. Returns the missing
+// keys so index.js can name them in the failure message; empty list
+// when GITHUB_CLIENT_SECRET is unset (no token-issuing surface).
+function missingKekRequiredKeys(env) {
+  if (!env.GITHUB_CLIENT_SECRET) return [];
+  return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
+}
+
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -88,6 +101,7 @@ module.exports = {
   prodRequired,
   missingBootKeys,
   missingProdKeys,
+  missingKekRequiredKeys,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };

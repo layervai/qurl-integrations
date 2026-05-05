@@ -1,5 +1,5 @@
 const Database = require('better-sqlite3');
-const { encrypt, decrypt } = require('./utils/crypto');
+const { encrypt, encryptStrict, decrypt } = require('./utils/crypto');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
@@ -830,8 +830,12 @@ const dbModule = {
   },
 
   recordOrphanedToken(accessToken) {
+    // encryptStrict (not encrypt) so a missing KEY_ENCRYPTION_KEY refuses
+    // to persist instead of falling through to plaintext. The boot gate
+    // in index.js already blocks this path in any deploy that hands out
+    // real GitHub tokens; this is the in-process fail-closed backstop.
     const stmt = db.prepare('INSERT INTO orphaned_oauth_tokens (access_token) VALUES (?)');
-    stmt.run(encrypt(accessToken));
+    stmt.run(encryptStrict(accessToken));
   },
 
   countOrphanedTokens() {

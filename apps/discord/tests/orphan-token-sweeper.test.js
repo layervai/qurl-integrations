@@ -18,6 +18,11 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
+// recordOrphanedToken now uses encryptStrict, which fails closed when
+// KEY_ENCRYPTION_KEY is unset. The sweeper test fixture seeds rows
+// through the real database module, so a real key is required.
+process.env.KEY_ENCRYPTION_KEY = require('crypto').randomBytes(32).toString('base64');
+
 const db = require('../src/database');
 const { sweepOnce } = require('../src/orphan-token-sweeper');
 
