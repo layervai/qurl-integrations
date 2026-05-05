@@ -23,18 +23,35 @@ const TYPE_COLORS = {
 };
 
 /**
- * Render a styled HTML page
+ * Render a styled HTML page.
+ *
+ * `details` (optional) renders a label/value list above the subtext —
+ * used by the qURL OAuth success page to surface the (guild, qURL email,
+ * key prefix) binding readout in distinct typography. Each entry's label
+ * and value pass through `escapeHtml` so untrusted values can't smuggle
+ * markup. PR #177 follow-up C.5 — replaces the prior prose-only subtext
+ * which read flat against the page background.
+ *
  * @param {Object} options
  * @param {string} options.title - Page title
  * @param {string} options.icon - Emoji icon
  * @param {string} options.heading - Main heading
- * @param {string} options.message - Message body (HTML-escaped at render time)
- * @param {string} [options.subtext] - Optional subtext
+ * @param {string} options.message - Message body
+ * @param {string} [options.subtext] - Optional subtext (rendered after `details`)
+ * @param {Array<{label:string,value:string}>} [options.details] - Structured key/value rows
  * @param {'success'|'error'|'warning'|'info'} [options.type='info'] - Page type for coloring
  * @param {boolean} [options.showDiscordButton=false] - Show "Open Discord" button
  */
-function renderPage({ title, icon, heading, message, subtext, type = 'info', showDiscordButton = false }) {
+function renderPage({ title, icon, heading, message, subtext, details, type = 'info', showDiscordButton = false }) {
   const color = TYPE_COLORS[type] || TYPE_COLORS.info;
+
+  const detailsHtml = Array.isArray(details) && details.length > 0
+    ? `<dl class="details">${details.map((d) => `
+            <div class="row">
+              <dt>${escapeHtml(d.label)}</dt>
+              <dd>${escapeHtml(d.value)}</dd>
+            </div>`).join('')}</dl>`
+    : '';
 
   return `
     <!DOCTYPE html>
@@ -82,6 +99,31 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
           font-size: 16px;
           line-height: 1.5;
         }
+        .details {
+          margin: 20px 0 12px 0;
+          padding: 16px;
+          background: rgba(0,0,0,0.25);
+          border-radius: 8px;
+          text-align: left;
+          font-size: 14px;
+        }
+        .details .row {
+          display: flex;
+          justify-content: space-between;
+          padding: 4px 0;
+          gap: 12px;
+        }
+        .details dt {
+          color: #aaa;
+          flex-shrink: 0;
+        }
+        .details dd {
+          margin: 0;
+          color: #fff;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          word-break: break-all;
+          text-align: right;
+        }
         .subtext {
           font-size: 14px;
           color: #888;
@@ -122,6 +164,7 @@ function renderPage({ title, icon, heading, message, subtext, type = 'info', sho
         <div class="icon">${escapeHtml(icon)}</div>
         <h1>${escapeHtml(heading)}</h1>
         <p class="message">${escapeHtml(message)}</p>
+        ${detailsHtml}
         ${subtext ? `<p class="subtext">${escapeHtml(subtext)}</p>` : ''}
         ${showDiscordButton ? `
           <a href="discord://" class="btn">Open Discord</a>

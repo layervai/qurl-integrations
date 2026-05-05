@@ -7,6 +7,8 @@ const db = require('./store');
 const logger = require('./logger');
 const { renderPage } = require('./templates/page');
 const oauthRouter = require('./routes/oauth');
+const qurlOAuthRouter = require('./routes/qurl-oauth');
+const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
@@ -16,15 +18,24 @@ const app = express();
 // Leaving it unset (dev direct-connect) ignores X-Forwarded-For so a local
 // caller can't spoof it to bypass rate limiting. Staging behind an LB
 // should set TRUST_PROXY=1 even with NODE_ENV != production.
+//
+// SECURITY: ALWAYS pass a finite POSITIVE integer to `app.set('trust
+// proxy', …)`. Express also accepts `true` (trust ALL hops) and `'true'`
+// (string), both of which let an attacker spoof X-Forwarded-For via any
+// upstream proxy to rotate their apparent IP and bypass the per-IP rate
+// limiter. The parseInt + Number.isFinite + > 0 chain below rejects all
+// of those: `'true'` / `'yes'` parse to NaN, negative values are
+// dropped, and a missing env falls through to the production-only
+// default of `1` (one hop = the ALB) rather than `true`.
 if (process.env.TRUST_PROXY) {
   const hops = parseInt(process.env.TRUST_PROXY, 10);
   if (Number.isFinite(hops) && hops > 0) {
     app.set('trust proxy', hops);
   } else {
-    logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY}`);
+    logger.warn(`Ignoring invalid TRUST_PROXY=${process.env.TRUST_PROXY} (must be a positive integer hop count, NOT 'true')`);
   }
 } else if (process.env.NODE_ENV === 'production') {
-  // Default for production if nothing configured.
+  // Default for production if nothing configured. Numeric, NEVER boolean.
   app.set('trust proxy', 1);
 }
 
@@ -186,6 +197,42 @@ if (config.isOpenNHPActive) {
   logger.info('Multi-tenant mode: /auth and /webhook routes not mounted (OpenNHP GitHub integration is dormant).');
 } else {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
+}
+
+// Cache-Control: no-store on every response from the OAuth surfaces —
+// success page surfaces guild + qURL email + key prefix; error pages
+// could leak detail in the future; not-configured page is also OAuth-
+// adjacent. Applying as a router-level default removes a conditional
+// invariant per-handler (round-9 #6) and is zero-cost on these
+// low-traffic paths. `no-store` alone is sufficient — intermediates
+// MUST NOT cache regardless of any other header.
+function noStoreHeaders(req, res, next) {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}
+
+// qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback) — separate
+// from the OpenNHP gate above. These always mount because /qurl setup is
+// the canonical path for any guild (multi-tenant or single-guild) to
+// configure a qURL API key, and the route gates internally on
+// config.isQurlOAuthConfigured (returns 503 with a "not configured yet"
+// page when AUTH0_* env vars are unset, rather than a hard 404). That way
+// flipping the AUTH0_* secrets in SSM is the only step needed to turn
+// OAuth on — no code change or env-flag re-flip required.
+app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
+if (!config.isQurlOAuthConfigured) {
+  logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
+}
+
+// Stage-2 Discord install callback. Mounts at /oauth/discord/callback —
+// the redirect_uri Discord OAuth2 hits when an admin clicks "Add to
+// Discord" + selects a server. Always mount so the redirect URI is
+// stable regardless of config; the route gates internally on
+// config.isDiscordInstallConfigured (returns 503 when DISCORD_CLIENT_SECRET
+// or AUTH0_* unset).
+app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
+if (!config.isDiscordInstallConfigured) {
+  logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)

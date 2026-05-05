@@ -99,15 +99,71 @@ if (!normalizedGuildId && enableOpenNHPFeatures) {
 // what "multi-tenant" means — only touches this file.
 const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
 
+// AUTH0_DOMAIN must be a bare hostname — the codebase composes it as
+// `https://${AUTH0_DOMAIN}/...` for the JWKS endpoint, /authorize, and
+// /oauth/token. Round-9 #2: typo'd values like 'https://layerv.auth0.com'
+// or a placeholder string would silently flip isQurlOAuthConfigured on,
+// then break under load with a confusing URL parse error. Reject at
+// config-load time so the bot fails to enable OAuth (legacy fallback
+// path activates) instead of crashing mid-flow.
+function isValidAuth0DomainShape(d) {
+  if (typeof d !== 'string' || !d) return false;
+  // DNS-shape cap: RFC 1035 maxes at 253 chars total. Auth0 domains in
+  // practice are short (e.g., layerv.us.auth0.com), but an explicit
+  // cap is clearer than relying on a regex bound.
+  if (d.length > 253) return false;
+  // Reject any scheme prefix or path — domain only.
+  if (/[:/?#]/.test(d)) return false;
+  // Bare hostname, letters/digits/dots/dashes, must contain at least
+  // one dot (rejects "placeholder" / "localhost" while permitting
+  // custom Auth0 domains like auth.layerv.ai). Case-insensitive on
+  // input — Auth0 domains are canonically lowercase but we don't
+  // reject mixed case.
+  return /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d);
+}
+
+// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
+// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
+// flow. False = degrade to the legacy modal-paste flow (kept until
+// Justin registers the Auth0 app + sets prod SSM secrets). Single
+// derivation point so commands.js + routes/qurl-oauth.js + server.js
+// agree on what "configured" means.
+const isQurlOAuthConfigured = Boolean(
+  isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
+  && process.env.AUTH0_CLIENT_ID
+  && process.env.AUTH0_CLIENT_SECRET
+  && process.env.AUTH0_AUDIENCE,
+);
+
+// True when the Stage-2 "Add to Discord, select server" install flow can
+// run end-to-end: needs the bot's Discord OAuth2 client secret (separate
+// from the bot token used for normal operations) on top of qURL OAuth.
+// The /oauth/discord/callback route gates on this; it returns 503 with a
+// "not configured" page when false, so the install link still completes
+// (bot lands in the server) but the chained Auth0 leg won't run until
+// Justin sets DISCORD_CLIENT_SECRET in SSM.
+const isDiscordInstallConfigured = Boolean(
+  isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
+);
+
 // Configuration from environment variables
 module.exports = {
   // Discord
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID,
+  // Required for the Stage-2 "Add to Discord, select server" install
+  // callback (src/routes/discord-install.js). Not used by normal bot
+  // operations — only by the OAuth2 token exchange when an admin
+  // installs the bot via the install link. Optional: omit and the
+  // /oauth/discord/callback route will return 503 with a documented
+  // "not configured" page until Justin sets the secret.
+  DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
   GUILD_ID: normalizedGuildId,
   isMultiTenant,
   ENABLE_OPENNHP_FEATURES: enableOpenNHPFeatures,
   isOpenNHPActive,
+  isQurlOAuthConfigured,
+  isDiscordInstallConfigured,
 
   // Role names for progression
   CONTRIBUTOR_ROLE_NAME: process.env.CONTRIBUTOR_ROLE_NAME || 'Contributor',
@@ -131,6 +187,17 @@ module.exports = {
   GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
   GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
   GITHUB_WEBHOOK_SECRET: process.env.GITHUB_WEBHOOK_SECRET,
+
+  // qURL OAuth (Auth0) — for /qurl setup admin consent flow.
+  // When unset, /qurl setup falls back to the legacy modal-paste path so the
+  // bot stays usable until Justin registers the Auth0 application + drops
+  // these into prod SSM. See project_qurl_bot_onboarding_model.md memory for
+  // the OAuth-app shape (Regular Web Application, callback URL = BASE_URL +
+  // /oauth/qurl/callback, scopes qurl:write + qurl:read).
+  AUTH0_DOMAIN: process.env.AUTH0_DOMAIN,
+  AUTH0_CLIENT_ID: process.env.AUTH0_CLIENT_ID,
+  AUTH0_CLIENT_SECRET: process.env.AUTH0_CLIENT_SECRET,
+  AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,
 
   // Allowed GitHub organizations (comma-separated)
   ALLOWED_GITHUB_ORGS: (process.env.ALLOWED_GITHUB_ORGS || 'OpenNHP').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
