@@ -164,6 +164,21 @@ describe('qurl-oauth routes', () => {
       }
     });
 
+    it('emits Cache-Control: no-store on every /oauth/qurl/* response (router-level pin)', async () => {
+      // Round-9 #6 moved no-store from per-handler to a router-level
+      // middleware in server.js. Pin here so a refactor that drops
+      // the middleware (or an Express version bump that changes
+      // header-merge order) can't silently let an intermediate cache
+      // a success page that surfaces (guild + qURL email + key
+      // prefix). Also cover error/start surfaces so the invariant
+      // applies to every OAuth response, not just success.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      const start = await request(app).get(`/oauth/qurl/start?state=${encodeURIComponent(state)}`);
+      expect(start.headers['cache-control']).toBe('no-store');
+      const startBad = await request(app).get('/oauth/qurl/start');
+      expect(startBad.headers['cache-control']).toBe('no-store');
+    });
+
     it('rejects array-shaped state query (?state=a&state=b) via singleStringParam', async () => {
       // Express parses repeated query params as arrays; `String([...])`
       // would join with commas and pass through. singleStringParam
@@ -251,6 +266,36 @@ describe('qurl-oauth routes', () => {
       );
       expect(res.status).toBe(400);
       expect(res.text).toMatch(/same browser tab/i);
+    });
+
+    it('cookie value URL-decodes to the same state used in the timingSafeEqual compare (round-9 #8 follow-up)', async () => {
+      // readCookie runs decodeURIComponent on the cookie value; the
+      // callback then does timingSafeEqual against query.state. The
+      // state token is base64url-safe by construction (no chars that
+      // encodeURIComponent escapes), so the encode/decode round-trip
+      // is effectively the identity — but if a future state-shape
+      // change introduces a `%`-needing char (e.g., dropping the
+      // base64url variant), this test would catch the drift before
+      // the cookie/state CSRF check silently fails for every user.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      // Pre-condition: state IS URL-safe today; we want this assertion
+      // to start failing if a refactor introduces `%`-needing chars
+      // (so it forces a deliberate update of readCookie's contract).
+      expect(encodeURIComponent(state)).toBe(state);
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const res = await request(app)
+        .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`)
+        .set('Cookie', `qurl_setup_session=${encodeURIComponent(state)}`);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('qURL is connected');
     });
 
     it('400s on cookie/state mismatch (cookie from a different state)', async () => {

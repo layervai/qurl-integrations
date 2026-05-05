@@ -15,26 +15,20 @@
 // One unbroken click chain from "Add to Discord" → "qURL is ready" — no
 // admin-visible step between Discord consent and Auth0 consent.
 //
-// CSRF posture (read together with qurl-oauth.js:renderSuccess):
-//   The `state` param Discord echoes is best-effort (admins paste the
-//   "Add to Discord" link from layerv.ai, not from a per-session form),
-//   so we don't validate it as a session-bound token. The defense
-//   stacks across two surfaces:
-//   1. Forged-callback rejection — only Discord can mint a `code` that
-//      pairs with our DISCORD_CLIENT_ID/SECRET, so an attacker forging
-//      a /oauth/discord/callback request without going through Discord
-//      OAuth2 can't get past the token exchange.
-//   2. Confused-deputy mitigation (LOAD-BEARING — do not remove without
-//      replacing) — an attacker who pre-runs Discord install in their
-//      own browser then forwards the chained Auth0-redirect URL to a
-//      victim WOULD pass step 1, because the Discord code is real.
-//      The success page in qurl-oauth.js's renderSuccess surfaces the
-//      bound (guildId, qurlAccountEmail, keyPrefix) tuple so the
-//      victim can spot the mismatch ("this isn't my server" / "this
-//      isn't my qURL email") before usage starts. This is the only
-//      thing standing between confused-deputy and a silent attacker
-//      key-bind, until the Auth0 consent screen is templated to show
-//      the target Discord guild (out of scope here — see PR #177).
+// CSRF posture (LOAD-BEARING — do not remove without replacing):
+//   Discord's echoed `state` param is intentionally NOT validated here —
+//   admins land via a static "Add to Discord" link on layerv.ai, not a
+//   per-session form, so there's no session-bound token to check
+//   against. Defense stacks on two surfaces:
+//     1. Token exchange — only Discord can mint a `code` that pairs
+//        with our DISCORD_CLIENT_ID/SECRET; a forged callback can't
+//        get past the POST /oauth2/token call.
+//     2. Success-page binding readout in qurl-oauth.js's renderSuccess
+//        surfaces (guildId, qurlAccountEmail, keyPrefix) so a victim
+//        of attacker-pre-runs-install-then-forwards-URL can spot the
+//        mismatch before usage starts.
+//   Issue #179 tracks the cross-repo signed-install-state work that
+//   would close the asterisk on (2) by validating state at the entry.
 
 const express = require('express');
 const config = require('../config');
