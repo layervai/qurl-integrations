@@ -40,7 +40,7 @@ const BODY_NOT_FOUND = JSON.stringify({ status: 'not_found' });
  *   and DB are torn down cleanly before exit.
  * @returns {import('node:http').Server}
  */
-function startGatewayHealthServer(isReady, onFatalError) {
+function startGatewayHealthServer(isReady, onFatalError = () => process.exit(1)) {
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
@@ -89,10 +89,9 @@ function startGatewayHealthServer(isReady, onFatalError) {
   // instead of an opaque uncaught-exception V8 stack trace. Route
   // through the caller's fatal-error handler so index.js can tear
   // down the Discord WebSocket + DB cleanly via gracefulShutdown.
-  const fatal = onFatalError || (() => process.exit(1));
   server.on('error', (err) => {
     logger.error('Gateway health listener failed', { error: err.message, code: err.code });
-    fatal(err);
+    onFatalError(err);
   });
 
   // Bind to loopback only. The wget probe runs INSIDE the container,
