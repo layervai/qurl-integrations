@@ -21,13 +21,24 @@ jest.mock('../src/logger', () => ({
 // recordOrphanedToken now uses encryptStrict, which fails closed when
 // KEY_ENCRYPTION_KEY is unset. The sweeper test fixture seeds rows
 // through the real database module, so a real key is required.
+const KEK_PRIOR = process.env.KEY_ENCRYPTION_KEY;
 process.env.KEY_ENCRYPTION_KEY = require('crypto').randomBytes(32).toString('base64');
 
 const db = require('../src/database');
 const { sweepOnce } = require('../src/orphan-token-sweeper');
 
 const originalFetch = globalThis.fetch;
-afterAll(() => { globalThis.fetch = originalFetch; db.close(); });
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  db.close();
+  // Restore the prior env state so a shared-runner setup can't leak
+  // this suite's key into a sibling test file.
+  if (KEK_PRIOR === undefined) {
+    delete process.env.KEY_ENCRYPTION_KEY;
+  } else {
+    process.env.KEY_ENCRYPTION_KEY = KEK_PRIOR;
+  }
+});
 
 describe('orphan token sweeper', () => {
   beforeEach(() => {

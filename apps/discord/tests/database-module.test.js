@@ -20,12 +20,21 @@ jest.mock('../src/logger', () => ({
 // is unset. The orphaned-token test below requires a real key; the
 // fail-closed-without-KEK behavior is asserted in tests/crypto.test.js +
 // the dedicated test at the end of this file.
+const KEK_PRIOR = process.env.KEY_ENCRYPTION_KEY;
 process.env.KEY_ENCRYPTION_KEY = require('crypto').randomBytes(32).toString('base64');
 
 const db = require('../src/database');
 
 afterAll(() => {
   db.close();
+  // Restore the prior env state so a future shared-runner setup
+  // (e.g. --runInBand merging suites into one worker) can't leak this
+  // suite's key into a sibling test file.
+  if (KEK_PRIOR === undefined) {
+    delete process.env.KEY_ENCRYPTION_KEY;
+  } else {
+    process.env.KEY_ENCRYPTION_KEY = KEK_PRIOR;
+  }
 });
 
 describe('database module', () => {

@@ -185,8 +185,11 @@ if (kekMissing.length > 0) {
 }
 if (process.env.KEY_ENCRYPTION_KEY) {
   try {
-    const { encrypt, decrypt } = require('./utils/crypto');
-    if (decrypt(encrypt('boot-smoke')) !== 'boot-smoke') {
+    // encryptStrict (not encrypt) so a future refactor that drops the
+    // outer env-var guard fails loudly here instead of silently falling
+    // through encrypt's plaintext-passthrough branch.
+    const { encryptStrict, decrypt } = require('./utils/crypto');
+    if (decrypt(encryptStrict('boot-smoke')) !== 'boot-smoke') {
       throw new Error('round-trip mismatch');
     }
   } catch (err) {

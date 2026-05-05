@@ -69,10 +69,12 @@ function encrypt(plaintext) {
   if (plaintext == null) return plaintext;
   const key = getKey();
   if (!key) {
-    // Warn once per process so staging/preview environments without
-    // KEY_ENCRYPTION_KEY don't silently store secrets in plaintext.
-    // index.js fails boot in NODE_ENV=production so this branch only
-    // runs in dev/test/staging.
+    // Warn once per process so dev installs without KEY_ENCRYPTION_KEY
+    // don't silently store secrets in plaintext. index.js fails boot
+    // when NODE_ENV=production OR when GITHUB_CLIENT_SECRET is set, so
+    // this branch only runs in dev/test environments without OAuth
+    // wiring. For live third-party credentials, callers MUST use
+    // encryptStrict() instead.
     if (!plaintextWarned) {
       plaintextWarned = true;
       logger.warn('KEY_ENCRYPTION_KEY is not set — secrets are being stored in PLAINTEXT. Generate a key with `node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"` and set KEY_ENCRYPTION_KEY in the environment before using in any shared deployment.');
@@ -90,6 +92,10 @@ function encrypt(plaintext) {
 // any environment that hands out real GitHub tokens, so this is
 // defense-in-depth against a misconfigured deploy that bypasses the gate.
 function encryptStrict(plaintext) {
+  // Null/undefined pass through unchanged, intentionally matching
+  // encrypt(). Callers that should never see a null at this point
+  // (e.g. the orphan-token revoke path) gate the value upstream;
+  // tightening to a throw here would break that contract.
   if (plaintext == null) return plaintext;
   const key = getKey();
   if (!key) {

@@ -32,6 +32,12 @@ function bootRequired(isOpenNHPActive) {
 // global-fallback for /qurl send; single-guild-plain and multi-tenant
 // deployments both rely on per-guild /qurl setup, so it's optional
 // outside the OpenNHP community server.
+//
+// KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys for
+// non-overlapping reasons: this entry catches prod deploys without
+// GITHUB_CLIENT_SECRET (KEK still protects guild_configs.qurl_api_key
+// + qurl_send_configs.attachment_url), while missingKekRequiredKeys
+// catches the staging/preview-with-OAuth case the prod block doesn't.
 function prodRequired(isOpenNHPActive) {
   if (!isOpenNHPActive) return ['METRICS_TOKEN', 'KEY_ENCRYPTION_KEY'];
   return ['METRICS_TOKEN', 'QURL_API_KEY', 'KEY_ENCRYPTION_KEY'];
