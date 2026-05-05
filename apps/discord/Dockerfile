@@ -40,6 +40,9 @@ USER node
 # runtime overrides PORT, update EXPOSE + this line together.
 # start-period=30s matches the 30s client.login() timeout in index.js —
 # the /health endpoint returns 503 until the Discord gateway sends READY.
+# The probe address (127.0.0.1) MUST match the listener's bind address in
+# gateway-health.js — binding ::1 while probing 127.0.0.1 (or vice versa)
+# is a classic silent-probe-failure mode.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD wget -qO- "http://127.0.0.1:3000/health" || exit 1
 

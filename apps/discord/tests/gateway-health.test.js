@@ -67,6 +67,7 @@ function closeServer(server) {
 }
 
 describe('gateway-health server', () => {
+  beforeEach(() => jest.clearAllMocks());
   test('GET /health returns 200 ok when isReady() is true', async () => {
     const server = startGatewayHealthServer(() => true);
     await waitForListening(server);

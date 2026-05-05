@@ -46,14 +46,16 @@ function startGatewayHealthServer(isReady, onFatalError, port = config.PORT) {
   const server = http.createServer((req, res) => {
     // Strip query string before matching — some ECS/ALB probe configs
     // append a cache-busting `?ts=…`; we don't want that to 404.
-    const { pathname } = new URL(req.url, 'http://127.0.0.1');
+    // split() instead of new URL() because URL() throws on malformed
+    // input (reachable from a buggy probe or L7 scanner via ECS Exec).
+    const path = req.url.split('?', 1)[0];
 
     // GET and HEAD only. Wget uses GET; HEAD is semantically
     // equivalent (RFC 9110 §9.3.2) and some load-balancer probes
     // default to it — accepting both avoids silent probe failure if
     // the infra follow-up specifies HEAD. Node automatically strips
     // the response body for HEAD requests.
-    if ((req.method !== 'GET' && req.method !== 'HEAD') || pathname !== '/health') {
+    if ((req.method !== 'GET' && req.method !== 'HEAD') || path !== '/health') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(BODY_NOT_FOUND);
       return;

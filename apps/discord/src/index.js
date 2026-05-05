@@ -405,7 +405,13 @@ async function start() {
     // Returns 503 until client.isReady() flips true (after READY
     // from the Discord gateway). Dockerfile --start-period=30s
     // covers this boot window so ECS doesn't replace the task early.
-    httpServer = startGatewayHealthServer(() => client.isReady(), () => gracefulShutdown(1));
+    httpServer = startGatewayHealthServer(() => client.isReady(), () => {
+      // Null out so gracefulShutdown doesn't try to .close() a server
+      // that never finished listening (would log a confusing
+      // "Server is not running" error).
+      httpServer = null;
+      gracefulShutdown(1);
+    });
   }
 
   // Background retry-revoke for any OAuth tokens whose initial
