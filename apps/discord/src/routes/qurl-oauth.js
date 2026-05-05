@@ -214,9 +214,9 @@ router.get('/callback', rateLimit, async (req, res) => {
     return renderError(res, 400, 'Invalid setup link', 'Setup must be completed in the same browser tab where /qurl setup was clicked.');
   }
   // Both inputs are strings (cookieState early-returned if null;
-  // state = String(req.query.state || '')), so Buffer.from doesn't
-  // throw. Length check before timingSafeEqual handles the only
-  // remaining failure mode.
+  // state came through singleStringParam, which returns '' for any
+  // non-string), so Buffer.from doesn't throw. Length check before
+  // timingSafeEqual handles the only remaining failure mode.
   const cookieBuf = Buffer.from(cookieState);
   const stateBuf = Buffer.from(state);
   const cookieMatches = cookieBuf.length === stateBuf.length

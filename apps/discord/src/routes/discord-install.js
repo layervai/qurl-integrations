@@ -37,7 +37,6 @@ const { renderPage } = require('../templates/page');
 const { signQurlOAuthState } = require('../utils/qurl-oauth-state');
 const { rateLimit } = require('../utils/oauth-rate-limit');
 const { setQurlOAuthCookie } = require('../utils/oauth-cookies');
-const { shouldPromptConsent } = require('../utils/guild-config-state');
 const { singleStringParam } = require('../utils/query-params');
 const { renderNotConfiguredPage } = require('../utils/oauth-not-configured');
 
@@ -132,10 +131,14 @@ router.get('/callback', rateLimit, async (req, res) => {
   // happened and the redundant consent screen on first install adds
   // friction without security gain.
   //
-  // We still kick off the guild-config read in parallel so the
-  // completion log line carries `previouslyConfigured` for ops
-  // (distinguishes a fresh-add from a re-install in metrics).
-  const previouslyConfiguredPromise = shouldPromptConsent(guildId, 'discord-install /callback');
+  // No DDB read here — the previous round-9 build kicked off
+  // shouldPromptConsent in parallel for a "previouslyConfigured"
+  // log field, but with prompt=consent unconditional that helper's
+  // bias-toward-true semantics were wrong for an informational
+  // metric. If we ever want the first-install vs re-install signal,
+  // pull it from setGuildApiKey's audit log or call getGuildConfig
+  // directly with a try/catch that distinguishes hit/miss/error.
+  // Round-9.6 item #3.
 
   // 1. Exchange code at Discord for an access_token. The token itself
   //    isn't long-lived state we keep — we only use it to call /users/@me
@@ -211,9 +214,6 @@ router.get('/callback', rateLimit, async (req, res) => {
   // the success-page binding readout in qurl-oauth.js's renderSuccess
   // surfaces (guild, qURL email) for visual sanity-check.
   setQurlOAuthCookie(res, req, qurlState);
-  // Resolve the parallel DDB read for the completion log only; the
-  // Auth0 prompt=consent decision is fixed for Stage-2 above.
-  const previouslyConfigured = await previouslyConfiguredPromise;
   const authorizeUrl = new URL(`https://${config.AUTH0_DOMAIN}/authorize`);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('client_id', config.AUTH0_CLIENT_ID);
@@ -223,10 +223,10 @@ router.get('/callback', rateLimit, async (req, res) => {
   authorizeUrl.searchParams.set('scope', 'qurl:write qurl:read openid email');
   authorizeUrl.searchParams.set('audience', config.AUTH0_AUDIENCE);
   authorizeUrl.searchParams.set('state', qurlState);
-  // ALWAYS prompt=consent on Stage-2 (per round-9 item #1) — see
-  // `previouslyConfiguredPromise` block at the top of this handler.
+  // ALWAYS prompt=consent on Stage-2 (per round-9 item #1) — see the
+  // confused-deputy block at the top of this handler.
   authorizeUrl.searchParams.set('prompt', 'consent');
-  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId, previouslyConfigured });
+  logger.info('Discord install complete; chaining to Auth0', { guildId, discordUserId });
   return res.redirect(302, authorizeUrl.toString());
 });
 

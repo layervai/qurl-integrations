@@ -3137,6 +3137,20 @@ const commands = [
 
         // OAuth path — preferred when configured.
         if (config.isQurlOAuthConfigured) {
+          // Fail-fast on encryption-at-rest BEFORE minting the OAuth
+          // setup link — otherwise the admin clicks through, completes
+          // the full Auth0 dance, and only then sees the 503 from
+          // /oauth/qurl/start. Same actionable message as the legacy
+          // modal-paste branch below; round-9.6 #4 surface symmetry.
+          if (!process.env.KEY_ENCRYPTION_KEY) {
+            logger.error('Refusing /qurl setup (OAuth path): KEY_ENCRYPTION_KEY is not set');
+            return interaction.reply({
+              content: '❌ **qURL is not ready to accept setup on this server.**\n\n'
+                + 'The bot operator needs to set `KEY_ENCRYPTION_KEY` (encryption-at-rest) before '
+                + '/qurl setup can store keys safely. Ask them to check the deployment env.',
+              ephemeral: true,
+            });
+          }
           const state = signQurlOAuthState(interaction.guildId, interaction.user.id);
           const startUrl = `${config.BASE_URL}/oauth/qurl/start?state=${encodeURIComponent(state)}`;
           return interaction.reply({
@@ -3287,11 +3301,22 @@ const commands = [
             ephemeral: true,
           });
         }
+        // Branch the not-configured copy on the active setup flow so
+        // the instructions match what /qurl setup actually accepts —
+        // OAuth-redirect (no api_key arg) vs legacy modal-paste.
+        // Pre-OAuth this hardcoded `setup api_key:lv_live_your_key_here`,
+        // which never matched the modal flow either; fixed in round-9.6
+        // alongside the OAuth-redirect path documentation.
+        const notConfiguredCopy = config.isQurlOAuthConfigured
+          ? '❌ **qURL is not configured for this server.**\n\n'
+            + 'Run `/qurl setup` to connect — you\'ll be redirected to layerv.ai to authorize, '
+            + 'and the bot will mint an API key bound to your server. Only server administrators can run setup.'
+          : '❌ **qURL is not configured for this server.**\n\n'
+            + '1. Sign up at **https://layerv.ai** to get your API key\n'
+            + '2. Run `/qurl setup` and paste the key into the modal\n\n'
+            + 'Only server administrators can run setup.';
         return interaction.reply({
-          content: '❌ **qURL is not configured for this server.**\n\n' +
-            '1. Sign up at **https://layerv.ai** to get your API key\n' +
-            '2. Run `/qurl setup api_key:lv_live_your_key_here`\n\n' +
-            'Only server administrators can run setup.',
+          content: notConfiguredCopy,
           ephemeral: true,
         });
       }
