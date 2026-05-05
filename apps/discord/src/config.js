@@ -99,13 +99,32 @@ if (!normalizedGuildId && enableOpenNHPFeatures) {
 // what "multi-tenant" means — only touches this file.
 const isOpenNHPActive = !isMultiTenant && enableOpenNHPFeatures;
 
-// True when all four Auth0 env vars are present — `/qurl setup` then
-// uses the OAuth-redirect flow. False = degrade to the legacy modal-paste
-// flow (kept until Justin registers the Auth0 app + sets prod SSM secrets).
-// Single derivation point so commands.js + routes/qurl-oauth.js + server.js
+// AUTH0_DOMAIN must be a bare hostname — the codebase composes it as
+// `https://${AUTH0_DOMAIN}/...` for the JWKS endpoint, /authorize, and
+// /oauth/token. Round-9 #2: typo'd values like 'https://layerv.auth0.com'
+// or a placeholder string would silently flip isQurlOAuthConfigured on,
+// then break under load with a confusing URL parse error. Reject at
+// config-load time so the bot fails to enable OAuth (legacy fallback
+// path activates) instead of crashing mid-flow.
+function isValidAuth0DomainShape(d) {
+  if (typeof d !== 'string' || !d) return false;
+  // Reject any scheme prefix or path — domain only.
+  if (/[:/?#]/.test(d)) return false;
+  // Bare hostname, lowercase letters/digits/dots/dashes, must contain
+  // at least one dot (rejects "placeholder" / "localhost" while
+  // permitting custom Auth0 domains like auth.layerv.ai). Length cap
+  // matches DNS label limits in aggregate.
+  return /^[a-z0-9][a-z0-9.-]{2,253}\.[a-z]{2,}$/i.test(d);
+}
+
+// True when all four Auth0 env vars are present AND AUTH0_DOMAIN is a
+// well-shaped hostname — `/qurl setup` then uses the OAuth-redirect
+// flow. False = degrade to the legacy modal-paste flow (kept until
+// Justin registers the Auth0 app + sets prod SSM secrets). Single
+// derivation point so commands.js + routes/qurl-oauth.js + server.js
 // agree on what "configured" means.
 const isQurlOAuthConfigured = Boolean(
-  process.env.AUTH0_DOMAIN
+  isValidAuth0DomainShape(process.env.AUTH0_DOMAIN)
   && process.env.AUTH0_CLIENT_ID
   && process.env.AUTH0_CLIENT_SECRET
   && process.env.AUTH0_AUDIENCE,

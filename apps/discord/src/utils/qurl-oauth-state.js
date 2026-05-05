@@ -51,9 +51,21 @@ const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
 // new var, drop OAUTH_STATE_SECRET. The 5-minute state TTL bounds the
 // "old links don't validate against the new key" window — no separate
 // dual-key reader needed.
+// Minimum acceptable secret length — per round-9 #4. 32 chars is the
+// floor for an HMAC-SHA256 secret with adequate entropy (matches the
+// `0`.repeat(64) test fixture's order of magnitude, well below the
+// 128-char hex secrets ops actually provisions). A 4-char accidental
+// value would HMAC just fine with no security; reject upfront.
+const MIN_STATE_SECRET_LENGTH = 32;
+
 function stateSecret() {
   const dedicated = process.env.QURL_OAUTH_STATE_SECRET || process.env.OAUTH_STATE_SECRET;
-  if (dedicated) return dedicated;
+  if (dedicated) {
+    if (dedicated.length < MIN_STATE_SECRET_LENGTH) {
+      throw new Error(`Refusing to mint qURL OAuth state: state-signing secret is shorter than ${MIN_STATE_SECRET_LENGTH} chars (got ${dedicated.length}). Provision a 64+ char value in SSM.`);
+    }
+    return dedicated;
+  }
   if (!config.GITHUB_CLIENT_SECRET) {
     const inTestHarness = process.env.NODE_ENV === 'test'
       && (process.env.JEST_WORKER_ID || process.env.CI === 'true');
@@ -66,6 +78,13 @@ function stateSecret() {
       _warnedFallback = true;
     }
     return _testFallbackSecret;
+  }
+  // GITHUB_CLIENT_SECRET fallback is also length-checked — Auth0 /
+  // GitHub provision 32+ char client secrets by default, but a manual
+  // /placeholder env on a misconfigured dev box would slip past
+  // otherwise.
+  if (config.GITHUB_CLIENT_SECRET.length < MIN_STATE_SECRET_LENGTH) {
+    throw new Error(`Refusing to mint qURL OAuth state: GITHUB_CLIENT_SECRET fallback is shorter than ${MIN_STATE_SECRET_LENGTH} chars.`);
   }
   return config.GITHUB_CLIENT_SECRET;
 }

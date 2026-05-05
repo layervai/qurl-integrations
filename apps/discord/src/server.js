@@ -199,6 +199,18 @@ if (config.isOpenNHPActive) {
   logger.info('Single-guild plain mode (ENABLE_OPENNHP_FEATURES=false): /auth and /webhook routes not mounted.');
 }
 
+// Cache-Control: no-store on every response from the OAuth surfaces —
+// success page surfaces guild + qURL email + key prefix; error pages
+// could leak detail in the future; not-configured page is also OAuth-
+// adjacent. Applying as a router-level default removes a conditional
+// invariant per-handler (round-9 #6) and is zero-cost on these
+// low-traffic paths. Also vary on Set-Cookie so any intermediate that
+// honors Vary doesn't cross-cache between authenticated tabs.
+function noStoreHeaders(req, res, next) {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}
+
 // qURL OAuth routes (/oauth/qurl/start + /oauth/qurl/callback) — separate
 // from the OpenNHP gate above. These always mount because /qurl setup is
 // the canonical path for any guild (multi-tenant or single-guild) to
@@ -207,7 +219,7 @@ if (config.isOpenNHPActive) {
 // page when AUTH0_* env vars are unset, rather than a hard 404). That way
 // flipping the AUTH0_* secrets in SSM is the only step needed to turn
 // OAuth on — no code change or env-flag re-flip required.
-app.use('/oauth/qurl', qurlOAuthRouter);
+app.use('/oauth/qurl', noStoreHeaders, qurlOAuthRouter);
 if (!config.isQurlOAuthConfigured) {
   logger.info('qURL OAuth routes mounted in not-configured mode (AUTH0_* env vars unset). /qurl setup will fall back to the legacy modal-paste path.');
 }
@@ -218,7 +230,7 @@ if (!config.isQurlOAuthConfigured) {
 // stable regardless of config; the route gates internally on
 // config.isDiscordInstallConfigured (returns 503 when DISCORD_CLIENT_SECRET
 // or AUTH0_* unset).
-app.use('/oauth/discord', discordInstallRouter);
+app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }

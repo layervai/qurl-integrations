@@ -220,6 +220,58 @@ describe('Discord install callback', () => {
       expect(loc.searchParams.get('prompt')).toBe('consent');
     });
 
+    it('cookie set at /oauth/discord/callback rides through to /oauth/qurl/callback (round-trip pin per round-9 #8)', async () => {
+      // Round-9 #8 closed: the previous tests inspected the Set-Cookie
+      // header but didn't actually replay the cookie back on the qurl
+      // callback. Path=/oauth/qurl on the cookie + request URL
+      // /oauth/qurl/callback is the prefix-match the browser uses when
+      // deciding to send the cookie back; pin it end-to-end so a
+      // future path narrowing/widening can't silently break Stage-2.
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'disc-token' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ id: '987654321098765432' }),
+        });
+      const stage2 = await request(app).get('/oauth/discord/callback?code=ok-code&guild_id=guild-1');
+      expect(stage2.status).toBe(302);
+      const setCookie = Array.isArray(stage2.headers['set-cookie'])
+        ? stage2.headers['set-cookie'].join('\n')
+        : stage2.headers['set-cookie'] || '';
+      const cookieMatch = setCookie.match(/qurl_setup_session=([^;]+)/);
+      expect(cookieMatch).not.toBeNull();
+      const cookieValue = cookieMatch[1];
+      const stateFromRedirect = new URL(stage2.headers.location).searchParams.get('state');
+      // The cookie value IS the state token (double-submit pattern).
+      expect(decodeURIComponent(cookieValue)).toBe(stateFromRedirect);
+
+      // Replay the cookie on /oauth/qurl/callback — the browser would
+      // do this because Path=/oauth/qurl matches the request path.
+      // Stub Auth0 + qurl-service so the chained callback can reach
+      // the cookie/state CSRF check.
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true, status: 201,
+          json: () => Promise.resolve({ data: { key_id: 'key-1', api_key: 'lv_live_abc', key_prefix: 'lv_live_a' } }),
+        });
+      const stage1Callback = await request(app)
+        .get(`/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(stateFromRedirect)}`)
+        .set('Cookie', `qurl_setup_session=${cookieValue}`);
+      expect(stage1Callback.status).toBe(200);
+      // Reaching the success page proves the cookie/state CSRF check
+      // passed — i.e., the cookie minted on /oauth/discord/callback
+      // would actually travel to /oauth/qurl/callback in a real
+      // browser (path attribute does its job).
+      expect(stage1Callback.text).toContain('qURL is connected');
+    });
+
     it('uses the right Discord token-exchange body shape (form-urlencoded with client creds)', async () => {
       const fetchSpy = jest.fn()
         .mockResolvedValueOnce({

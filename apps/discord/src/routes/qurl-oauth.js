@@ -66,12 +66,8 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   if (guildId) details.push({ label: 'Discord guild', value: guildId });
   if (qurlAccountEmail) details.push({ label: 'qURL account', value: qurlAccountEmail });
   if (keyPrefix) details.push({ label: 'API key prefix', value: keyPrefix });
-  // Cache-Control: no-store keeps the binding readout (qURL email,
-  // key prefix) out of any intermediate cache — back/forward cache,
-  // browser disk cache, ALB cache. Low cost, prevents the tab from
-  // surfacing a stale binding readout if the admin closes and
-  // re-opens. PR #177 round-9 review item #1.
-  res.setHeader('Cache-Control', 'no-store');
+  // Cache-Control: no-store is set as a router-level default in
+  // server.js for every /oauth/* response — see noStoreHeaders.
   return res.status(200).send(renderPage({
     title: 'qURL Connected',
     icon: '✅',
@@ -85,12 +81,6 @@ function renderSuccess(res, { guildId, keyPrefix, qurlAccountEmail }) {
   }));
 }
 
-// Error pages intentionally do NOT set `Cache-Control: no-store`
-// (unlike renderSuccess) — the headline + detail strings here don't
-// surface secrets (no api_key / email / key prefix). If a future
-// edit adds key-prefix-leaking detail to an error path, set
-// `res.setHeader('Cache-Control', 'no-store')` at the call site.
-// Round-9 item #4 — explicit so the invariant is searchable.
 function renderError(res, statusCode, headline, detail) {
   return res.status(statusCode).send(renderPage({
     title: 'qURL Setup Failed',
