@@ -331,30 +331,26 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
-      // RFC 7807 problem JSON; surface specific cases (currently just
-      // api_key_limit) before the generic catch-all so the admin sees
-      // the actual cause + the action they can take, not a "service
-      // rejected the request" wall. Parse-fail / missing-code falls
-      // through to the generic branch.
+      // Parse RFC 7807 problem JSON to discriminate user-quota hits
+      // (warn-level, dedicated 429 page) from service failures (error-
+      // level, generic 502 page). `<unparseable>` distinguishes "body
+      // wasn't JSON at all" from "JSON but no error.code" in logs.
       let problemCode = '';
       try {
         const parsed = JSON.parse(errBody);
         if (typeof parsed?.error?.code === 'string') problemCode = parsed.error.code;
-      } catch { /* not JSON — fall through */ }
+      } catch { problemCode = '<unparseable>'; }
 
       if (mintResp.status === 403 && problemCode === 'api_key_limit') {
-        // User-quota hit, NOT a service failure. Log at warn (not
-        // error) so prod alerting / log-rate alarms can distinguish
-        // "qurl-service down" (logger.error) from "user on Free tier
-        // hit 3 keys" (logger.warn). Status 429 mirrors the actual
-        // semantic (Too Many Requests / quota) — qurl-service's 403
-        // is itself somewhat off-spec for a quota hit; we render the
-        // semantically correct status to the admin's browser.
+        // logger.warn (not error) so prod alerting can distinguish
+        // user-quota hits from qurl-service outages. Status 429
+        // matches the actual semantic — qurl-service's 403 is off-
+        // spec for a quota hit (RFC 7231 §6.5.3 vs RFC 6585 §4).
         logger.warn('qURL API key mint refused: api_key_limit', {
           status: mintResp.status, problemCode, guildId,
         });
         return renderError(res, 429, 'qURL API key limit reached',
-          'Your qURL account has hit its API key limit (Free tier allows 3). Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl setup again.');
+          'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl setup again.');
       }
 
       logger.error('qURL API key mint failed', {
