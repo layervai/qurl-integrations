@@ -11,6 +11,8 @@ const {
   startGatewayHeartbeat,
   startActiveGuildCount,
   readGatewayHealth,
+  noteGatewayActivity,
+  _test: gatewayMetricsTest,
 } = require('../src/gateway-metrics');
 const { AUDIT_EVENTS } = require('../src/constants');
 
@@ -35,6 +37,18 @@ function fakeClient({ isReady = true, ping = 42, ackedAgo = 5_000, guildCount = 
     guilds: { cache: { size: guildCount } },
   };
 }
+
+// Most readGatewayHealth tests want a "recent activity" baseline so
+// the activity-gate (Justin #193 §2) doesn't make every test report
+// unhealthy. Reset + tick at the start of each test that exercises
+// the composite. Tests for the pre-first-frame ("no activity yet")
+// path explicitly skip this.
+beforeEach(() => {
+  if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
+    gatewayMetricsTest._resetGatewayActivity();
+  }
+  noteGatewayActivity();
+});
 
 describe('readGatewayHealth', () => {
   test('healthy when ready, ping > 0, ack age < 60s', () => {
@@ -112,6 +126,45 @@ describe('readGatewayHealth', () => {
     expect(snap.healthy).toBe(false);
     expect(snap.ping_ms).toBe(-1);
     expect(snap.ack_age_ms).toBe(null);
+  });
+
+  test('unhealthy before the first gateway frame (lastGatewayActivityAt = 0 sentinel)', () => {
+    // Justin #193 §2: dispatch wedge / event-loop saturation case.
+    // At fresh-boot, before client.on('raw') has fired even once,
+    // lastGatewayActivityAt = 0 so activity_age_ms is null and
+    // composite must report unhealthy regardless of other signals.
+    gatewayMetricsTest._resetGatewayActivity();
+    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
+    expect(snap.healthy).toBe(false);
+    expect(snap.activity_age_ms).toBe(null);
+    expect(snap.is_ready).toBe(true); // ready, but never tick'd → still unhealthy
+  });
+
+  test('unhealthy when activity is stale (>60s — event-loop saturation)', () => {
+    gatewayMetricsTest._resetGatewayActivity();
+    // Simulate a tick 90 s ago by calling noteGatewayActivity() with a
+    // back-dated `now` injection.
+    noteGatewayActivity(() => Date.now() - 90_000);
+    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
+    expect(snap.healthy).toBe(false);
+    expect(snap.activity_age_ms).toBeGreaterThanOrEqual(60_000);
+  });
+
+  test('healthy when activity is recent and other signals OK', () => {
+    gatewayMetricsTest._resetGatewayActivity();
+    noteGatewayActivity();
+    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
+    expect(snap.healthy).toBe(true);
+    expect(snap.activity_age_ms).toBeLessThan(60_000);
+  });
+
+  test('NTP step-backward clamps activity_age_ms to 0', () => {
+    gatewayMetricsTest._resetGatewayActivity();
+    // Simulate a tick "in the future" (clock just stepped backward).
+    noteGatewayActivity(() => Date.now() + 10_000);
+    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
+    expect(snap.activity_age_ms).toBe(0);
+    expect(snap.healthy).toBe(true);
   });
 });
 

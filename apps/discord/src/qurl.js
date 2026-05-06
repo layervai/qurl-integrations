@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
@@ -59,6 +60,20 @@ async function qurlFetch(method, path, body, apiKey) {
       let bodyLen = 0;
       try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
       logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
+      // Justin's review on #193 §5: emit a dependency_auth_failure
+      // event on 401/403 from qurl-service so a paired CloudWatch
+      // metric filter can count rotated/invalid-token cases. Fires
+      // BEFORE the throw so a caller's catch path doesn't have to
+      // re-route the audit emit — the metric is independent of how
+      // the caller handles the error.
+      if (resp.status === 401 || resp.status === 403) {
+        logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+          dependency: 'qurl_service',
+          status: resp.status,
+          method,
+          path,
+        });
+      }
       if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
         const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
         logger.warn('qURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });

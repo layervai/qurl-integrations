@@ -123,6 +123,50 @@ describe('qURL client — retry logic on transient failures', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('emits dependency_auth_failure audit event on 401 (Justin #193 §5)', async () => {
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    logger.audit.mockClear();
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-auth-401')).rejects.toThrow(/401/);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      expect.objectContaining({
+        dependency: 'qurl_service',
+        status: 401,
+        method: 'GET',
+        path: '/qurls/res-auth-401',
+      }),
+    );
+  });
+
+  it('emits dependency_auth_failure audit event on 403 (Justin #193 §5)', async () => {
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    logger.audit.mockClear();
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 403, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-auth-403')).rejects.toThrow(/403/);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      expect.objectContaining({ dependency: 'qurl_service', status: 403 }),
+    );
+  });
+
+  it('does NOT emit dependency_auth_failure on retryable 503', async () => {
+    // Pin that the audit event only fires on auth-class failures —
+    // a transient 503 retry path stays quiet so the alarm count
+    // reflects auth issues specifically, not generic API errors.
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    logger.audit.mockClear();
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-503')).rejects.toThrow(/503/);
+    const authCalls = logger.audit.mock.calls.filter(
+      ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+    );
+    expect(authCalls).toHaveLength(0);
+  });
+
   it('gives up after 3 attempts on persistent 503', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '' });
     await expect(qurl.getResourceStatus('res-down')).rejects.toThrow(/503/);

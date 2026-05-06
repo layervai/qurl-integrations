@@ -4,7 +4,7 @@ const { client, refreshCache, shutdown: discordShutdown } = require('./discord')
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
-const { startGatewayHeartbeat, startActiveGuildCount } = require('./gateway-metrics');
+const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
@@ -262,6 +262,17 @@ if (isGateway) {
 
   // Handle interactions
   client.on('interactionCreate', handleCommand);
+
+  // Phase 1 monitoring (Justin #193 §2): tick the gateway-activity
+  // timestamp on every WebSocket frame including heartbeats. Cheap
+  // (synchronous timestamp update). Catches event-loop saturation as
+  // a wedge condition — if the loop is saturated, raw events queue
+  // up and the timestamp goes stale, flipping the heartbeat composite
+  // to unhealthy. Subsumes the heartbeat-ack age check: discord.js
+  // dispatches HEARTBEAT_ACK frames as raw events too.
+  client.on('raw', () => {
+    noteGatewayActivity();
+  });
 
   // Error handling
   client.on('error', error => {

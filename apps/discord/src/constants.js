@@ -175,6 +175,23 @@ const AUDIT_EVENTS = {
 
   // Periodic gauge of `client.guilds.cache.size`. Emitted every 60 s.
   ACTIVE_GUILD_COUNT: 'active_guild_count',
+
+  // Justin's review on #193 §5: "Bot can be isReady() and still
+  // failing every /qurl link because the GitHub App token expired
+  // or the qurl-service API key was rotated."
+  //
+  // Emitted when a request to a dependency returns 401 or 403.
+  // Carries `dependency: 'qurl_service'` (extensible to GitHub /
+  // Auth0 / etc. as future dependencies are instrumented), `status`
+  // (numeric 401|403), and `path` (low-cardinality — bounded by
+  // qURL API surface). The paired CloudWatch metric filter counts
+  // these so an alarm can fire on >N auth failures in a window —
+  // catches token-rotation drift before users see cascading errors.
+  // Reactive design: only fires on actual dependency calls (no
+  // periodic probing). For an idle bot with no real users, the
+  // metric stays zero — but for an idle bot the rotation also
+  // doesn't matter until someone tries to use it.
+  DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

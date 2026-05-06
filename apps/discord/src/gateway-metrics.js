@@ -23,6 +23,40 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVE_GUILD_INTERVAL_MS = 60_000;
 const HEARTBEAT_ACK_AGE_THRESHOLD_MS = 60_000;
 
+// Justin's review on #193 §2: "Command dispatch wedge — handleCommand
+// hung on DB pool exhaustion, qurl-service API call, or Auth0 token
+// refresh. Need a 'last command processed within N seconds' or 'last
+// gateway event within N seconds' signal layered into isReady."
+//
+// Threshold = 60 s matches the heartbeat-ack threshold. discord.js
+// emits a heartbeat every ~41 s and the bot's `client.on('raw', ...)`
+// handler updates this timestamp on every WebSocket frame including
+// heartbeats — so an idle gateway still ticks. A wedge at the event-
+// loop level prevents the raw handler from running, the timestamp
+// goes stale, and the composite goes unhealthy.
+const GATEWAY_ACTIVITY_THRESHOLD_MS = 60_000;
+let lastGatewayActivityAt = 0;
+
+/**
+ * Note that the gateway just received a frame. Called from the
+ * `client.on('raw', ...)` hook in index.js (gateway-only path).
+ * Cheap — just a timestamp update — so it's safe to fire on every
+ * frame including heartbeats.
+ *
+ * @param {() => number} [now=Date.now]
+ */
+function noteGatewayActivity(now = Date.now) {
+  lastGatewayActivityAt = now();
+}
+
+/**
+ * Test-only reset for the module-level activity timestamp. NOT
+ * exported in the public API — accessed via `_test` for jest.
+ */
+function _resetGatewayActivity() {
+  lastGatewayActivityAt = 0;
+}
+
 /**
  * Inspect the discord.js client's WebSocketManager and return a
  * health snapshot. Pure function — callers decide whether to emit.
@@ -62,13 +96,30 @@ function readGatewayHealth(client, now = Date.now) {
   // Fargate hosts get periodic NTP corrections.
   const ack_age_ms = oldestAck === null ? null : Math.max(0, now() - oldestAck);
 
+  // Activity check (Justin #193 §2 — dispatch-wedge / event-loop
+  // saturation). lastGatewayActivityAt = 0 means we've never seen a
+  // frame, so the bot can't be healthy yet (boot window). Same NTP
+  // clamp logic as ack_age — a backward step shouldn't paper over a
+  // stale timestamp.
+  const activity_age_ms = lastGatewayActivityAt === 0
+    ? null
+    : Math.max(0, now() - lastGatewayActivityAt);
+
   const healthy =
     isReady &&
     ping_ms > 0 &&
     ack_age_ms !== null &&
-    ack_age_ms < HEARTBEAT_ACK_AGE_THRESHOLD_MS;
+    ack_age_ms < HEARTBEAT_ACK_AGE_THRESHOLD_MS &&
+    activity_age_ms !== null &&
+    activity_age_ms < GATEWAY_ACTIVITY_THRESHOLD_MS;
 
-  return { healthy, ping_ms, ack_age_ms, is_ready: isReady };
+  return {
+    healthy,
+    ping_ms,
+    ack_age_ms,
+    activity_age_ms,
+    is_ready: isReady,
+  };
 }
 
 /**
@@ -100,6 +151,7 @@ function startGatewayHeartbeat(client, opts = {}) {
         logger.audit(AUDIT_EVENTS.GATEWAY_HEARTBEAT, {
           ping_ms: snapshot.ping_ms,
           ack_age_ms: snapshot.ack_age_ms,
+          activity_age_ms: snapshot.activity_age_ms,
         });
       }
       // Edge-triggered logs so on-call can distinguish "wedged for
@@ -110,11 +162,13 @@ function startGatewayHeartbeat(client, opts = {}) {
           is_ready: snapshot.is_ready,
           ping_ms: snapshot.ping_ms,
           ack_age_ms: snapshot.ack_age_ms,
+          activity_age_ms: snapshot.activity_age_ms,
         });
       } else if (prevHealthy === false && snapshot.healthy) {
         logger.info('Gateway heartbeat: unhealthy → healthy', {
           ping_ms: snapshot.ping_ms,
           ack_age_ms: snapshot.ack_age_ms,
+          activity_age_ms: snapshot.activity_age_ms,
         });
       }
       prevHealthy = snapshot.healthy;
@@ -191,7 +245,14 @@ module.exports = {
   startGatewayHeartbeat,
   startActiveGuildCount,
   readGatewayHealth,
+  noteGatewayActivity,
   HEARTBEAT_INTERVAL_MS,
   ACTIVE_GUILD_INTERVAL_MS,
   HEARTBEAT_ACK_AGE_THRESHOLD_MS,
+  GATEWAY_ACTIVITY_THRESHOLD_MS,
+  // Test-only exports (NODE_ENV-gated to keep live state out of prod
+  // consumers, mirroring the commands.js _test pattern).
+  ...(process.env.NODE_ENV !== 'production' && {
+    _test: { _resetGatewayActivity },
+  }),
 };
