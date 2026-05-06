@@ -3525,7 +3525,7 @@ async function handleCommand(interaction) {
   //
   // command_name is from the Discord-delivered field, low-cardinality
   // (bounded by registered slash commands; <30 distinct values).
-  const ackStart = process.hrtime.bigint();
+  const handlerStart = process.hrtime.bigint();
   const commandName = interaction.commandName;
   const emitInteractionMetric = (success, failureType) => {
     // logger.audit has its own two-tier try/catch (logger.js:209-234)
@@ -3534,7 +3534,7 @@ async function handleCommand(interaction) {
     // sub-millisecond handler reports a fractional ms instead of
     // truncating to 0. ns count fits comfortably in a double for any
     // realistic handler duration; precision loss here is irrelevant.
-    const handler_duration_ms = Number(process.hrtime.bigint() - ackStart) / 1_000_000;
+    const handler_duration_ms = Number(process.hrtime.bigint() - handlerStart) / 1_000_000;
     logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
       command_name: commandName,
       success,
