@@ -502,6 +502,25 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('preserves handler_error when execute throws AND followUp also throws non-ack', async () => {
+    // Pin the asymmetric precedence rule: in the main path a
+    // handler_error tag is preserved over a follow-up reply_failed
+    // because the original execute failure is the more meaningful
+    // dashboard signal. A future refactor that flips the asymmetry
+    // would silently change failure-type attribution; this test
+    // catches it.
+    const interaction = makeInteraction({
+      commandName: 'stats',
+      reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+    });
+    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+    );
+  });
+
   it('does not emit for autocomplete events (early-return path)', async () => {
     const interaction = makeInteraction({
       isChatInputCommand: jest.fn(() => false),

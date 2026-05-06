@@ -3626,13 +3626,15 @@ async function handleCommand(interaction) {
 // Discord's 3 s interaction-acknowledgement deadline surfaces as a
 // REST 10062 / "Unknown interaction" error from discord.js when the bot
 // tries to reply after the token has expired. Detect both the numeric
-// code (preferred) and the message text (fallback for shapes that don't
-// carry .code) so the ack_timeout alarm doesn't miss the variant.
+// code (preferred — discord.js DiscordAPIError preserves it) and the
+// exact message text (fallback for wrapped-error shapes that don't
+// carry .code). The fallback is anchored on the full string rather
+// than a substring match so a future longer message containing the
+// phrase "Unknown interaction type X" doesn't misclassify.
 function isAckTimeoutError(err) {
   if (!err) return false;
   if (err.code === 10062) return true;
-  const msg = typeof err.message === 'string' ? err.message : '';
-  return /Unknown interaction/i.test(msg);
+  return typeof err.message === 'string' && err.message === 'Unknown interaction';
 }
 
 module.exports = {
