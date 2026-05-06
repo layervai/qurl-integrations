@@ -3531,7 +3531,11 @@ async function handleCommand(interaction) {
   const emitInteractionMetric = (success, failureType) => {
     // logger.audit has its own two-tier try/catch (logger.js:209-234)
     // and is documented to never throw — no outer guard needed here.
-    const handler_duration_ms = Number((process.hrtime.bigint() - ackStart) / 1_000_000n);
+    // Number(ns) / 1_000_000 (NOT BigInt division then Number) so a
+    // sub-millisecond handler reports a fractional ms instead of
+    // truncating to 0. ns count fits comfortably in a double for any
+    // realistic handler duration; precision loss here is irrelevant.
+    const handler_duration_ms = Number(process.hrtime.bigint() - ackStart) / 1_000_000;
     logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
       command_name: commandName,
       success,
@@ -3595,6 +3599,16 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
+    // failureType reflects the FIRST failure observed: handler_error
+    // (or ack_timeout if the handler threw a 10062). If the follow-up
+    // reply ALSO fails for a non-ack reason, we deliberately keep the
+    // original handler_error tag — the original execute failure is the
+    // more meaningful signal for the dashboard. Only an ack_timeout on
+    // the reply is allowed to override (so the user-visible "did not
+    // respond" cluster catches it). Asymmetric vs. the stale-
+    // registration path above (which DOES tag reply_failed) because
+    // there's no prior execute() in that path; the reply outcome IS
+    // the only signal.
     let failureType = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
     try {
       if (interaction.replied || interaction.deferred) {

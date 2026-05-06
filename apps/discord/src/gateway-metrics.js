@@ -153,7 +153,7 @@ function startGatewayHeartbeat(client, opts = {}) {
 function startActiveGuildCount(client, opts = {}) {
   const intervalMs = opts.intervalMs ?? ACTIVE_GUILD_INTERVAL_MS;
 
-  const timer = setInterval(() => {
+  function tick() {
     try {
       const count = client.guilds?.cache?.size;
       if (typeof count === 'number') {
@@ -162,7 +162,16 @@ function startActiveGuildCount(client, opts = {}) {
     } catch (err) {
       logger.warn('Active-guild-count sampler threw', { error: err?.message });
     }
-  }, intervalMs);
+  }
+
+  // Symmetric with startGatewayHeartbeat — runOnce so the first
+  // datapoint lands inside any future alarm window without waiting
+  // for the first interval. Today this metric is gauge-only on the
+  // dashboard, so the immediate emit is just consistency, but it
+  // keeps both timers behaving the same way.
+  tick();
+
+  const timer = setInterval(tick, intervalMs);
 
   if (typeof timer.unref === 'function') timer.unref();
 
