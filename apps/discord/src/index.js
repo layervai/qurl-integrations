@@ -270,9 +270,11 @@ if (isGateway) {
   // up and the timestamp goes stale, flipping the heartbeat composite
   // to unhealthy. Subsumes the heartbeat-ack age check: discord.js
   // dispatches HEARTBEAT_ACK frames as raw events too.
-  client.on('raw', () => {
-    noteGatewayActivity();
-  });
+  //
+  // Pass `noteGatewayActivity` directly (not a wrapping arrow) so v8
+  // keeps a single shape across the listener's lifetime. Saves
+  // closure allocation on every frame at high message rates.
+  client.on('raw', noteGatewayActivity);
 
   // Error handling
   client.on('error', error => {

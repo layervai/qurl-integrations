@@ -149,7 +149,12 @@ const AUDIT_EVENTS = {
   // Paired with terraform filters in qurl-integrations-infra
   // qurl-bot-discord/terraform/monitoring.tf.
 
-  // Single emission per Discord interaction. `success: true|false`,
+  // Single emission per ChatInputCommand interaction. handleCommand
+  // early-returns on autocomplete / non-chat-input (modal submits,
+  // buttons) WITHOUT emitting — those flows have their own contracts.
+  // If discord.js ever routes a new interaction type through the
+  // same handler, the metric undercounts until either the early-
+  // return or this comment is updated. `success: true|false`,
   // `handler_duration_ms` (handler entry → metric emit; not edge-to-ACK
   // — see commands.js comment), and `failure_type` ('ack_timeout' |
   // 'handler_error' | 'unknown_command' | 'reply_failed' | null)

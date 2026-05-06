@@ -39,13 +39,24 @@ let lastGatewayActivityAt = 0;
 
 /**
  * Note that the gateway just received a frame. Called from the
- * `client.on('raw', ...)` hook in index.js (gateway-only path).
- * Cheap — just a timestamp update — so it's safe to fire on every
- * frame including heartbeats.
+ * `client.on('raw', ...)` hook in index.js (gateway-only path —
+ * never invoked from the HTTP role; if `readGatewayHealth` is ever
+ * called from HTTP, it'll always report unhealthy because this
+ * timestamp stays at 0). Cheap — just a timestamp update — so it's
+ * safe to fire on every frame including heartbeats.
  *
- * @param {() => number} [now=Date.now]
+ * Defensive arg shape: discord.js's `raw` event hands the listener
+ * a packet object as the first argument, NOT a clock function. The
+ * `typeof maybeNow === 'function'` check lets the same function
+ * be passed directly to `client.on('raw', noteGatewayActivity)`
+ * (saves a closure allocation per frame) AND still accept a custom
+ * clock from tests via `noteGatewayActivity(() => fakeNow)`.
+ *
+ * @param {(() => number) | unknown} [maybeNow] — optional clock fn
+ *   for tests; any non-function argument falls back to Date.now.
  */
-function noteGatewayActivity(now = Date.now) {
+function noteGatewayActivity(maybeNow) {
+  const now = typeof maybeNow === 'function' ? maybeNow : Date.now;
   lastGatewayActivityAt = now();
 }
 
