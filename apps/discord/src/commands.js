@@ -3500,6 +3500,21 @@ async function registerCommands(client) {
   }
 }
 
+// Discord's 3 s interaction-acknowledgement deadline surfaces as a
+// REST 10062 / "Unknown interaction" error from discord.js when the bot
+// tries to reply after the token has expired. Detect both the numeric
+// code (preferred — discord.js DiscordAPIError preserves it) and the
+// message text (fallback for wrapped-error shapes that drop .code).
+// The regex accepts an optional "Class: " prefix common to wrapped
+// shapes (e.g. RESTJSONError) but rejects trailing content like
+// "Unknown interaction type X" to avoid misclassification.
+const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*: )?Unknown interaction$/;
+function isAckTimeoutError(err) {
+  if (!err) return false;
+  if (err.code === 10062) return true;
+  return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
+}
+
 // Handle command interactions
 async function handleCommand(interaction) {
   // /qurl now has zero options after the button-driven redesign; no other
@@ -3623,21 +3638,6 @@ async function handleCommand(interaction) {
   }
 }
 
-// Discord's 3 s interaction-acknowledgement deadline surfaces as a
-// REST 10062 / "Unknown interaction" error from discord.js when the bot
-// tries to reply after the token has expired. Detect both the numeric
-// code (preferred — discord.js DiscordAPIError preserves it) and the
-// message text (fallback for wrapped-error shapes that drop .code).
-// The regex accepts an optional "Class: " prefix common to wrapped
-// shapes (e.g. RESTJSONError) but rejects trailing content like
-// "Unknown interaction type X" to avoid misclassification.
-const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*: )?Unknown interaction$/;
-function isAckTimeoutError(err) {
-  if (!err) return false;
-  if (err.code === 10062) return true;
-  return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
-}
-
 module.exports = {
   commands,
   registerCommands,
@@ -3681,6 +3681,10 @@ module.exports = {
       // reset it between cases so a prior test's cached members don't
       // mask a `members.fetch` rejection in the next test.
       memberFetchCache,
+      // Phase 1 monitoring helper exposed for direct regex coverage.
+      // The fallback regex shape drives the failure_type alarm so a
+      // silent breakage is bad — table-driven tests pin every shape.
+      isAckTimeoutError,
     },
   }),
 };

@@ -546,6 +546,25 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  describe('isAckTimeoutError direct regex coverage', () => {
+    const { isAckTimeoutError } = _test;
+    test.each([
+      // [name, error, expected]
+      ['discord.js DiscordAPIError code 10062', { code: 10062 }, true],
+      ['exact bare message', new Error('Unknown interaction'), true],
+      ['wrapped with RESTJSONError prefix', new Error('RESTJSONError: Unknown interaction'), true],
+      ['wrapped with arbitrary class prefix', new Error('SomeWrapper: Unknown interaction'), true],
+      ['rejected: trailing content (Discord type variant)', new Error('Unknown interaction type 5'), false],
+      ['rejected: substring inside other message', new Error('Failed to handle Unknown interaction'), false],
+      ['rejected: numeric .message', { message: 5 }, false],
+      ['rejected: no message and no code', { foo: 'bar' }, false],
+      ['rejected: null', null, false],
+      ['rejected: undefined', undefined, false],
+    ])('%s → %s', (_name, err, expected) => {
+      expect(isAckTimeoutError(err)).toBe(expected);
+    });
+  });
+
   it('does not emit for autocomplete events (early-return path)', async () => {
     const interaction = makeInteraction({
       isChatInputCommand: jest.fn(() => false),
