@@ -331,8 +331,30 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
+      // Parse RFC 7807 problem JSON to discriminate user-quota hits
+      // (warn-level, dedicated 429 page) from service failures (error-
+      // level, generic 502 page). `<unparseable>` distinguishes "body
+      // wasn't JSON at all" from "JSON but no error.code" in logs.
+      let problemCode = '';
+      try {
+        const parsed = JSON.parse(errBody);
+        if (typeof parsed?.error?.code === 'string') problemCode = parsed.error.code;
+      } catch { problemCode = '<unparseable>'; }
+
+      if (mintResp.status === 403 && problemCode === 'api_key_limit') {
+        // logger.warn (not error) so prod alerting can distinguish
+        // user-quota hits from qurl-service outages. Status 429
+        // matches the actual semantic — qurl-service's 403 is off-
+        // spec for a quota hit (RFC 7231 §6.5.3 vs RFC 6585 §4).
+        logger.warn('qURL API key mint refused: api_key_limit', {
+          status: mintResp.status, problemCode, guildId,
+        });
+        return renderError(res, 429, 'qURL API key limit reached',
+          'Your qURL account has hit its API key limit. Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl setup again.');
+      }
+
       logger.error('qURL API key mint failed', {
-        status: mintResp.status, body: errBody.slice(0, 500), guildId,
+        status: mintResp.status, problemCode, body: errBody.slice(0, 500), guildId,
       });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service rejected the API-key request. Please run /qurl setup again, or contact your layerv.ai admin.');

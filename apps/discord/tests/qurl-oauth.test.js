@@ -339,6 +339,65 @@ describe('qurl-oauth routes', () => {
       expect(db.setGuildApiKey).not.toHaveBeenCalled();
     });
 
+    it('429s with key-limit-specific copy when qurl-service returns api_key_limit, does not persist or DM', async () => {
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+        })
+        .mockResolvedValueOnce({
+          ok: false, status: 403,
+          text: () => Promise.resolve(JSON.stringify({
+            error: {
+              type: 'https://docs.layerv.ai/problems/api_key_limit',
+              title: 'API Key Limit Exceeded',
+              status: 403,
+              code: 'api_key_limit',
+              detail: 'You have reached the maximum number of API keys (3) for your plan.',
+            },
+          })),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      // 429 not 403 — qurl-service's 403 is off-spec for a quota hit;
+      // the bot renders the semantically correct status (RFC 7231:
+      // 429 = quota / rate-limit class).
+      expect(res.status).toBe(429);
+      expect(res.text).toContain('qURL API key limit reached');
+      expect(res.text).toContain('Delete an unused key');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+      // Failure path must not distort the dispatch / DM metrics —
+      // sendDM is reserved for successful provisioning.
+      expect(discord.sendDM).not.toHaveBeenCalled();
+    });
+
+    it('falls through to generic 502 when qurl-service returns valid JSON without error.code', async () => {
+      // Pin that the parse path can't accidentally match the api_key_limit
+      // branch when `code` is absent. A future field rename on qurl-service
+      // (e.g. `code` → `kind`) would land here; the user gets the generic
+      // 502 instead of a misclassified quota page.
+      const state = signQurlOAuthState('guild-1', 'admin-2');
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({
+          ok: true, status: 200,
+          json: () => Promise.resolve({ access_token: 'jwt-xyz', token_type: 'Bearer', expires_in: 3600 }),
+        })
+        .mockResolvedValueOnce({
+          ok: false, status: 403,
+          text: () => Promise.resolve(JSON.stringify({
+            error: { title: 'Forbidden', status: 403, detail: 'no code field' },
+          })),
+        });
+      const res = await request(app).get(
+        `/oauth/qurl/callback?code=auth0-code&state=${encodeURIComponent(state)}`,
+      ).set('Cookie', cookieFor(state));
+      expect(res.status).toBe(502);
+      expect(res.text).toContain('Could not provision qURL key');
+      expect(db.setGuildApiKey).not.toHaveBeenCalled();
+    });
+
     it('200s on happy path: mints key, persists, DMs admin, renders success with binding readout', async () => {
       const state = signQurlOAuthState('guild-1', 'admin-2');
       // id_token with an `email` claim — base64url-encoded JSON, no
