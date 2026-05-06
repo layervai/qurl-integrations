@@ -134,6 +134,18 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+
+  // Emitted by gateway-health.js on every /health response that
+  // returns 503 (client.isReady() === false OR the readiness closure
+  // threw). The wget probe runs every 30 s, so a real wedge produces
+  // this event at probe cadence — the paired CloudWatch metric
+  // filter (qurl-integrations-infra) counts these so an alarm can
+  // fire on >N unhealthy responses in a window. Justin's review on
+  // #193 §13: "Either log a structured event on each 503, or emit
+  // an EMF metric directly from the listener" — going with the
+  // structured-log option since the rest of this codebase already
+  // uses that path.
+  GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

@@ -39,6 +39,7 @@
 const http = require('node:http');
 const config = require('./config');
 const logger = require('./logger');
+const { AUDIT_EVENTS } = require('./constants');
 
 // Pre-computed — these never change, so avoid JSON.stringify per request.
 const BODY_OK = JSON.stringify({ status: 'ok' });
@@ -121,8 +122,15 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
       // 503 distinguishes "responding but not ready" from "not
       // responding at all" — the wget probe treats non-2xx as
       // unhealthy, so ECS replaces the task on either.
+      //
+      // Audit-event emit on EVERY 503 (not just on the transition
+      // warn above) so the paired CloudWatch metric filter can count
+      // unhealthy responses at probe cadence. Justin's review on
+      // #193 §13: a wedge persisting for N probes should produce N
+      // count events for the alarm, not one transition log.
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(BODY_UNHEALTHY);
+      logger.audit(AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY, {});
     }
   });
 

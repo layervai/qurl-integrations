@@ -23,6 +23,7 @@ jest.mock('../src/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+  audit: jest.fn(),
 }));
 
 // Bind to ephemeral port to avoid collisions with concurrent test
@@ -99,6 +100,47 @@ describe('gateway-health server', () => {
       expect(status).toBe(503);
       expect(contentType).toBe('application/json');
       expect(JSON.parse(body)).toEqual({ status: 'unhealthy' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('every 503 emits a gateway_health_unhealthy audit event (count per probe)', async () => {
+    // Justin's review on #193 §13: a wedge persisting for N probes
+    // should produce N count events for the alarm, not one transition
+    // log. Pin the per-probe emission so a future refactor can't
+    // collapse it back into a transition-only signal.
+    const mockLogger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const server = startGatewayHealthServer(() => false, noopOnListenError);
+    await waitForListening(server);
+    try {
+      mockLogger.audit.mockClear();
+      await request(server, '/health');
+      await request(server, '/health');
+      await request(server, '/health');
+      const unhealthyCalls = mockLogger.audit.mock.calls.filter(
+        ([event]) => event === AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY,
+      );
+      expect(unhealthyCalls).toHaveLength(3);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('200 (healthy) responses do NOT emit gateway_health_unhealthy', async () => {
+    const mockLogger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
+    await waitForListening(server);
+    try {
+      mockLogger.audit.mockClear();
+      await request(server, '/health');
+      await request(server, '/health');
+      const unhealthyCalls = mockLogger.audit.mock.calls.filter(
+        ([event]) => event === AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY,
+      );
+      expect(unhealthyCalls).toHaveLength(0);
     } finally {
       await closeServer(server);
     }
