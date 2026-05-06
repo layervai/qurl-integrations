@@ -502,6 +502,31 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     );
   });
 
+  it('preserves sub-millisecond handler_duration_ms (no BigInt-truncation regression)', async () => {
+    // Round-3 fix: Number(ns / 1_000_000n) → Number(ns) / 1_000_000.
+    // The bigint-division shape would truncate any sub-ms duration to
+    // 0 and silently destroy fast-path regression detection. Mock
+    // process.hrtime.bigint to return start at 0n and end at 500_000n
+    // (= 500 µs delta). handler_duration_ms must be 0.5, NOT 0.
+    const realHrtime = process.hrtime.bigint;
+    let callCount = 0;
+    process.hrtime.bigint = jest.fn(() => {
+      callCount++;
+      return callCount === 1 ? 0n : 500_000n;
+    });
+    try {
+      const interaction = makeInteraction({ commandName: 'stats' });
+      await handleCommand(interaction);
+      const auditCalls = logger.audit.mock.calls.filter(
+        c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED,
+      );
+      expect(auditCalls).toHaveLength(1);
+      expect(auditCalls[0][1].handler_duration_ms).toBe(0.5);
+    } finally {
+      process.hrtime.bigint = realHrtime;
+    }
+  });
+
   it('preserves handler_error when execute throws AND followUp also throws non-ack', async () => {
     // Pin the asymmetric precedence rule: in the main path a
     // handler_error tag is preserved over a follow-up reply_failed

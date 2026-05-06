@@ -262,6 +262,21 @@ describe('startActiveGuildCount', () => {
     expect(logger.audit).not.toHaveBeenCalled();
   });
 
+  test('runs once immediately so the first gauge sample lands without waiting for the interval', () => {
+    // Symmetric with the startGatewayHeartbeat runOnce test. Pins the
+    // round-3 addition: a future refactor that drops the immediate
+    // tick() would otherwise pass CI silently because the existing
+    // tests advance fake timers before asserting.
+    const client = fakeClient({ guildCount: 5 });
+    startActiveGuildCount(client, { intervalMs: 60_000 });
+    // No timer advance — runOnce should already have emitted.
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.ACTIVE_GUILD_COUNT,
+      { count: 5 },
+    );
+  });
+
   test('swallows errors and logs at warn level', () => {
     const client = {
       get guilds() { throw new Error('cache exploded'); },
