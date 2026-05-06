@@ -262,6 +262,24 @@ describe('gateway-health server', () => {
     }
   });
 
+  test('strict /health match — trailing slash and sub-paths return 404', async () => {
+    // Lock the strict-match contract. If the infra follow-up's wget
+    // URL ever has a trailing slash or someone "helpfully" relaxes
+    // the match to a prefix, this test catches it. Strict-match is
+    // the right call for a probe surface — silent under-match is
+    // worse than a hard 404 the operator can grep for.
+    const server = startGatewayHealthServer(() => true, noopOnListenError);
+    await waitForListening(server);
+    try {
+      const trailing = await request(server, '/health/');
+      expect(trailing.status).toBe(404);
+      const subpath = await request(server, '/health/ready');
+      expect(subpath.status).toBe(404);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   test('HEAD /health returns 200 when isReady() is true', async () => {
     // Some load-balancer probes default to HEAD. HEAD is semantically
     // GET-without-body (RFC 9110 §9.3.2), so accepting it avoids
@@ -370,7 +388,7 @@ describe('gateway-health server', () => {
       // `second` never bound, but the Server object retains the
       // registered `error` listener — closing releases the handle so
       // `jest --detectOpenHandles` stays clean.
-      if (second) await closeServer(second).catch(() => {});
+      if (second) await closeServer(second);
       await closeServer(first);
     }
   });

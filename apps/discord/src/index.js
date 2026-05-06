@@ -407,8 +407,12 @@ async function start() {
     // covers this boot window so ECS doesn't replace the task early.
     httpServer = startGatewayHealthServer(() => client.isReady(), () => {
       // Null out so gracefulShutdown doesn't try to .close() a server
-      // that never finished listening (would log a confusing
-      // "Server is not running" error).
+      // that's in an error state. Covers both the listen-window race
+      // (server never finished listening — close() would log
+      // "Server is not running") AND post-listen runtime errors
+      // (server bound the port but emitted error later — close() is
+      // still possible but unlikely to succeed cleanly during a
+      // teardown that's already in flight).
       httpServer = null;
       gracefulShutdown(1);
     });
