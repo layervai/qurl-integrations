@@ -172,6 +172,16 @@ describe('startGatewayHeartbeat', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    // Reset + tick activity AFTER useFakeTimers so the timestamp uses
+    // the same fake-clock source as the readGatewayHealth comparisons.
+    // Without this, the outer beforeEach() ticks with real Date.now(),
+    // then advanceTimersByTime drifts the fake clock — Math.max(0,…)
+    // papers over the negative diff so tests pass, but the activity
+    // gate isn't actually being exercised in these tests.
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
+      gatewayMetricsTest._resetGatewayActivity();
+    }
+    noteGatewayActivity();
   });
   afterEach(() => jest.useRealTimers());
 
@@ -295,6 +305,12 @@ describe('startActiveGuildCount', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    // See startGatewayHeartbeat beforeEach for why activity reset
+    // happens AFTER useFakeTimers (clock-source consistency).
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
+      gatewayMetricsTest._resetGatewayActivity();
+    }
+    noteGatewayActivity();
   });
   afterEach(() => jest.useRealTimers());
 

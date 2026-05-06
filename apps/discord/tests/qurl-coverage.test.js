@@ -167,6 +167,24 @@ describe('qURL client — retry logic on transient failures', () => {
     expect(authCalls).toHaveLength(0);
   });
 
+  it('emits dependency_auth_failure EXACTLY ONCE on 401 (emit-once invariant)', async () => {
+    // EMIT-ONCE INVARIANT pinned by the qurl.js comment: 401/403 must
+    // stay OUT of RETRYABLE_STATUSES so the audit emit fires once
+    // per request, not once per attempt. If a future change adds 401
+    // to the retry set, this assertion fails — alarm count would
+    // multiply on a single auth failure.
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    logger.audit.mockClear();
+    globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401, text: async () => '' });
+    await expect(qurl.getResourceStatus('res-once')).rejects.toThrow(/401/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1); // no retry on auth-class
+    const authCalls = logger.audit.mock.calls.filter(
+      ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+    );
+    expect(authCalls).toHaveLength(1);
+  });
+
   it('gives up after 3 attempts on persistent 503', async () => {
     globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => '' });
     await expect(qurl.getResourceStatus('res-down')).rejects.toThrow(/503/);

@@ -66,6 +66,14 @@ async function qurlFetch(method, path, body, apiKey) {
       // BEFORE the throw so a caller's catch path doesn't have to
       // re-route the audit emit — the metric is independent of how
       // the caller handles the error.
+      //
+      // EMIT-ONCE INVARIANT: 401/403 must stay OUT of
+      // RETRYABLE_STATUSES (declared at the top of this file). If a
+      // future change ever adds them (e.g. for token-refresh
+      // experiments), this emit fires per attempt and the alarm
+      // count multiplies. Pinned by tests/qurl-coverage.test.js —
+      // adding 401/403 to the retry set breaks the "emit-once on 401"
+      // assertion there.
       if (resp.status === 401 || resp.status === 403) {
         logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
           dependency: 'qurl_service',

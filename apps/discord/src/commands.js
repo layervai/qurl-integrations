@@ -3505,10 +3505,12 @@ async function registerCommands(client) {
 // tries to reply after the token has expired. Detect both the numeric
 // code (preferred — discord.js DiscordAPIError preserves it) and the
 // message text (fallback for wrapped-error shapes that drop .code).
-// The regex accepts an optional "Class: " prefix common to wrapped
-// shapes (e.g. RESTJSONError) but rejects trailing content like
-// "Unknown interaction type X" to avoid misclassification.
-const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*: )?Unknown interaction$/;
+// The regex accepts an optional "Class: " or "Class[code]: " prefix
+// common to wrapped shapes — e.g. `RESTJSONError: Unknown interaction`
+// or discord.js's own `DiscordAPIError[10062]: Unknown interaction` —
+// but rejects trailing content like "Unknown interaction type X" to
+// avoid misclassification.
+const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*(?:\[\d+\])?: )?Unknown interaction$/;
 function isAckTimeoutError(err) {
   if (!err) return false;
   if (err.code === 10062) return true;

@@ -553,6 +553,8 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
       ['discord.js DiscordAPIError code 10062', { code: 10062 }, true],
       ['exact bare message', new Error('Unknown interaction'), true],
       ['wrapped with RESTJSONError prefix', new Error('RESTJSONError: Unknown interaction'), true],
+      ['discord.js DiscordAPIError[10062]: prefix shape (typical wrapped)', new Error('DiscordAPIError[10062]: Unknown interaction'), true],
+      ['arbitrary class with numeric-bracket prefix', new Error('SomeApiError[42]: Unknown interaction'), true],
       ['wrapped with arbitrary class prefix', new Error('SomeWrapper: Unknown interaction'), true],
       ['rejected: trailing content (Discord type variant)', new Error('Unknown interaction type 5'), false],
       ['rejected: substring inside other message', new Error('Failed to handle Unknown interaction'), false],
