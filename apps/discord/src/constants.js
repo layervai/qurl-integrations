@@ -160,6 +160,13 @@ const AUDIT_EVENTS = {
   // 'handler_error' | 'unknown_command' | 'reply_failed' | null)
   // carry every dimension Phase 1 alarms need. Low-cardinality only —
   // command_name is bounded by registered slash commands.
+  //
+  // failure_type precedence: when execute() throws AND a follow-up
+  // reply also throws, handler_error wins (the original execute
+  // failure is the more meaningful signal); only ack_timeout is
+  // allowed to override. Asymmetric vs. the stale-registration path
+  // which DOES tag reply_failed because there's no prior execute.
+  // See commands.js handleCommand for the precedence table.
   INTERACTION_HANDLED: 'interaction_handled',
 
   // Positive-signal heartbeat. Emitted every 30 s when the composite

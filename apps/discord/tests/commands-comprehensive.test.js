@@ -527,6 +527,36 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     }
   });
 
+  it('emits INTERACTION_HANDLED EXACTLY ONCE across each failure scenario (cardinality lock)', async () => {
+    // Pin emission cardinality, not just value. Existing tests use
+    // toHaveBeenCalledWith which would still pass on duplicate emits.
+    // A future refactor that accidentally splits the event into two
+    // emits (e.g. separate "interaction_started" + "interaction_ended"
+    // pair) would silently double the alarm count without this assertion.
+    logger = require('../src/logger');
+    const scenarios = [
+      ['success path', () => makeInteraction({ commandName: 'stats' })],
+      ['handler_error', () => {
+        const i = makeInteraction({ commandName: 'stats' });
+        mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+        return i;
+      }],
+      ['unknown_command', () => makeInteraction({ commandName: 'no-such-cmd' })],
+      ['reply_failed (stale-reg path)', () => makeInteraction({
+        commandName: 'no-such-cmd',
+        reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+      })],
+    ];
+    for (const [name, mkInteraction] of scenarios) {
+      logger.audit.mockClear();
+      await handleCommand(mkInteraction());
+      const interactionCalls = logger.audit.mock.calls.filter(
+        c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED,
+      );
+      expect(interactionCalls).toHaveLength(1);
+    }
+  });
+
   it('preserves handler_error when execute throws AND followUp also throws non-ack', async () => {
     // Pin the asymmetric precedence rule: in the main path a
     // handler_error tag is preserved over a follow-up reply_failed

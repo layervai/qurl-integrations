@@ -102,6 +102,12 @@ function readGatewayHealth(client, now = Date.now) {
       // > 0 rejects both the -1 sentinel (pre-first-ack) and any
       // future change to 0 / null without falsely emitting "healthy"
       // before the first heartbeat round-trip completes.
+      // TODO(multi-shard): if shard 0 ack'd recently and shard 1 has
+      // never ack'd (-1), this loop reports healthy from shard 0
+      // alone — a stuck-since-boot shard wouldn't move the needle.
+      // Single-shard today so unobservable, but when sharding flips
+      // on, treat a -1 sentinel as itself unhealthy after a settle
+      // window (e.g. >2× heartbeat interval since process start).
       if (typeof acked === 'number' && acked > 0) {
         if (oldestAck === null || acked < oldestAck) oldestAck = acked;
       }
@@ -269,7 +275,12 @@ module.exports = {
   GATEWAY_ACTIVITY_THRESHOLD_MS,
   // Test-only exports (NODE_ENV-gated to keep live state out of prod
   // consumers, mirroring the commands.js _test pattern).
-  ...(process.env.NODE_ENV !== 'production' && {
+  // _test gated on NODE_ENV === 'test' (NOT !== 'production') so
+  // a misconfigured prod task with NODE_ENV unset doesn't ship the
+  // internal handles. jest sets NODE_ENV='test' automatically; if
+  // local-dev workflows need access, set NODE_ENV=test for that
+  // shell.
+  ...(process.env.NODE_ENV === 'test' && {
     _test: { _resetGatewayActivity },
   }),
 };
