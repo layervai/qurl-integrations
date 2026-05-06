@@ -166,6 +166,22 @@ describe('readGatewayHealth', () => {
     expect(snap.activity_age_ms).toBe(0);
     expect(snap.healthy).toBe(true);
   });
+
+  test('noteGatewayActivity treats non-function arg as Date.now (production caller shape)', () => {
+    // discord.js's `raw` event passes a packet object as the first
+    // arg, not a clock function. The defensive `typeof === 'function'`
+    // fallback must keep the timestamp updating in that case. Without
+    // this test, a future refactor that drops the typeof check would
+    // pass tests that only exercise the clock-fn injection form.
+    gatewayMetricsTest._resetGatewayActivity();
+    const fakePacket = { op: 11, t: null, s: null, d: null }; // discord.js raw shape
+    const before = Date.now();
+    noteGatewayActivity(fakePacket);
+    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
+    expect(snap.activity_age_ms).toBeGreaterThanOrEqual(0);
+    expect(snap.activity_age_ms).toBeLessThan(Date.now() - before + 100);
+    expect(snap.healthy).toBe(true);
+  });
 });
 
 describe('startGatewayHeartbeat', () => {

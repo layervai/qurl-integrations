@@ -167,6 +167,23 @@ describe('qURL client — retry logic on transient failures', () => {
     expect(authCalls).toHaveLength(0);
   });
 
+  it('does NOT emit dependency_auth_failure on non-auth 4xx (400, 404, 409)', async () => {
+    // Pin the auth-only scope of the metric. A future regex-match-
+    // everything bug or status-list expansion would otherwise leak
+    // generic 4xx into the auth-failure alarm and dilute its signal.
+    const logger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    for (const status of [400, 404, 409]) {
+      logger.audit.mockClear();
+      globalThis.fetch = jest.fn().mockResolvedValue({ ok: false, status, text: async () => '' });
+      await expect(qurl.getResourceStatus(`res-${status}`)).rejects.toThrow(new RegExp(String(status)));
+      const authCalls = logger.audit.mock.calls.filter(
+        ([event]) => event === AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE,
+      );
+      expect(authCalls).toHaveLength(0);
+    }
+  });
+
   it('emits dependency_auth_failure EXACTLY ONCE on 401 (emit-once invariant)', async () => {
     // EMIT-ONCE INVARIANT pinned by the qurl.js comment: 401/403 must
     // stay OUT of RETRYABLE_STATUSES so the audit emit fires once
