@@ -66,6 +66,12 @@ function _resetGatewayActivity() {
  * @returns {{ healthy: boolean, ping_ms: number, ack_age_ms: number|null, is_ready: boolean }}
  */
 function readGatewayHealth(client, now = Date.now) {
+  // Single point-in-time read so ack_age_ms and activity_age_ms are
+  // computed against the same `t`. Practically irrelevant (microseconds
+  // of drift between two now() calls), but useful for tests injecting
+  // a non-monotonic now and for keeping the snapshot semantically
+  // atomic.
+  const t = now();
   const isReady = typeof client.isReady === 'function' ? client.isReady() : false;
   const ping = client.ws?.ping;
   const ping_ms = typeof ping === 'number' ? ping : -1;
@@ -94,7 +100,7 @@ function readGatewayHealth(client, now = Date.now) {
   // negative age that would otherwise satisfy `< 60_000` and falsely
   // mark the gateway healthy. Date.now() is wall-clock, not monotonic;
   // Fargate hosts get periodic NTP corrections.
-  const ack_age_ms = oldestAck === null ? null : Math.max(0, now() - oldestAck);
+  const ack_age_ms = oldestAck === null ? null : Math.max(0, t - oldestAck);
 
   // Activity check (Justin #193 §2 — dispatch-wedge / event-loop
   // saturation). lastGatewayActivityAt = 0 means we've never seen a
@@ -103,7 +109,7 @@ function readGatewayHealth(client, now = Date.now) {
   // stale timestamp.
   const activity_age_ms = lastGatewayActivityAt === 0
     ? null
-    : Math.max(0, now() - lastGatewayActivityAt);
+    : Math.max(0, t - lastGatewayActivityAt);
 
   const healthy =
     isReady &&

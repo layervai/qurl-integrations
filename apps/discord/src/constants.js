@@ -181,16 +181,30 @@ const AUDIT_EVENTS = {
   // or the qurl-service API key was rotated."
   //
   // Emitted when a request to a dependency returns 401 or 403.
-  // Carries `dependency: 'qurl_service'` (extensible to GitHub /
-  // Auth0 / etc. as future dependencies are instrumented), `status`
-  // (numeric 401|403), and `path` (low-cardinality — bounded by
-  // qURL API surface). The paired CloudWatch metric filter counts
-  // these so an alarm can fire on >N auth failures in a window —
-  // catches token-rotation drift before users see cascading errors.
-  // Reactive design: only fires on actual dependency calls (no
-  // periodic probing). For an idle bot with no real users, the
-  // metric stays zero — but for an idle bot the rotation also
-  // doesn't matter until someone tries to use it.
+  // Payload fields:
+  //   - `dependency`: 'qurl_service' (extensible to GitHub / Auth0
+  //                   / etc. as future dependencies are instrumented).
+  //                   LOW-cardinality — safe to dimension on.
+  //   - `status`: numeric 401 | 403. LOW-cardinality — safe to
+  //               dimension on.
+  //   - `method`: HTTP verb (GET, POST, PUT, DELETE). LOW-cardinality
+  //               — safe to dimension on.
+  //   - `path`: HIGH-cardinality (carries resource IDs like
+  //             `/qurls/abc123def`). Forensic-query field ONLY —
+  //             do NOT promote to a CloudWatch metric dimension at
+  //             the terraform-filter layer. Same trap as `guild_id`
+  //             above: per-resource dimensioning would explode
+  //             metric cost. Dimension on `dependency + method +
+  //             status` instead; use Logs Insights to drill down
+  //             to specific paths during an incident.
+  //
+  // The paired CloudWatch metric filter counts these so an alarm
+  // can fire on >N auth failures in a window — catches token-
+  // rotation drift before users see cascading errors. Reactive
+  // design: only fires on actual dependency calls (no periodic
+  // probing). For an idle bot with no real users, the metric
+  // stays zero — but for an idle bot the rotation also doesn't
+  // matter until someone tries to use it.
   DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 };
 
