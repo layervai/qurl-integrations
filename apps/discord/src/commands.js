@@ -3627,14 +3627,15 @@ async function handleCommand(interaction) {
 // REST 10062 / "Unknown interaction" error from discord.js when the bot
 // tries to reply after the token has expired. Detect both the numeric
 // code (preferred — discord.js DiscordAPIError preserves it) and the
-// exact message text (fallback for wrapped-error shapes that don't
-// carry .code). The fallback is anchored on the full string rather
-// than a substring match so a future longer message containing the
-// phrase "Unknown interaction type X" doesn't misclassify.
+// message text (fallback for wrapped-error shapes that drop .code).
+// The regex accepts an optional "Class: " prefix common to wrapped
+// shapes (e.g. RESTJSONError) but rejects trailing content like
+// "Unknown interaction type X" to avoid misclassification.
+const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*: )?Unknown interaction$/;
 function isAckTimeoutError(err) {
   if (!err) return false;
   if (err.code === 10062) return true;
-  return typeof err.message === 'string' && err.message === 'Unknown interaction';
+  return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
 }
 
 module.exports = {

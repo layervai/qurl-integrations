@@ -371,7 +371,7 @@ client.on('guildCreate', (guild) => {
       replay,
     });
   } catch (error) {
-    logger.error('Error handling guildCreate event', { error: error.message });
+    logger.error('Error handling guildCreate event', { error: error?.message });
   }
 });
 
@@ -381,7 +381,7 @@ client.on('guildDelete', (guild) => {
       guild_id: guild?.id,
     });
   } catch (error) {
-    logger.error('Error handling guildDelete event', { error: error.message });
+    logger.error('Error handling guildDelete event', { error: error?.message });
   }
 });
 

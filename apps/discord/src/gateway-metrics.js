@@ -170,13 +170,14 @@ function startActiveGuildCount(client, opts = {}) {
   // dashboard, so the immediate emit is just consistency, but it
   // keeps both timers behaving the same way.
   //
-  // Caveat: index.js calls startActiveGuildCount() right after
-  // client.login() resolves, which is BEFORE the gateway READY
+  // Caveat (#196): index.js calls startActiveGuildCount() right
+  // after client.login() resolves, which is BEFORE the gateway READY
   // event populates client.guilds.cache. The first datapoint here
   // can be 0 while the bot is actually in N guilds — an artifact of
   // the cache hydrating asynchronously. The 60s interval makes this
-  // self-correcting within one window. A future alarm on this
-  // metric should either ignore the boot window or wait for ready.
+  // self-correcting within one window. Phase 2 alarm-wiring on this
+  // metric must reference #196 and decide on a fix (defer first
+  // emit until ready, OR alarm-side ignore-the-boot-window).
   tick();
 
   const timer = setInterval(tick, intervalMs);
