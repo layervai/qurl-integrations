@@ -3156,11 +3156,7 @@ const commands = [
           return interaction.reply({
             content: '🔐 **Connect qURL to this server**\n\n'
               + `**[Click here to authorize qURL](${startUrl})**\n\n`
-              + 'Sign in with your layerv.ai account and consent. The bot will mint a qURL '
-              + 'API key owned by your account — all usage on this server will bill to you. '
-              + 'No copy-paste needed.\n\n'
-              + '_This link expires in 5 minutes and is bound to your browser session — '
-              + 'open it in the same browser where you ran `/qurl setup`._',
+              + '_The link expires in 5 minutes._',
             ephemeral: true,
           });
         }
