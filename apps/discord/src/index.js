@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
+const { startGatewayHealthServer } = require('./gateway-health');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
@@ -387,11 +388,34 @@ async function start() {
     }
   }
 
-  // HTTP listener — OAuth callback, webhooks, health, metrics.
-  // Skipped in `gateway`-only mode; the ALB targets HTTP replicas
-  // only. `combined` keeps the legacy single-process behavior.
+  // HTTP listener.
+  //   - isHttp / combined: full Express server (OAuth callback,
+  //     webhooks, /health, /metrics). The ALB targets HTTP replicas
+  //     only; gateway-only tasks aren't behind the ALB.
+  //   - gateway-only: minimal /health responder so the container-level
+  //     wget probe (re-added in qurl-integrations-infra follow-up to
+  //     #151) can catch WebSocket disconnect / event-loop wedge /
+  //     dispatch deadlock — failure modes the deployment_circuit_breaker
+  //     misses because the node process stays alive. Without this,
+  //     `desired_count=1` means one wedged gateway task = entire
+  //     /qurl command surface dead until a human notices.
   if (isHttp) {
     httpServer = startServer();
+  } else if (isGateway) {
+    // Returns 503 until client.isReady() flips true (after READY
+    // from the Discord gateway). Dockerfile --start-period=30s
+    // covers this boot window so ECS doesn't replace the task early.
+    httpServer = startGatewayHealthServer(() => client.isReady(), () => {
+      // Null out so gracefulShutdown doesn't try to .close() a server
+      // that's in an error state. Covers both the listen-window race
+      // (server never finished listening — close() would log
+      // "Server is not running") AND post-listen runtime errors
+      // (server bound the port but emitted error later — close() is
+      // still possible but unlikely to succeed cleanly during a
+      // teardown that's already in flight).
+      httpServer = null;
+      gracefulShutdown(1);
+    });
   }
 
   // Background retry-revoke for any OAuth tokens whose initial

@@ -134,6 +134,16 @@ const AUDIT_EVENTS = {
   // dashboard from counting all-failed revokes as successes.
   REVOKE_SUCCESS: 'revoke_success',
   REVOKE_FAILED: 'revoke_failed',
+
+  // Emitted by gateway-health.js on every /health response that
+  // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
+  // so the dashboard can split a clean WebSocket disconnect from a
+  // readiness-closure bug under load. The wget probe runs every
+  // 30 s, so a real wedge produces this event at probe cadence —
+  // the paired CloudWatch metric filter at qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf counts these so an
+  // alarm can fire on >N unhealthy responses in a window.
+  GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

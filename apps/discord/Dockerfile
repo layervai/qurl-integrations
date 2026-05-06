@@ -38,8 +38,16 @@ USER node
 # Port is hardcoded at 3000: ${PORT:-3000} inside a Dockerfile CMD's exec
 # form doesn't interpolate at runtime, and EXPOSE is already 3000. If the
 # runtime overrides PORT, update EXPOSE + this line together.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- "http://localhost:3000/health" || exit 1
+# start-period=30s matches the 30s client.login() timeout in index.js —
+# the /health endpoint returns 503 until the Discord gateway sends READY.
+# NOTE: On Fargate this Dockerfile HEALTHCHECK is cosmetic — ECS uses the
+# task-def `healthCheck` (re-added in the infra follow-up). Tune the
+# task-def values, not these, for production behavior.
+# The probe address (127.0.0.1) MUST match the listener's bind address in
+# gateway-health.js — binding ::1 while probing 127.0.0.1 (or vice versa)
+# is a classic silent-probe-failure mode.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:3000/health" || exit 1
 
 # Run node directly (not `npm start`) so SIGTERM is delivered to the Node
 # process itself — otherwise npm eats the signal and the container hard-kills
