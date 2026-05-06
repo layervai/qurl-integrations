@@ -23,10 +23,10 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVE_GUILD_INTERVAL_MS = 60_000;
 const HEARTBEAT_ACK_AGE_THRESHOLD_MS = 60_000;
 
-// Justin's review on #193 §2: "Command dispatch wedge — handleCommand
-// hung on DB pool exhaustion, qurl-service API call, or Auth0 token
-// refresh. Need a 'last command processed within N seconds' or 'last
-// gateway event within N seconds' signal layered into isReady."
+// Composite-readiness gateway-activity signal. client.isReady() alone
+// misses event-loop wedges (DB pool exhaustion, qurl-service stalls,
+// Auth0 refresh hangs) — the WebSocket stays connected but the raw
+// handler stops firing.
 //
 // Threshold = 60 s matches the heartbeat-ack threshold. discord.js
 // emits a heartbeat every ~41 s and the bot's `client.on('raw', ...)`

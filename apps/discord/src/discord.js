@@ -345,23 +345,15 @@ client.on('channelDelete', async (channel) => {
   }
 });
 
-// Phase 1 monitoring — bot install / uninstall lifecycle. These events
-// also fire on every shard ready burst (Discord re-sends guildCreate
-// for every guild the bot is already in), so the install dashboard
-// widget should view counts as a *trend*, not as "exactly N installs
-// happened today." A genuine install is the only path that fires
-// guildCreate while the client is already isReady(); we use that to
-// distinguish first-time joins from replay events.
+// guildCreate also fires on every shard ready burst (Discord re-sends
+// for every guild the bot is already in). Tag replays via !isReady() so
+// the install dashboard widget can filter to genuine installs.
 //
-// KNOWN LIMITATION (#195 — Phase 2 follow-up): discord.js v14's
-// `Client.isReady()` does NOT flip back to false on a session resume,
-// so a forced re-IDENTIFY (CLOSE code 4xxx requiring a fresh session)
-// would fire guildCreate for every cached guild while isReady() is
-// still true — every replay would get tagged `replay: false` and
-// produce a fake install spike on the dashboard. Acceptable for
-// Phase 1 because the bot has no real users in prod yet (and forced
-// re-IDENTIFY is rare). The fix uses a settle window driven by
-// shardReady/shardResume events; see #195 for the full design.
+// KNOWN LIMITATION (#195): discord.js v14's `Client.isReady()` does
+// NOT flip back to false on a session resume, so a forced re-IDENTIFY
+// (CLOSE code 4xxx) replays every cached guild with `replay: false`,
+// producing a fake install spike. Phase 2 fix uses a settle window
+// driven by shardReady/shardResume; see #195.
 client.on('guildCreate', (guild) => {
   try {
     const replay = !client.isReady();

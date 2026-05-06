@@ -188,11 +188,9 @@ const AUDIT_EVENTS = {
   // Periodic gauge of `client.guilds.cache.size`. Emitted every 60 s.
   ACTIVE_GUILD_COUNT: 'active_guild_count',
 
-  // Justin's review on #193 §5: "Bot can be isReady() and still
-  // failing every /qurl link because the GitHub App token expired
-  // or the qurl-service API key was rotated."
-  //
-  // Emitted when a request to a dependency returns 401 or 403.
+  // Emitted when a request to a dependency returns 401 or 403 — catches
+  // rotation drift (qurl-service API key, GitHub App token, etc.) that
+  // client.isReady() can't see.
   // Payload fields:
   //   - `dependency`: 'qurl_service' (extensible to GitHub / Auth0
   //                   / etc. as future dependencies are instrumented).

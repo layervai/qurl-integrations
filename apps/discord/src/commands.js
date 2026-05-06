@@ -3527,30 +3527,17 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
-  // Phase 1 monitoring instrumentation. handler_duration_ms is the
-  // wall-clock delta from handleCommand entry to the metric emit
-  // (after command.execute completes, OR at any failure path). NOT
-  // the user-perceived ACK latency — for commands that defer + run
-  // a long background task, the user sees a fast "Bot is thinking..."
-  // ACK and this number captures the whole operation. True edge-to-
-  // ACK measurement is Phase 2 work (separate planning PR).
-  //
+  // handler_duration_ms is wall-clock from entry to emit, NOT user-
+  // perceived ACK latency — for commands that defer + run a background
+  // task, this captures the whole operation. Edge-to-ACK is Phase 2.
   // hrtime.bigint() instead of Date.now() so an NTP step backward
-  // can't produce a negative duration. The result is nanoseconds; we
-  // divide to ms for the audit payload (no precision loss at the ms
-  // granularity dashboards consume).
-  //
-  // command_name is from the Discord-delivered field, low-cardinality
-  // (bounded by registered slash commands; <30 distinct values).
+  // can't produce a negative duration.
   const handlerStart = process.hrtime.bigint();
   const commandName = interaction.commandName;
   const emitInteractionMetric = (success, failureType) => {
-    // logger.audit has its own two-tier try/catch (logger.js:209-234)
-    // and is documented to never throw — no outer guard needed here.
     // Number(ns) / 1_000_000 (NOT BigInt division then Number) so a
     // sub-millisecond handler reports a fractional ms instead of
-    // truncating to 0. ns count fits comfortably in a double for any
-    // realistic handler duration; precision loss here is irrelevant.
+    // truncating to 0.
     const handler_duration_ms = Number(process.hrtime.bigint() - handlerStart) / 1_000_000;
     logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
       command_name: commandName,
@@ -3615,16 +3602,12 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
-    // failureType reflects the FIRST failure observed: handler_error
-    // (or ack_timeout if the handler threw a 10062). If the follow-up
-    // reply ALSO fails for a non-ack reason, we deliberately keep the
-    // original handler_error tag — the original execute failure is the
-    // more meaningful signal for the dashboard. Only an ack_timeout on
-    // the reply is allowed to override (so the user-visible "did not
-    // respond" cluster catches it). Asymmetric vs. the stale-
-    // registration path above (which DOES tag reply_failed) because
-    // there's no prior execute() in that path; the reply outcome IS
-    // the only signal.
+    // failureType reflects the FIRST failure observed. If the follow-up
+    // reply also fails for a non-ack reason, keep the original
+    // handler_error — execute() is the more meaningful signal. Only
+    // ack_timeout on the reply may override (user-visible "did not
+    // respond"). Asymmetric vs. the stale-registration path above
+    // (which tags reply_failed) because there's no prior execute() there.
     let failureType = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
     try {
       if (interaction.replied || interaction.deferred) {
@@ -3683,9 +3666,9 @@ module.exports = {
       // reset it between cases so a prior test's cached members don't
       // mask a `members.fetch` rejection in the next test.
       memberFetchCache,
-      // Phase 1 monitoring helper exposed for direct regex coverage.
-      // The fallback regex shape drives the failure_type alarm so a
-      // silent breakage is bad — table-driven tests pin every shape.
+      // The ACK_TIMEOUT_MSG_RE fallback shape drives the failure_type
+      // alarm — table-driven tests pin every shape so a silent regex
+      // breakage can't slip through.
       isAckTimeoutError,
     },
   }),

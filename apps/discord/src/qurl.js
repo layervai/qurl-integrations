@@ -60,20 +60,14 @@ async function qurlFetch(method, path, body, apiKey) {
       let bodyLen = 0;
       try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
       logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
-      // Justin's review on #193 §5: emit a dependency_auth_failure
-      // event on 401/403 from qurl-service so a paired CloudWatch
-      // metric filter can count rotated/invalid-token cases. Fires
-      // BEFORE the throw so a caller's catch path doesn't have to
-      // re-route the audit emit — the metric is independent of how
-      // the caller handles the error.
+      // Emit BEFORE the throw so a caller's catch path can't suppress
+      // the audit — the metric stays independent of caller error
+      // handling.
       //
       // EMIT-ONCE INVARIANT: 401/403 must stay OUT of
       // RETRYABLE_STATUSES (declared at the top of this file). If a
-      // future change ever adds them (e.g. for token-refresh
-      // experiments), this emit fires per attempt and the alarm
-      // count multiplies. Pinned by tests/qurl-coverage.test.js —
-      // adding 401/403 to the retry set breaks the "emit-once on 401"
-      // assertion there.
+      // future change adds them, this emit fires per attempt and the
+      // alarm count multiplies. Pinned by tests/qurl-coverage.test.js.
       if (resp.status === 401 || resp.status === 403) {
         logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
           dependency: 'qurl_service',

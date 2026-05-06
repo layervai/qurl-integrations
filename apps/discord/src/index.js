@@ -263,17 +263,11 @@ if (isGateway) {
   // Handle interactions
   client.on('interactionCreate', handleCommand);
 
-  // Phase 1 monitoring (Justin #193 §2): tick the gateway-activity
-  // timestamp on every WebSocket frame including heartbeats. Cheap
-  // (synchronous timestamp update). Catches event-loop saturation as
-  // a wedge condition — if the loop is saturated, raw events queue
-  // up and the timestamp goes stale, flipping the heartbeat composite
-  // to unhealthy. Subsumes the heartbeat-ack age check: discord.js
-  // dispatches HEARTBEAT_ACK frames as raw events too.
-  //
-  // Pass `noteGatewayActivity` directly (not a wrapping arrow) so v8
-  // keeps a single shape across the listener's lifetime. Saves
-  // closure allocation on every frame at high message rates.
+  // Tick the gateway-activity timestamp on every WebSocket frame.
+  // Catches event-loop saturation: if the loop is saturated, raw events
+  // queue up and the timestamp goes stale, flipping the heartbeat
+  // composite to unhealthy. Pass the function directly (not wrapped) so
+  // v8 keeps a single shape and avoids per-frame closure allocation.
   client.on('raw', noteGatewayActivity);
 
   // Error handling
