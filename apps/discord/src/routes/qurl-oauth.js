@@ -331,21 +331,35 @@ router.get('/callback', rateLimit, async (req, res) => {
     });
     if (!mintResp.ok) {
       const errBody = await mintResp.text().catch(() => '');
-      logger.error('qURL API key mint failed', {
-        status: mintResp.status, body: errBody.slice(0, 500), guildId,
-      });
-      // RFC 7807 problem JSON; surface the api_key_limit case specifically
-      // so the admin sees the actual cause + the action they can take,
-      // not a generic "service rejected the request" wall.
+      // RFC 7807 problem JSON; surface specific cases (currently just
+      // api_key_limit) before the generic catch-all so the admin sees
+      // the actual cause + the action they can take, not a "service
+      // rejected the request" wall. Parse-fail / missing-code falls
+      // through to the generic branch.
       let problemCode = '';
       try {
         const parsed = JSON.parse(errBody);
         if (typeof parsed?.error?.code === 'string') problemCode = parsed.error.code;
-      } catch { /* not JSON — fall through to the generic branch */ }
+      } catch { /* not JSON — fall through */ }
+
       if (mintResp.status === 403 && problemCode === 'api_key_limit') {
-        return renderError(res, 403, 'qURL API key limit reached',
+        // User-quota hit, NOT a service failure. Log at warn (not
+        // error) so prod alerting / log-rate alarms can distinguish
+        // "qurl-service down" (logger.error) from "user on Free tier
+        // hit 3 keys" (logger.warn). Status 429 mirrors the actual
+        // semantic (Too Many Requests / quota) — qurl-service's 403
+        // is itself somewhat off-spec for a quota hit; we render the
+        // semantically correct status to the admin's browser.
+        logger.warn('qURL API key mint refused: api_key_limit', {
+          status: mintResp.status, problemCode, guildId,
+        });
+        return renderError(res, 429, 'qURL API key limit reached',
           'Your qURL account has hit its API key limit (Free tier allows 3). Delete an unused key in your layerv.ai dashboard, or upgrade your plan, then run /qurl setup again.');
       }
+
+      logger.error('qURL API key mint failed', {
+        status: mintResp.status, problemCode, body: errBody.slice(0, 500), guildId,
+      });
       return renderError(res, 502, 'Could not provision qURL key',
         'qurl-service rejected the API-key request. Please run /qurl setup again, or contact your layerv.ai admin.');
     }
