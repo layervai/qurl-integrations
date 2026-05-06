@@ -353,16 +353,15 @@ client.on('channelDelete', async (channel) => {
 // guildCreate while the client is already isReady(); we use that to
 // distinguish first-time joins from replay events.
 //
-// KNOWN LIMITATION (tracked for Phase 2 follow-up): discord.js v14's
+// KNOWN LIMITATION (#195 — Phase 2 follow-up): discord.js v14's
 // `Client.isReady()` does NOT flip back to false on a session resume,
 // so a forced re-IDENTIFY (CLOSE code 4xxx requiring a fresh session)
 // would fire guildCreate for every cached guild while isReady() is
 // still true — every replay would get tagged `replay: false` and
 // produce a fake install spike on the dashboard. Acceptable for
-// Phase 1 because the bot has no real users in prod yet; the fix is
-// to track our own ready timestamp via shardReady/shardResume events
-// and use a settle window. Documented here so a future reader doesn't
-// chase the noise as a real install signal.
+// Phase 1 because the bot has no real users in prod yet (and forced
+// re-IDENTIFY is rare). The fix uses a settle window driven by
+// shardReady/shardResume events; see #195 for the full design.
 client.on('guildCreate', (guild) => {
   try {
     const replay = !client.isReady();

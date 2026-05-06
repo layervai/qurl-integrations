@@ -44,7 +44,7 @@ function readGatewayHealth(client, now = Date.now) {
   // future sharding flip is automatic; the oldest timestamp across
   // shards is the worst-case heartbeat age and the right number to
   // alarm on.
-  let oldest_ack = null;
+  let oldestAck = null;
   if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
       const acked = shard?.lastPingTimestamp;
@@ -52,7 +52,7 @@ function readGatewayHealth(client, now = Date.now) {
       // future change to 0 / null without falsely emitting "healthy"
       // before the first heartbeat round-trip completes.
       if (typeof acked === 'number' && acked > 0) {
-        if (oldest_ack === null || acked < oldest_ack) oldest_ack = acked;
+        if (oldestAck === null || acked < oldestAck) oldestAck = acked;
       }
     }
   }
@@ -60,7 +60,7 @@ function readGatewayHealth(client, now = Date.now) {
   // negative age that would otherwise satisfy `< 60_000` and falsely
   // mark the gateway healthy. Date.now() is wall-clock, not monotonic;
   // Fargate hosts get periodic NTP corrections.
-  const ack_age_ms = oldest_ack === null ? null : Math.max(0, now() - oldest_ack);
+  const ack_age_ms = oldestAck === null ? null : Math.max(0, now() - oldestAck);
 
   const healthy =
     isReady &&
@@ -169,6 +169,14 @@ function startActiveGuildCount(client, opts = {}) {
   // for the first interval. Today this metric is gauge-only on the
   // dashboard, so the immediate emit is just consistency, but it
   // keeps both timers behaving the same way.
+  //
+  // Caveat: index.js calls startActiveGuildCount() right after
+  // client.login() resolves, which is BEFORE the gateway READY
+  // event populates client.guilds.cache. The first datapoint here
+  // can be 0 while the bot is actually in N guilds — an artifact of
+  // the cache hydrating asynchronously. The 60s interval makes this
+  // self-correcting within one window. A future alarm on this
+  // metric should either ignore the boot window or wait for ready.
   tick();
 
   const timer = setInterval(tick, intervalMs);

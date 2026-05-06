@@ -3516,8 +3516,7 @@ async function handleCommand(interaction) {
   // the user-perceived ACK latency — for commands that defer + run
   // a long background task, the user sees a fast "Bot is thinking..."
   // ACK and this number captures the whole operation. True edge-to-
-  // ACK measurement is Phase 2 work (see qurl-integrations-infra#419
-  // tracking issue link in the Phase 2 planning PR).
+  // ACK measurement is Phase 2 work (separate planning PR).
   //
   // hrtime.bigint() instead of Date.now() so an NTP step backward
   // can't produce a negative duration. The result is nanoseconds; we
