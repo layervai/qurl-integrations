@@ -2,6 +2,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discor
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
+const { AUDIT_EVENTS } = require('./constants');
 const db = require('./store');
 const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 
@@ -341,6 +342,38 @@ client.on('channelDelete', async (channel) => {
     }
   } catch (error) {
     logger.error('Error handling channelDelete event', { error: error.message });
+  }
+});
+
+// guildCreate also fires on every shard ready burst (Discord re-sends
+// for every guild the bot is already in). Tag replays via !isReady() so
+// the install dashboard widget can filter to genuine installs.
+//
+// KNOWN LIMITATION (#195): discord.js v14's `Client.isReady()` does
+// NOT flip back to false on a session resume, so a forced re-IDENTIFY
+// (CLOSE code 4xxx) replays every cached guild with `replay: false`,
+// producing a fake install spike. Phase 2 fix uses a settle window
+// driven by shardReady/shardResume; see #195.
+client.on('guildCreate', (guild) => {
+  try {
+    const replay = !client.isReady();
+    logger.audit(AUDIT_EVENTS.GUILD_INSTALL, {
+      guild_id: guild?.id,
+      member_count: guild?.memberCount,
+      replay,
+    });
+  } catch (error) {
+    logger.error('Error handling guildCreate event', { error: error?.message });
+  }
+});
+
+client.on('guildDelete', (guild) => {
+  try {
+    logger.audit(AUDIT_EVENTS.GUILD_UNINSTALL, {
+      guild_id: guild?.id,
+    });
+  } catch (error) {
+    logger.error('Error handling guildDelete event', { error: error?.message });
   }
 });
 

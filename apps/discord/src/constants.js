@@ -144,6 +144,78 @@ const AUDIT_EVENTS = {
   // qurl-bot-discord/terraform/monitoring.tf counts these so an
   // alarm can fire on >N unhealthy responses in a window.
   GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
+
+  // Phase 1 monitoring events — emitted by the gateway role only.
+  // Paired with terraform filters in qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf.
+
+  // Single emission per ChatInputCommand interaction. handleCommand
+  // early-returns on autocomplete / non-chat-input (modal submits,
+  // buttons) WITHOUT emitting — those flows have their own contracts.
+  // If discord.js ever routes a new interaction type through the
+  // same handler, the metric undercounts until either the early-
+  // return or this comment is updated. `success: true|false`,
+  // `handler_duration_ms` (handler entry → metric emit; not edge-to-ACK
+  // — see commands.js comment), and `failure_type` ('ack_timeout' |
+  // 'handler_error' | 'unknown_command' | 'reply_failed' | null)
+  // carry every dimension Phase 1 alarms need. Low-cardinality only —
+  // command_name is bounded by registered slash commands.
+  //
+  // failure_type precedence: when execute() throws AND a follow-up
+  // reply also throws, handler_error wins (the original execute
+  // failure is the more meaningful signal); only ack_timeout is
+  // allowed to override. Asymmetric vs. the stale-registration path
+  // which DOES tag reply_failed because there's no prior execute.
+  // See commands.js handleCommand for the precedence table.
+  INTERACTION_HANDLED: 'interaction_handled',
+
+  // Positive-signal heartbeat. Emitted every 30 s when the composite
+  // readiness check passes (client.isReady() && ws.ping > 0 &&
+  // ack_age_ms < 60000). Missing emissions = wedge.
+  GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
+
+  // Bot added/removed from a guild. Single emission on the
+  // guildCreate / guildDelete event. `guild_id` is in the payload
+  // for log-grep / forensic queries; it MUST NOT be promoted to a
+  // CloudWatch metric dimension at the terraform-filter layer —
+  // per-guild dimensioning explodes metric cost ($0.30/metric/guild)
+  // and is high-cardinality unbounded as installs grow. See the
+  // monitoring.tf filter for guild_install — it counts events as a
+  // flat metric.
+  GUILD_INSTALL: 'guild_install',
+  GUILD_UNINSTALL: 'guild_uninstall',
+
+  // Periodic gauge of `client.guilds.cache.size`. Emitted every 60 s.
+  ACTIVE_GUILD_COUNT: 'active_guild_count',
+
+  // Emitted when a request to a dependency returns 401 or 403 — catches
+  // rotation drift (qurl-service API key, GitHub App token, etc.) that
+  // client.isReady() can't see.
+  // Payload fields:
+  //   - `dependency`: 'qurl_service' (extensible to GitHub / Auth0
+  //                   / etc. as future dependencies are instrumented).
+  //                   LOW-cardinality — safe to dimension on.
+  //   - `status`: numeric 401 | 403. LOW-cardinality — safe to
+  //               dimension on.
+  //   - `method`: HTTP verb (GET, POST, PUT, DELETE). LOW-cardinality
+  //               — safe to dimension on.
+  //   - `path`: HIGH-cardinality (carries resource IDs like
+  //             `/qurls/abc123def`). Forensic-query field ONLY —
+  //             do NOT promote to a CloudWatch metric dimension at
+  //             the terraform-filter layer. Same trap as `guild_id`
+  //             above: per-resource dimensioning would explode
+  //             metric cost. Dimension on `dependency + method +
+  //             status` instead; use Logs Insights to drill down
+  //             to specific paths during an incident.
+  //
+  // The paired CloudWatch metric filter counts these so an alarm
+  // can fire on >N auth failures in a window — catches token-
+  // rotation drift before users see cascading errors. Reactive
+  // design: only fires on actual dependency calls (no periodic
+  // probing). For an idle bot with no real users, the metric
+  // stays zero — but for an idle bot the rotation also doesn't
+  // matter until someone tries to use it.
+  DEPENDENCY_AUTH_FAILURE: 'dependency_auth_failure',
 };
 
 // Frozen so a stray `AUDIT_EVENTS.UPLOAD_SUCCESS = 'oops'` mutation at

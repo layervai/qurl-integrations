@@ -4,6 +4,7 @@ const { client, refreshCache, shutdown: discordShutdown } = require('./discord')
 const { registerCommands, handleCommand } = require('./commands');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
+const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
 const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
@@ -262,6 +263,13 @@ if (isGateway) {
   // Handle interactions
   client.on('interactionCreate', handleCommand);
 
+  // Tick the gateway-activity timestamp on every WebSocket frame.
+  // Catches event-loop saturation: if the loop is saturated, raw events
+  // queue up and the timestamp goes stale, flipping the heartbeat
+  // composite to unhealthy. Pass the function directly (not wrapped) so
+  // v8 keeps a single shape and avoids per-frame closure allocation.
+  client.on('raw', noteGatewayActivity);
+
   // Error handling
   client.on('error', error => {
     logger.error('Discord client error', { error: error.message });
@@ -288,6 +296,8 @@ process.on('uncaughtException', error => {
 // Graceful shutdown
 let httpServer = null;
 let httpRefreshTimer = null;
+let gatewayHeartbeatTimer = null;
+let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
 async function gracefulShutdown(code = 0) {
@@ -320,6 +330,17 @@ async function gracefulShutdown(code = 0) {
     // last refresh firing mid-teardown.
     if (httpRefreshTimer) {
       clearInterval(httpRefreshTimer);
+    }
+    // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
+    // heartbeat tick during client.destroy() would race with the
+    // WebSocketShard teardown and surface as a confusing "Sampler
+    // threw" warn. Timers are also .unref()'d but order matters for
+    // log cleanliness.
+    if (gatewayHeartbeatTimer) {
+      clearInterval(gatewayHeartbeatTimer);
+    }
+    if (activeGuildCountTimer) {
+      clearInterval(activeGuildCountTimer);
     }
     // Discord client shutdown only meaningful when we're the gateway
     // role. HTTP-only replicas never called login(), so there's no
@@ -447,6 +468,21 @@ async function start() {
         t.unref();
       }),
     ]);
+
+    // Phase 1 monitoring — periodic gateway heartbeat + active-guild-count.
+    // Started AFTER login so the first heartbeat sample sees a real ws.ping
+    // and shard.lastPingTimestamp rather than -1 from the pre-login client.
+    // Both .unref() inside the module so they don't pin shutdown.
+    //
+    // Shutdown-race guard: if SIGTERM landed during client.login() above,
+    // gracefulShutdown has already cleared the (still-null) timer locals
+    // and is racing to exit. Skip starting new timers in that case so we
+    // don't register a setInterval that no one will ever clear. Mirrors
+    // the httpRefreshTimer guard pattern at line 393.
+    if (!isShuttingDown) {
+      gatewayHeartbeatTimer = startGatewayHeartbeat(client);
+      activeGuildCountTimer = startActiveGuildCount(client);
+    }
   }
 }
 

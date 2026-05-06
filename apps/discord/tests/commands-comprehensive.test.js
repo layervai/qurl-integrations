@@ -412,6 +412,202 @@ describe('handleCommand', () => {
   });
 });
 
+// Phase 1 monitoring — handleCommand emits a single audit event per
+// interaction so the terraform metric filters can derive total /
+// failure / per-command latency without needing multiple events. Each
+// failure_type maps to a different alarm at the infra layer:
+//   - ack_timeout → user-visible "did not respond" cluster (count alarm)
+//   - handler_error → backend / dependency degradation (rate alarm)
+//   - unknown_command → stale-registration count (informational)
+describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
+  const { AUDIT_EVENTS } = require('../src/constants');
+  let logger;
+
+  beforeEach(() => {
+    logger = require('../src/logger');
+    logger.audit.mockClear();
+  });
+
+  it('emits success=true when command executes cleanly', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({
+        command_name: 'stats',
+        success: true,
+        failure_type: null,
+        handler_duration_ms: expect.any(Number),
+      }),
+    );
+  });
+
+  it('emits failure_type=handler_error when execute() throws', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+    );
+  });
+
+  it('emits failure_type=ack_timeout on Discord 10062 (Unknown interaction)', async () => {
+    const interaction = makeInteraction({ commandName: 'stats' });
+    const ackErr = Object.assign(new Error('Unknown interaction'), { code: 10062 });
+    mockDb.getStats.mockImplementationOnce(() => { throw ackErr; });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'ack_timeout' }),
+    );
+  });
+
+  it('emits failure_type=unknown_command for stale-registration path', async () => {
+    const interaction = makeInteraction({ commandName: 'no-such-cmd' });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'unknown_command' }),
+    );
+  });
+
+  it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
+    // Stale-registration path tries to reply "no longer available" but
+    // the reply itself fails for a non-timeout reason (e.g. permission
+    // missing in the channel). Tag distinctly from ack_timeout so the
+    // dashboard can separate "Discord deadline missed" from "reply
+    // call broke for some other reason."
+    const interaction = makeInteraction({
+      commandName: 'no-such-cmd',
+      reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+    });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'reply_failed' }),
+    );
+  });
+
+  it('emits failure_type=ack_timeout when stale-registration reply hits Discord 10062', async () => {
+    const ackErr = Object.assign(new Error('Unknown interaction'), { code: 10062 });
+    const interaction = makeInteraction({
+      commandName: 'no-such-cmd',
+      reply: jest.fn().mockRejectedValue(ackErr),
+    });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'ack_timeout' }),
+    );
+  });
+
+  it('preserves sub-millisecond handler_duration_ms (no BigInt-truncation regression)', async () => {
+    // Round-3 fix: Number(ns / 1_000_000n) → Number(ns) / 1_000_000.
+    // The bigint-division shape would truncate any sub-ms duration to
+    // 0 and silently destroy fast-path regression detection. Mock
+    // process.hrtime.bigint to return start at 0n and end at 500_000n
+    // (= 500 µs delta). handler_duration_ms must be 0.5, NOT 0.
+    const realHrtime = process.hrtime.bigint;
+    let callCount = 0;
+    process.hrtime.bigint = jest.fn(() => {
+      callCount++;
+      return callCount === 1 ? 0n : 500_000n;
+    });
+    try {
+      const interaction = makeInteraction({ commandName: 'stats' });
+      await handleCommand(interaction);
+      const auditCalls = logger.audit.mock.calls.filter(
+        c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED,
+      );
+      expect(auditCalls).toHaveLength(1);
+      expect(auditCalls[0][1].handler_duration_ms).toBe(0.5);
+    } finally {
+      process.hrtime.bigint = realHrtime;
+    }
+  });
+
+  it('emits INTERACTION_HANDLED EXACTLY ONCE across each failure scenario (cardinality lock)', async () => {
+    // Pin emission cardinality, not just value. Existing tests use
+    // toHaveBeenCalledWith which would still pass on duplicate emits.
+    // A future refactor that accidentally splits the event into two
+    // emits (e.g. separate "interaction_started" + "interaction_ended"
+    // pair) would silently double the alarm count without this assertion.
+    logger = require('../src/logger');
+    const scenarios = [
+      ['success path', () => makeInteraction({ commandName: 'stats' })],
+      ['handler_error', () => {
+        const i = makeInteraction({ commandName: 'stats' });
+        mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+        return i;
+      }],
+      ['unknown_command', () => makeInteraction({ commandName: 'no-such-cmd' })],
+      ['reply_failed (stale-reg path)', () => makeInteraction({
+        commandName: 'no-such-cmd',
+        reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+      })],
+    ];
+    for (const [name, mkInteraction] of scenarios) {
+      logger.audit.mockClear();
+      await handleCommand(mkInteraction());
+      const interactionCalls = logger.audit.mock.calls.filter(
+        c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED,
+      );
+      expect(interactionCalls).toHaveLength(1);
+    }
+  });
+
+  it('preserves handler_error when execute throws AND followUp also throws non-ack', async () => {
+    // Pin the asymmetric precedence rule: in the main path a
+    // handler_error tag is preserved over a follow-up reply_failed
+    // because the original execute failure is the more meaningful
+    // dashboard signal. A future refactor that flips the asymmetry
+    // would silently change failure-type attribution; this test
+    // catches it.
+    const interaction = makeInteraction({
+      commandName: 'stats',
+      reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+    });
+    mockDb.getStats.mockImplementationOnce(() => { throw new Error('db crash'); });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'stats', success: false, failure_type: 'handler_error' }),
+    );
+  });
+
+  describe('isAckTimeoutError direct regex coverage', () => {
+    const { isAckTimeoutError } = _test;
+    test.each([
+      // [name, error, expected]
+      ['discord.js DiscordAPIError code 10062', { code: 10062 }, true],
+      ['exact bare message', new Error('Unknown interaction'), true],
+      ['wrapped with RESTJSONError prefix', new Error('RESTJSONError: Unknown interaction'), true],
+      ['discord.js DiscordAPIError[10062]: prefix shape (typical wrapped)', new Error('DiscordAPIError[10062]: Unknown interaction'), true],
+      ['arbitrary class with numeric-bracket prefix', new Error('SomeApiError[42]: Unknown interaction'), true],
+      ['wrapped with arbitrary class prefix', new Error('SomeWrapper: Unknown interaction'), true],
+      ['rejected: trailing content (Discord type variant)', new Error('Unknown interaction type 5'), false],
+      ['rejected: substring inside other message', new Error('Failed to handle Unknown interaction'), false],
+      ['rejected: numeric .message', { message: 5 }, false],
+      ['rejected: no message and no code', { foo: 'bar' }, false],
+      ['rejected: null', null, false],
+      ['rejected: undefined', undefined, false],
+    ])('%s → %s', (_name, err, expected) => {
+      expect(isAckTimeoutError(err)).toBe(expected);
+    });
+  });
+
+  it('does not emit for autocomplete events (early-return path)', async () => {
+    const interaction = makeInteraction({
+      isChatInputCommand: jest.fn(() => false),
+      isAutocomplete: jest.fn(() => true),
+    });
+    await handleCommand(interaction);
+    const calls = logger.audit.mock.calls.filter(c => c[0] === AUDIT_EVENTS.INTERACTION_HANDLED);
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('/link command', () => {
   it('replies with OAuth link embed when not linked', async () => {
     mockDb.getLinkByDiscord.mockReturnValue(null);

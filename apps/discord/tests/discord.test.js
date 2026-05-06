@@ -91,6 +91,11 @@ const mockClient = {
   once: jest.fn(),
   on: jest.fn(),
   destroy: jest.fn(),
+  isReady: jest.fn(() => true),
+  // Stub matches discord.js v14 WebSocketManager surface (Map of
+  // shards, numeric ping). Future handlers that read client.ws via
+  // gateway-metrics or anywhere else won't crash silently in tests.
+  ws: { shards: new Map(), ping: 50 },
   guilds: { fetch: jest.fn().mockResolvedValue(mockGuild) },
   users: { fetch: jest.fn() },
   user: { tag: 'TestBot#0001' },
@@ -117,6 +122,8 @@ const readyHandler = mockClient.once.mock.calls.find(c => c[0] === 'ready')?.[1]
 const roleDeleteHandler = mockClient.on.mock.calls.find(c => c[0] === 'roleDelete')?.[1];
 const channelDeleteHandler = mockClient.on.mock.calls.find(c => c[0] === 'channelDelete')?.[1];
 const guildMemberAddHandler = mockClient.on.mock.calls.find(c => c[0] === 'guildMemberAdd')?.[1];
+const guildCreateHandler = mockClient.on.mock.calls.find(c => c[0] === 'guildCreate')?.[1];
+const guildDeleteHandler = mockClient.on.mock.calls.find(c => c[0] === 'guildDelete')?.[1];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -403,6 +410,57 @@ describe('discord module', () => {
       expect(roleDeleteHandler).toBeDefined();
       expect(channelDeleteHandler).toBeDefined();
       expect(guildMemberAddHandler).toBeDefined();
+    });
+
+    // Phase 1 monitoring — guildCreate / guildDelete emit audit events
+    // for install/uninstall trend tracking. guildCreate also fires on
+    // shard ready burst (Discord re-sends an event for every guild the
+    // bot is already in), so the handler tags those as `replay: true`
+    // when the client is not yet isReady().
+    it('registers guildCreate and guildDelete handlers', () => {
+      expect(guildCreateHandler).toBeDefined();
+      expect(guildDeleteHandler).toBeDefined();
+    });
+
+    it('guildCreate emits guild_install audit event', () => {
+      const logger = require('../src/logger');
+      const { AUDIT_EVENTS } = require('../src/constants');
+      logger.audit.mockClear();
+      mockClient.isReady.mockReturnValueOnce(true);
+      guildCreateHandler({ id: 'g-new', memberCount: 42 });
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.GUILD_INSTALL,
+        expect.objectContaining({ guild_id: 'g-new', member_count: 42, replay: false }),
+      );
+    });
+
+    it('guildCreate tags as replay=true during shard-ready burst', () => {
+      const logger = require('../src/logger');
+      logger.audit.mockClear();
+      mockClient.isReady.mockReturnValueOnce(false);
+      guildCreateHandler({ id: 'g-replay', memberCount: 1 });
+      expect(logger.audit).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ replay: true }),
+      );
+    });
+
+    it('guildDelete emits guild_uninstall audit event', () => {
+      const logger = require('../src/logger');
+      const { AUDIT_EVENTS } = require('../src/constants');
+      logger.audit.mockClear();
+      guildDeleteHandler({ id: 'g-gone' });
+      expect(logger.audit).toHaveBeenCalledWith(
+        AUDIT_EVENTS.GUILD_UNINSTALL,
+        expect.objectContaining({ guild_id: 'g-gone' }),
+      );
+    });
+
+    it('guildCreate handler swallows audit errors so a logging blip cannot break installs', () => {
+      const logger = require('../src/logger');
+      logger.audit.mockImplementationOnce(() => { throw new Error('audit broken'); });
+      expect(() => guildCreateHandler({ id: 'g-err' })).not.toThrow();
+      expect(logger.error).toHaveBeenCalled();
     });
 
     it('ready handler refreshes cache', async () => {

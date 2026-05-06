@@ -3500,6 +3500,23 @@ async function registerCommands(client) {
   }
 }
 
+// Discord's 3 s interaction-acknowledgement deadline surfaces as a
+// REST 10062 / "Unknown interaction" error from discord.js when the bot
+// tries to reply after the token has expired. Detect both the numeric
+// code (preferred — discord.js DiscordAPIError preserves it) and the
+// message text (fallback for wrapped-error shapes that drop .code).
+// The regex accepts an optional "Class: " or "Class[code]: " prefix
+// common to wrapped shapes — e.g. `RESTJSONError: Unknown interaction`
+// or discord.js's own `DiscordAPIError[10062]: Unknown interaction` —
+// but rejects trailing content like "Unknown interaction type X" to
+// avoid misclassification.
+const ACK_TIMEOUT_MSG_RE = /^(?:[A-Za-z][A-Za-z0-9]*(?:\[\d+\])?: )?Unknown interaction$/;
+function isAckTimeoutError(err) {
+  if (!err) return false;
+  if (err.code === 10062) return true;
+  return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
+}
+
 // Handle command interactions
 async function handleCommand(interaction) {
   // /qurl now has zero options after the button-driven redesign; no other
@@ -3509,6 +3526,26 @@ async function handleCommand(interaction) {
   if (interaction.isAutocomplete()) return;
 
   if (!interaction.isChatInputCommand()) return;
+
+  // handler_duration_ms is wall-clock from entry to emit, NOT user-
+  // perceived ACK latency — for commands that defer + run a background
+  // task, this captures the whole operation. Edge-to-ACK is Phase 2.
+  // hrtime.bigint() instead of Date.now() so an NTP step backward
+  // can't produce a negative duration.
+  const handlerStart = process.hrtime.bigint();
+  const commandName = interaction.commandName;
+  const emitInteractionMetric = (success, failureType) => {
+    // Number(ns) / 1_000_000 (NOT BigInt division then Number) so a
+    // sub-millisecond handler reports a fractional ms instead of
+    // truncating to 0.
+    const handler_duration_ms = Number(process.hrtime.bigint() - handlerStart) / 1_000_000;
+    logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
+      command_name: commandName,
+      success,
+      failure_type: failureType,
+      handler_duration_ms,
+    });
+  };
 
   // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
   // mode to customer-safe mode (flip GUILD_ID unset OR flip
@@ -3536,16 +3573,23 @@ async function handleCommand(interaction) {
         content: 'This command is no longer available in this server.',
         ephemeral: true,
       });
+      emitInteractionMetric(false, 'unknown_command');
     } catch (err) {
       logger.warn('Failed to reply to stale command interaction', {
         command: interaction.commandName, error: err.message,
       });
+      // Reply throw within Discord's 3 s window surfaces as the user-
+      // visible "did not respond" dialog. Tag it distinctly so the
+      // ack_timeout alarm catches it without being washed out by other
+      // failures.
+      emitInteractionMetric(false, isAckTimeoutError(err) ? 'ack_timeout' : 'reply_failed');
     }
     return;
   }
 
   try {
     await command.execute(interaction);
+    emitInteractionMetric(true, null);
   } catch (error) {
     logger.error(`Error executing ${interaction.commandName}`, { error: error.message });
     // Any throw after setCooldown (e.g. deferReply failure, modal timeout path
@@ -3558,6 +3602,13 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
+    // failureType reflects the FIRST failure observed. If the follow-up
+    // reply also fails for a non-ack reason, keep the original
+    // handler_error — execute() is the more meaningful signal. Only
+    // ack_timeout on the reply may override (user-visible "did not
+    // respond"). Asymmetric vs. the stale-registration path above
+    // (which tags reply_failed) because there's no prior execute() there.
+    let failureType = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
@@ -3566,7 +3617,9 @@ async function handleCommand(interaction) {
       }
     } catch (replyError) {
       logger.error('Failed to send error response', { error: replyError.message });
+      if (isAckTimeoutError(replyError)) failureType = 'ack_timeout';
     }
+    emitInteractionMetric(false, failureType);
   }
 }
 
@@ -3613,6 +3666,10 @@ module.exports = {
       // reset it between cases so a prior test's cached members don't
       // mask a `members.fetch` rejection in the next test.
       memberFetchCache,
+      // The ACK_TIMEOUT_MSG_RE fallback shape drives the failure_type
+      // alarm — table-driven tests pin every shape so a silent regex
+      // breakage can't slip through.
+      isAckTimeoutError,
     },
   }),
 };

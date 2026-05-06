@@ -1,5 +1,6 @@
 const config = require('./config');
 const logger = require('./logger');
+const { AUDIT_EVENTS } = require('./constants');
 const dns = require('dns').promises;
 
 /**
@@ -59,6 +60,22 @@ async function qurlFetch(method, path, body, apiKey) {
       let bodyLen = 0;
       try { bodyLen = (await resp.text()).length; } catch { /* ignore */ }
       logger.debug('qURL API error', { method, path, status: resp.status, bodyLen, attempt });
+      // Emit BEFORE the throw so a caller's catch path can't suppress
+      // the audit — the metric stays independent of caller error
+      // handling.
+      //
+      // EMIT-ONCE INVARIANT: 401/403 must stay OUT of
+      // RETRYABLE_STATUSES (declared at the top of this file). If a
+      // future change adds them, this emit fires per attempt and the
+      // alarm count multiplies. Pinned by tests/qurl-coverage.test.js.
+      if (resp.status === 401 || resp.status === 403) {
+        logger.audit(AUDIT_EVENTS.DEPENDENCY_AUTH_FAILURE, {
+          dependency: 'qurl_service',
+          status: resp.status,
+          method,
+          path,
+        });
+      }
       if (RETRYABLE_STATUSES.has(resp.status) && attempt < maxAttempts - 1) {
         const delay = 200 * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
         logger.warn('qURL API transient failure, retrying', { method, path, status: resp.status, attempt, delay });
