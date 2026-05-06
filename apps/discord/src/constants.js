@@ -150,9 +150,11 @@ const AUDIT_EVENTS = {
   // qurl-bot-discord/terraform/monitoring.tf.
 
   // Single emission per Discord interaction. `success: true|false`,
-  // `ack_latency_ms` (handler entry → first reply/defer/error), and
-  // `failure_type` ('ack_timeout' | 'handler_error' | 'unknown_command'
-  // | null) carry every dimension Phase 1 alarms need.
+  // `handler_duration_ms` (handler entry → metric emit; not edge-to-ACK
+  // — see commands.js comment), and `failure_type` ('ack_timeout' |
+  // 'handler_error' | 'unknown_command' | 'reply_failed' | null)
+  // carry every dimension Phase 1 alarms need. Low-cardinality only —
+  // command_name is bounded by registered slash commands.
   INTERACTION_HANDLED: 'interaction_handled',
 
   // Positive-signal heartbeat. Emitted every 30 s when the composite
@@ -161,7 +163,13 @@ const AUDIT_EVENTS = {
   GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
 
   // Bot added/removed from a guild. Single emission on the
-  // guildCreate / guildDelete event.
+  // guildCreate / guildDelete event. `guild_id` is in the payload
+  // for log-grep / forensic queries; it MUST NOT be promoted to a
+  // CloudWatch metric dimension at the terraform-filter layer —
+  // per-guild dimensioning explodes metric cost ($0.30/metric/guild)
+  // and is high-cardinality unbounded as installs grow. See the
+  // monitoring.tf filter for guild_install — it counts events as a
+  // flat metric.
   GUILD_INSTALL: 'guild_install',
   GUILD_UNINSTALL: 'guild_uninstall',
 

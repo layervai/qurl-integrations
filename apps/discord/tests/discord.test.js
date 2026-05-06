@@ -92,6 +92,10 @@ const mockClient = {
   on: jest.fn(),
   destroy: jest.fn(),
   isReady: jest.fn(() => true),
+  // Stub matches discord.js v14 WebSocketManager surface (Map of
+  // shards, numeric ping). Future handlers that read client.ws via
+  // gateway-metrics or anywhere else won't crash silently in tests.
+  ws: { shards: new Map(), ping: 50 },
   guilds: { fetch: jest.fn().mockResolvedValue(mockGuild) },
   users: { fetch: jest.fn() },
   user: { tag: 'TestBot#0001' },

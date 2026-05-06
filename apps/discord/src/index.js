@@ -324,6 +324,11 @@ async function gracefulShutdown(code = 0) {
     if (httpRefreshTimer) {
       clearInterval(httpRefreshTimer);
     }
+    // Clear gateway-metrics timers BEFORE discordShutdown(): a stray
+    // heartbeat tick during client.destroy() would race with the
+    // WebSocketShard teardown and surface as a confusing "Sampler
+    // threw" warn. Timers are also .unref()'d but order matters for
+    // log cleanliness.
     if (gatewayHeartbeatTimer) {
       clearInterval(gatewayHeartbeatTimer);
     }
@@ -459,10 +464,18 @@ async function start() {
 
     // Phase 1 monitoring — periodic gateway heartbeat + active-guild-count.
     // Started AFTER login so the first heartbeat sample sees a real ws.ping
-    // and shard.lastHeartbeatAcked rather than -1/0 from the pre-login
-    // client. Both .unref() inside the module so they don't pin shutdown.
-    gatewayHeartbeatTimer = startGatewayHeartbeat(client);
-    activeGuildCountTimer = startActiveGuildCount(client);
+    // and shard.lastPingTimestamp rather than -1 from the pre-login client.
+    // Both .unref() inside the module so they don't pin shutdown.
+    //
+    // Shutdown-race guard: if SIGTERM landed during client.login() above,
+    // gracefulShutdown has already cleared the (still-null) timer locals
+    // and is racing to exit. Skip starting new timers in that case so we
+    // don't register a setInterval that no one will ever clear. Mirrors
+    // the httpRefreshTimer guard pattern at line 393.
+    if (!isShuttingDown) {
+      gatewayHeartbeatTimer = startGatewayHeartbeat(client);
+      activeGuildCountTimer = startActiveGuildCount(client);
+    }
   }
 }
 

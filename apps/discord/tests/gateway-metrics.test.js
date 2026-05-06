@@ -23,8 +23,12 @@ jest.mock('../src/logger', () => ({
 }));
 
 function fakeClient({ isReady = true, ping = 42, ackedAgo = 5_000, guildCount = 3 } = {}) {
-  const lastHeartbeatAcked = ackedAgo === null ? null : Date.now() - ackedAgo;
-  const shards = new Map([[0, { lastHeartbeatAcked }]]);
+  // Mirror discord.js v14 shape: WebSocketShard.lastPingTimestamp is
+  // a numeric ms epoch (-1 pre-first-ack). Tests use null to indicate
+  // "no shards have an ack at all" (whole shards Map empty / each
+  // shard pre-first-ack).
+  const lastPingTimestamp = ackedAgo === null ? -1 : Date.now() - ackedAgo;
+  const shards = new Map([[0, { lastPingTimestamp }]]);
   return {
     isReady: () => isReady,
     ws: { ping, shards },
@@ -59,10 +63,27 @@ describe('readGatewayHealth', () => {
     expect(snap.ack_age_ms).toBeGreaterThanOrEqual(60_000);
   });
 
-  test('unhealthy when no shards have an ack', () => {
+  test('unhealthy when no shards have completed a heartbeat round-trip yet (-1 sentinel)', () => {
+    // discord.js v14 initializes lastPingTimestamp to -1 until the
+    // first HEARTBEAT_ACK lands. The composite check must reject this
+    // pre-first-ack state so the alarm doesn't go OK during a boot
+    // window where the gateway hasn't actually ack'd yet.
     const client = {
       isReady: () => true,
-      ws: { ping: 42, shards: new Map([[0, { lastHeartbeatAcked: 0 }]]) },
+      ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: -1 }]]) },
+      guilds: { cache: { size: 1 } },
+    };
+    const snap = readGatewayHealth(client);
+    expect(snap.healthy).toBe(false);
+    expect(snap.ack_age_ms).toBe(null);
+  });
+
+  test('unhealthy when shard reports lastPingTimestamp = 0 (legacy/null shape)', () => {
+    // Future-proof: if a future discord.js version flips the
+    // pre-first-ack sentinel to 0, the > 0 guard still catches it.
+    const client = {
+      isReady: () => true,
+      ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: 0 }]]) },
       guilds: { cache: { size: 1 } },
     };
     const snap = readGatewayHealth(client);
@@ -73,8 +94,8 @@ describe('readGatewayHealth', () => {
   test('uses oldest ack across multiple shards (worst case)', () => {
     const now = Date.now();
     const shards = new Map([
-      [0, { lastHeartbeatAcked: now - 5_000 }],
-      [1, { lastHeartbeatAcked: now - 80_000 }], // stale shard wins
+      [0, { lastPingTimestamp: now - 5_000 }],
+      [1, { lastPingTimestamp: now - 80_000 }], // stale shard wins
     ]);
     const client = {
       isReady: () => true,

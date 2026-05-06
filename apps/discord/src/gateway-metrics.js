@@ -36,15 +36,21 @@ function readGatewayHealth(client, now = Date.now) {
   const ping = client.ws?.ping;
   const ping_ms = typeof ping === 'number' ? ping : -1;
 
-  // discord.js v14 exposes per-shard heartbeat-ack timestamps on the
-  // WebSocketShard. shards is a Collection; for an unsharded bot there
-  // is exactly one shard at id 0. We iterate so a future shard count
-  // change is automatic — the oldest ack across shards is the worst
-  // case and the right number to alarm on.
+  // discord.js v14 exposes the most recent heartbeat-round-trip
+  // timestamp on each WebSocketShard as `lastPingTimestamp` (set in
+  // WebSocketManager.js on every HEARTBEAT_ACK; initialized to -1
+  // pre-first-ack per WebSocketShard.js:54). NOT `lastHeartbeatAcked`
+  // — that field doesn't exist in v14. Iterate shards.values() so a
+  // future sharding flip is automatic; the oldest timestamp across
+  // shards is the worst-case heartbeat age and the right number to
+  // alarm on.
   let oldest_ack = null;
   if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
-      const acked = shard?.lastHeartbeatAcked;
+      const acked = shard?.lastPingTimestamp;
+      // > 0 rejects both the -1 sentinel (pre-first-ack) and any
+      // future change to 0 / null without falsely emitting "healthy"
+      // before the first heartbeat round-trip completes.
       if (typeof acked === 'number' && acked > 0) {
         if (oldest_ack === null || acked < oldest_ack) oldest_ack = acked;
       }
@@ -77,6 +83,12 @@ function startGatewayHeartbeat(client, opts = {}) {
   const intervalMs = opts.intervalMs ?? HEARTBEAT_INTERVAL_MS;
   const now = opts.now ?? Date.now;
 
+  // Per-timer transition memory so we log a single warn at the
+  // healthy → unhealthy edge and a single info at the recovery edge,
+  // not every 30 s of cadence. Initial null = first observation is
+  // silent (boot window can flap freely without log spam).
+  let prevHealthy = null;
+
   const timer = setInterval(() => {
     try {
       const snapshot = readGatewayHealth(client, now);
@@ -86,6 +98,22 @@ function startGatewayHeartbeat(client, opts = {}) {
           ack_age_ms: snapshot.ack_age_ms,
         });
       }
+      // Edge-triggered logs so on-call can distinguish "wedged for
+      // 5 min" (one warn at t=0, then silence on the metric side) from
+      // "metric pipeline broken" (zero log lines + zero metric).
+      if (prevHealthy === true && !snapshot.healthy) {
+        logger.warn('Gateway heartbeat: healthy → unhealthy', {
+          is_ready: snapshot.is_ready,
+          ping_ms: snapshot.ping_ms,
+          ack_age_ms: snapshot.ack_age_ms,
+        });
+      } else if (prevHealthy === false && snapshot.healthy) {
+        logger.info('Gateway heartbeat: unhealthy → healthy', {
+          ping_ms: snapshot.ping_ms,
+          ack_age_ms: snapshot.ack_age_ms,
+        });
+      }
+      prevHealthy = snapshot.healthy;
     } catch (err) {
       // Heartbeat must never break the bot. Swallow + log so a future
       // discord.js API change doesn't take down the gateway process.

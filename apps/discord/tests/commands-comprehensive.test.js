@@ -437,7 +437,7 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
         command_name: 'stats',
         success: true,
         failure_type: null,
-        ack_latency_ms: expect.any(Number),
+        handler_duration_ms: expect.any(Number),
       }),
     );
   });
@@ -469,6 +469,36 @@ describe('handleCommand — INTERACTION_HANDLED audit emission', () => {
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.INTERACTION_HANDLED,
       expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'unknown_command' }),
+    );
+  });
+
+  it('emits failure_type=reply_failed when stale-registration reply throws non-ack error', async () => {
+    // Stale-registration path tries to reply "no longer available" but
+    // the reply itself fails for a non-timeout reason (e.g. permission
+    // missing in the channel). Tag distinctly from ack_timeout so the
+    // dashboard can separate "Discord deadline missed" from "reply
+    // call broke for some other reason."
+    const interaction = makeInteraction({
+      commandName: 'no-such-cmd',
+      reply: jest.fn().mockRejectedValue(new Error('Missing Permissions')),
+    });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'reply_failed' }),
+    );
+  });
+
+  it('emits failure_type=ack_timeout when stale-registration reply hits Discord 10062', async () => {
+    const ackErr = Object.assign(new Error('Unknown interaction'), { code: 10062 });
+    const interaction = makeInteraction({
+      commandName: 'no-such-cmd',
+      reply: jest.fn().mockRejectedValue(ackErr),
+    });
+    await handleCommand(interaction);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.INTERACTION_HANDLED,
+      expect.objectContaining({ command_name: 'no-such-cmd', success: false, failure_type: 'ack_timeout' }),
     );
   });
 

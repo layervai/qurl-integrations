@@ -3510,12 +3510,17 @@ async function handleCommand(interaction) {
 
   if (!interaction.isChatInputCommand()) return;
 
-  // Phase 1 monitoring instrumentation. handleCommand entry → first
-  // reply/defer/error is the user-perceived ACK latency. ack_latency_ms
-  // captures end-to-end (including stale-registration replies and the
-  // error-fallback path) so the dashboard reflects what the user sees.
+  // Phase 1 monitoring instrumentation. handler_duration_ms is the
+  // wall-clock time from handleCommand entry to the metric emit (after
+  // command.execute completes, OR at any failure path). NOT the user-
+  // perceived ACK latency — for commands that defer + run a long
+  // background task, the user sees a fast "Bot is thinking..." ACK
+  // and this number captures the whole operation. True edge-to-ACK
+  // measurement is Phase 2 work (see qurl-integrations-infra#TBD).
+  // For Phase 1 the alarm semantics ("p99 > 2s") still hold: a slow
+  // handler is a real signal even if the user already saw the ack.
   // command_name is from the Discord-delivered field, low-cardinality
-  // (bounded by registered commands).
+  // (bounded by registered slash commands; <30 distinct values).
   const ackStart = Date.now();
   const command_name = interaction.commandName;
   const emitInteractionMetric = (success, failure_type) => {
@@ -3524,7 +3529,7 @@ async function handleCommand(interaction) {
         command_name,
         success,
         failure_type,
-        ack_latency_ms: Date.now() - ackStart,
+        handler_duration_ms: Date.now() - ackStart,
       });
     } catch (_) { /* audit must never break user flow */ }
   };
