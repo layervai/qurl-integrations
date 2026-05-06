@@ -145,8 +145,9 @@ describe('startGatewayHeartbeat', () => {
   test('emits on every interval tick when healthy', () => {
     const client = fakeClient({ ackedAgo: 5_000 });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    // 1 immediate runOnce + 3 interval ticks at t=1000/2000/3000 = 4
     jest.advanceTimersByTime(3_500);
-    expect(logger.audit).toHaveBeenCalledTimes(3);
+    expect(logger.audit).toHaveBeenCalledTimes(4);
   });
 
   test('swallows sampler errors so a future API change does not wedge the bot', () => {
@@ -169,6 +170,71 @@ describe('startGatewayHeartbeat', () => {
     expect(timer).toBeDefined();
     expect(typeof timer.unref).toBe('function');
     clearInterval(timer);
+  });
+
+  test('logs healthy → unhealthy transition exactly once (edge-triggered, not per-tick)', () => {
+    // Start healthy, run two healthy ticks, then flip the client to
+    // unhealthy and run two more ticks. Expect exactly ONE warn at
+    // the edge — NOT one per unhealthy tick. Pin the broken contract
+    // ("warn fires every interval while wedged") that would spam logs.
+    let isReady = true;
+    const client = {
+      isReady: () => isReady,
+      ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: Date.now() - 5_000 }]]) },
+      guilds: { cache: { size: 1 } },
+    };
+    startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    // Initial runOnce + 1 tick = 2 healthy samples
+    jest.advanceTimersByTime(1_000);
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    isReady = false;
+    jest.advanceTimersByTime(1_000); // first unhealthy → warn
+    jest.advanceTimersByTime(1_000); // still unhealthy, no second warn
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Gateway heartbeat: healthy → unhealthy',
+      expect.objectContaining({ is_ready: false }),
+    );
+
+    // Recovery → exactly one info, not one per healthy tick
+    isReady = true;
+    logger.info.mockClear();
+    jest.advanceTimersByTime(1_000); // recovery → info
+    jest.advanceTimersByTime(1_000); // still healthy, no second info
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      'Gateway heartbeat: unhealthy → healthy',
+      expect.any(Object),
+    );
+  });
+
+  test('runs once immediately so the first datapoint lands inside the boot alarm window', () => {
+    const client = fakeClient({ ackedAgo: 5_000 });
+    startGatewayHeartbeat(client, { intervalMs: 60_000 });
+    // No timer advance — just invocation. The runOnce should already
+    // have emitted a heartbeat without waiting for the first interval.
+    expect(logger.audit).toHaveBeenCalledTimes(1);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
+  });
+
+  test('Math.max(0, …) guards against negative ack_age_ms from NTP step backward', () => {
+    const future = Date.now() + 10_000; // simulate clock that jumped backward
+    const shards = new Map([[0, { lastPingTimestamp: future }]]);
+    const client = {
+      isReady: () => true,
+      ws: { ping: 42, shards },
+      guilds: { cache: { size: 1 } },
+    };
+    const snap = readGatewayHealth(client);
+    expect(snap.ack_age_ms).toBe(0);
+    // healthy still requires ack_age_ms < 60_000 — clamp keeps the
+    // signal correct: a backward clock step now produces "very recent
+    // ack" which is the right semantic, not "stale by Number.MIN".
+    expect(snap.healthy).toBe(true);
   });
 });
 

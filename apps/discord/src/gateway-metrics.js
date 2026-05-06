@@ -56,7 +56,11 @@ function readGatewayHealth(client, now = Date.now) {
       }
     }
   }
-  const ack_age_ms = oldest_ack === null ? null : now() - oldest_ack;
+  // Math.max(0, ...) guards against an NTP step backward producing a
+  // negative age that would otherwise satisfy `< 60_000` and falsely
+  // mark the gateway healthy. Date.now() is wall-clock, not monotonic;
+  // Fargate hosts get periodic NTP corrections.
+  const ack_age_ms = oldest_ack === null ? null : Math.max(0, now() - oldest_ack);
 
   const healthy =
     isReady &&
@@ -89,7 +93,7 @@ function startGatewayHeartbeat(client, opts = {}) {
   // silent (boot window can flap freely without log spam).
   let prevHealthy = null;
 
-  const timer = setInterval(() => {
+  function tick() {
     try {
       const snapshot = readGatewayHealth(client, now);
       if (snapshot.healthy) {
@@ -119,7 +123,19 @@ function startGatewayHeartbeat(client, opts = {}) {
       // discord.js API change doesn't take down the gateway process.
       logger.warn('Gateway heartbeat sampler threw', { error: err?.message });
     }
-  }, intervalMs);
+  }
+
+  // Run once immediately so the first metric datapoint lands inside
+  // the alarm's 60s evaluation window. Without this, setInterval
+  // doesn't fire until t+30s and the alarm transitions
+  // INSUFFICIENT_DATA → ALARM during steady-state boot. Note: the
+  // 30s interval × 2 fits inside the 60s alarm window so a single
+  // missed sample doesn't trip the alarm — only sustained absence
+  // does. If you ever drop the alarm threshold to 30s, also drop the
+  // sampling interval to avoid flap.
+  tick();
+
+  const timer = setInterval(tick, intervalMs);
 
   // .unref() so the timer doesn't keep the event loop alive at shutdown.
   if (typeof timer.unref === 'function') timer.unref();

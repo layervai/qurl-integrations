@@ -3511,27 +3511,33 @@ async function handleCommand(interaction) {
   if (!interaction.isChatInputCommand()) return;
 
   // Phase 1 monitoring instrumentation. handler_duration_ms is the
-  // wall-clock time from handleCommand entry to the metric emit (after
-  // command.execute completes, OR at any failure path). NOT the user-
-  // perceived ACK latency — for commands that defer + run a long
-  // background task, the user sees a fast "Bot is thinking..." ACK
-  // and this number captures the whole operation. True edge-to-ACK
-  // measurement is Phase 2 work (see qurl-integrations-infra#TBD).
-  // For Phase 1 the alarm semantics ("p99 > 2s") still hold: a slow
-  // handler is a real signal even if the user already saw the ack.
+  // wall-clock delta from handleCommand entry to the metric emit
+  // (after command.execute completes, OR at any failure path). NOT
+  // the user-perceived ACK latency — for commands that defer + run
+  // a long background task, the user sees a fast "Bot is thinking..."
+  // ACK and this number captures the whole operation. True edge-to-
+  // ACK measurement is Phase 2 work (see qurl-integrations-infra#419
+  // tracking issue link in the Phase 2 planning PR).
+  //
+  // hrtime.bigint() instead of Date.now() so an NTP step backward
+  // can't produce a negative duration. The result is nanoseconds; we
+  // divide to ms for the audit payload (no precision loss at the ms
+  // granularity dashboards consume).
+  //
   // command_name is from the Discord-delivered field, low-cardinality
   // (bounded by registered slash commands; <30 distinct values).
-  const ackStart = Date.now();
-  const command_name = interaction.commandName;
-  const emitInteractionMetric = (success, failure_type) => {
-    try {
-      logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
-        command_name,
-        success,
-        failure_type,
-        handler_duration_ms: Date.now() - ackStart,
-      });
-    } catch (_) { /* audit must never break user flow */ }
+  const ackStart = process.hrtime.bigint();
+  const commandName = interaction.commandName;
+  const emitInteractionMetric = (success, failureType) => {
+    // logger.audit has its own two-tier try/catch (logger.js:209-234)
+    // and is documented to never throw — no outer guard needed here.
+    const handler_duration_ms = Number((process.hrtime.bigint() - ackStart) / 1_000_000n);
+    logger.audit(AUDIT_EVENTS.INTERACTION_HANDLED, {
+      command_name: commandName,
+      success,
+      failure_type: failureType,
+      handler_duration_ms,
+    });
   };
 
   // Defense-in-depth for mode-flip: if an operator switches from OpenNHP
@@ -3589,7 +3595,7 @@ async function handleCommand(interaction) {
       ephemeral: true,
     };
 
-    let failure_type = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
+    let failureType = isAckTimeoutError(error) ? 'ack_timeout' : 'handler_error';
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
@@ -3598,9 +3604,9 @@ async function handleCommand(interaction) {
       }
     } catch (replyError) {
       logger.error('Failed to send error response', { error: replyError.message });
-      if (isAckTimeoutError(replyError)) failure_type = 'ack_timeout';
+      if (isAckTimeoutError(replyError)) failureType = 'ack_timeout';
     }
-    emitInteractionMetric(false, failure_type);
+    emitInteractionMetric(false, failureType);
   }
 }
 
