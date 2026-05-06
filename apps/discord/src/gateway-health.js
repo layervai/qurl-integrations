@@ -99,12 +99,19 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
     // unhealthy rather than surfacing a 500. Log at debug so an
     // operator triaging an unexplained 503 rate has something to
     // grep for — info-level would be too noisy at probe cadence.
+    //
+    // Track WHICH unhealthy path (closure-not-ready vs closure-threw)
+    // so the audit emit below can distinguish them — same alarm fires
+    // on either, but the dashboard can split a real wedge from a
+    // closure bug under load.
     let ready;
+    let reason = 'not_ready';
     try {
       ready = isReady();
     } catch (err) {
       logger.debug('Gateway health: isReady closure threw, treating as unhealthy', { error: err.message });
       ready = false;
+      reason = 'sampler_threw';
     }
 
     // Transition logging — fires once per state change, not per probe.
@@ -124,13 +131,18 @@ function startGatewayHealthServer(isReady, onListenError, port = config.PORT) {
       // unhealthy, so ECS replaces the task on either.
       //
       // Audit-event emit on EVERY 503 (not just on the transition
-      // warn above) so the paired CloudWatch metric filter can count
-      // unhealthy responses at probe cadence. Justin's review on
-      // #193 §13: a wedge persisting for N probes should produce N
-      // count events for the alarm, not one transition log.
+      // warn above) so the paired CloudWatch metric filter
+      // (qurl-integrations-infra PR #419 — qurl-bot-discord/terraform
+      // monitoring.tf) can count unhealthy responses at probe cadence.
+      // A wedge persisting for N probes produces N count events for
+      // the alarm, not one transition log.
+      //
+      // `reason` carries 'not_ready' (clean WebSocket disconnect) or
+      // 'sampler_threw' (closure under load surfaced a bug). Both
+      // routes feed the same alarm, but the dashboard can split.
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(BODY_UNHEALTHY);
-      logger.audit(AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY, {});
+      logger.audit(AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY, { reason });
     }
   });
 

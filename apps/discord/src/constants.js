@@ -136,15 +136,13 @@ const AUDIT_EVENTS = {
   REVOKE_FAILED: 'revoke_failed',
 
   // Emitted by gateway-health.js on every /health response that
-  // returns 503 (client.isReady() === false OR the readiness closure
-  // threw). The wget probe runs every 30 s, so a real wedge produces
-  // this event at probe cadence — the paired CloudWatch metric
-  // filter (qurl-integrations-infra) counts these so an alarm can
-  // fire on >N unhealthy responses in a window. Justin's review on
-  // #193 §13: "Either log a structured event on each 503, or emit
-  // an EMF metric directly from the listener" — going with the
-  // structured-log option since the rest of this codebase already
-  // uses that path.
+  // returns 503. Carries `reason: 'not_ready' | 'sampler_threw'`
+  // so the dashboard can split a clean WebSocket disconnect from a
+  // readiness-closure bug under load. The wget probe runs every
+  // 30 s, so a real wedge produces this event at probe cadence —
+  // the paired CloudWatch metric filter at qurl-integrations-infra
+  // qurl-bot-discord/terraform/monitoring.tf counts these so an
+  // alarm can fire on >N unhealthy responses in a window.
   GATEWAY_HEALTH_UNHEALTHY: 'gateway_health_unhealthy',
 };
 

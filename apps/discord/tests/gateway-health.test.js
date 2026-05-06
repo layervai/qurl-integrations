@@ -106,10 +106,11 @@ describe('gateway-health server', () => {
   });
 
   test('every 503 emits a gateway_health_unhealthy audit event (count per probe)', async () => {
-    // Justin's review on #193 §13: a wedge persisting for N probes
-    // should produce N count events for the alarm, not one transition
-    // log. Pin the per-probe emission so a future refactor can't
-    // collapse it back into a transition-only signal.
+    // A wedge persisting for N probes should produce N count events
+    // for the alarm, not one transition log. Pin the per-probe emission
+    // so a future refactor can't collapse it back into a transition-only
+    // signal. Pinning `reason: 'not_ready'` keeps the dashboard split
+    // intact if a future caller forgets to pass it.
     const mockLogger = require('../src/logger');
     const { AUDIT_EVENTS } = require('../src/constants');
     const server = startGatewayHealthServer(() => false, noopOnListenError);
@@ -123,6 +124,56 @@ describe('gateway-health server', () => {
         ([event]) => event === AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY,
       );
       expect(unhealthyCalls).toHaveLength(3);
+      for (const call of unhealthyCalls) {
+        expect(call[1]).toEqual({ reason: 'not_ready' });
+      }
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('isReady() throw path emits gateway_health_unhealthy with reason=sampler_threw', async () => {
+    // Distinguishes a closure bug under load from a clean WebSocket
+    // disconnect — both produce 503 + emit, but the reason field
+    // splits them on the dashboard. Without this test, a future
+    // refactor moving the audit call inside the non-throw branch
+    // would silently drop the most operationally-interesting wedge.
+    const mockLogger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const server = startGatewayHealthServer(() => { throw new Error('boom'); }, noopOnListenError);
+    await waitForListening(server);
+    try {
+      mockLogger.audit.mockClear();
+      const { status } = await request(server, '/health');
+      expect(status).toBe(503);
+      const unhealthyCalls = mockLogger.audit.mock.calls.filter(
+        ([event]) => event === AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY,
+      );
+      expect(unhealthyCalls).toHaveLength(1);
+      expect(unhealthyCalls[0][1]).toEqual({ reason: 'sampler_threw' });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  test('HEAD /health unhealthy ALSO emits gateway_health_unhealthy', async () => {
+    // Some load-balancer probes default to HEAD. The emit must fire
+    // regardless of method — if a future change adds a HEAD early-
+    // return for body-strip optimization, the emit would silently
+    // drop and a HEAD-probing LB would never trigger the alarm.
+    const mockLogger = require('../src/logger');
+    const { AUDIT_EVENTS } = require('../src/constants');
+    const server = startGatewayHealthServer(() => false, noopOnListenError);
+    await waitForListening(server);
+    try {
+      mockLogger.audit.mockClear();
+      const head = await request(server, '/health', 'HEAD');
+      expect(head.status).toBe(503);
+      const unhealthyCalls = mockLogger.audit.mock.calls.filter(
+        ([event]) => event === AUDIT_EVENTS.GATEWAY_HEALTH_UNHEALTHY,
+      );
+      expect(unhealthyCalls).toHaveLength(1);
+      expect(unhealthyCalls[0][1]).toEqual({ reason: 'not_ready' });
     } finally {
       await closeServer(server);
     }
