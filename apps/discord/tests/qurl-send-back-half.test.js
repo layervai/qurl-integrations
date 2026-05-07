@@ -192,6 +192,8 @@ const logger = require('../src/logger');
 const {
   monitorLinkStatus,
   revokeAllLinks,
+  renderRevokeMsg,
+  REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
   activeMonitors,
@@ -649,6 +651,46 @@ describe('revokeAllLinks', () => {
     const events = logger.audit.mock.calls.map(c => c[0]);
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
+  });
+});
+
+describe('renderRevokeMsg', () => {
+  it('lists all names + no expand button when count <= TRUNC_LIMIT', () => {
+    const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false);
+    expect(r.content).toContain('Revoked 2/2 links');
+    expect(r.content).toContain('Revoked for: alice, bob');
+    expect(r.needsExpand).toBe(false);
+    expect(r.row).toBeNull();
+  });
+
+  it('truncates with "+N more" + adds Show All button when count > TRUNC_LIMIT', () => {
+    const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 3 }, (_, i) => `u${i}`);
+    const r = renderRevokeMsg('send-2', names, names.length, false);
+    expect(r.content).toContain(`+${3} more`);
+    expect(r.content).not.toContain(names.at(-1)); // last name truncated off
+    expect(r.needsExpand).toBe(true);
+    expect(r.row).not.toBeNull();
+  });
+
+  it('shows full list + Show Less button when showAll=true', () => {
+    const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
+    const r = renderRevokeMsg('send-3', names, names.length, true);
+    expect(r.content).toContain(names.at(-1)); // last name now present
+    expect(r.content).not.toMatch(/\+\d+ more/);
+    expect(r.needsExpand).toBe(true); // button still rendered for toggle back
+  });
+
+  it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
+    const r = renderRevokeMsg('send-4', [], 5, false);
+    expect(r.content).toContain('Revoked 0/5');
+    expect(r.content).not.toContain('Revoked for:');
+    expect(r.row).toBeNull();
+  });
+
+  it('singularizes "link" when total === 1', () => {
+    const r = renderRevokeMsg('send-5', ['alice'], 1, false);
+    expect(r.content).toContain('Revoked 1/1 link.');
+    expect(r.content).not.toContain('1/1 links');
   });
 });
 

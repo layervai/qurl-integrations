@@ -1923,26 +1923,6 @@ async function handleSend(interaction, apiKey) {
     let revokeShowAll = false;
     let revokeInFlight = false;
 
-    function renderRevokeMsg(names, total, showAll) {
-      const success = names.length;
-      let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}. Note: already-opened links cannot be revoked.`;
-      if (success > 0) {
-        content += showAll || success <= TRUNC_LIMIT
-          ? `\nRevoked for: ${names.join(', ')}`
-          : `\nRevoked for: ${names.slice(0, TRUNC_LIMIT).join(', ')} +${success - TRUNC_LIMIT} more`;
-      }
-      const needsExpand = success > TRUNC_LIMIT;
-      const row = needsExpand
-        ? new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`qurl_revoke_expand_${sendId}`)
-            .setLabel(showAll ? 'Show Less' : 'Show All')
-            .setStyle(ButtonStyle.Secondary),
-        )
-        : null;
-      return { content, needsExpand, row };
-    }
-
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
@@ -1963,7 +1943,7 @@ async function handleSend(interaction, apiKey) {
         // Toggle Show All / Show Less on the post-revoke recipient list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(revokeResultUserNames, revokeResultTotal, revokeShowAll);
+        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
         await interaction.editReply({
           content: updated.content,
           components: updated.needsExpand ? [updated.row] : [],
@@ -1976,6 +1956,11 @@ async function handleSend(interaction, apiKey) {
         // second click can't observe in-flight.
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeInFlight = true;
+        // Stop the link-status monitor BEFORE any editReply — otherwise
+        // its setInterval can fire concurrently with our revoke-result
+        // edit and overwrite the post-revoke message with a stale
+        // link-status update.
+        if (monitor) monitor.stop();
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
@@ -1985,7 +1970,7 @@ async function handleSend(interaction, apiKey) {
           revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
-          const initial = renderRevokeMsg(revokeResultUserNames, revokeResultTotal, false);
+          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
           await interaction.editReply({
             content: initial.content,
             components: initial.needsExpand ? [initial.row] : [],
@@ -1997,7 +1982,6 @@ async function handleSend(interaction, apiKey) {
             components: [],
           }).catch(logIgnoredDiscordErr);
         }
-        if (monitor) monitor.stop();
         // Collector keeps running for the post-revoke expand toggle;
         // its `time:` window auto-expires.
 
@@ -2502,6 +2486,33 @@ async function handleRevoke(interaction, apiKey) {
   } catch {
     await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(logIgnoredDiscordErr);
   }
+}
+
+// Shared truncation limit for both send + revoke recipient lists.
+const REVOKE_TRUNC_LIMIT = 5;
+
+// Builds the post-revoke confirmation message + Show All toggle row.
+// Hoisted to module scope (vs. closure inside the send handler) so it
+// can be unit-tested without a full collector mock. Mirrors
+// `buildConfirmMsg`'s truncation pattern.
+function renderRevokeMsg(sendId, names, total, showAll) {
+  const success = names.length;
+  let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}. Note: already-opened links cannot be revoked.`;
+  if (success > 0) {
+    content += showAll || success <= REVOKE_TRUNC_LIMIT
+      ? `\nRevoked for: ${names.join(', ')}`
+      : `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${success - REVOKE_TRUNC_LIMIT} more`;
+  }
+  const needsExpand = success > REVOKE_TRUNC_LIMIT;
+  const row = needsExpand
+    ? new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`qurl_revoke_expand_${sendId}`)
+        .setLabel(showAll ? 'Show Less' : 'Show All')
+        .setStyle(ButtonStyle.Secondary),
+    )
+    : null;
+  return { content, needsExpand, row };
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
@@ -3709,6 +3720,8 @@ module.exports = {
       // focused spec without that setup overhead.
       monitorLinkStatus,
       revokeAllLinks,
+      renderRevokeMsg,
+      REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
       activeMonitors,
       // Test-only file-concurrency hooks. The slot counter is module-
