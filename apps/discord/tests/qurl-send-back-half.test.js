@@ -652,6 +652,50 @@ describe('revokeAllLinks', () => {
     expect(events).not.toContain('revoke_success');
     expect(events).not.toContain('revoke_failed');
   });
+
+  // mintLinksInBatches packs up to TOKENS_PER_RESOURCE recipients onto
+  // a single resource_id. Without grouping, the 2nd…Nth DELETE for a
+  // shared resource throws 404 and would mis-classify N-1 recipients
+  // as failures even though all their tokens were invalidated by the
+  // 1st DELETE.
+  it('groups items by resource_id — shared-resource recipients all land in successUserIds on a single DELETE', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-3' },
+      { resource_id: 'res-solo',   recipient_discord_id: 'u-4' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+
+    const result = await revokeAllLinks('send-shared', 'sender-1', 'apikey');
+
+    // 1 DELETE per unique resource, not per recipient.
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(4);
+    expect(result.total).toBe(4);
+    expect(result.successUserIds.sort()).toEqual(['u-1', 'u-2', 'u-3', 'u-4']);
+    expect(result.failureUserIds).toEqual([]);
+  });
+
+  it('groups items by resource_id — shared-resource failure fans out to all sharing recipients', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-shared', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-shared', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-solo',   recipient_discord_id: 'u-3' },
+    ]);
+    // First call (res-shared) fails, second (res-solo) succeeds.
+    mockDeleteLink
+      .mockRejectedValueOnce(new Error('already opened'))
+      .mockResolvedValueOnce(undefined);
+
+    const result = await revokeAllLinks('send-shared-fail', 'sender-1', 'apikey');
+
+    expect(mockDeleteLink).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(1);
+    expect(result.total).toBe(3);
+    expect(result.successUserIds).toEqual(['u-3']);
+    expect(result.failureUserIds.sort()).toEqual(['u-1', 'u-2']);
+  });
 });
 
 describe('renderRevokeMsg', () => {

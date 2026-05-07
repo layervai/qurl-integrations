@@ -2520,21 +2520,36 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // a Discord user id for display. Caller resolves IDs → usernames
   // against its in-scope `recipients` array.
   const items = await db.getSendItems(sendId, senderDiscordId);
+
+  // A single resource_id can be shared across up to TOKENS_PER_RESOURCE
+  // recipients (mintLinksInBatches packs tokens onto a resource).
+  // `deleteLink` deletes the WHOLE resource, so call it once per unique
+  // resource and fan the success/failure out to every recipient sharing
+  // it. Without this dedup, the 2nd…Nth DELETE for a shared resource
+  // returns 404 (non-retryable) and would mis-classify N-1 recipients
+  // as failures even though their tokens were all invalidated.
+  const byResource = new Map();
+  for (const item of items) {
+    const list = byResource.get(item.resource_id) || [];
+    list.push(item.recipient_discord_id);
+    byResource.set(item.resource_id, list);
+  }
+  const resourceEntries = [...byResource.entries()];
   const successUserIds = [];
   const failureUserIds = [];
 
-  const results = await batchSettled(items, async (item) => {
-    await deleteLink(item.resource_id, apiKey);
-    return item;
+  const results = await batchSettled(resourceEntries, async ([resourceId]) => {
+    await deleteLink(resourceId, apiKey);
+    return resourceId;
   }, 5);
 
   for (let i = 0; i < results.length; i++) {
-    const recipientId = items[i].recipient_discord_id;
+    const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
-      successUserIds.push(recipientId);
+      successUserIds.push(...recipientIds);
     } else {
-      failureUserIds.push(recipientId);
-      logger.error('Failed to revoke QURL', { error: results[i].reason?.message });
+      failureUserIds.push(...recipientIds);
+      logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
     }
   }
 
