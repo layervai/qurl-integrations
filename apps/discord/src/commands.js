@@ -1916,15 +1916,21 @@ async function handleSend(interaction, apiKey) {
 
     // Post-revoke state. Truncation mirrors `buildConfirmMsg`.
     // `revokeInFlight` dedups concurrent Revoke clicks before the
-    // editReply lands — without it a double-click double-counts the
-    // REVOKE_SUCCESS audit metric. Intentionally never reset: success
-    // path replaces components with at most the expand button, catch
-    // path strips components — neither re-renders Revoke, so retry
-    // isn't possible inline anyway.
+    // editReply lands. Intentionally never reset: success path
+    // replaces components with at most the expand button, catch path
+    // strips components — neither re-renders Revoke, so retry isn't
+    // possible inline anyway.
+    // `revokeSucceeded` distinguishes "revoke ran and rendered a
+    // result" from "revoke threw, message says Failed". The on('end')
+    // time-out re-render must NOT overwrite a Failed message with
+    // `Revoked 0/0 links` — set this flag only AFTER the success
+    // editReply lands.
     let revokeResultUserNames = [];
+    let revokeResultSuccessCount = 0;  // row-count, not deduped name count
     let revokeResultTotal = 0;
     let revokeShowAll = false;
     let revokeInFlight = false;
+    let revokeSucceeded = false;
 
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
@@ -1946,7 +1952,7 @@ async function handleSend(interaction, apiKey) {
         // Toggle Show All / Show Less on the post-revoke recipient list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
+        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
         await interaction.editReply({
           content: updated.content,
           components: updated.needsExpand ? [updated.row] : [],
@@ -1971,13 +1977,15 @@ async function handleSend(interaction, apiKey) {
           // Map ids → snapshot usernames from send time.
           const idToName = new Map(recipients.map(r => [r.id, r.username]));
           revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
+          revokeResultSuccessCount = revoked.success;
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
+          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccessCount);
           await interaction.editReply({
             content: initial.content,
             components: initial.needsExpand ? [initial.row] : [],
           }).catch(logIgnoredDiscordErr);
+          revokeSucceeded = true;
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
           await interaction.editReply({
@@ -2087,15 +2095,21 @@ async function handleSend(interaction, apiKey) {
       // Stop monitor polling when collector ends for any reason
       if (monitor) monitor.stop();
       if (reason === 'time') {
-        // After revoke, re-render the revoke result instead of the
-        // pre-revoke confirmMsg + Management-window banner — otherwise
-        // the user's "Revoked X/Y links" view gets clobbered when the
-        // collector window ends.
-        if (revokeInFlight) {
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
+        // After a SUCCESSFUL revoke, re-render the revoke result
+        // instead of the pre-revoke confirmMsg + Management-window
+        // banner — otherwise the user's "Revoked X/Y links" view
+        // gets clobbered when the collector window ends. Gate on
+        // `revokeSucceeded` (not `revokeInFlight`) so a failure
+        // message ("Failed to revoke links…") isn't overwritten with
+        // a stale "Revoked 0/0 links" line.
+        if (revokeSucceeded) {
+          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
+        // If a revoke was attempted but failed, leave the failure
+        // message in place — don't append a Management-window banner.
+        if (revokeInFlight) return;
         interaction.editReply({
           content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
           components: [],
@@ -2514,18 +2528,21 @@ async function handleRevoke(interaction, apiKey) {
 const REVOKE_TRUNC_LIMIT = 5;
 
 // Builds the post-revoke confirmation message + Show All toggle row.
-// Hoisted to module scope (vs. closure inside the send handler) so it
-// can be unit-tested without a full collector mock. Mirrors
-// `buildConfirmMsg`'s truncation pattern.
-function renderRevokeMsg(sendId, names, total, showAll) {
-  const success = names.length;
-  let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}. Note: already-opened links cannot be revoked.`;
-  if (success > 0) {
-    content += showAll || success <= REVOKE_TRUNC_LIMIT
+// `success` is row-count (matches `total`'s units — "X/Y links"),
+// `names` is the deduped per-recipient list for display. They diverge
+// when a user has multiple qurl_sends rows (handleAddRecipients's
+// file + location branches). Hoisted to module scope so it can be
+// unit-tested without a full collector mock. Mirrors `buildConfirmMsg`.
+function renderRevokeMsg(sendId, names, total, showAll, successCount = names.length) {
+  const success = successCount;
+  let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}.`;
+  if (total > 0) content += ' Note: already-opened links cannot be revoked.';
+  if (names.length > 0) {
+    content += showAll || names.length <= REVOKE_TRUNC_LIMIT
       ? `\nRevoked for: ${names.join(', ')}`
-      : `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${success - REVOKE_TRUNC_LIMIT} more`;
+      : `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
   }
-  const needsExpand = success > REVOKE_TRUNC_LIMIT;
+  const needsExpand = names.length > REVOKE_TRUNC_LIMIT;
   const row = needsExpand
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -2565,25 +2582,32 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     return resourceId;
   }, 5);
 
-  // Dedupe across resources: handleAddRecipients can write multiple
-  // qurl_sends rows per recipient (file + location branches), so the
-  // same recipient_discord_id can appear under multiple resource_ids.
-  // Surface each user once in the revoke confirmation list.
+  // Track per-row counts (matches `total = items.length` units —
+  // "X/Y links") AND deduped per-recipient ids (for the names list).
+  // handleAddRecipients can write multiple qurl_sends rows per
+  // recipient (file + location branches), so a single user may map
+  // to multiple resource_ids. Without this split, a 1-recipient /
+  // 2-row send shows "Revoked 1/2 links" even when both rows were
+  // revoked.
+  let successRowCount = 0;
   const seenSuccess = new Set();
   const seenFailure = new Set();
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
-    const target = results[i].status === 'fulfilled' ? successUserIds : failureUserIds;
-    const seen = results[i].status === 'fulfilled' ? seenSuccess : seenFailure;
-    for (const id of recipientIds) {
-      if (!seen.has(id)) { seen.add(id); target.push(id); }
-    }
-    if (results[i].status !== 'fulfilled') {
+    if (results[i].status === 'fulfilled') {
+      successRowCount += recipientIds.length;
+      for (const id of recipientIds) {
+        if (!seenSuccess.has(id)) { seenSuccess.add(id); successUserIds.push(id); }
+      }
+    } else {
+      for (const id of recipientIds) {
+        if (!seenFailure.has(id)) { seenFailure.add(id); failureUserIds.push(id); }
+      }
       logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
     }
   }
 
-  const success = successUserIds.length;
+  const success = successRowCount;
   const total = items.length;
 
   // Record the user's revocation intent so this send stops appearing in

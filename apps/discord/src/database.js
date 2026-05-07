@@ -801,9 +801,11 @@ const dbModule = {
       : row;
   },
 
+  // Deduped resource_id list. Delegates to `getSendItems` so the
+  // per-row select is the single source of truth.
   getSendResourceIds(sendId, senderDiscordId) {
-    const stmt = db.prepare('SELECT DISTINCT resource_id FROM qurl_sends WHERE send_id = ? AND sender_discord_id = ?');
-    return stmt.all(sendId, senderDiscordId).map(r => r.resource_id);
+    const items = this.getSendItems(sendId, senderDiscordId);
+    return [...new Set(items.map(i => i.resource_id))];
   },
 
   getSendItems(sendId, senderDiscordId) {

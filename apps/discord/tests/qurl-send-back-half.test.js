@@ -738,6 +738,19 @@ describe('renderRevokeMsg', () => {
     expect(r.content).toContain('Revoked 1/1 link.');
     expect(r.content).not.toContain('1/1 links');
   });
+
+  it('row-count successCount diverges from deduped names.length on multi-row sends', () => {
+    // 1 unique recipient (file + location = 2 rows), both rows revoked.
+    // Pre-fix: rendered "1/2" (recipient count vs row count). Now: "2/2".
+    const r = renderRevokeMsg('send-multi', ['alice'], 2, false, /* successCount */ 2);
+    expect(r.content).toContain('Revoked 2/2 links');
+    expect(r.content).toContain('Revoked for: alice');
+  });
+
+  it('omits the already-opened note when total === 0 (nothing was attempted)', () => {
+    const r = renderRevokeMsg('send-empty', [], 0, false);
+    expect(r.content).not.toContain('already-opened');
+  });
 });
 
 // ===========================================================================

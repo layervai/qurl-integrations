@@ -106,3 +106,4 @@ describe('Discord Bot: Message Helpers', () => {
     expect(buttons).toContain('Add Recipients');
   });
 });
+
