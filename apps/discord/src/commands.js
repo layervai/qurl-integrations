@@ -1914,12 +1914,14 @@ async function handleSend(interaction, apiKey) {
 
     let showAllRecipients = false;
 
-    // Post-revoke state. Set when the user clicks Revoke; consumed by
-    // the `qurl_revoke_expand_${sendId}` button handler. Truncation
-    // mirrors `buildConfirmMsg` so the two messages feel consistent.
+    // Post-revoke state. Truncation mirrors `buildConfirmMsg`.
+    // `revokeInFlight` dedups concurrent Revoke clicks before the
+    // editReply lands — without it a double-click double-counts the
+    // REVOKE_SUCCESS audit metric.
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
     let revokeShowAll = false;
+    let revokeInFlight = false;
 
     function renderRevokeMsg(names, total, showAll) {
       const success = names.length;
@@ -1959,9 +1961,6 @@ async function handleSend(interaction, apiKey) {
 
       if (btnInteraction.customId === `qurl_revoke_expand_${sendId}`) {
         // Toggle Show All / Show Less on the post-revoke recipient list.
-        // The post-revoke state owns its own expand button (separate
-        // customId from the pre-revoke `qurl_expand_*`) so the two
-        // truncation states don't clobber each other.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
         const updated = renderRevokeMsg(revokeResultUserNames, revokeResultTotal, revokeShowAll);
@@ -1973,15 +1972,15 @@ async function handleSend(interaction, apiKey) {
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
+        // Sync dedup BEFORE any await — Node single-threaded so a
+        // second click can't observe in-flight.
+        if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        revokeInFlight = true;
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-          // Map successUserIds → usernames via the in-scope `recipients`
-          // array (id + username pairs from send-time resolution).
-          // Discord display names can change between send and revoke;
-          // using the snapshot at send time keeps the revoke list
-          // self-consistent with the original Recipients list shown above.
+          // Map ids → snapshot usernames from send time.
           const idToName = new Map(recipients.map(r => [r.id, r.username]));
           revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
           revokeResultTotal = revoked.total;
@@ -1999,8 +1998,8 @@ async function handleSend(interaction, apiKey) {
           }).catch(logIgnoredDiscordErr);
         }
         if (monitor) monitor.stop();
-        // Don't stop the collector — keep listening for the post-revoke
-        // expand toggle. The collector's `time:` window auto-expires.
+        // Collector keeps running for the post-revoke expand toggle;
+        // its `time:` window auto-expires.
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
         // =====================================================================
