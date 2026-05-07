@@ -722,6 +722,8 @@ describe('renderRevokeMsg', () => {
     expect(r.content).toContain(names.at(-1)); // last name now present
     expect(r.content).not.toMatch(/\+\d+ more/);
     expect(r.needsExpand).toBe(true); // button still rendered for toggle back
+    // Discord mock chainable returns itself; introspect via setLabel.mock.calls.
+    expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Show Less');
   });
 
   it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
