@@ -817,6 +817,31 @@ describe('handleAddRecipients — pre-flight guards', () => {
 
     expect(result.msg).toMatch(/incomplete/i);
   });
+
+  // The collector handler appends `newRecipients` to its in-scope
+  // `recipients` array so a post-Add revoke renders new users by name
+  // (commands.js around the `addResult.delivered > 0` branch). If this
+  // field gets renamed/dropped, that wiring breaks silently.
+  it('returns newRecipients with {id, username} pairs (post-Add revoke wiring)', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: null, expires_in: '5m',
+    });
+
+    const result = await handleAddRecipients(
+      'send-1',
+      makeUsersCollection([
+        { id: 'u1', username: 'Alice', bot: false },
+        { id: 'u2', username: 'Bob', bot: false },
+      ]),
+      makeInteraction(),
+      'apikey',
+    );
+
+    expect(result.newRecipients).toEqual([
+      { id: 'u1', username: 'Alice' },
+      { id: 'u2', username: 'Bob' },
+    ]);
+  });
 });
 
 describe('handleAddRecipients — file path failure modes', () => {

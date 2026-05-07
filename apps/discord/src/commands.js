@@ -2103,6 +2103,10 @@ async function handleSend(interaction, apiKey) {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
+          // Honor the user's last `revokeShowAll` toggle for the
+          // terminal render. Components stripped — terminal state has
+          // no toggle button, so the message stays at whatever
+          // expansion the user left it at.
           const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
@@ -2128,7 +2132,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const senderDiscordId = originalInteraction.user.id;
   const sendConfig = await db.getSendConfig(sendId, senderDiscordId);
   if (!sendConfig) {
-    return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0 };
+    return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
   // Filter out bots and the sender. Convert the Discord Collection to a
@@ -2136,9 +2140,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
+  // Resolved {id, username} list — surfaced on every return so the
+  // collector handler can extend its in-scope `recipients` array
+  // unconditionally (post-Add revoke renders the new users by name).
+  const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
-    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [], delivered: 0, failed: 0 };
+    return { msg: 'No valid recipients selected (bots and yourself are excluded).', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Create new QURL links for each resource type in the send config
@@ -2148,7 +2156,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const hasLocation = sendConfig.actual_url;
 
   if (!hasFile && !hasLocation) {
-    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0 };
+    return { msg: 'Cannot add recipients — send configuration is incomplete.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Tracks which prep paths actually completed so we can emit a single
@@ -2168,7 +2176,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       if (!sendConfig.attachment_url) {
         return {
           msg: 'Cannot add file recipients — original attachment is no longer available. Please create a new send.',
-          newResourceIds: [],
+          newResourceIds: [], newRecipients: resolvedRecipients,
           delivered: 0,
           failed: 0,
         };
@@ -2181,7 +2189,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         logger.error('addRecipients refused non-Discord attachment_url', { sendId });
         return {
           msg: 'Cannot add file recipients — original attachment URL is no longer valid. Please create a new send.',
-          newResourceIds: [],
+          newResourceIds: [], newRecipients: resolvedRecipients,
           delivered: 0,
           failed: 0,
         };
@@ -2306,7 +2314,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     });
     return {
       msg: 'Failed to save link records. Recipients were not messaged. Please try again.',
-      newResourceIds: [],
+      newResourceIds: [], newRecipients: resolvedRecipients,
       delivered: 0,
       failed: 0,
     };
@@ -2589,6 +2597,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // to multiple resource_ids. Without this split, a 1-recipient /
   // 2-row send shows "Revoked 1/2 links" even when both rows were
   // revoked.
+  // Known limitation: a recipient with rows on multiple resources
+  // where some succeed and others fail will appear in BOTH
+  // successUserIds and failureUserIds — the names line will say
+  // "Revoked for: alice" while one of alice's links actually failed.
+  // Acceptable for v1 since the multi-row case is rare; bias to
+  // failure-wins or splitting by resource is a future refinement.
   let successRowCount = 0;
   const seenSuccess = new Set();
   const seenFailure = new Set();
@@ -2609,6 +2623,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
 
   const success = successRowCount;
   const total = items.length;
+  // Audit metric uses per-resource units (matches the pre-PR shape so
+  // dashboard queries don't silently break). User-facing message uses
+  // `total` (per-row) — same item across both call paths means
+  // backward-compat for callers expecting the {success, total} shape.
+  const auditTotal = byResource.size;
+  const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 
   // Record the user's revocation intent so this send stops appearing in
   // the /qurl revoke dropdown. Mark regardless of per-link success —
@@ -2617,7 +2637,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // markSendRevoked so a DB write throw can't suppress the metric.
   if (total > 0) {
     const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
-    logger.audit(event, { send_id: sendId, success, total });
+    logger.audit(event, { send_id: sendId, success: auditSuccess, total: auditTotal });
   }
   await db.markSendRevoked(sendId, senderDiscordId);
 
