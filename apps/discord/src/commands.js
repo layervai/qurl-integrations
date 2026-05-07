@@ -1914,6 +1914,33 @@ async function handleSend(interaction, apiKey) {
 
     let showAllRecipients = false;
 
+    // Post-revoke state. Set when the user clicks Revoke; consumed by
+    // the `qurl_revoke_expand_${sendId}` button handler. Truncation
+    // mirrors `buildConfirmMsg` so the two messages feel consistent.
+    let revokeResultUserNames = [];
+    let revokeResultTotal = 0;
+    let revokeShowAll = false;
+
+    function renderRevokeMsg(names, total, showAll) {
+      const success = names.length;
+      let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}. Note: already-opened links cannot be revoked.`;
+      if (success > 0) {
+        content += showAll || success <= TRUNC_LIMIT
+          ? `\nRevoked for: ${names.join(', ')}`
+          : `\nRevoked for: ${names.slice(0, TRUNC_LIMIT).join(', ')} +${success - TRUNC_LIMIT} more`;
+      }
+      const needsExpand = success > TRUNC_LIMIT;
+      const row = needsExpand
+        ? new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`qurl_revoke_expand_${sendId}`)
+            .setLabel(showAll ? 'Show Less' : 'Show All')
+            .setStyle(ButtonStyle.Secondary),
+        )
+        : null;
+      return { content, needsExpand, row };
+    }
+
     collector.on('collect', async (btnInteraction) => {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
@@ -1930,14 +1957,39 @@ async function handleSend(interaction, apiKey) {
         return;
       }
 
+      if (btnInteraction.customId === `qurl_revoke_expand_${sendId}`) {
+        // Toggle Show All / Show Less on the post-revoke recipient list.
+        // The post-revoke state owns its own expand button (separate
+        // customId from the pre-revoke `qurl_expand_*`) so the two
+        // truncation states don't clobber each other.
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        revokeShowAll = !revokeShowAll;
+        const updated = renderRevokeMsg(revokeResultUserNames, revokeResultTotal, revokeShowAll);
+        await interaction.editReply({
+          content: updated.content,
+          components: updated.needsExpand ? [updated.row] : [],
+        }).catch(logIgnoredDiscordErr);
+        return;
+      }
+
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+          // Map successUserIds → usernames via the in-scope `recipients`
+          // array (id + username pairs from send-time resolution).
+          // Discord display names can change between send and revoke;
+          // using the snapshot at send time keeps the revoke list
+          // self-consistent with the original Recipients list shown above.
+          const idToName = new Map(recipients.map(r => [r.id, r.username]));
+          revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
+          revokeResultTotal = revoked.total;
+          revokeShowAll = false;
+          const initial = renderRevokeMsg(revokeResultUserNames, revokeResultTotal, false);
           await interaction.editReply({
-            content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
-            components: [],
+            content: initial.content,
+            components: initial.needsExpand ? [initial.row] : [],
           }).catch(logIgnoredDiscordErr);
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
@@ -1947,7 +1999,8 @@ async function handleSend(interaction, apiKey) {
           }).catch(logIgnoredDiscordErr);
         }
         if (monitor) monitor.stop();
-        collector.stop('revoked');
+        // Don't stop the collector — keep listening for the post-revoke
+        // expand toggle. The collector's `time:` window auto-expires.
 
       } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
         // =====================================================================
@@ -2453,38 +2506,44 @@ async function handleRevoke(interaction, apiKey) {
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
-  const resourceIds = await db.getSendResourceIds(sendId, senderDiscordId);
-  let success = 0;
+  // Pull per-recipient items so per-link success can be mapped back to
+  // a Discord user id for display. Caller resolves IDs → usernames
+  // against its in-scope `recipients` array.
+  const items = await db.getSendItems(sendId, senderDiscordId);
+  const successUserIds = [];
+  const failureUserIds = [];
 
-  const results = await batchSettled(resourceIds, async (resourceId) => {
-    await deleteLink(resourceId, apiKey);
-    return resourceId;
+  const results = await batchSettled(items, async (item) => {
+    await deleteLink(item.resource_id, apiKey);
+    return item;
   }, 5);
 
-  for (const r of results) {
-    if (r.status === 'fulfilled') success++;
-    else logger.error('Failed to revoke QURL', { error: r.reason?.message });
+  for (let i = 0; i < results.length; i++) {
+    const recipientId = items[i].recipient_discord_id;
+    if (results[i].status === 'fulfilled') {
+      successUserIds.push(recipientId);
+    } else {
+      failureUserIds.push(recipientId);
+      logger.error('Failed to revoke QURL', { error: results[i].reason?.message });
+    }
   }
 
+  const success = successUserIds.length;
+  const total = items.length;
+
   // Record the user's revocation intent so this send stops appearing in
-  // the /qurl revoke dropdown. We mark regardless of per-link success —
-  // partial failures are surfaced in the reply message ("Revoked X/Y"),
-  // and re-picking the same send from the dropdown wouldn't help anyway
-  // since the failed resource_ids are the same.
-  // Emit BEFORE markSendRevoked for the same reason the dispatch
-  // emissions fire before updateSendDMStatus — a DB write throw must
-  // not suppress the audit metric, which is exactly the failure mode
-  // we're trying to measure. Distinguish all-failed (success === 0)
-  // from at-least-partial (success > 0) so the dashboard isn't
-  // misled into counting fully-failed revokes as successes.
-  if (resourceIds.length > 0) {
+  // the /qurl revoke dropdown. Mark regardless of per-link success —
+  // partial failures surface in the reply ("Revoked X/Y"), and re-
+  // picking the same send wouldn't help anyway. Emit audit BEFORE
+  // markSendRevoked so a DB write throw can't suppress the metric.
+  if (total > 0) {
     const event = success > 0 ? AUDIT_EVENTS.REVOKE_SUCCESS : AUDIT_EVENTS.REVOKE_FAILED;
-    logger.audit(event, { send_id: sendId, success, total: resourceIds.length });
+    logger.audit(event, { send_id: sendId, success, total });
   }
   await db.markSendRevoked(sendId, senderDiscordId);
 
-  logger.info('Revoked send', { sendId, success, total: resourceIds.length });
-  return { success, total: resourceIds.length };
+  logger.info('Revoked send', { sendId, success, total });
+  return { success, total, successUserIds, failureUserIds };
 }
 
 // Time-based sweep every 60s (was 5min). With high user counts the Map can

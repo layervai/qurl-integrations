@@ -136,6 +136,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
+  getSendItems: jest.fn(() => []),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -562,44 +563,61 @@ describe('monitorLinkStatus — duration cap + activeMonitors LRU', () => {
 // ===========================================================================
 
 describe('revokeAllLinks', () => {
-  it('calls deleteLink for each resource and markSendRevoked, returns success/total', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2', 'res-3']);
+  // Helper: items shape mirrors `getSendItems` return — `{resource_id,
+  // recipient_discord_id}` per row. The recipient_discord_id values
+  // are surfaced via `successUserIds`/`failureUserIds` so callers can
+  // resolve usernames against their in-scope `recipients` array.
+  const makeItems = (n) => Array.from({ length: n }, (_, i) => ({
+    resource_id: `res-${i + 1}`,
+    recipient_discord_id: `user-${i + 1}`,
+  }));
+
+  it('calls deleteLink for each resource and markSendRevoked, returns success/total + per-recipient ids', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(3));
     mockDeleteLink.mockResolvedValue(undefined);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
     expect(mockDeleteLink).toHaveBeenCalledTimes(3);
     expect(mockDb.markSendRevoked).toHaveBeenCalledWith('send-1', 'sender-1');
-    expect(result).toEqual({ success: 3, total: 3 });
+    expect(result).toEqual({
+      success: 3,
+      total: 3,
+      successUserIds: ['user-1', 'user-2', 'user-3'],
+      failureUserIds: [],
+    });
   });
 
   it('counts partial failures as success/total mismatch and logs each failure', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('429 rate limited'));
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(result).toEqual({ success: 1, total: 2 });
+    expect(result.success).toBe(1);
+    expect(result.total).toBe(2);
+    expect(result.successUserIds).toEqual(['user-1']);
+    expect(result.failureUserIds).toEqual(['user-2']);
     expect(logger.error).toHaveBeenCalledWith('Failed to revoke QURL', expect.any(Object));
     // markSendRevoked still fires — partial failures don't block the local
     // record update, since re-picking from /qurl revoke wouldn't help.
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
-  it('returns 0/0 when send has no resource IDs (already-revoked or unknown sendId)', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce([]);
+  it('returns 0/0 when send has no items (already-revoked or unknown sendId)', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([]);
 
     const result = await revokeAllLinks('send-1', 'sender-1', 'apikey');
 
-    expect(result).toEqual({ success: 0, total: 0 });
+    expect(result).toEqual({ success: 0, total: 0, successUserIds: [], failureUserIds: [] });
     expect(mockDeleteLink).not.toHaveBeenCalled();
     expect(mockDb.markSendRevoked).toHaveBeenCalled();
   });
 
   it('emits revoke_success audit event with success/total tally when at least one link revoked', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink.mockResolvedValue(undefined);
 
     await revokeAllLinks('send-42', 'sender-1', 'apikey');
@@ -610,7 +628,7 @@ describe('revokeAllLinks', () => {
   });
 
   it('emits revoke_failed (not revoke_success) when every per-link delete throws', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce(['res-1', 'res-2']);
+    mockDb.getSendItems.mockResolvedValueOnce(makeItems(2));
     mockDeleteLink.mockRejectedValue(new Error('429 rate limited'));
 
     await revokeAllLinks('send-43', 'sender-1', 'apikey');
@@ -624,7 +642,7 @@ describe('revokeAllLinks', () => {
   });
 
   it('emits no audit event when there are no resources to revoke (avoids 0/0 noise)', async () => {
-    mockDb.getSendResourceIds.mockResolvedValueOnce([]);
+    mockDb.getSendItems.mockResolvedValueOnce([]);
 
     await revokeAllLinks('send-44', 'sender-1', 'apikey');
 

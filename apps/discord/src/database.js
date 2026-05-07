@@ -806,6 +806,11 @@ const dbModule = {
     return stmt.all(sendId, senderDiscordId).map(r => r.resource_id);
   },
 
+  getSendItems(sendId, senderDiscordId) {
+    const stmt = db.prepare('SELECT resource_id, recipient_discord_id FROM qurl_sends WHERE send_id = ? AND sender_discord_id = ?');
+    return stmt.all(sendId, senderDiscordId);
+  },
+
   // ── Guild config (BYOK API keys) ──
 
   // Encrypted at rest via KEY_ENCRYPTION_KEY (AES-256-GCM). Rows written

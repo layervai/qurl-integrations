@@ -1296,6 +1296,22 @@ async function getSendResourceIds(sendId, senderDiscordId) {
   return [...ids];
 }
 
+// Returns the full per-recipient items so the revoke path can map
+// per-link success/failure back to a Discord user id for display.
+// Same pagination requirement as `getSendResourceIds`.
+async function getSendItems(sendId, senderDiscordId) {
+  const items = await queryAll({
+    TableName: TABLES.qurl_sends,
+    KeyConditionExpression: 'send_id = :sid',
+    FilterExpression: 'sender_discord_id = :s',
+    ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
+  });
+  return items.map(item => ({
+    resource_id: item.resource_id,
+    recipient_discord_id: item.recipient_discord_id,
+  }));
+}
+
 // ── Guild (BYOK) API keys ──
 
 async function getGuildApiKey(guildId) {
@@ -1504,7 +1520,7 @@ module.exports = {
   getWeeklyDigestData,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, getRecentSends, markSendRevoked,
-  saveSendConfig, getSendConfig, getSendResourceIds,
+  saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
   // Orphaned tokens

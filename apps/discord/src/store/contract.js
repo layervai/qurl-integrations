@@ -94,6 +94,7 @@ const STORE_METHODS = Object.freeze([
   'saveSendConfig',
   'getSendConfig',
   'getSendResourceIds',
+  'getSendItems',
 
   // Guild (BYOK) API keys
   'getGuildApiKey',
