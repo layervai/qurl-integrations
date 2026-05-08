@@ -34,8 +34,8 @@ function escapeDiscordMarkdown(s) {
 // \uXXXX escapes go through string parsing — keeps the source
 // ASCII-only and avoids editor-/tool-chain confusion over raw control
 // codepoints in a regex literal.
-// eslint-disable-next-line no-control-regex
 const STRIP_RE = new RegExp(
+  // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
   '[\\u0000-\\u001F\\u007F\\u00AD\\u061C\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]',
   'g',
 );
