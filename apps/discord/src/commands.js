@@ -2659,16 +2659,22 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
 // Builds the post-send ephemeral confirmation message body — pure
 // string + optional `attachmentText`. Mirrors the post-revoke shape:
 // when the full successNames + failedNames lists would exceed Discord's
-// 2000-char content cap, both lines render a 5-name preview with "(see
+// 2000-char content cap, lines render a 5-name preview with "(see
 // attached)" and the caller emits a `recipients.txt` AttachmentBuilder
 // on the initial editReply. In attachment mode `needsExpand=false`
-// (the file IS the full list — Show All toggle is suppressed).
+// (the file IS the full list — Show All toggle is suppressed). The
+// `showAll` arg is ignored in attachment mode.
+//
+// `(see attached)` is appended only to lines that were ACTUALLY
+// truncated — a 2-name failed line beside a 200-name recipients line
+// renders the failed names inline without the misleading pointer.
 //
 // `successNames` / `failedNamesPlain` are PLAIN (sanitizeDisplayNamePlain
 // at the call site) so they can land verbatim in the .txt; per-name
 // markdown escape is applied here for message-content rendering only.
 function renderSendConfirm({
-  delivered, expiresIn, failed, failedNamesPlain, successNames, showAll,
+  delivered, expiresIn, failed,
+  failedNamesPlain = [], successNames = [], showAll = false,
 }) {
   const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
   const escapedFailed = failedNamesPlain.map(escapeDiscordMarkdown);
@@ -2680,15 +2686,27 @@ function renderSendConfirm({
 
   if (!fullFits) {
     let msg = header;
+    // "(see attached)" only on lines that were actually truncated —
+    // overflow can be driven by ONE list while the other fits inline.
+    const failedTruncated = failedNamesPlain.length > REVOKE_TRUNC_LIMIT;
+    const successTruncated = successNames.length > REVOKE_TRUNC_LIMIT;
     if (failed > 0) {
-      const preview = escapedFailed.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
-      const more = failedNamesPlain.length - REVOKE_TRUNC_LIMIT;
-      msg += `\n${failed} could not be reached: ${preview}${more > 0 ? ` +${more} more` : ''} (see attached)`;
+      if (failedTruncated) {
+        const preview = escapedFailed.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+        const more = failedNamesPlain.length - REVOKE_TRUNC_LIMIT;
+        msg += `\n${failed} could not be reached: ${preview} +${more} more (see attached)`;
+      } else {
+        msg += fullFailedLine;
+      }
     }
     if (successNames.length > 0) {
-      const preview = escapedSuccess.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
-      const more = successNames.length - REVOKE_TRUNC_LIMIT;
-      msg += `\nRecipients: ${preview}${more > 0 ? ` +${more} more` : ''} (see attached)`;
+      if (successTruncated) {
+        const preview = escapedSuccess.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+        const more = successNames.length - REVOKE_TRUNC_LIMIT;
+        msg += `\nRecipients: ${preview} +${more} more (see attached)`;
+      } else {
+        msg += fullRecipientsLine;
+      }
     }
     let attachmentText = '';
     if (successNames.length > 0) {
