@@ -169,6 +169,12 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   if (shardsTerminated === 0) {
     return { triggered: false, reason: 'no_shards' };
   }
+  // TODO(multi-shard): pairs with the multi-shard TODO in
+  // readGatewayHealth above. When sharding flips on, the actually-
+  // wedged shard could be the one that sync-throws while a healthy
+  // shard's destroy succeeds — locking recovery out for 10 min while
+  // the stuck shard stays stuck. Move to a per-shard cooldown map
+  // (lastRecoveryAttemptAt[shardId]) at that point.
   lastRecoveryAttemptAt = t;
   return { triggered: true, reason: 'zombie_ws', shardsTerminated };
 }

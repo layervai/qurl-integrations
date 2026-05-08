@@ -316,6 +316,38 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
+  test('tick() invokes auto-recovery when activity is stale past threshold (integration: pin the wiring)', () => {
+    // Without this test, deleting the maybeAutoRecoverZombieWS call
+    // from tick() — or flipping its guard from `!healthy` to
+    // `healthy` — would pass every other test in this file. Pin the
+    // wire so a regression has to break this assertion to land.
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
+      gatewayMetricsTest._resetGatewayActivity();
+      gatewayMetricsTest._resetRecoveryClock();
+    }
+    // Back-date activity by 200s so the snapshot will be unhealthy
+    // AND past RECOVERY_ACTIVITY_THRESHOLD_MS (120s).
+    noteGatewayActivity(() => Date.now() - 200_000);
+    const shard = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = {
+      isReady: () => true,
+      ws: { ping: 42, shards: new Map([[0, shard]]) },
+      guilds: { cache: { size: 1 } },
+    };
+    startGatewayHeartbeat(client, { intervalMs: 60_000 });
+    // runOnce already fired — no advanceTimers needed.
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 4000,
+        recover: WebSocketShardDestroyRecovery.Reconnect,
+      }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Gateway auto-recovery: forcing reconnect (zombie WS)',
+      expect.objectContaining({ shards_terminated: 1 }),
+    );
+  });
+
   test('runs once immediately so the first datapoint lands inside the boot alarm window', () => {
     const client = fakeClient({ ackedAgo: 5_000 });
     startGatewayHeartbeat(client, { intervalMs: 60_000 });
