@@ -785,6 +785,23 @@ describe('renderRevokeMsg', () => {
     expect(r.attachmentText).toBeNull();
   });
 
+  // names with markdown chars must survive plain in the .txt
+  // attachment but render escaped in message content.
+  it('attachmentText is plain; content escapes markdown per name', () => {
+    const names = ['*alice*', 'normal', '[bob](evil)'];
+    // Force attachment by repeating to overflow REVOKE_CONTENT_SAFE_MAX.
+    const many = Array.from({ length: 200 }, () => '*alice*');
+    const r = renderRevokeMsg('send-md', many, many.length, true);
+    expect(r.attachmentText).toContain('*alice*');
+    expect(r.attachmentText).not.toContain('\\*alice\\*');
+    expect(r.content).toContain('\\*alice\\*'); // preview line is escaped
+
+    // Inline (small list) path also escapes.
+    const inline = renderRevokeMsg('send-md2', names, names.length, false);
+    expect(inline.content).toContain('\\*alice\\*');
+    expect(inline.content).toContain('\\[bob\\]\\(evil\\)');
+  });
+
   // Header takes its count from `success` (authoritative DDB count),
   // not `names.length` — guards against `recipients[]` being incomplete
   // when the caller filters by Set membership.

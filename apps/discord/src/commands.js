@@ -126,7 +126,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -287,16 +287,15 @@ function resolveSenderAlias(interaction) {
     ?? 'Someone';
 }
 
-// Resolve a recipient's per-guild display alias the same way the
-// sender alias resolves — guild nickname > globalName > username.
-// Falls back through whatever we have on the recipient object so the
-// helper works for User-from-UserSelect, GuildMember-from-channel-
-// members, and the {id, username} shape produced by handleAddRecipients.
-// sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape;
-// matches the public-channel notify path (see callers of
-// sanitizeDisplayName elsewhere in this file) so any rendering of a
-// recipient name (Recipients line, Revoked-for line, attachment file)
-// is hardened against bidi / zero-width / markdown-bypass nicknames.
+// Resolve a recipient's per-guild display alias: guild nickname >
+// globalName > username. Falls back through whatever we have on the
+// recipient object so the helper works for User-from-UserSelect,
+// GuildMember-from-channel-members, and the {id, username} shape
+// produced by handleAddRecipients. Returns the PLAIN sanitized form
+// (NFKC + bidi/zero-width strip + length cap, no markdown escape).
+// Callers that render into Discord message content must wrap in
+// escapeDiscordMarkdown; callers writing to a plain-text surface
+// (e.g. revoked-users.txt) use the return value directly.
 function resolveRecipientAlias(r, interaction) {
   const member = interaction?.guild?.members?.cache?.get(r.id);
   const raw = member?.displayName
@@ -304,7 +303,7 @@ function resolveRecipientAlias(r, interaction) {
     ?? r?.user?.displayName
     ?? r?.username
     ?? `user-${r?.id}`;
-  return sanitizeDisplayName(raw);
+  return sanitizeDisplayNamePlain(raw);
 }
 
 // --- Shared DM delivery payload builder ---
@@ -1833,13 +1832,14 @@ async function handleSend(interaction, apiKey) {
   function buildConfirmMsg(showAll) {
     let msg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
     if (failed > 0) {
-      msg += `\n${failed} could not be reached: ${failedUsers.map(u => resolveRecipientAlias(u, interaction)).join(', ')}`;
+      msg += `\n${failed} could not be reached: ${failedUsers.map(u => escapeDiscordMarkdown(resolveRecipientAlias(u, interaction))).join(', ')}`;
     }
     if (successNames.length > 0) {
-      if (showAll || successNames.length <= REVOKE_TRUNC_LIMIT) {
-        msg += `\nRecipients: ${successNames.join(', ')}`;
+      const escaped = successNames.map(escapeDiscordMarkdown);
+      if (showAll || escaped.length <= REVOKE_TRUNC_LIMIT) {
+        msg += `\nRecipients: ${escaped.join(', ')}`;
       } else {
-        msg += `\nRecipients: ${successNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${successNames.length - REVOKE_TRUNC_LIMIT} more`;
+        msg += `\nRecipients: ${escaped.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${escaped.length - REVOKE_TRUNC_LIMIT} more`;
       }
     }
     return msg;
@@ -2608,13 +2608,18 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
     return { content, needsExpand: false, row: null, attachmentText };
   }
 
-  const fullLine = `\nRevoked for: ${names.join(', ')}`;
+  // `names` are plain (sanitizeDisplayNamePlain at the call site) so
+  // they can land verbatim in the .txt attachment. Message content
+  // needs markdown escape per name to defuse `*phish*` / `[t](url)`
+  // injection — render-context split.
+  const escapedNames = names.map(escapeDiscordMarkdown);
+  const fullLine = `\nRevoked for: ${escapedNames.join(', ')}`;
   const fullFits = content.length + fullLine.length <= REVOKE_CONTENT_SAFE_MAX;
 
   if (!fullFits) {
     // Full list won't fit inline → emit as a file attachment. Inline
     // shows the first REVOKE_TRUNC_LIMIT names + "(see attached)" pointer.
-    const preview = names.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+    const preview = escapedNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
     content += `\nRevoked for: ${preview} +${names.length - REVOKE_TRUNC_LIMIT} more (see attached)`;
     attachmentText = names.join('\n');
     return { content, needsExpand: false, row: null, attachmentText };
@@ -2624,7 +2629,7 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
   if (showAll || names.length <= REVOKE_TRUNC_LIMIT) {
     content += fullLine;
   } else {
-    content += `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
+    content += `\nRevoked for: ${escapedNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
   }
 
   const needsExpand = names.length > REVOKE_TRUNC_LIMIT;
