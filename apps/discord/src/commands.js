@@ -1829,24 +1829,20 @@ async function handleSend(interaction, apiKey) {
   const failedUserIds = new Set(failedUsers.map(u => u.id || u));
   const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => resolveRecipientAlias(r, interaction));
 
-  function buildConfirmMsg(showAll) {
-    let msg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
-    if (failed > 0) {
-      msg += `\n${failed} could not be reached: ${failedUsers.map(u => escapeDiscordMarkdown(resolveRecipientAlias(u, interaction))).join(', ')}`;
-    }
-    if (successNames.length > 0) {
-      const escaped = successNames.map(escapeDiscordMarkdown);
-      if (showAll || escaped.length <= REVOKE_TRUNC_LIMIT) {
-        msg += `\nRecipients: ${escaped.join(', ')}`;
-      } else {
-        msg += `\nRecipients: ${escaped.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${escaped.length - REVOKE_TRUNC_LIMIT} more`;
-      }
-    }
-    return msg;
-  }
+  // Plain-form failed names (sanitizeDisplayNamePlain is already
+  // applied inside resolveRecipientAlias). Used for the attachment
+  // file; message-content rendering escapes per name.
+  const failedNamesPlain = failedUsers.map(u => resolveRecipientAlias(u, interaction));
+  const buildConfirmMsg = (showAll) => renderSendConfirm({
+    delivered, expiresIn, failed,
+    failedNamesPlain, successNames, showAll,
+  });
 
-  let confirmMsg = buildConfirmMsg(false);
-  const needsExpand = successNames.length > REVOKE_TRUNC_LIMIT;
+  let confirmRendered = buildConfirmMsg(false);
+  let confirmMsg = confirmRendered.content;
+  // In attachment mode the file IS the full list, so suppress the
+  // Show All toggle — the same shape the post-revoke flow uses.
+  const needsExpand = confirmRendered.needsExpand;
 
   const buttonRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -1867,10 +1863,24 @@ async function handleSend(interaction, apiKey) {
     );
   }
 
-  const response = await interaction.editReply({
+  // When successNames + failedNames overflow Discord's 2000-char content
+  // cap, attach the full lists as `recipients.txt` on this initial
+  // editReply. Subsequent monitor ticks / Add Recipients edits don't
+  // pass `files`, so Discord keeps the existing attachment without
+  // re-uploading. Add Recipients does NOT regenerate the attachment;
+  // the newly-added users surface in the post-revoke "Revoked for: …"
+  // list (with its own overflow path) and in monitor link-status
+  // updates.
+  const initialPayload = {
     content: confirmMsg,
     components: delivered > 0 ? [buttonRow] : [],
-  });
+  };
+  if (confirmRendered.attachmentText) {
+    initialPayload.files = [
+      new AttachmentBuilder(Buffer.from(confirmRendered.attachmentText, 'utf8'), { name: 'recipients.txt' }),
+    ];
+  }
+  const response = await interaction.editReply(initialPayload);
 
   // Non-ephemeral channel notification when sending to "Everyone" (channel
   // target) or "Voice users" (voice target). The sender's ephemeral reply
@@ -1955,7 +1965,9 @@ async function handleSend(interaction, apiKey) {
       if (btnInteraction.customId === `qurl_expand_${sendId}`) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         showAllRecipients = !showAllRecipients;
-        confirmMsg = buildConfirmMsg(showAllRecipients);
+        // buildConfirmMsg now returns {content, attachmentText, needsExpand};
+        // extract content for the monitor + editReply (string-only).
+        confirmMsg = buildConfirmMsg(showAllRecipients).content;
         monitor.updateBaseMsg(confirmMsg);
         const fullMsg = monitor.getFullMsg();
         const updatedRow = new ActionRowBuilder().addComponents(
@@ -2642,6 +2654,63 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
     )
     : null;
   return { content, needsExpand, row, attachmentText };
+}
+
+// Builds the post-send ephemeral confirmation message body — pure
+// string + optional `attachmentText`. Mirrors the post-revoke shape:
+// when the full successNames + failedNames lists would exceed Discord's
+// 2000-char content cap, both lines render a 5-name preview with "(see
+// attached)" and the caller emits a `recipients.txt` AttachmentBuilder
+// on the initial editReply. In attachment mode `needsExpand=false`
+// (the file IS the full list — Show All toggle is suppressed).
+//
+// `successNames` / `failedNamesPlain` are PLAIN (sanitizeDisplayNamePlain
+// at the call site) so they can land verbatim in the .txt; per-name
+// markdown escape is applied here for message-content rendering only.
+function renderSendConfirm({
+  delivered, expiresIn, failed, failedNamesPlain, successNames, showAll,
+}) {
+  const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+  const escapedFailed = failedNamesPlain.map(escapeDiscordMarkdown);
+  const escapedSuccess = successNames.map(escapeDiscordMarkdown);
+
+  const fullFailedLine = failed > 0 ? `\n${failed} could not be reached: ${escapedFailed.join(', ')}` : '';
+  const fullRecipientsLine = successNames.length > 0 ? `\nRecipients: ${escapedSuccess.join(', ')}` : '';
+  const fullFits = (header + fullFailedLine + fullRecipientsLine).length <= REVOKE_CONTENT_SAFE_MAX;
+
+  if (!fullFits) {
+    let msg = header;
+    if (failed > 0) {
+      const preview = escapedFailed.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+      const more = failedNamesPlain.length - REVOKE_TRUNC_LIMIT;
+      msg += `\n${failed} could not be reached: ${preview}${more > 0 ? ` +${more} more` : ''} (see attached)`;
+    }
+    if (successNames.length > 0) {
+      const preview = escapedSuccess.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+      const more = successNames.length - REVOKE_TRUNC_LIMIT;
+      msg += `\nRecipients: ${preview}${more > 0 ? ` +${more} more` : ''} (see attached)`;
+    }
+    let attachmentText = '';
+    if (successNames.length > 0) {
+      attachmentText += `DELIVERED (${successNames.length}):\n${successNames.join('\n')}`;
+    }
+    if (failedNamesPlain.length > 0) {
+      if (attachmentText) attachmentText += '\n\n';
+      attachmentText += `NOT DELIVERED (${failedNamesPlain.length}):\n${failedNamesPlain.join('\n')}`;
+    }
+    return { content: msg, attachmentText, needsExpand: false };
+  }
+
+  let msg = header;
+  if (failed > 0) msg += fullFailedLine;
+  if (successNames.length > 0) {
+    if (showAll || escapedSuccess.length <= REVOKE_TRUNC_LIMIT) {
+      msg += fullRecipientsLine;
+    } else {
+      msg += `\nRecipients: ${escapedSuccess.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${escapedSuccess.length - REVOKE_TRUNC_LIMIT} more`;
+    }
+  }
+  return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
@@ -3890,6 +3959,7 @@ module.exports = {
       monitorLinkStatus,
       revokeAllLinks,
       renderRevokeMsg,
+      renderSendConfirm,
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
       activeMonitors,

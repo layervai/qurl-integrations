@@ -194,6 +194,7 @@ const {
   monitorLinkStatus,
   revokeAllLinks,
   renderRevokeMsg,
+  renderSendConfirm,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
@@ -717,6 +718,76 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(1); // only bob (alice has a failure)
     expect(result.successUserIds).toEqual(['bob']);
     expect(result.failureUserIds).toEqual(['alice']);
+  });
+});
+
+describe('renderSendConfirm — post-send confirmation overflow', () => {
+  // Common args.
+  const baseArgs = {
+    delivered: 0, expiresIn: '1h', failed: 0,
+    failedNamesPlain: [], successNames: [], showAll: false,
+  };
+
+  it('small list: full inline + Show All toggle when >TRUNC_LIMIT', () => {
+    const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
+    expect(r.content).toMatch(/^Sent to \d+ users? \| /);
+    expect(r.content).toContain('Recipients: u0, u1, u2, u3, u4 +2 more');
+    expect(r.attachmentText).toBeNull();
+    expect(r.needsExpand).toBe(true);
+  });
+
+  it('small list, showAll=true: full names inline, no truncation marker', () => {
+    const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
+    expect(r.content).toContain('Recipients: u0, u1, u2, u3, u4, u5, u6');
+    expect(r.content).not.toMatch(/\+\d+ more/);
+    expect(r.attachmentText).toBeNull();
+  });
+
+  it('overflow: full list >2000 chars triggers attachment + suppresses Show All', () => {
+    // 200 long names ~= ~6kB inline; well over Discord's 2000-char cap.
+    const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
+    expect(r.content.length).toBeLessThanOrEqual(2000);
+    expect(r.content).toContain('(see attached)');
+    expect(r.content).toContain('Recipients: verylongusername0000, verylongusername0001');
+    expect(r.attachmentText).not.toBeNull();
+    expect(r.attachmentText).toContain('DELIVERED (200):');
+    expect(r.attachmentText.split('\n')).toContain('verylongusername0199');
+    expect(r.needsExpand).toBe(false);
+  });
+
+  it('overflow: failed list also rolls into the same attachment', () => {
+    const successNames = Array.from({ length: 100 }, (_, i) => `delivered_${String(i).padStart(3, '0')}_with_long_name`);
+    const failedNamesPlain = Array.from({ length: 50 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name`);
+    const r = renderSendConfirm({
+      ...baseArgs,
+      delivered: successNames.length, failed: failedNamesPlain.length,
+      successNames, failedNamesPlain, showAll: true,
+    });
+    expect(r.attachmentText).toContain('DELIVERED (100):');
+    expect(r.attachmentText).toContain('NOT DELIVERED (50):');
+    expect(r.attachmentText).toContain('failed_049_with_long_name');
+    expect(r.content).toContain('could not be reached');
+    expect(r.content).toContain('(see attached)');
+  });
+
+  it('plain names land verbatim in attachment (markdown not escaped)', () => {
+    // 100 names with markdown chars to force overflow + verify plain rendering.
+    const successNames = Array.from({ length: 100 }, () => '*alice*_long_name_to_force_overflow');
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
+    expect(r.attachmentText).toContain('*alice*_long_name_to_force_overflow');
+    expect(r.attachmentText).not.toContain('\\*alice\\*');
+    // Inline preview escapes for message rendering.
+    expect(r.content).toContain('\\*alice\\*');
+  });
+
+  it('zero recipients (delivered=0): no Recipients line, no attachment', () => {
+    const r = renderSendConfirm({ ...baseArgs });
+    expect(r.content).not.toContain('Recipients:');
+    expect(r.attachmentText).toBeNull();
+    expect(r.needsExpand).toBe(false);
   });
 });
 
