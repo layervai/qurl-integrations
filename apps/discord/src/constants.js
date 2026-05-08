@@ -174,6 +174,14 @@ const AUDIT_EVENTS = {
   // ack_age_ms < 60000). Missing emissions = wedge.
   GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
 
+  // Negative-signal heartbeat. Emitted every 30 s when the composite
+  // readiness check FAILS — pairs with the healthy event so the
+  // unhealthy snapshot is observable as a metric (carries activity_age_ms
+  // unbounded, where the healthy emission caps at <60s by definition).
+  // The 5/8 zombie-WS incident showed an alarm on Max(activity_age_ms)
+  // is the right shape; that needs unhealthy emissions to fire on.
+  GATEWAY_HEARTBEAT_UNHEALTHY: 'gateway_heartbeat_unhealthy',
+
   // Bot added/removed from a guild. Single emission on the
   // guildCreate / guildDelete event. `guild_id` is in the payload
   // for log-grep / forensic queries; it MUST NOT be promoted to a

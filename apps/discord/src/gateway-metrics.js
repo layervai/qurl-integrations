@@ -250,6 +250,20 @@ function startGatewayHeartbeat(client, opts = {}) {
           ack_age_ms: snapshot.ack_age_ms,
           activity_age_ms: snapshot.activity_age_ms,
         });
+      } else {
+        // Pair-event for the healthy heartbeat so activity_age_ms is
+        // observable as a metric on EVERY tick. Without this, the
+        // healthy emission caps activity_age_ms at <60s by definition
+        // and a Max(activity_age_ms) > 60s alarm would never fire — yet
+        // 60s+ is exactly the zombie-WS signal we need to alarm on
+        // (5/8 incident). null-safe payload: ack_age_ms is null pre-
+        // first-ack, ping_ms is -1 pre-first-ws.
+        logger.audit(AUDIT_EVENTS.GATEWAY_HEARTBEAT_UNHEALTHY, {
+          ping_ms: snapshot.ping_ms,
+          ack_age_ms: snapshot.ack_age_ms,
+          activity_age_ms: snapshot.activity_age_ms,
+          is_ready: snapshot.is_ready,
+        });
       }
       // Edge-triggered logs so on-call can distinguish "wedged for
       // 5 min" (one warn at t=0, then silence on the metric side) from

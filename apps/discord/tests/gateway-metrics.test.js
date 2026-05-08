@@ -217,11 +217,31 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
-  test('does NOT emit when unhealthy (silence is the alarm signal)', () => {
+  test('does NOT emit gateway_heartbeat_healthy when unhealthy (silence is the existing alarm signal)', () => {
     const client = fakeClient({ isReady: false });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
-    expect(logger.audit).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
+  });
+
+  test('emits gateway_heartbeat_unhealthy carrying activity_age_ms when unhealthy (Max-on-activity_age_ms alarm source)', () => {
+    // Pin the contract that the unhealthy companion event always
+    // carries activity_age_ms — terraform's metric filter extracts
+    // that field directly. A future refactor that drops it from the
+    // payload would silently break the alarm.
+    const client = fakeClient({ isReady: false });
+    startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT_UNHEALTHY,
+      expect.objectContaining({
+        activity_age_ms: expect.any(Number),
+        is_ready: false,
+      }),
+    );
   });
 
   test('emits on every interval tick when healthy', () => {
@@ -230,6 +250,10 @@ describe('startGatewayHeartbeat', () => {
     // 1 immediate runOnce + 3 interval ticks at t=1000/2000/3000 = 4
     jest.advanceTimersByTime(3_500);
     expect(logger.audit).toHaveBeenCalledTimes(4);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
   });
 
   test('swallows sampler errors so a future API change does not wedge the bot', () => {
