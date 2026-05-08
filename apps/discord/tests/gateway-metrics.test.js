@@ -12,6 +12,9 @@ const {
   startActiveGuildCount,
   readGatewayHealth,
   noteGatewayActivity,
+  maybeAutoRecoverZombieWS,
+  RECOVERY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_COOLDOWN_MS,
   _test: gatewayMetricsTest,
 } = require('../src/gateway-metrics');
 const { AUDIT_EVENTS } = require('../src/constants');
@@ -370,5 +373,148 @@ describe('startActiveGuildCount', () => {
     jest.advanceTimersByTime(1_000);
     expect(logger.audit).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('maybeAutoRecoverZombieWS', () => {
+  function shardClient({ destroyImpl } = {}) {
+    const shard = { destroy: destroyImpl ?? jest.fn() };
+    return {
+      client: { ws: { shards: new Map([[0, shard]]) } },
+      shard,
+    };
+  }
+
+  beforeEach(() => {
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetRecoveryClock === 'function') {
+      gatewayMetricsTest._resetRecoveryClock();
+    }
+    jest.clearAllMocks();
+  });
+
+  test('skips when client is not ready (boot/reconnect already running)', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: false, activity_age_ms: 999_999 },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('not_ready');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('skips when activity baseline is null (pre-first-frame)', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: null },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_activity_baseline');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('skips when activity is below threshold', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS - 1 },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('within_threshold');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('triggers shard.destroy when activity is past threshold', () => {
+    const { client, shard } = shardClient();
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.reason).toBe('zombie_ws');
+    expect(result.shardsTerminated).toBe(1);
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({ closeCode: 4000 }),
+    );
+  });
+
+  test('debounces a second attempt inside the cooldown window', () => {
+    const { client, shard } = shardClient();
+    const t0 = 1_000_000;
+    const first = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    expect(first.triggered).toBe(true);
+    shard.destroy.mockClear();
+
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 5_000 },
+      () => t0 + RECOVERY_COOLDOWN_MS - 1,
+    );
+    expect(second.triggered).toBe(false);
+    expect(second.reason).toBe('cooldown');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('allows a second attempt after the cooldown elapses', () => {
+    const { client, shard } = shardClient();
+    const t0 = 1_000_000;
+    maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    shard.destroy.mockClear();
+
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0 + RECOVERY_COOLDOWN_MS + 1,
+    );
+    expect(second.triggered).toBe(true);
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('logs warn but still consumes recovery budget when shard.destroy throws', () => {
+    const { client, shard } = shardClient({
+      destroyImpl: jest.fn(() => { throw new Error('already destroyed'); }),
+    });
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(0);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Shard destroy threw during auto-recovery',
+      expect.objectContaining({ error: 'already destroyed' }),
+    );
+    // Cooldown still consumed — the next call inside the window debounces.
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 1_000,
+    );
+    expect(second.triggered).toBe(false);
+    expect(second.reason).toBe('cooldown');
+  });
+
+  test('safely no-ops when client.ws.shards is missing', () => {
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      { ws: {} },
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(0);
   });
 });

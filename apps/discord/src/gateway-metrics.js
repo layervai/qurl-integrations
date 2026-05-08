@@ -23,6 +23,20 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVE_GUILD_INTERVAL_MS = 60_000;
 const HEARTBEAT_ACK_AGE_THRESHOLD_MS = 60_000;
 
+// Auto-recovery thresholds for the zombie-WS pattern observed
+// 2026-05-08 (sandbox + prod): bot's `activity_age_ms` climbed past
+// 60s while heartbeat ACKs kept landing — Discord stopped pushing
+// events but discord.js didn't detect the dead session. Both bots
+// hit it simultaneously when their gateway pod blipped. Fix: when
+// activity is stale past `RECOVERY_ACTIVITY_THRESHOLD_MS` AND the
+// client thinks it's ready (so this isn't a normal boot/disconnect
+// flap), terminate every shard's WebSocket so the manager
+// reconnects fresh. `RECOVERY_COOLDOWN_MS` prevents a reconnect
+// storm if termination doesn't immediately restore activity.
+const RECOVERY_ACTIVITY_THRESHOLD_MS = 120_000;
+const RECOVERY_COOLDOWN_MS = 10 * 60_000;
+let lastRecoveryAttemptAt = 0;
+
 // Composite-readiness gateway-activity signal. client.isReady() alone
 // misses event-loop wedges (DB pool exhaustion, qurl-service stalls,
 // Auth0 refresh hangs) — the WebSocket stays connected but the raw
@@ -66,6 +80,66 @@ function noteGatewayActivity(maybeNow) {
  */
 function _resetGatewayActivity() {
   lastGatewayActivityAt = 0;
+}
+
+/**
+ * Test-only reset for the recovery cooldown clock.
+ */
+function _resetRecoveryClock() {
+  lastRecoveryAttemptAt = 0;
+}
+
+/**
+ * Detect the zombie-WS pattern (heartbeats land but Discord events
+ * don't) and force a fresh session. Returns the action taken so
+ * callers can log + test the decision.
+ *
+ * Decision tree:
+ *  - is_ready=false → boot/reconnect already in flight, skip
+ *  - activity_age_ms < RECOVERY_ACTIVITY_THRESHOLD_MS → not zombie
+ *  - within RECOVERY_COOLDOWN_MS of last attempt → debounce
+ *  - else → terminate every shard via shard.destroy() so the manager
+ *    re-IDENTIFYs cleanly. Per-shard so a future multi-shard config
+ *    only restarts the wedged shard, not the whole client.
+ *
+ * @returns {{ triggered: boolean, reason: string }}
+ */
+function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
+  if (!snapshot.is_ready) return { triggered: false, reason: 'not_ready' };
+  if (snapshot.activity_age_ms === null) return { triggered: false, reason: 'no_activity_baseline' };
+  if (snapshot.activity_age_ms < RECOVERY_ACTIVITY_THRESHOLD_MS) {
+    return { triggered: false, reason: 'within_threshold' };
+  }
+  const t = now();
+  if (t - lastRecoveryAttemptAt < RECOVERY_COOLDOWN_MS) {
+    return { triggered: false, reason: 'cooldown' };
+  }
+
+  // Per-shard destroy so a future multi-shard config (TODO at L107)
+  // only resets the wedged shard. discord.js v14 WebSocketShard.destroy
+  // closes the underlying ws, marks the shard for re-IDENTIFY, and
+  // the WebSocketManager runs the reconnect loop automatically.
+  let shardsTerminated = 0;
+  if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
+    for (const shard of client.ws.shards.values()) {
+      try {
+        if (typeof shard?.destroy === 'function') {
+          // closeCode 4000 = re-establishable. Reason string surfaces
+          // in CloudWatch via the manager's reconnect logs.
+          shard.destroy({ closeCode: 4000, reason: 'auto-recovery: zombie ws (activity stale)' });
+          shardsTerminated++;
+        }
+      } catch (err) {
+        // A throw here means the shard's already torn down (race with
+        // an in-flight disconnect) — log and keep going. Don't gate
+        // the cooldown reset on success; we still consumed the
+        // recovery budget.
+        logger.warn('Shard destroy threw during auto-recovery', { error: err?.message });
+      }
+    }
+  }
+  lastRecoveryAttemptAt = t;
+  return { triggered: true, reason: 'zombie_ws', shardsTerminated };
 }
 
 /**
@@ -187,7 +261,22 @@ function startGatewayHeartbeat(client, opts = {}) {
           ack_age_ms: snapshot.ack_age_ms,
           activity_age_ms: snapshot.activity_age_ms,
         });
-      } else if (prevHealthy === false && snapshot.healthy) {
+      }
+      // Zombie-WS recovery runs on every unhealthy tick (not just
+      // the edge) — debounced by RECOVERY_COOLDOWN_MS internally.
+      // Edge-only would miss the case where the bot was already
+      // unhealthy at boot and stayed there.
+      if (!snapshot.healthy) {
+        const recovery = maybeAutoRecoverZombieWS(client, snapshot, now);
+        if (recovery.triggered) {
+          logger.warn('Gateway auto-recovery: forcing reconnect (zombie WS)', {
+            activity_age_ms: snapshot.activity_age_ms,
+            ack_age_ms: snapshot.ack_age_ms,
+            shards_terminated: recovery.shardsTerminated,
+          });
+        }
+      }
+      if (prevHealthy === false && snapshot.healthy) {
         logger.info('Gateway heartbeat: unhealthy → healthy', {
           ping_ms: snapshot.ping_ms,
           ack_age_ms: snapshot.ack_age_ms,
@@ -269,10 +358,13 @@ module.exports = {
   startActiveGuildCount,
   readGatewayHealth,
   noteGatewayActivity,
+  maybeAutoRecoverZombieWS,
   HEARTBEAT_INTERVAL_MS,
   ACTIVE_GUILD_INTERVAL_MS,
   HEARTBEAT_ACK_AGE_THRESHOLD_MS,
   GATEWAY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_COOLDOWN_MS,
   // Test-only exports (NODE_ENV-gated to keep live state out of prod
   // consumers, mirroring the commands.js _test pattern).
   // _test gated on NODE_ENV === 'test' (NOT !== 'production') so
@@ -281,6 +373,6 @@ module.exports = {
   // local-dev workflows need access, set NODE_ENV=test for that
   // shell.
   ...(process.env.NODE_ENV === 'test' && {
-    _test: { _resetGatewayActivity },
+    _test: { _resetGatewayActivity, _resetRecoveryClock },
   }),
 };
