@@ -2644,13 +2644,15 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   }
   await db.markSendRevoked(sendId, senderDiscordId);
 
-  // Log both unit shapes — top-level fields are per-user (post-PR);
-  // `resources` preserves the pre-PR per-resource shape so downstream
-  // log tooling can pick whichever it was built against.
+  // Top-level `success/total` stay per-resource to preserve the
+  // pre-PR shape that dashboards / log searches keyed off; per-user
+  // counts surface in nested `users` (new). Mirrors the audit
+  // event's back-compat split.
   logger.info('Revoked send', {
     sendId,
+    success: auditSuccess,
+    total: auditTotal,
     users: { success, total },
-    resources: { success: auditSuccess, total: auditTotal },
   });
   return { success, total, successUserIds, failureUserIds };
 }
