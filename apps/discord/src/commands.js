@@ -2137,10 +2137,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
-  // {id, username} surfaced on every pre-mint return path so the
-  // caller can extend its recipients[] (post-Add revoke shows names).
-  // Inner returns post-mint omit it but always have delivered: 0,
-  // so the caller's `if (delivered > 0)` guard skips them.
+  // {id, username} surfaced on every pre-mint return so the caller
+  // can extend its recipients[] (post-Add revoke shows names).
+  // Post-mint returns omit it — those paths fail BEFORE writing
+  // qurl_sends rows, so a subsequent revoke would never surface
+  // those ids and the caller's lookup-or-fallback handles the
+  // omitted case correctly.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2515,13 +2517,11 @@ async function handleRevoke(interaction, apiKey) {
     const sendId = selectInteraction.values[0];
     const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
-    // Counts are per-user (matches the inline-button path's wording).
     // Slash-command path lacks the in-scope `recipients` array needed
     // to resolve names → no "Revoked for: …" line here. Operators
     // wanting names should use the inline button after a send.
-    const noteSuffix = revoked.total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
     await selectInteraction.update({
-      content: `Revoked ${revoked.success}/${revoked.total} user${revoked.total !== 1 ? 's' : ''}.${noteSuffix}`,
+      content: buildRevokeHeader(revoked.success, revoked.total),
       components: [],
     });
   } catch {
@@ -2554,6 +2554,15 @@ function revokeReplyPayload(rendered) {
 // Discord's limit and the editReply would error.
 const REVOKE_CONTENT_SAFE_MAX = 1900;
 
+// Single source of truth for the "Revoked X/Y users[.]" header +
+// already-opened note. Used by both the inline-button path (via
+// renderRevokeMsg) and the slash-command /qurl revoke handler so a
+// future wording change lands in one place.
+function buildRevokeHeader(success, total) {
+  const note = total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
+  return `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.${note}`;
+}
+
 // Builds the post-revoke confirmation message + Show All toggle row.
 // User-centric: `success`/`total` are unique-recipient counts; `names`
 // is the strict-success list. Returns `attachmentText` (newline-joined
@@ -2562,10 +2571,7 @@ const REVOKE_CONTENT_SAFE_MAX = 1900;
 // mode the Show All button is suppressed since the file IS the full
 // list.
 function renderRevokeMsg(sendId, names, total, showAll) {
-  const success = names.length;
-  const header = `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.`;
-  const note = total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
-  let content = header + note;
+  let content = buildRevokeHeader(names.length, total);
   let attachmentText = null;
 
   if (names.length === 0) {
