@@ -16,6 +16,7 @@
  * window: alarm fires after 60 s of missing heartbeats. Client-side
  * threshold one heartbeat-interval (~41 s) plus one buffer cycle.
  */
+const { WebSocketShardDestroyRecovery } = require('discord.js');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 
@@ -116,27 +117,47 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   }
 
   // Per-shard destroy so a future multi-shard config (TODO at L107)
-  // only resets the wedged shard. discord.js v14 WebSocketShard.destroy
-  // closes the underlying ws, marks the shard for re-IDENTIFY, and
-  // the WebSocketManager runs the reconnect loop automatically.
+  // only resets the wedged shard. discord.js shard.destroy is async
+  // and only re-IDENTIFYs when `recover` is set — without it, the
+  // shard transitions to Idle and stays there. `code` (NOT closeCode
+  // — different field name) 4000 = re-establishable. Fire-and-catch:
+  // tick() is sync but destroy awaits internals (updateSessionInfo,
+  // ws onclose race, internalConnect). Letting that promise reject
+  // would surface as an unhandledRejection that crashes the process
+  // on Node 16+.
   let shardsTerminated = 0;
   if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
+      if (typeof shard?.destroy !== 'function') continue;
       try {
-        if (typeof shard?.destroy === 'function') {
-          // closeCode 4000 = re-establishable. Reason string surfaces
-          // in CloudWatch via the manager's reconnect logs.
-          shard.destroy({ closeCode: 4000, reason: 'auto-recovery: zombie ws (activity stale)' });
-          shardsTerminated++;
+        const result = shard.destroy({
+          code: 4000,
+          reason: 'auto-recovery: zombie ws (activity stale)',
+          recover: WebSocketShardDestroyRecovery.Reconnect,
+        });
+        if (result && typeof result.catch === 'function') {
+          result.catch((err) => {
+            logger.warn('Shard destroy promise rejected during auto-recovery', { error: err?.message });
+          });
         }
+        shardsTerminated++;
       } catch (err) {
-        // A throw here means the shard's already torn down (race with
-        // an in-flight disconnect) — log and keep going. Don't gate
-        // the cooldown reset on success; we still consumed the
-        // recovery budget.
-        logger.warn('Shard destroy threw during auto-recovery', { error: err?.message });
+        // Sync throw = bad-args / TypeError before the async body
+        // runs. Already-Idle shards return synchronously without
+        // throwing, so this branch is for genuinely unexpected
+        // shapes; log and keep going so a single broken shard
+        // doesn't block the others.
+        logger.warn('Shard destroy threw synchronously during auto-recovery', { error: err?.message });
       }
     }
+  }
+
+  // Only stamp the cooldown when something actually got terminated.
+  // If client.ws.shards is missing/empty (rare — would mean is_ready
+  // is true while no shards exist, contradiction in steady state),
+  // retry on the next tick rather than locking out for 10 min.
+  if (shardsTerminated === 0) {
+    return { triggered: false, reason: 'no_shards' };
   }
   lastRecoveryAttemptAt = t;
   return { triggered: true, reason: 'zombie_ws', shardsTerminated };

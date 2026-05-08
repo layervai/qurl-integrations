@@ -401,8 +401,11 @@ describe('startActiveGuildCount', () => {
 });
 
 describe('maybeAutoRecoverZombieWS', () => {
+  // Default destroy returns a resolved promise — discord.js's destroy
+  // is async, and we test that the fire-and-forget caller handles
+  // both success and rejection without breaking the tick loop.
   function shardClient({ destroyImpl } = {}) {
-    const shard = { destroy: destroyImpl ?? jest.fn() };
+    const shard = { destroy: destroyImpl ?? jest.fn(() => Promise.resolve()) };
     return {
       client: { ws: { shards: new Map([[0, shard]]) } },
       shard,
@@ -460,8 +463,14 @@ describe('maybeAutoRecoverZombieWS', () => {
     expect(result.triggered).toBe(true);
     expect(result.reason).toBe('zombie_ws');
     expect(result.shardsTerminated).toBe(1);
+    // `code` (NOT closeCode) — different field; closeCode would be
+    // silently ignored. `recover` MUST be set or the shard goes Idle
+    // and never reconnects (defeats the whole point of this code path).
     expect(shard.destroy).toHaveBeenCalledWith(
-      expect.objectContaining({ closeCode: 4000 }),
+      expect.objectContaining({
+        code: 4000,
+        recover: 0, // WebSocketShardDestroyRecovery.Reconnect
+      }),
     );
   });
 
@@ -505,9 +514,9 @@ describe('maybeAutoRecoverZombieWS', () => {
     expect(shard.destroy).toHaveBeenCalledTimes(1);
   });
 
-  test('logs warn but still consumes recovery budget when shard.destroy throws', () => {
+  test('catches sync throw from shard.destroy and keeps going', () => {
     const { client, shard } = shardClient({
-      destroyImpl: jest.fn(() => { throw new Error('already destroyed'); }),
+      destroyImpl: jest.fn(() => { throw new Error('bad-args'); }),
     });
     const t = 1_000_000;
     const result = maybeAutoRecoverZombieWS(
@@ -515,30 +524,80 @@ describe('maybeAutoRecoverZombieWS', () => {
       { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
       () => t,
     );
-    expect(result.triggered).toBe(true);
-    expect(result.shardsTerminated).toBe(0);
+    // Sync throw => shardsTerminated stays 0 => returns no_shards
+    // and DOES NOT consume the cooldown. The next tick retries.
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_shards');
     expect(logger.warn).toHaveBeenCalledWith(
-      'Shard destroy threw during auto-recovery',
-      expect.objectContaining({ error: 'already destroyed' }),
+      'Shard destroy threw synchronously during auto-recovery',
+      expect.objectContaining({ error: 'bad-args' }),
     );
-    // Cooldown still consumed — the next call inside the window debounces.
+    expect(shard.destroy).toHaveBeenCalled();
+
+    // Confirm cooldown was NOT stamped — second call same tick can fire.
     const second = maybeAutoRecoverZombieWS(
       client,
       { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
       () => t + 1_000,
     );
-    expect(second.triggered).toBe(false);
-    expect(second.reason).toBe('cooldown');
+    expect(second.reason).toBe('no_shards'); // still failing the same way
   });
 
-  test('safely no-ops when client.ws.shards is missing', () => {
+  test('handles destroy() promise rejection without crashing the process', async () => {
+    const destroyImpl = jest.fn(() => Promise.reject(new Error('async-destroy-failed')));
+    const { client, shard } = shardClient({ destroyImpl });
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    // Sync result still triggered — we count the destroy as fired.
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(1);
+    // Wait one microtask tick for the rejection handler.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Shard destroy promise rejected during auto-recovery',
+      expect.objectContaining({ error: 'async-destroy-failed' }),
+    );
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 4000, recover: 0 }),
+    );
+  });
+
+  test('returns no_shards (does NOT consume cooldown) when client.ws.shards is missing', () => {
     const t = 1_000_000;
     const result = maybeAutoRecoverZombieWS(
       { ws: {} },
       { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
       () => t,
     );
-    expect(result.triggered).toBe(true);
-    expect(result.shardsTerminated).toBe(0);
+    // No shards to terminate => not triggered, no cooldown stamp,
+    // next tick retries. (If is_ready=true while shards is missing,
+    // the bot is in a pathological state — locking out for 10min
+    // serves no one.)
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_shards');
+
+    // Same-tick second call confirms the cooldown was NOT stamped.
+    const second = maybeAutoRecoverZombieWS(
+      { ws: {} },
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 100,
+    );
+    expect(second.reason).toBe('no_shards');
+  });
+
+  test('returns no_shards when client.ws itself is undefined', () => {
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      {},
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_shards');
   });
 });
