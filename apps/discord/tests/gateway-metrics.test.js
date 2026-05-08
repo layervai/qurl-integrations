@@ -6,12 +6,17 @@
  * on. The setInterval timers are exercised via jest fake timers so
  * each test can advance time deterministically.
  */
+const { WebSocketShardDestroyRecovery } = require('discord.js');
 const logger = require('../src/logger');
 const {
   startGatewayHeartbeat,
   startActiveGuildCount,
   readGatewayHealth,
   noteGatewayActivity,
+  maybeAutoRecoverZombieWS,
+  RECOVERY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_COOLDOWN_MS,
+  RECOVERY_RATE_LIMIT_COOLDOWN_MS,
   _test: gatewayMetricsTest,
 } = require('../src/gateway-metrics');
 const { AUDIT_EVENTS } = require('../src/constants');
@@ -194,8 +199,14 @@ describe('startGatewayHeartbeat', () => {
     // then advanceTimersByTime drifts the fake clock — Math.max(0,…)
     // papers over the negative diff so tests pass, but the activity
     // gate isn't actually being exercised in these tests.
+    //
+    // Reset the recovery cooldown too: a previous test in this block
+    // may have stamped lastRecoveryAttemptAt, which would silently
+    // make a downstream test that expects a triggered recovery
+    // pass-as-cooldown'd instead.
     if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
       gatewayMetricsTest._resetGatewayActivity();
+      gatewayMetricsTest._resetRecoveryClock();
     }
     noteGatewayActivity();
   });
@@ -214,11 +225,31 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
-  test('does NOT emit when unhealthy (silence is the alarm signal)', () => {
+  test('does NOT emit gateway_heartbeat_healthy when unhealthy (silence is the existing alarm signal)', () => {
     const client = fakeClient({ isReady: false });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
-    expect(logger.audit).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
+  });
+
+  test('emits gateway_heartbeat_unhealthy carrying activity_age_ms when unhealthy (Max-on-activity_age_ms alarm source)', () => {
+    // Pin the contract that the unhealthy companion event always
+    // carries activity_age_ms — terraform's metric filter extracts
+    // that field directly. A future refactor that drops it from the
+    // payload would silently break the alarm.
+    const client = fakeClient({ isReady: false });
+    startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT_UNHEALTHY,
+      expect.objectContaining({
+        activity_age_ms: expect.any(Number),
+        is_ready: false,
+      }),
+    );
   });
 
   test('emits on every interval tick when healthy', () => {
@@ -227,6 +258,10 @@ describe('startGatewayHeartbeat', () => {
     // 1 immediate runOnce + 3 interval ticks at t=1000/2000/3000 = 4
     jest.advanceTimersByTime(3_500);
     expect(logger.audit).toHaveBeenCalledTimes(4);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
   });
 
   test('swallows sampler errors so a future API change does not wedge the bot', () => {
@@ -285,6 +320,38 @@ describe('startGatewayHeartbeat', () => {
     expect(logger.info).toHaveBeenCalledWith(
       'Gateway heartbeat: unhealthy → healthy',
       expect.any(Object),
+    );
+  });
+
+  test('tick() invokes auto-recovery when activity is stale past threshold (integration: pin the wiring)', () => {
+    // Without this test, deleting the maybeAutoRecoverZombieWS call
+    // from tick() — or flipping its guard from `!healthy` to
+    // `healthy` — would pass every other test in this file. Pin the
+    // wire so a regression has to break this assertion to land.
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
+      gatewayMetricsTest._resetGatewayActivity();
+      gatewayMetricsTest._resetRecoveryClock();
+    }
+    // Back-date activity by 200s so the snapshot will be unhealthy
+    // AND past RECOVERY_ACTIVITY_THRESHOLD_MS (120s).
+    noteGatewayActivity(() => Date.now() - 200_000);
+    const shard = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = {
+      isReady: () => true,
+      ws: { ping: 42, shards: new Map([[0, shard]]) },
+      guilds: { cache: { size: 1 } },
+    };
+    startGatewayHeartbeat(client, { intervalMs: 60_000 });
+    // runOnce already fired — no advanceTimers needed.
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 4000,
+        recover: WebSocketShardDestroyRecovery.Reconnect,
+      }),
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Gateway auto-recovery: forcing reconnect (zombie WS)',
+      expect.objectContaining({ shards_terminated: 1 }),
     );
   });
 
@@ -370,5 +437,320 @@ describe('startActiveGuildCount', () => {
     jest.advanceTimersByTime(1_000);
     expect(logger.audit).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('maybeAutoRecoverZombieWS', () => {
+  // Default destroy returns a resolved promise — discord.js's destroy
+  // is async, and we test that the fire-and-forget caller handles
+  // both success and rejection without breaking the tick loop.
+  function shardClient({ destroyImpl } = {}) {
+    const shard = { destroy: destroyImpl ?? jest.fn(() => Promise.resolve()) };
+    return {
+      client: { ws: { shards: new Map([[0, shard]]) } },
+      shard,
+    };
+  }
+
+  beforeEach(() => {
+    if (gatewayMetricsTest && typeof gatewayMetricsTest._resetRecoveryClock === 'function') {
+      gatewayMetricsTest._resetRecoveryClock();
+    }
+    jest.clearAllMocks();
+  });
+
+  test('skips when client is not ready (boot/reconnect already running)', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: false, activity_age_ms: 999_999 },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('not_ready');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('skips when activity baseline is null (pre-first-frame)', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: null },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_activity_baseline');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('skips when activity is below threshold', () => {
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS - 1 },
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('within_threshold');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('triggers shard.destroy when activity is past threshold', () => {
+    const { client, shard } = shardClient();
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.reason).toBe('zombie_ws');
+    expect(result.shardsTerminated).toBe(1);
+    // `code` (NOT closeCode) — different field; closeCode would be
+    // silently ignored. `recover` MUST be set or the shard goes Idle
+    // and never reconnects (defeats the whole point of this code path).
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 4000,
+        recover: WebSocketShardDestroyRecovery.Reconnect,
+      }),
+    );
+  });
+
+  test('debounces a second attempt inside the cooldown window', () => {
+    const { client, shard } = shardClient();
+    const t0 = 1_000_000;
+    const first = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    expect(first.triggered).toBe(true);
+    shard.destroy.mockClear();
+
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 5_000 },
+      () => t0 + RECOVERY_COOLDOWN_MS - 1,
+    );
+    expect(second.triggered).toBe(false);
+    expect(second.reason).toBe('cooldown');
+    expect(shard.destroy).not.toHaveBeenCalled();
+  });
+
+  test('allows a second attempt after the cooldown elapses', () => {
+    const { client, shard } = shardClient();
+    const t0 = 1_000_000;
+    maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    shard.destroy.mockClear();
+
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0 + RECOVERY_COOLDOWN_MS + 1,
+    );
+    expect(second.triggered).toBe(true);
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('all shards sync-throw → all_destroys_threw + short rate-limit cooldown', () => {
+    const { client, shard } = shardClient({
+      destroyImpl: jest.fn(() => { throw new Error('bad-args'); }),
+    });
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    // Shards exist, every destroy() sync-threw — distinct from
+    // the empty/missing-shards branch (which retries next tick).
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('all_destroys_threw');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Shard destroy threw synchronously during auto-recovery',
+      expect.objectContaining({ error: 'bad-args' }),
+    );
+    expect(shard.destroy).toHaveBeenCalled();
+
+    // Within the rate-limit cooldown window, recovery is gated to
+    // bound warn-log volume — the warn block doesn't re-fire.
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 1_000,
+    );
+    expect(second.reason).toBe('cooldown');
+  });
+
+  test('all_destroys_threw rate-limit cooldown elapses → recovery retries', () => {
+    const { client, shard } = shardClient({
+      destroyImpl: jest.fn(() => { throw new Error('bad-args'); }),
+    });
+    const t0 = 1_000_000;
+    maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    shard.destroy.mockClear();
+
+    // Past the rate-limit cooldown but still inside the 10-min main
+    // cooldown — recovery should retry (the main cooldown is only
+    // stamped on successful termination, which never happened here).
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0 + RECOVERY_RATE_LIMIT_COOLDOWN_MS + 1,
+    );
+    expect(second.reason).toBe('all_destroys_threw');
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('successful recovery resets activity baseline (next snapshot reads null until first post-reconnect frame)', () => {
+    const { client } = shardClient({
+      destroyImpl: jest.fn(),
+    });
+    const t = 2_000_000;
+    // Pre-condition: activity baseline is set (the beforeEach
+    // noteGatewayActivity() seeded it). Confirm a snapshot has a
+    // numeric activity_age_ms before we trigger recovery.
+    const preSnap = readGatewayHealth(client);
+    expect(typeof preSnap.activity_age_ms).toBe('number');
+
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+
+    // After successful destroy, the baseline is cleared. A snapshot
+    // taken before the new WebSocket's first raw frame reports null
+    // — readGatewayHealth treats lastGatewayActivityAt === 0 as the
+    // pre-first-frame sentinel. This prevents a tick between
+    // is_ready flipping back true and the first post-reconnect raw
+    // frame from observing the pre-destroy stale value still climbing.
+    const postSnap = readGatewayHealth(client);
+    expect(postSnap.activity_age_ms).toBeNull();
+
+    // First post-reconnect raw frame re-baselines.
+    noteGatewayActivity();
+    const postNoteSnap = readGatewayHealth(client);
+    expect(typeof postNoteSnap.activity_age_ms).toBe('number');
+    expect(postNoteSnap.activity_age_ms).toBeLessThan(1_000);
+  });
+
+  test('handles destroy() promise rejection without crashing the process', async () => {
+    const destroyImpl = jest.fn(() => Promise.reject(new Error('async-destroy-failed')));
+    const { client, shard } = shardClient({ destroyImpl });
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    // Sync result still triggered — we count the destroy as fired.
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(1);
+    // Wait one microtask tick for the rejection handler.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Shard destroy promise rejected during auto-recovery',
+      expect.objectContaining({ error: 'async-destroy-failed' }),
+    );
+    expect(shard.destroy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 4000,
+        recover: WebSocketShardDestroyRecovery.Reconnect,
+      }),
+    );
+  });
+
+  test('returns no_shards (does NOT consume cooldown) when client.ws.shards is missing', () => {
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      { ws: {} },
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    // No shards to terminate => not triggered, no cooldown stamp,
+    // next tick retries. (If is_ready=true while shards is missing,
+    // the bot is in a pathological state — locking out for 10min
+    // serves no one.)
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_shards');
+
+    // Same-tick second call confirms the cooldown was NOT stamped.
+    const second = maybeAutoRecoverZombieWS(
+      { ws: {} },
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 100,
+    );
+    expect(second.reason).toBe('no_shards');
+  });
+
+  test('returns no_shards when client.ws itself is undefined', () => {
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      {},
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(false);
+    expect(result.reason).toBe('no_shards');
+  });
+
+  test('triggers across multiple shards (happy path) — pin shardsTerminated count', () => {
+    const shardA = { destroy: jest.fn(() => Promise.resolve()) };
+    const shardB = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = { ws: { shards: new Map([[0, shardA], [1, shardB]]) } };
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => 1_000_000,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(2);
+    expect(shardA.destroy).toHaveBeenCalledTimes(1);
+    expect(shardB.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('partial-failure: one shard sync-throws, other succeeds — cooldown still stamped', () => {
+    const shardA = { destroy: jest.fn(() => { throw new Error('borked'); }) };
+    const shardB = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = { ws: { shards: new Map([[0, shardA], [1, shardB]]) } };
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(1); // B succeeded; A threw
+    // Cooldown WAS stamped (>=1 success), so an immediate retry debounces.
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 1_000,
+    );
+    expect(second.reason).toBe('cooldown');
+  });
+
+  test('boundary: activity_age_ms === RECOVERY_ACTIVITY_THRESHOLD_MS triggers (>= semantic)', () => {
+    // Code uses `< THRESHOLD` to gate, so equality falls THROUGH to
+    // the recovery path. Pin the boundary so a future refactor to
+    // `<=` (which would silently delay recovery by one tick) breaks
+    // this test instead of getting silently merged.
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS },
+      () => 1_000_000,
+    );
+    expect(result.triggered).toBe(true);
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
   });
 });

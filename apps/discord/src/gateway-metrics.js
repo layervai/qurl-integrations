@@ -2,26 +2,53 @@
  * Periodic gateway-side metric emitters for Phase 1 monitoring.
  *
  * Two timers, both run on the gateway-only ECS task:
- *   1. Positive-signal heartbeat (30 s) — emits gateway_heartbeat_healthy
- *      when discord.js reports a connected, ack'd, recently-active
- *      WebSocket. Missing emissions are the alarm condition (paired
- *      with treat_missing_data = breaching at the alarm side), which
- *      catches the wedge classes client.isReady() alone misses:
- *      heartbeat-zombie, dispatch-deadlock, event-loop saturation.
+ *   1. Heartbeat (30 s) — dual-emission. Healthy ticks emit
+ *      gateway_heartbeat_healthy (paired with the missing-data
+ *      `gateway_heartbeat_silence` alarm); unhealthy ticks emit
+ *      gateway_heartbeat_unhealthy carrying activity_age_ms (paired
+ *      with the Max-on-value `gateway_activity_age_ms_high` alarm in
+ *      qurl-integrations-infra #446). Two metrics catch two failure
+ *      shapes: total silence (process-level wedge) vs. flapping
+ *      dispatch wedge (5/8 zombie-WS — heartbeat-ACKs land but event
+ *      frames don't, so silence alarm misses it).
  *   2. Active-guild gauge (60 s) — emits active_guild_count carrying
  *      client.guilds.cache.size. Used for install/uninstall trend
  *      detection and as a sanity check on guild-scoped features.
  *
  * Composite readiness threshold (60 s ack age) lines up with the alarm
- * window: alarm fires after 60 s of missing heartbeats. Client-side
- * threshold one heartbeat-interval (~41 s) plus one buffer cycle.
+ * window: silence alarm fires after 60 s of missing heartbeats.
+ * Client-side threshold one heartbeat-interval (~41 s) plus one
+ * buffer cycle. Unhealthy ticks ALSO trigger auto-recovery via
+ * maybeAutoRecoverZombieWS at activity_age_ms > 120 s.
  */
+const { WebSocketShardDestroyRecovery } = require('discord.js');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const ACTIVE_GUILD_INTERVAL_MS = 60_000;
 const HEARTBEAT_ACK_AGE_THRESHOLD_MS = 60_000;
+
+// Auto-recovery thresholds for the zombie-WS pattern observed
+// 2026-05-08 (sandbox + prod): bot's `activity_age_ms` climbed past
+// 60s while heartbeat ACKs kept landing — Discord stopped pushing
+// events but discord.js didn't detect the dead session. Both bots
+// hit it simultaneously when their gateway pod blipped. Fix: when
+// activity is stale past `RECOVERY_ACTIVITY_THRESHOLD_MS` AND the
+// client thinks it's ready (so this isn't a normal boot/disconnect
+// flap), terminate every shard's WebSocket so the manager
+// reconnects fresh. `RECOVERY_COOLDOWN_MS` prevents a reconnect
+// storm if termination doesn't immediately restore activity.
+const RECOVERY_ACTIVITY_THRESHOLD_MS = 120_000;
+const RECOVERY_COOLDOWN_MS = 10 * 60_000;
+// Short cooldown stamped only when every shard's destroy() sync-threw
+// (every call rejected before the async body ran — pathological, e.g.
+// an @discordjs/ws bump that breaks the option shape). Bounds warn-log
+// volume in CloudWatch Logs without locking recovery out for the full
+// 10 min; activity-age alarm pages on-call regardless.
+const RECOVERY_RATE_LIMIT_COOLDOWN_MS = 60_000;
+let lastRecoveryAttemptAt = 0;
+let lastRecoveryRateLimitAt = 0;
 
 // Composite-readiness gateway-activity signal. client.isReady() alone
 // misses event-loop wedges (DB pool exhaustion, qurl-service stalls,
@@ -66,6 +93,125 @@ function noteGatewayActivity(maybeNow) {
  */
 function _resetGatewayActivity() {
   lastGatewayActivityAt = 0;
+}
+
+/**
+ * Test-only reset for the recovery cooldown clock.
+ */
+function _resetRecoveryClock() {
+  lastRecoveryAttemptAt = 0;
+  lastRecoveryRateLimitAt = 0;
+}
+
+/**
+ * Detect the zombie-WS pattern (heartbeats land but Discord events
+ * don't) and force a fresh session. Returns the action taken so
+ * callers can log + test the decision.
+ *
+ * Decision tree:
+ *  - is_ready=false → boot/reconnect already in flight, skip
+ *  - activity_age_ms < RECOVERY_ACTIVITY_THRESHOLD_MS → not zombie
+ *  - within RECOVERY_COOLDOWN_MS of last attempt → debounce
+ *  - else → terminate every shard via shard.destroy() so the manager
+ *    re-IDENTIFYs cleanly. Per-shard so a future multi-shard config
+ *    only restarts the wedged shard, not the whole client.
+ *
+ * @returns {{ triggered: boolean, reason: string, shardsTerminated?: number }}
+ */
+function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
+  if (!snapshot.is_ready) return { triggered: false, reason: 'not_ready' };
+  if (snapshot.activity_age_ms === null) return { triggered: false, reason: 'no_activity_baseline' };
+  if (snapshot.activity_age_ms < RECOVERY_ACTIVITY_THRESHOLD_MS) {
+    return { triggered: false, reason: 'within_threshold' };
+  }
+  const t = now();
+  if (t - lastRecoveryAttemptAt < RECOVERY_COOLDOWN_MS) {
+    return { triggered: false, reason: 'cooldown' };
+  }
+  if (t - lastRecoveryRateLimitAt < RECOVERY_RATE_LIMIT_COOLDOWN_MS) {
+    return { triggered: false, reason: 'cooldown' };
+  }
+
+  // Per-shard destroy so a future multi-shard config (see the
+  // multi-shard TODO in readGatewayHealth above) only resets the
+  // wedged shard. discord.js shard.destroy is async and only
+  // re-IDENTIFYs when `recover` is set — without it, the shard
+  // transitions to Idle and stays there. `code` (NOT closeCode —
+  // different field name) 4000 = re-establishable. Fire-and-catch:
+  // tick() is sync but destroy awaits internals (updateSessionInfo,
+  // ws onclose race, internalConnect). Letting that promise reject
+  // would surface as an unhandledRejection that crashes the process
+  // on Node 16+.
+  //
+  // Cooldown choice: stamped optimistically as soon as destroy() is
+  // dispatched (line below), NOT on resolved-success. Rationale: if
+  // every shard's destroy rejects asynchronously, we'd be locked out
+  // for 10 min — but the bot is still emitting unhealthy heartbeats,
+  // and the activity_age_ms alarm (qurl-integrations-infra #446)
+  // will page on-call within ~2 min. Async rejections are rare and
+  // operator-handled; the optimistic stamp prevents a reconnect
+  // storm in the common case where destroy() succeeds.
+  let shardsAttempted = 0;
+  let shardsTerminated = 0;
+  if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
+    for (const shard of client.ws.shards.values()) {
+      if (typeof shard?.destroy !== 'function') continue;
+      shardsAttempted++;
+      try {
+        const result = shard.destroy({
+          code: 4000,
+          reason: 'auto-recovery: zombie ws (activity stale)',
+          recover: WebSocketShardDestroyRecovery.Reconnect,
+        });
+        if (result && typeof result.catch === 'function') {
+          result.catch((err) => {
+            logger.warn('Shard destroy promise rejected during auto-recovery', { error: err?.message });
+          });
+        }
+        shardsTerminated++;
+      } catch (err) {
+        // Sync throw = bad-args / TypeError before the async body
+        // runs. Already-Idle shards return synchronously without
+        // throwing, so this branch is for genuinely unexpected
+        // shapes; log and keep going so a single broken shard
+        // doesn't block the others.
+        logger.warn('Shard destroy threw synchronously during auto-recovery', { error: err?.message });
+      }
+    }
+  }
+
+  // Two distinct empty-result branches:
+  //   - shardsAttempted === 0: client.ws.shards missing/empty. Pathological
+  //     in steady state (is_ready=true contradicts no shards); retry on
+  //     the next tick without consuming any cooldown.
+  //   - shardsAttempted > 0 && shardsTerminated === 0: shards exist but
+  //     every destroy() sync-threw. Stamp the short rate-limit cooldown
+  //     so the warn-log volume is bounded; recovery still retries inside
+  //     the 10-min main cooldown window.
+  if (shardsAttempted === 0) {
+    return { triggered: false, reason: 'no_shards' };
+  }
+  if (shardsTerminated === 0) {
+    lastRecoveryRateLimitAt = t;
+    return { triggered: false, reason: 'all_destroys_threw' };
+  }
+  // TODO(multi-shard): pairs with the multi-shard TODO in
+  // readGatewayHealth above. When sharding flips on, the actually-
+  // wedged shard could be the one that sync-throws while a healthy
+  // shard's destroy succeeds — locking recovery out for 10 min while
+  // the stuck shard stays stuck. Move to a per-shard cooldown map
+  // (lastRecoveryAttemptAt[shardId]) at that point.
+  lastRecoveryAttemptAt = t;
+  // Reset the activity baseline so subsequent ticks read
+  // `activity_age_ms: null` until the reconnected WebSocket's first
+  // raw frame re-baselines via noteGatewayActivity(). Without this,
+  // a tick between is_ready flipping back to true and the first
+  // post-reconnect frame would observe the pre-destroy stale value
+  // still climbing — harmless under the 10 min main cooldown today,
+  // but a flap source if cooldown ever shrinks (e.g. per-shard
+  // cooldown for the multi-shard TODO above).
+  _resetGatewayActivity();
+  return { triggered: true, reason: 'zombie_ws', shardsTerminated };
 }
 
 /**
@@ -146,13 +292,16 @@ function readGatewayHealth(client, now = Date.now) {
 }
 
 /**
- * Start the positive-signal heartbeat timer. Returns the timer handle
- * so callers (gracefulShutdown) can clear it.
+ * Start the heartbeat timer. Returns the timer handle so callers
+ * (gracefulShutdown) can clear it.
  *
- * Only emits on the healthy path — silence is the alarm condition.
- * Emitting an "unhealthy" event would create a second metric the
- * operator would have to remember to watch; the missing-data trick
- * collapses that into one alarm.
+ * Dual-emission: healthy ticks emit gateway_heartbeat_healthy (paired
+ * with the silence/missing-data alarm — one shape of wedge: total
+ * silence). Unhealthy ticks emit gateway_heartbeat_unhealthy carrying
+ * activity_age_ms (paired with the Max-on-value alarm — second shape
+ * of wedge: flapping dispatch where intermittent healthy ticks keep
+ * the silence alarm quiet). Unhealthy ticks also trigger
+ * maybeAutoRecoverZombieWS for self-heal at activity_age_ms >= 120 s.
  *
  * @param {import('discord.js').Client} client
  * @param {{ intervalMs?: number, now?: () => number }} [opts]
@@ -176,6 +325,20 @@ function startGatewayHeartbeat(client, opts = {}) {
           ack_age_ms: snapshot.ack_age_ms,
           activity_age_ms: snapshot.activity_age_ms,
         });
+      } else {
+        // Pair-event for the healthy heartbeat so activity_age_ms is
+        // observable as a metric on EVERY tick. Without this, the
+        // healthy emission caps activity_age_ms at <60s by definition
+        // and a Max(activity_age_ms) > 60s alarm would never fire — yet
+        // 60s+ is exactly the zombie-WS signal we need to alarm on
+        // (5/8 incident). null-safe payload: ack_age_ms is null pre-
+        // first-ack, ping_ms is -1 pre-first-ws.
+        logger.audit(AUDIT_EVENTS.GATEWAY_HEARTBEAT_UNHEALTHY, {
+          ping_ms: snapshot.ping_ms,
+          ack_age_ms: snapshot.ack_age_ms,
+          activity_age_ms: snapshot.activity_age_ms,
+          is_ready: snapshot.is_ready,
+        });
       }
       // Edge-triggered logs so on-call can distinguish "wedged for
       // 5 min" (one warn at t=0, then silence on the metric side) from
@@ -187,7 +350,22 @@ function startGatewayHeartbeat(client, opts = {}) {
           ack_age_ms: snapshot.ack_age_ms,
           activity_age_ms: snapshot.activity_age_ms,
         });
-      } else if (prevHealthy === false && snapshot.healthy) {
+      }
+      // Zombie-WS recovery runs on every unhealthy tick (not just
+      // the edge) — debounced by RECOVERY_COOLDOWN_MS internally.
+      // Edge-only would miss the case where the bot was already
+      // unhealthy at boot and stayed there.
+      if (!snapshot.healthy) {
+        const recovery = maybeAutoRecoverZombieWS(client, snapshot, now);
+        if (recovery.triggered) {
+          logger.warn('Gateway auto-recovery: forcing reconnect (zombie WS)', {
+            activity_age_ms: snapshot.activity_age_ms,
+            ack_age_ms: snapshot.ack_age_ms,
+            shards_terminated: recovery.shardsTerminated,
+          });
+        }
+      }
+      if (prevHealthy === false && snapshot.healthy) {
         logger.info('Gateway heartbeat: unhealthy → healthy', {
           ping_ms: snapshot.ping_ms,
           ack_age_ms: snapshot.ack_age_ms,
@@ -269,10 +447,14 @@ module.exports = {
   startActiveGuildCount,
   readGatewayHealth,
   noteGatewayActivity,
+  maybeAutoRecoverZombieWS,
   HEARTBEAT_INTERVAL_MS,
   ACTIVE_GUILD_INTERVAL_MS,
   HEARTBEAT_ACK_AGE_THRESHOLD_MS,
   GATEWAY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_ACTIVITY_THRESHOLD_MS,
+  RECOVERY_COOLDOWN_MS,
+  RECOVERY_RATE_LIMIT_COOLDOWN_MS,
   // Test-only exports (NODE_ENV-gated to keep live state out of prod
   // consumers, mirroring the commands.js _test pattern).
   // _test gated on NODE_ENV === 'test' (NOT !== 'production') so
@@ -281,6 +463,6 @@ module.exports = {
   // local-dev workflows need access, set NODE_ENV=test for that
   // shell.
   ...(process.env.NODE_ENV === 'test' && {
-    _test: { _resetGatewayActivity },
+    _test: { _resetGatewayActivity, _resetRecoveryClock },
   }),
 };
