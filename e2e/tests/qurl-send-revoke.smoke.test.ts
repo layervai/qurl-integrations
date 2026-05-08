@@ -1,32 +1,15 @@
 /**
- * Smoke contract for the post-revoke confirmation message format
- * (`/qurl send` → click Revoke → bot edits the ephemeral confirmation).
- *
- * Imports `renderRevokeMsg` from the bot src so a wording change in
- * commands.js fails this smoke gate at deploy time.
- *
- * The unit tests in apps/discord/tests/qurl-send-back-half.test.js
- * cover the same surface during the bot's own CI. This file's value
- * is at the post-deploy smoke layer.
+ * Wording-drift smoke for the post-revoke confirmation message.
+ * Imports the discord.js-free `revoke-render` module so the e2e
+ * runner can load it without `apps/discord/node_modules`.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const cmds = require('../../apps/discord/src/commands');
-// `_test` is gated on NODE_ENV !== 'production'. If this smoke is ever
-// run with production env (e.g. to mirror prod), the destructure below
-// would throw "Cannot destructure ... of undefined". Fail loudly with
-// a curated message so the next operator knows what's wrong.
-if (!cmds._test) {
-  throw new Error(
-    'qurl-send-revoke.smoke.test.ts requires NODE_ENV !== "production" to access commands.js _test exports. ' +
-    'Run jest with the default NODE_ENV=test, or unset NODE_ENV.',
-  );
-}
-const { renderRevokeMsg, REVOKE_TRUNC_LIMIT } = cmds._test;
+const { renderRevokeContent, REVOKE_TRUNC_LIMIT } = require('../../apps/discord/src/revoke-render');
 
 describe('qURL send revoke confirmation format (smoke)', () => {
   test('full-list format: "Revoked X/Y users" + "Revoked for: alice, bob"', () => {
-    const r = renderRevokeMsg('send-1', ['alice', 'bob', 'carol'], 3, false);
+    const r = renderRevokeContent({ names: ['alice', 'bob', 'carol'], total: 3, showAll: false });
     expect(r.content).toMatch(/^Revoked 3\/3 users\./);
     expect(r.content).toContain('Revoked for: alice, bob, carol');
     expect(r.content).not.toMatch(/\+\d+ more/);
@@ -34,31 +17,31 @@ describe('qURL send revoke confirmation format (smoke)', () => {
 
   test(`truncated format: "+N more" when names exceed REVOKE_TRUNC_LIMIT (${REVOKE_TRUNC_LIMIT})`, () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 3 }, (_, i) => `u${i}`);
-    const r = renderRevokeMsg('send-2', names, names.length, false);
+    const r = renderRevokeContent({ names, total: names.length, showAll: false });
     expect(r.content).toMatch(/\+3 more$/m);
     expect(r.needsExpand).toBe(true);
   });
 
   test('no-success format: "Revoked 0/N" omits "Revoked for:" line', () => {
-    const r = renderRevokeMsg('send-3', [], 5, false);
+    const r = renderRevokeContent({ names: [], total: 5, showAll: false });
     expect(r.content).toMatch(/^Revoked 0\/5 users\./);
     expect(r.content).not.toContain('Revoked for:');
   });
 
   test('zero-attempt format: "Revoked 0/0" omits the already-opened note', () => {
-    const r = renderRevokeMsg('send-4', [], 0, false);
+    const r = renderRevokeContent({ names: [], total: 0, showAll: false });
     expect(r.content).not.toContain('already-opened');
   });
 
   test('singular "user" when total === 1', () => {
-    const r = renderRevokeMsg('send-5', ['alice'], 1, false);
+    const r = renderRevokeContent({ names: ['alice'], total: 1, showAll: false });
     expect(r.content).toMatch(/^Revoked 1\/1 user\./);
     expect(r.content).not.toMatch(/^Revoked 1\/1 users\./);
   });
 
   test('large lists overflow to file attachment instead of inline truncation', () => {
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
-    const r = renderRevokeMsg('send-6', names, names.length, true);
+    const r = renderRevokeContent({ names, total: names.length, showAll: true });
     expect(r.content.length).toBeLessThanOrEqual(2000);
     expect(r.content).toContain('(see attached)');
     expect(r.attachmentText).not.toBeNull();
