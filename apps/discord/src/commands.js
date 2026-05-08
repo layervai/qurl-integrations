@@ -1851,7 +1851,7 @@ async function handleSend(interaction, apiKey) {
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(`qurl_revoke_${sendId}`)
-      .setLabel('Revoke')
+      .setLabel('Revoke All')
       .setStyle(ButtonStyle.Danger),
   );
   if (needsExpand) {
@@ -1972,7 +1972,7 @@ async function handleSend(interaction, apiKey) {
         const fullMsg = monitor.getFullMsg();
         const updatedRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`qurl_add_${sendId}`).setLabel('Add Recipients').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
         );
         await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(logIgnoredDiscordErr);
