@@ -16,6 +16,7 @@ const {
   maybeAutoRecoverZombieWS,
   RECOVERY_ACTIVITY_THRESHOLD_MS,
   RECOVERY_COOLDOWN_MS,
+  RECOVERY_RATE_LIMIT_COOLDOWN_MS,
   _test: gatewayMetricsTest,
 } = require('../src/gateway-metrics');
 const { AUDIT_EVENTS } = require('../src/constants');
@@ -553,7 +554,7 @@ describe('maybeAutoRecoverZombieWS', () => {
     expect(shard.destroy).toHaveBeenCalledTimes(1);
   });
 
-  test('catches sync throw from shard.destroy and keeps going', () => {
+  test('all shards sync-throw → all_destroys_threw + short rate-limit cooldown', () => {
     const { client, shard } = shardClient({
       destroyImpl: jest.fn(() => { throw new Error('bad-args'); }),
     });
@@ -563,23 +564,82 @@ describe('maybeAutoRecoverZombieWS', () => {
       { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
       () => t,
     );
-    // Sync throw => shardsTerminated stays 0 => returns no_shards
-    // and DOES NOT consume the cooldown. The next tick retries.
+    // Shards exist, every destroy() sync-threw — distinct from
+    // the empty/missing-shards branch (which retries next tick).
     expect(result.triggered).toBe(false);
-    expect(result.reason).toBe('no_shards');
+    expect(result.reason).toBe('all_destroys_threw');
     expect(logger.warn).toHaveBeenCalledWith(
       'Shard destroy threw synchronously during auto-recovery',
       expect.objectContaining({ error: 'bad-args' }),
     );
     expect(shard.destroy).toHaveBeenCalled();
 
-    // Confirm cooldown was NOT stamped — second call same tick can fire.
+    // Within the rate-limit cooldown window, recovery is gated to
+    // bound warn-log volume — the warn block doesn't re-fire.
     const second = maybeAutoRecoverZombieWS(
       client,
       { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
       () => t + 1_000,
     );
-    expect(second.reason).toBe('no_shards'); // still failing the same way
+    expect(second.reason).toBe('cooldown');
+  });
+
+  test('all_destroys_threw rate-limit cooldown elapses → recovery retries', () => {
+    const { client, shard } = shardClient({
+      destroyImpl: jest.fn(() => { throw new Error('bad-args'); }),
+    });
+    const t0 = 1_000_000;
+    maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0,
+    );
+    shard.destroy.mockClear();
+
+    // Past the rate-limit cooldown but still inside the 10-min main
+    // cooldown — recovery should retry (the main cooldown is only
+    // stamped on successful termination, which never happened here).
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t0 + RECOVERY_RATE_LIMIT_COOLDOWN_MS + 1,
+    );
+    expect(second.reason).toBe('all_destroys_threw');
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('successful recovery resets activity baseline (next snapshot reads null until first post-reconnect frame)', () => {
+    const { client } = shardClient({
+      destroyImpl: jest.fn(),
+    });
+    const t = 2_000_000;
+    // Pre-condition: activity baseline is set (the beforeEach
+    // noteGatewayActivity() seeded it). Confirm a snapshot has a
+    // numeric activity_age_ms before we trigger recovery.
+    const preSnap = readGatewayHealth(client);
+    expect(typeof preSnap.activity_age_ms).toBe('number');
+
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+
+    // After successful destroy, the baseline is cleared. A snapshot
+    // taken before the new WebSocket's first raw frame reports null
+    // — readGatewayHealth treats lastGatewayActivityAt === 0 as the
+    // pre-first-frame sentinel. This prevents a tick between
+    // is_ready flipping back true and the first post-reconnect raw
+    // frame from observing the pre-destroy stale value still climbing.
+    const postSnap = readGatewayHealth(client);
+    expect(postSnap.activity_age_ms).toBeNull();
+
+    // First post-reconnect raw frame re-baselines.
+    noteGatewayActivity();
+    const postNoteSnap = readGatewayHealth(client);
+    expect(typeof postNoteSnap.activity_age_ms).toBe('number');
+    expect(postNoteSnap.activity_age_ms).toBeLessThan(1_000);
   });
 
   test('handles destroy() promise rejection without crashing the process', async () => {

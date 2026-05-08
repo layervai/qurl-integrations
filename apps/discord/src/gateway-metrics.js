@@ -41,7 +41,14 @@ const HEARTBEAT_ACK_AGE_THRESHOLD_MS = 60_000;
 // storm if termination doesn't immediately restore activity.
 const RECOVERY_ACTIVITY_THRESHOLD_MS = 120_000;
 const RECOVERY_COOLDOWN_MS = 10 * 60_000;
+// Short cooldown stamped only when every shard's destroy() sync-threw
+// (every call rejected before the async body ran — pathological, e.g.
+// an @discordjs/ws bump that breaks the option shape). Bounds warn-log
+// volume in CloudWatch Logs without locking recovery out for the full
+// 10 min; activity-age alarm pages on-call regardless.
+const RECOVERY_RATE_LIMIT_COOLDOWN_MS = 60_000;
 let lastRecoveryAttemptAt = 0;
+let lastRecoveryRateLimitAt = 0;
 
 // Composite-readiness gateway-activity signal. client.isReady() alone
 // misses event-loop wedges (DB pool exhaustion, qurl-service stalls,
@@ -93,6 +100,7 @@ function _resetGatewayActivity() {
  */
 function _resetRecoveryClock() {
   lastRecoveryAttemptAt = 0;
+  lastRecoveryRateLimitAt = 0;
 }
 
 /**
@@ -120,6 +128,9 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   if (t - lastRecoveryAttemptAt < RECOVERY_COOLDOWN_MS) {
     return { triggered: false, reason: 'cooldown' };
   }
+  if (t - lastRecoveryRateLimitAt < RECOVERY_RATE_LIMIT_COOLDOWN_MS) {
+    return { triggered: false, reason: 'cooldown' };
+  }
 
   // Per-shard destroy so a future multi-shard config (see the
   // multi-shard TODO in readGatewayHealth above) only resets the
@@ -140,10 +151,12 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   // will page on-call within ~2 min. Async rejections are rare and
   // operator-handled; the optimistic stamp prevents a reconnect
   // storm in the common case where destroy() succeeds.
+  let shardsAttempted = 0;
   let shardsTerminated = 0;
   if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
       if (typeof shard?.destroy !== 'function') continue;
+      shardsAttempted++;
       try {
         const result = shard.destroy({
           code: 4000,
@@ -167,12 +180,20 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
     }
   }
 
-  // Only stamp the cooldown when something actually got terminated.
-  // If client.ws.shards is missing/empty (rare — would mean is_ready
-  // is true while no shards exist, contradiction in steady state),
-  // retry on the next tick rather than locking out for 10 min.
-  if (shardsTerminated === 0) {
+  // Two distinct empty-result branches:
+  //   - shardsAttempted === 0: client.ws.shards missing/empty. Pathological
+  //     in steady state (is_ready=true contradicts no shards); retry on
+  //     the next tick without consuming any cooldown.
+  //   - shardsAttempted > 0 && shardsTerminated === 0: shards exist but
+  //     every destroy() sync-threw. Stamp the short rate-limit cooldown
+  //     so the warn-log volume is bounded; recovery still retries inside
+  //     the 10-min main cooldown window.
+  if (shardsAttempted === 0) {
     return { triggered: false, reason: 'no_shards' };
+  }
+  if (shardsTerminated === 0) {
+    lastRecoveryRateLimitAt = t;
+    return { triggered: false, reason: 'all_destroys_threw' };
   }
   // TODO(multi-shard): pairs with the multi-shard TODO in
   // readGatewayHealth above. When sharding flips on, the actually-
@@ -181,6 +202,15 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   // the stuck shard stays stuck. Move to a per-shard cooldown map
   // (lastRecoveryAttemptAt[shardId]) at that point.
   lastRecoveryAttemptAt = t;
+  // Reset the activity baseline so subsequent ticks read
+  // `activity_age_ms: null` until the reconnected WebSocket's first
+  // raw frame re-baselines via noteGatewayActivity(). Without this,
+  // a tick between is_ready flipping back to true and the first
+  // post-reconnect frame would observe the pre-destroy stale value
+  // still climbing — harmless under the 10 min main cooldown today,
+  // but a flap source if cooldown ever shrinks (e.g. per-shard
+  // cooldown for the multi-shard TODO above).
+  _resetGatewayActivity();
   return { triggered: true, reason: 'zombie_ws', shardsTerminated };
 }
 
@@ -424,6 +454,7 @@ module.exports = {
   GATEWAY_ACTIVITY_THRESHOLD_MS,
   RECOVERY_ACTIVITY_THRESHOLD_MS,
   RECOVERY_COOLDOWN_MS,
+  RECOVERY_RATE_LIMIT_COOLDOWN_MS,
   // Test-only exports (NODE_ENV-gated to keep live state out of prod
   // consumers, mirroring the commands.js _test pattern).
   // _test gated on NODE_ENV === 'test' (NOT !== 'production') so
