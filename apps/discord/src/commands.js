@@ -292,13 +292,19 @@ function resolveSenderAlias(interaction) {
 // Falls back through whatever we have on the recipient object so the
 // helper works for User-from-UserSelect, GuildMember-from-channel-
 // members, and the {id, username} shape produced by handleAddRecipients.
+// sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape;
+// matches the public-channel notify path (see callers of
+// sanitizeDisplayName elsewhere in this file) so any rendering of a
+// recipient name (Recipients line, Revoked-for line, attachment file)
+// is hardened against bidi / zero-width / markdown-bypass nicknames.
 function resolveRecipientAlias(r, interaction) {
   const member = interaction?.guild?.members?.cache?.get(r.id);
-  return member?.displayName
+  const raw = member?.displayName
     ?? r?.displayName
     ?? r?.user?.displayName
     ?? r?.username
     ?? `user-${r?.id}`;
+  return sanitizeDisplayName(raw);
 }
 
 // --- Shared DM delivery payload builder ---
