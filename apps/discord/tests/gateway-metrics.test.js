@@ -6,6 +6,7 @@
  * on. The setInterval timers are exercised via jest fake timers so
  * each test can advance time deterministically.
  */
+const { WebSocketShardDestroyRecovery } = require('discord.js');
 const logger = require('../src/logger');
 const {
   startGatewayHeartbeat,
@@ -469,7 +470,7 @@ describe('maybeAutoRecoverZombieWS', () => {
     expect(shard.destroy).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 4000,
-        recover: 0, // WebSocketShardDestroyRecovery.Reconnect
+        recover: WebSocketShardDestroyRecovery.Reconnect,
       }),
     );
   });
@@ -563,7 +564,10 @@ describe('maybeAutoRecoverZombieWS', () => {
       expect.objectContaining({ error: 'async-destroy-failed' }),
     );
     expect(shard.destroy).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 4000, recover: 0 }),
+      expect.objectContaining({
+        code: 4000,
+        recover: WebSocketShardDestroyRecovery.Reconnect,
+      }),
     );
   });
 
@@ -599,5 +603,56 @@ describe('maybeAutoRecoverZombieWS', () => {
     );
     expect(result.triggered).toBe(false);
     expect(result.reason).toBe('no_shards');
+  });
+
+  test('triggers across multiple shards (happy path) — pin shardsTerminated count', () => {
+    const shardA = { destroy: jest.fn(() => Promise.resolve()) };
+    const shardB = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = { ws: { shards: new Map([[0, shardA], [1, shardB]]) } };
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => 1_000_000,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(2);
+    expect(shardA.destroy).toHaveBeenCalledTimes(1);
+    expect(shardB.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  test('partial-failure: one shard sync-throws, other succeeds — cooldown still stamped', () => {
+    const shardA = { destroy: jest.fn(() => { throw new Error('borked'); }) };
+    const shardB = { destroy: jest.fn(() => Promise.resolve()) };
+    const client = { ws: { shards: new Map([[0, shardA], [1, shardB]]) } };
+    const t = 1_000_000;
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t,
+    );
+    expect(result.triggered).toBe(true);
+    expect(result.shardsTerminated).toBe(1); // B succeeded; A threw
+    // Cooldown WAS stamped (>=1 success), so an immediate retry debounces.
+    const second = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS + 1 },
+      () => t + 1_000,
+    );
+    expect(second.reason).toBe('cooldown');
+  });
+
+  test('boundary: activity_age_ms === RECOVERY_ACTIVITY_THRESHOLD_MS triggers (>= semantic)', () => {
+    // Code uses `< THRESHOLD` to gate, so equality falls THROUGH to
+    // the recovery path. Pin the boundary so a future refactor to
+    // `<=` (which would silently delay recovery by one tick) breaks
+    // this test instead of getting silently merged.
+    const { client, shard } = shardClient();
+    const result = maybeAutoRecoverZombieWS(
+      client,
+      { is_ready: true, activity_age_ms: RECOVERY_ACTIVITY_THRESHOLD_MS },
+      () => 1_000_000,
+    );
+    expect(result.triggered).toBe(true);
+    expect(shard.destroy).toHaveBeenCalledTimes(1);
   });
 });

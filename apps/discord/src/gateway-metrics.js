@@ -116,15 +116,25 @@ function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
     return { triggered: false, reason: 'cooldown' };
   }
 
-  // Per-shard destroy so a future multi-shard config (TODO at L107)
-  // only resets the wedged shard. discord.js shard.destroy is async
-  // and only re-IDENTIFYs when `recover` is set — without it, the
-  // shard transitions to Idle and stays there. `code` (NOT closeCode
-  // — different field name) 4000 = re-establishable. Fire-and-catch:
+  // Per-shard destroy so a future multi-shard config (see the
+  // multi-shard TODO in readGatewayHealth above) only resets the
+  // wedged shard. discord.js shard.destroy is async and only
+  // re-IDENTIFYs when `recover` is set — without it, the shard
+  // transitions to Idle and stays there. `code` (NOT closeCode —
+  // different field name) 4000 = re-establishable. Fire-and-catch:
   // tick() is sync but destroy awaits internals (updateSessionInfo,
   // ws onclose race, internalConnect). Letting that promise reject
   // would surface as an unhandledRejection that crashes the process
   // on Node 16+.
+  //
+  // Cooldown choice: stamped optimistically as soon as destroy() is
+  // dispatched (line below), NOT on resolved-success. Rationale: if
+  // every shard's destroy rejects asynchronously, we'd be locked out
+  // for 10 min — but the bot is still emitting unhealthy heartbeats,
+  // and the activity_age_ms alarm (qurl-integrations-infra #446)
+  // will page on-call within ~2 min. Async rejections are rare and
+  // operator-handled; the optimistic stamp prevents a reconnect
+  // storm in the common case where destroy() succeeds.
   let shardsTerminated = 0;
   if (client.ws?.shards && typeof client.ws.shards.values === 'function') {
     for (const shard of client.ws.shards.values()) {
