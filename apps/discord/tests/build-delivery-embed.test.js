@@ -215,20 +215,20 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
   });
 
-  // Regression net for the live-countdown design: the Portal-closes line
+  // Regression net for the live-countdown design: the Door-closes line
   // must render Discord's <t:N:R> relative-time markdown so the recipient
   // sees "in 24 hours" → "in 16 hours" → "1 hour ago" as time passes.
   // A future refactor that goes back to baking a static label into the
-  // embed ("Portal closes in **24 hours**" forever) would silently
+  // embed ("Door closes in **24 hours**" forever) would silently
   // regress this UX — the assertion below catches it.
-  it('renders Discord native relative-time <t:N:R> for the Portal-closes line', () => {
+  it('renders Discord native relative-time <t:N:R> for the Door-closes line', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const portalField = fields.find(f => typeof f.value === 'string' && f.value.includes('Portal closes'));
-    expect(portalField).toBeDefined();
-    expect(portalField.value).toBe('\ud83d\udd50 Portal closes <t:1735689600:R>');
+    const doorField = fields.find(f => typeof f.value === 'string' && f.value.includes('Door closes'));
+    expect(doorField).toBeDefined();
+    expect(doorField.value).toBe('\ud83d\udd50 Door closes <t:1735689600:R>');
     // Locks against accidental reversion to a static label
-    expect(portalField.value).not.toMatch(/Portal closes in \*\*\d/);
+    expect(doorField.value).not.toMatch(/Door closes in \*\*\d/);
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes
