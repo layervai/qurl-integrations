@@ -862,10 +862,9 @@ describe('handleAddRecipients — pre-flight guards', () => {
     expect(result.msg).toMatch(/incomplete/i);
   });
 
-  // The collector handler appends `newRecipients` to its in-scope
-  // `recipients` array so a post-Add revoke renders new users by name
-  // (commands.js around the `addResult.delivered > 0` branch). If this
-  // field gets renamed/dropped, that wiring breaks silently.
+  // newRecipients carries {id, username} so callers can render added
+  // users by name on a post-Add revoke. Renaming/dropping the field
+  // would break that wiring silently.
   it('returns newRecipients with {id, username} pairs (post-Add revoke wiring)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: null, expires_in: '5m',

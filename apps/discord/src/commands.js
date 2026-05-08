@@ -2001,6 +2001,9 @@ async function handleSend(interaction, apiKey) {
             content: 'Failed to revoke links. Try `/qurl revoke` instead.',
             components: [],
           }).catch(logIgnoredDiscordErr);
+          // Reset so the dedup flag isn't sticky if the failure UI
+          // ever changes to retain the Revoke button.
+          revokeInFlight = false;
         }
         // Collector keeps running for the post-revoke expand toggle;
         // its `time:` window auto-expires.
@@ -2069,17 +2072,8 @@ async function handleSend(interaction, apiKey) {
               sendId, selectInteraction.users, interaction, apiKey,
             );
 
-            // Extend recipients[] whenever names were resolved.
-            // Pre-mint early-return paths (config not found, attachment
-            // url stale, link save failed) populate `newRecipients`
-            // even though no qurl_sends rows were written — the
-            // post-revoke filter `successSet.has(r.id)` excludes
-            // those phantom IDs, so the cost is just the unused
-            // entries on `recipients[]`. Post-mint failure paths DO
-            // write rows, where this push is load-bearing for the
-            // revoke names line. Dedupe by id so a re-Add of an
-            // already-included user doesn't render "alice, bob,
-            // alice".
+            // Extend recipients[] for the post-revoke names line.
+            // Dedupe by id — re-Add of an already-included user.
             if (addResult.newRecipients?.length) {
               const existingIds = new Set(recipients.map(r => r.id));
               for (const r of addResult.newRecipients) {
@@ -2647,8 +2641,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
 
   // deleteLink deletes the whole resource; one DELETE per unique
   // resource_id, fan result out to every recipient sharing it.
-  // Without this, 2nd…Nth DELETE for a shared resource returns 404
-  // and mis-classifies N-1 recipients as failures.
+  // Required because mintLinksInBatches packs up to TOKENS_PER_RESOURCE
+  // recipients per resource, so the same resource_id is shared.
   const byResource = new Map();
   for (const item of items) {
     const list = byResource.get(item.resource_id) || [];
@@ -2689,7 +2683,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
   const success = successUserIds.length;
   const total = totalUsers;
-  // Audit metric stays per-resource; preserves pre-PR dashboard shape.
+  // Audit metric is per-resource (DELETE call), not per-recipient.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 
@@ -2704,10 +2698,8 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   }
   await db.markSendRevoked(sendId, senderDiscordId);
 
-  // Top-level `success/total` stay per-resource to preserve the
-  // pre-PR shape that dashboards / log searches keyed off; per-user
-  // counts surface in nested `users` (new). Mirrors the audit
-  // event's back-compat split.
+  // Top-level `success/total` are per-resource (matches the audit
+  // event); per-recipient counts surface in nested `users`.
   logger.info('Revoked send', {
     sendId,
     success: auditSuccess,
