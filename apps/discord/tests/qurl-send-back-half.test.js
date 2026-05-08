@@ -814,6 +814,28 @@ describe('renderRevokeMsg', () => {
   });
 });
 
+// Pinned because `buildRevokeHeader` is the ONLY wording the slash-
+// command `/qurl revoke` path uses (no Recipients line — see
+// commands.js's slash handler). Unit-test the helper directly so a
+// future wording change reaches the slash-command surface even if no
+// `renderRevokeMsg` test happens to hit the same shape.
+describe('buildRevokeHeader (slash-command revoke path)', () => {
+  // eslint-disable-next-line global-require
+  const { buildRevokeHeader } = require('../src/revoke-render');
+
+  it('zero-attempt: "Revoked 0/0 users." (no already-opened note)', () => {
+    expect(buildRevokeHeader(0, 0)).toBe('Revoked 0/0 users.');
+  });
+
+  it('singular: "Revoked 1/1 user." (singular noun + already-opened note)', () => {
+    expect(buildRevokeHeader(1, 1)).toBe('Revoked 1/1 user. Note: already-opened links cannot be revoked.');
+  });
+
+  it('plural: "Revoked 3/5 users." includes already-opened note when total > 0', () => {
+    expect(buildRevokeHeader(3, 5)).toBe('Revoked 3/5 users. Note: already-opened links cannot be revoked.');
+  });
+});
+
 // ===========================================================================
 // handleAddRecipients
 // ===========================================================================
