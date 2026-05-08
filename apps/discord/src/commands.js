@@ -287,6 +287,20 @@ function resolveSenderAlias(interaction) {
     ?? 'Someone';
 }
 
+// Resolve a recipient's per-guild display alias the same way the
+// sender alias resolves — guild nickname > globalName > username.
+// Falls back through whatever we have on the recipient object so the
+// helper works for User-from-UserSelect, GuildMember-from-channel-
+// members, and the {id, username} shape produced by handleAddRecipients.
+function resolveRecipientAlias(r, interaction) {
+  const member = interaction?.guild?.members?.cache?.get(r.id);
+  return member?.displayName
+    ?? r?.displayName
+    ?? r?.user?.displayName
+    ?? r?.username
+    ?? `user-${r?.id}`;
+}
+
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
 // embed copy is intentionally evocative ("opened a door", "Portal closes",
@@ -1806,12 +1820,12 @@ async function handleSend(interaction, apiKey) {
   // display username — usernames can collide within a guild.
   const TRUNC_LIMIT = 5;
   const failedUserIds = new Set(failedUsers.map(u => u.id || u));
-  const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => r.username);
+  const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => resolveRecipientAlias(r, interaction));
 
   function buildConfirmMsg(showAll) {
     let msg = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
     if (failed > 0) {
-      msg += `\n${failed} could not be reached: ${failedUsers.map(u => u.username).join(', ')}`;
+      msg += `\n${failed} could not be reached: ${failedUsers.map(u => resolveRecipientAlias(u, interaction)).join(', ')}`;
     }
     if (successNames.length > 0) {
       if (showAll || successNames.length <= TRUNC_LIMIT) {
@@ -1960,8 +1974,8 @@ async function handleSend(interaction, apiKey) {
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-          // Map ids → snapshot usernames from send time.
-          const idToName = new Map(recipients.map(r => [r.id, r.username]));
+          // Map ids → per-guild alias snapshot from send time.
+          const idToName = new Map(recipients.map(r => [r.id, resolveRecipientAlias(r, interaction)]));
           revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
