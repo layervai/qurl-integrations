@@ -784,6 +784,17 @@ describe('renderRevokeMsg', () => {
     const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false);
     expect(r.attachmentText).toBeNull();
   });
+
+  // Header takes its count from `success` (authoritative DDB count),
+  // not `names.length` — guards against `recipients[]` being incomplete
+  // when the caller filters by Set membership.
+  it('header uses explicit success arg, not names.length', () => {
+    // 5 users had links revoked but only 4 names resolvable in
+    // recipients[] — header must still say "5/5".
+    const r = renderRevokeMsg('send-mismatch', ['alice', 'bob', 'carol', 'dave'], 5, false, 5);
+    expect(r.content).toMatch(/^Revoked 5\/5 users\./);
+    expect(r.content).toContain('Revoked for: alice, bob, carol, dave');
+  });
 });
 
 // ===========================================================================

@@ -1934,6 +1934,11 @@ async function handleSend(interaction, apiKey) {
     // by a stale "Revoked 0/0".
     let revokeResultUserNames = [];
     let revokeResultTotal = 0;
+    // Authoritative DDB strict-success count. Tracked separately from
+    // `revokeResultUserNames.length` so the header stays correct even
+    // if a successful recipient_id can't be name-resolved against
+    // `recipients[]`.
+    let revokeResultSuccess = 0;
     let revokeShowAll = false;
     let revokeInFlight = false;
     let revokeSucceeded = false;
@@ -1958,7 +1963,7 @@ async function handleSend(interaction, apiKey) {
         // Toggle Show All / Show Less on the post-revoke recipient list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
+        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
         await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
@@ -1983,8 +1988,9 @@ async function handleSend(interaction, apiKey) {
             .filter(r => successSet.has(r.id))
             .map(r => resolveRecipientAlias(r, interaction));
           revokeResultTotal = revoked.total;
+          revokeResultSuccess = revoked.success;
           revokeShowAll = false;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
+          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
           await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           revokeSucceeded = true;
         } catch (err) {
@@ -2065,8 +2071,15 @@ async function handleSend(interaction, apiKey) {
             // if DM delivery failed, the qurl_sends rows were written
             // by handleAddRecipients, so a subsequent revoke would
             // surface those recipient_ids; without this push the
-            // names line falls back to `user-<id>`.
-            if (addResult.newRecipients?.length) recipients.push(...addResult.newRecipients);
+            // names line falls back to `user-<id>`. Dedupe by id so a
+            // re-Add of an already-included user doesn't render
+            // "alice, bob, alice" on the post-revoke list.
+            if (addResult.newRecipients?.length) {
+              const existingIds = new Set(recipients.map(r => r.id));
+              for (const r of addResult.newRecipients) {
+                if (!existingIds.has(r.id)) recipients.push(r);
+              }
+            }
 
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
@@ -2107,11 +2120,12 @@ async function handleSend(interaction, apiKey) {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
-          // Terminal state: keep attachment if any, strip components.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
-          const payload = revokeReplyPayload(final);
-          payload.components = [];
-          interaction.editReply(payload).catch(logIgnoredDiscordErr);
+          // Terminal state: re-render content (Show All may have
+          // toggled), strip components. Omit `files`/`attachments`
+          // so Discord keeps the existing revoked-users.txt without
+          // re-uploading the same blob 15min later.
+          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+          interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
         // Revoke attempted but failed — leave the failure message.
@@ -2575,8 +2589,13 @@ function buildRevokeHeader(success, total) {
 // content cap — caller wraps in an AttachmentBuilder. In attachment
 // mode the Show All button is suppressed since the file IS the full
 // list.
-function renderRevokeMsg(sendId, names, total, showAll) {
-  let content = buildRevokeHeader(names.length, total);
+//
+// `success` defaults to `names.length`. Pass it explicitly when the
+// authoritative count (e.g. DDB strict-success) may exceed the names
+// the caller could resolve — header reflects truth, names list
+// reflects what's renderable.
+function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
+  let content = buildRevokeHeader(success, total);
   let attachmentText = null;
 
   if (names.length === 0) {
