@@ -2570,6 +2570,7 @@ async function handleRevoke(interaction, apiKey) {
 // e2e smoke test can require it without pulling in `discord.js`.
 const {
   REVOKE_TRUNC_LIMIT,
+  REVOKE_CONTENT_SAFE_MAX,
   buildRevokeHeader,
   renderRevokeContent,
 } = require('./revoke-render');
