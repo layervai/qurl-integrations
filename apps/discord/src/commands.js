@@ -1918,7 +1918,6 @@ async function handleSend(interaction, apiKey) {
     // guards the on('end') re-render so a Failed message isn't overwritten
     // by a stale "Revoked 0/0".
     let revokeResultUserNames = [];
-    let revokeResultSuccessCount = 0;
     let revokeResultTotal = 0;
     let revokeShowAll = false;
     let revokeInFlight = false;
@@ -1944,7 +1943,7 @@ async function handleSend(interaction, apiKey) {
         // Toggle Show All / Show Less on the post-revoke recipient list.
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
+        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
         await interaction.editReply({
           content: updated.content,
           components: updated.needsExpand ? [updated.row] : [],
@@ -1966,10 +1965,9 @@ async function handleSend(interaction, apiKey) {
           // Map ids → snapshot usernames from send time.
           const idToName = new Map(recipients.map(r => [r.id, r.username]));
           revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
-          revokeResultSuccessCount = revoked.success;
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccessCount);
+          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
           await interaction.editReply({
             content: initial.content,
             components: initial.needsExpand ? [initial.row] : [],
@@ -2091,7 +2089,7 @@ async function handleSend(interaction, apiKey) {
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
           // Honor revokeShowAll on terminal render; strip components.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
+          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
@@ -2511,21 +2509,49 @@ async function handleRevoke(interaction, apiKey) {
 // Shared truncation limit for both send + revoke recipient lists.
 const REVOKE_TRUNC_LIMIT = 5;
 
+// Discord message content cap is 2000 chars. Leave headroom for the
+// header + "Revoked for: " prefix; force truncation in renderRevokeMsg
+// even when showAll=true if the full names list would push the total
+// over this. Without it, a Show All on ~80+ recipients would exceed
+// Discord's limit and the editReply would error.
+const REVOKE_CONTENT_SAFE_MAX = 1900;
+
 // Builds the post-revoke confirmation message + Show All toggle row.
-// `success` is row-count (matches `total`'s units — "X/Y links"),
-// `names` is the deduped per-recipient list for display. They diverge
-// when a user has multiple qurl_sends rows (handleAddRecipients's
-// file + location branches). Hoisted to module scope so it can be
-// unit-tested without a full collector mock. Mirrors `buildConfirmMsg`.
-function renderRevokeMsg(sendId, names, total, showAll, successCount = names.length) {
-  const success = successCount;
-  let content = `Revoked ${success}/${total} link${total !== 1 ? 's' : ''}.`;
-  if (total > 0) content += ' Note: already-opened links cannot be revoked.';
+// User-centric: `success` and `total` are unique-recipient counts;
+// `names` is the strict-success list (recipient with all links
+// revoked, none failed). Show All hard-caps when the full list would
+// exceed the Discord content limit (REVOKE_CONTENT_SAFE_MAX).
+function renderRevokeMsg(sendId, names, total, showAll) {
+  // names.length is the strict-success count (revokeAllLinks already
+  // filtered out mixed-outcome users into failureUserIds).
+  const success = names.length;
+  const header = `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.`;
+  const note = total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
+  let content = header + note;
+
   if (names.length > 0) {
-    content += showAll || names.length <= REVOKE_TRUNC_LIMIT
-      ? `\nRevoked for: ${names.join(', ')}`
-      : `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
+    const wantTruncate = !showAll && names.length > REVOKE_TRUNC_LIMIT;
+    if (wantTruncate) {
+      content += `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
+    } else {
+      const fullLine = `\nRevoked for: ${names.join(', ')}`;
+      if (content.length + fullLine.length <= REVOKE_CONTENT_SAFE_MAX) {
+        content += fullLine;
+      } else {
+        // Show All would exceed the Discord 2000-char cap; binary-
+        // search the largest prefix of names that fits.
+        let lo = 0, hi = names.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          const candidate = `\nRevoked for: ${names.slice(0, mid).join(', ')} +${names.length - mid} more`;
+          if ((content + candidate).length <= REVOKE_CONTENT_SAFE_MAX) lo = mid;
+          else hi = mid - 1;
+        }
+        content += `\nRevoked for: ${names.slice(0, lo).join(', ')} +${names.length - lo} more`;
+      }
+    }
   }
+
   const needsExpand = names.length > REVOKE_TRUNC_LIMIT;
   const row = needsExpand
     ? new ActionRowBuilder().addComponents(
@@ -2563,35 +2589,32 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     return resourceId;
   }, 5);
 
-  // Per-row count (for "X/Y links") + deduped per-recipient ids
-  // (for the names line). A recipient with multi-resource rows
-  // (handleAddRecipients's file + location branches) can land in
-  // both lists when results diverge; see PR description for v2 note.
-  let successRowCount = 0;
+  // User-centric: strict-success = recipient whose every link was
+  // revoked (in success but not in failure). Mixed-outcome users
+  // (some links succeeded, some failed) count as failure — better to
+  // tell the operator "alice is partial" via failure than misleadingly
+  // claim full success.
   const seenSuccess = new Set();
   const seenFailure = new Set();
   for (let i = 0; i < results.length; i++) {
     const [resourceId, recipientIds] = resourceEntries[i];
     if (results[i].status === 'fulfilled') {
-      successRowCount += recipientIds.length;
-      for (const id of recipientIds) {
-        if (!seenSuccess.has(id)) { seenSuccess.add(id); successUserIds.push(id); }
-      }
+      for (const id of recipientIds) seenSuccess.add(id);
     } else {
-      for (const id of recipientIds) {
-        if (!seenFailure.has(id)) { seenFailure.add(id); failureUserIds.push(id); }
-      }
+      for (const id of recipientIds) seenFailure.add(id);
       logger.error('Failed to revoke QURL', { resource_id: resourceId, error: results[i].reason?.message });
     }
   }
+  // Strict success = revoked AND not in any failure bucket.
+  for (const id of seenSuccess) {
+    if (!seenFailure.has(id)) successUserIds.push(id);
+  }
+  for (const id of seenFailure) failureUserIds.push(id);
 
-  const success = successRowCount;
-  const total = items.length;
-  // Audit metric uses per-resource units (matches the pre-PR shape so
-  // dashboard queries don't silently break). User-facing message uses
-  // `total` (per-row) — same item across both call paths means
-  // backward-compat for callers expecting the {success, total} shape.
-  // Per-resource units; preserves pre-PR dashboard shape.
+  const totalUsers = new Set(items.map(it => it.recipient_discord_id)).size;
+  const success = successUserIds.length;
+  const total = totalUsers;
+  // Audit metric stays per-resource; preserves pre-PR dashboard shape.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 

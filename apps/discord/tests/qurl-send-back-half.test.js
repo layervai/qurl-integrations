@@ -683,7 +683,6 @@ describe('revokeAllLinks', () => {
       { resource_id: 'res-shared', recipient_discord_id: 'u-2' },
       { resource_id: 'res-solo',   recipient_discord_id: 'u-3' },
     ]);
-    // First call (res-shared) fails, second (res-solo) succeeds.
     mockDeleteLink
       .mockRejectedValueOnce(new Error('already opened'))
       .mockResolvedValueOnce(undefined);
@@ -696,12 +695,34 @@ describe('revokeAllLinks', () => {
     expect(result.successUserIds).toEqual(['u-3']);
     expect(result.failureUserIds.sort()).toEqual(['u-1', 'u-2']);
   });
+
+  // Failure-wins semantics: if a recipient has rows on multiple
+  // resources and any DELETE fails, they count as failure (not
+  // success) — better to tell the operator "alice is partial" than
+  // misleadingly claim full success.
+  it('failure-wins: mixed-outcome recipient (one resource ok, another failed) → failure only', async () => {
+    mockDb.getSendItems.mockResolvedValueOnce([
+      { resource_id: 'res-a', recipient_discord_id: 'alice' },  // succeeds
+      { resource_id: 'res-b', recipient_discord_id: 'alice' },  // fails
+      { resource_id: 'res-a', recipient_discord_id: 'bob' },    // succeeds (bob clean)
+    ]);
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)            // res-a
+      .mockRejectedValueOnce(new Error('opened')); // res-b
+
+    const result = await revokeAllLinks('send-mixed', 'sender-1', 'apikey');
+
+    expect(result.total).toBe(2);  // 2 unique recipients
+    expect(result.success).toBe(1); // only bob (alice has a failure)
+    expect(result.successUserIds).toEqual(['bob']);
+    expect(result.failureUserIds).toEqual(['alice']);
+  });
 });
 
 describe('renderRevokeMsg', () => {
   it('lists all names + no expand button when count <= TRUNC_LIMIT', () => {
     const r = renderRevokeMsg('send-1', ['alice', 'bob'], 2, false);
-    expect(r.content).toContain('Revoked 2/2 links');
+    expect(r.content).toContain('Revoked 2/2 users');
     expect(r.content).toContain('Revoked for: alice, bob');
     expect(r.needsExpand).toBe(false);
     expect(r.row).toBeNull();
@@ -719,37 +740,37 @@ describe('renderRevokeMsg', () => {
   it('shows full list + Show Less button when showAll=true', () => {
     const names = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
     const r = renderRevokeMsg('send-3', names, names.length, true);
-    expect(r.content).toContain(names.at(-1)); // last name now present
+    expect(r.content).toContain(names.at(-1));
     expect(r.content).not.toMatch(/\+\d+ more/);
-    expect(r.needsExpand).toBe(true); // button still rendered for toggle back
-    // Discord mock chainable returns itself; introspect via setLabel.mock.calls.
+    expect(r.needsExpand).toBe(true);
     expect(r.row.components[0].setLabel).toHaveBeenCalledWith('Show Less');
   });
 
   it('omits the names line when no successful revokes (e.g. all already-opened)', () => {
     const r = renderRevokeMsg('send-4', [], 5, false);
-    expect(r.content).toContain('Revoked 0/5');
+    expect(r.content).toContain('Revoked 0/5 users');
     expect(r.content).not.toContain('Revoked for:');
     expect(r.row).toBeNull();
   });
 
-  it('singularizes "link" when total === 1', () => {
+  it('singularizes "user" when total === 1', () => {
     const r = renderRevokeMsg('send-5', ['alice'], 1, false);
-    expect(r.content).toContain('Revoked 1/1 link.');
-    expect(r.content).not.toContain('1/1 links');
-  });
-
-  it('row-count successCount diverges from deduped names.length on multi-row sends', () => {
-    // 1 unique recipient (file + location = 2 rows), both rows revoked.
-    // Pre-fix: rendered "1/2" (recipient count vs row count). Now: "2/2".
-    const r = renderRevokeMsg('send-multi', ['alice'], 2, false, /* successCount */ 2);
-    expect(r.content).toContain('Revoked 2/2 links');
-    expect(r.content).toContain('Revoked for: alice');
+    expect(r.content).toContain('Revoked 1/1 user.');
+    expect(r.content).not.toContain('1/1 users');
   });
 
   it('omits the already-opened note when total === 0 (nothing was attempted)', () => {
     const r = renderRevokeMsg('send-empty', [], 0, false);
     expect(r.content).not.toContain('already-opened');
+  });
+
+  it('truncates Show All output when full list would exceed Discord 2000-char content cap', () => {
+    // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
+    const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
+    const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true);
+    expect(r.content.length).toBeLessThanOrEqual(2000);
+    // Truncation marker still appears even with showAll=true when forced.
+    expect(r.content).toMatch(/\+\d+ more/);
   });
 });
 
