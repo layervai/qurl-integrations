@@ -11,8 +11,18 @@
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { _test } = require('../../apps/discord/src/commands');
-const { renderRevokeMsg, REVOKE_TRUNC_LIMIT } = _test;
+const cmds = require('../../apps/discord/src/commands');
+// `_test` is gated on NODE_ENV !== 'production'. If this smoke is ever
+// run with production env (e.g. to mirror prod), the destructure below
+// would throw "Cannot destructure ... of undefined". Fail loudly with
+// a curated message so the next operator knows what's wrong.
+if (!cmds._test) {
+  throw new Error(
+    'qurl-send-revoke.smoke.test.ts requires NODE_ENV !== "production" to access commands.js _test exports. ' +
+    'Run jest with the default NODE_ENV=test, or unset NODE_ENV.',
+  );
+}
+const { renderRevokeMsg, REVOKE_TRUNC_LIMIT } = cmds._test;
 
 describe('qURL send revoke confirmation format (smoke)', () => {
   test('full-list format: "Revoked X/Y users" + "Revoked for: alice, bob"', () => {

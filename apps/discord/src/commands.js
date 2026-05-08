@@ -2118,8 +2118,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
-  // {id, username} surfaced on every return so the caller can extend
-  // its recipients[] unconditionally (post-Add revoke shows new names).
+  // {id, username} surfaced on every pre-mint return path so the
+  // caller can extend its recipients[] (post-Add revoke shows names).
+  // Inner returns post-mint omit it but always have delivered: 0,
+  // so the caller's `if (delivered > 0)` guard skips them.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2642,7 +2644,14 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   }
   await db.markSendRevoked(sendId, senderDiscordId);
 
-  logger.info('Revoked send', { sendId, success, total });
+  // Log both unit shapes — top-level fields are per-user (post-PR);
+  // `resources` preserves the pre-PR per-resource shape so downstream
+  // log tooling can pick whichever it was built against.
+  logger.info('Revoked send', {
+    sendId,
+    users: { success, total },
+    resources: { success: auditSuccess, total: auditTotal },
+  });
   return { success, total, successUserIds, failureUserIds };
 }
 
