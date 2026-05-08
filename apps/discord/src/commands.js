@@ -2582,16 +2582,16 @@ function revokeReplyPayload(rendered) {
 // All wording assertions live against `renderRevokeContent` directly
 // (see `apps/discord/src/revoke-render.js` + the e2e smoke).
 function renderRevokeMsg(sendId, names, total, showAll, success = names.length) {
-  const data = renderRevokeContent(sendId, names, total, showAll, success);
+  const data = renderRevokeContent({ names, total, showAll, success });
   const row = data.needsExpand
     ? new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`qurl_revoke_expand_${data.sendId}`)
-        .setLabel(data.showAll ? 'Show Less' : 'Show All')
+        .setCustomId(`qurl_revoke_expand_${sendId}`)
+        .setLabel(showAll ? 'Show Less' : 'Show All')
         .setStyle(ButtonStyle.Secondary),
     )
     : null;
-  return { content: data.content, needsExpand: data.needsExpand, row, attachmentText: data.attachmentText };
+  return { ...data, row };
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {

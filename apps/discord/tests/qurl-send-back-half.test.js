@@ -814,11 +814,8 @@ describe('renderRevokeMsg', () => {
   });
 });
 
-// Pinned because `buildRevokeHeader` is the ONLY wording the slash-
-// command `/qurl revoke` path uses (no Recipients line — see
-// commands.js's slash handler). Unit-test the helper directly so a
-// future wording change reaches the slash-command surface even if no
-// `renderRevokeMsg` test happens to hit the same shape.
+// Slash-command /qurl revoke uses buildRevokeHeader directly (no
+// Recipients line); unit-test it so wording stays pinned.
 describe('buildRevokeHeader (slash-command revoke path)', () => {
   // eslint-disable-next-line global-require
   const { buildRevokeHeader } = require('../src/revoke-render');

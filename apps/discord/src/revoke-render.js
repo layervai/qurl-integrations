@@ -1,13 +1,6 @@
-// Pure-string rendering of the post-revoke confirmation. Lives in its
-// own module — with zero deps on `discord.js`, `./store`, `./config`,
-// `./logger` — so the e2e wording-drift smoke (`e2e/tests/qurl-send-
-// revoke.smoke.test.ts`) can `require()` it without dragging in the
-// bot's whole runtime. Keep this file dep-free.
-//
-// `commands.js` is the only consumer that builds the Show All
-// `ActionRowBuilder`/`ButtonBuilder` from the returned `needsExpand` /
-// `showAll` shape — the row shape stays in commands.js so this module
-// has no discord.js coupling.
+// Pure-string revoke rendering. No discord.js / store / config /
+// logger deps — keep this file dep-free so the e2e wording-drift
+// smoke can require it without the bot's runtime.
 
 const { escapeDiscordMarkdown } = require('./utils/sanitize');
 
@@ -20,6 +13,8 @@ const REVOKE_TRUNC_LIMIT = 5;
 // over this. Without it, a Show All on ~80+ recipients would exceed
 // Discord's limit and the editReply would error.
 const REVOKE_CONTENT_SAFE_MAX = 1900;
+
+const REVOKE_FOR_PREFIX = '\nRevoked for: ';
 
 // Single source of truth for the "Revoked X/Y users[.]" header +
 // already-opened note. Used by both the inline-button path (via
@@ -43,39 +38,34 @@ function buildRevokeHeader(success, total) {
 // authoritative count (e.g. DDB strict-success) may exceed the names
 // the caller could resolve — header reflects truth, names list
 // reflects what's renderable.
-function renderRevokeContent(sendId, names, total, showAll, success = names.length) {
+function renderRevokeContent({ names, total, showAll, success = names.length }) {
   let content = buildRevokeHeader(success, total);
-  let attachmentText = null;
 
   if (names.length === 0) {
-    return { sendId, content, needsExpand: false, showAll, attachmentText };
+    return { content, needsExpand: false, attachmentText: null };
   }
 
   // `names` are plain so they can land verbatim in the .txt attachment.
   // Message content needs markdown escape per name to defuse `*phish*`
   // / `[t](url)` injection — render-context split.
   const escapedNames = names.map(escapeDiscordMarkdown);
-  const fullLine = `\nRevoked for: ${escapedNames.join(', ')}`;
-  const fullFits = content.length + fullLine.length <= REVOKE_CONTENT_SAFE_MAX;
+  const fullLine = REVOKE_FOR_PREFIX + escapedNames.join(', ');
 
-  if (!fullFits) {
+  if (content.length + fullLine.length > REVOKE_CONTENT_SAFE_MAX) {
     // Full list won't fit inline → emit as a file attachment. Inline
     // shows the first REVOKE_TRUNC_LIMIT names + "(see attached)" pointer.
     const preview = escapedNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
-    content += `\nRevoked for: ${preview} +${names.length - REVOKE_TRUNC_LIMIT} more (see attached)`;
-    attachmentText = names.join('\n');
-    return { sendId, content, needsExpand: false, showAll, attachmentText };
+    content += `${REVOKE_FOR_PREFIX}${preview} +${names.length - REVOKE_TRUNC_LIMIT} more (see attached)`;
+    return { content, needsExpand: false, attachmentText: names.join('\n') };
   }
 
   // Full list fits inline — current Show All / Show Less behavior.
   if (showAll || names.length <= REVOKE_TRUNC_LIMIT) {
     content += fullLine;
   } else {
-    content += `\nRevoked for: ${escapedNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
+    content += `${REVOKE_FOR_PREFIX}${escapedNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
   }
-
-  const needsExpand = names.length > REVOKE_TRUNC_LIMIT;
-  return { sendId, content, needsExpand, showAll, attachmentText };
+  return { content, needsExpand: names.length > REVOKE_TRUNC_LIMIT, attachmentText: null };
 }
 
 module.exports = {
