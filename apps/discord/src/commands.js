@@ -1914,19 +1914,11 @@ async function handleSend(interaction, apiKey) {
 
     let showAllRecipients = false;
 
-    // Post-revoke state. Truncation mirrors `buildConfirmMsg`.
-    // `revokeInFlight` dedups concurrent Revoke clicks before the
-    // editReply lands. Intentionally never reset: success path
-    // replaces components with at most the expand button, catch path
-    // strips components — neither re-renders Revoke, so retry isn't
-    // possible inline anyway.
-    // `revokeSucceeded` distinguishes "revoke ran and rendered a
-    // result" from "revoke threw, message says Failed". The on('end')
-    // time-out re-render must NOT overwrite a Failed message with
-    // `Revoked 0/0 links` — set this flag only AFTER the success
-    // editReply lands.
+    // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
+    // guards the on('end') re-render so a Failed message isn't overwritten
+    // by a stale "Revoked 0/0".
     let revokeResultUserNames = [];
-    let revokeResultSuccessCount = 0;  // row-count, not deduped name count
+    let revokeResultSuccessCount = 0;
     let revokeResultTotal = 0;
     let revokeShowAll = false;
     let revokeInFlight = false;
@@ -1961,14 +1953,11 @@ async function handleSend(interaction, apiKey) {
       }
 
       if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
-        // Sync dedup BEFORE any await — Node single-threaded so a
-        // second click can't observe in-flight.
+        // Sync dedup before any await (Node single-threaded).
         if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeInFlight = true;
-        // Stop the link-status monitor BEFORE any editReply — otherwise
-        // its setInterval can fire concurrently with our revoke-result
-        // edit and overwrite the post-revoke message with a stale
-        // link-status update.
+        // Stop monitor BEFORE any editReply — its setInterval can
+        // overwrite the revoke-result message otherwise.
         if (monitor) monitor.stop();
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
@@ -2062,9 +2051,7 @@ async function handleSend(interaction, apiKey) {
 
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
-              // Extend `recipients` so a subsequent Revoke renders newly-
-              // added users by name. Without this, post-Add revoke falls
-              // back to `user-${id}` for the new ids.
+              // Extend recipients[] for post-Add revoke name resolution.
               if (addResult.newRecipients?.length) recipients.push(...addResult.newRecipients);
               // Tell the monitor to track the new links (including new resource IDs for location sends)
               monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
@@ -2103,16 +2090,12 @@ async function handleSend(interaction, apiKey) {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
-          // Honor the user's last `revokeShowAll` toggle for the
-          // terminal render. Components stripped — terminal state has
-          // no toggle button, so the message stays at whatever
-          // expansion the user left it at.
+          // Honor revokeShowAll on terminal render; strip components.
           const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccessCount);
           interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
           return;
         }
-        // If a revoke was attempted but failed, leave the failure
-        // message in place — don't append a Management-window banner.
+        // Revoke attempted but failed — leave the failure message.
         if (revokeInFlight) return;
         interaction.editReply({
           content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
@@ -2140,9 +2123,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
-  // Resolved {id, username} list — surfaced on every return so the
-  // collector handler can extend its in-scope `recipients` array
-  // unconditionally (post-Add revoke renders the new users by name).
+  // {id, username} surfaced on every return so the caller can extend
+  // its recipients[] unconditionally (post-Add revoke shows new names).
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2405,13 +2387,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   if (failed > 0) msg += ` (${failed} could not be reached)`;
   logger.info('/qurl add recipients', { sendId, delivered, failed });
   // Return delivered/failed explicitly so callers don't have to regex-parse msg.
-  // newRecipients shape mirrors `handleSend`'s `recipients` ({id,
-  // username, ...}). Caller appends to its in-scope `recipients` so a
-  // post-Add revoke renders the new users by name (not `user-${id}`).
-  return {
-    msg, newResourceIds, delivered, failed,
-    newRecipients: newRecipients.map(u => ({ id: u.id, username: u.username })),
-  };
+  return { msg, newResourceIds, delivered, failed, newRecipients: resolvedRecipients };
 }
 
 // --- /qurl revoke handler ---
@@ -2568,13 +2544,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // against its in-scope `recipients` array.
   const items = await db.getSendItems(sendId, senderDiscordId);
 
-  // A single resource_id can be shared across up to TOKENS_PER_RESOURCE
-  // recipients (mintLinksInBatches packs tokens onto a resource).
-  // `deleteLink` deletes the WHOLE resource, so call it once per unique
-  // resource and fan the success/failure out to every recipient sharing
-  // it. Without this dedup, the 2nd…Nth DELETE for a shared resource
-  // returns 404 (non-retryable) and would mis-classify N-1 recipients
-  // as failures even though their tokens were all invalidated.
+  // deleteLink deletes the whole resource; one DELETE per unique
+  // resource_id, fan result out to every recipient sharing it.
+  // Without this, 2nd…Nth DELETE for a shared resource returns 404
+  // and mis-classifies N-1 recipients as failures.
   const byResource = new Map();
   for (const item of items) {
     const list = byResource.get(item.resource_id) || [];
@@ -2590,19 +2563,10 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     return resourceId;
   }, 5);
 
-  // Track per-row counts (matches `total = items.length` units —
-  // "X/Y links") AND deduped per-recipient ids (for the names list).
-  // handleAddRecipients can write multiple qurl_sends rows per
-  // recipient (file + location branches), so a single user may map
-  // to multiple resource_ids. Without this split, a 1-recipient /
-  // 2-row send shows "Revoked 1/2 links" even when both rows were
-  // revoked.
-  // Known limitation: a recipient with rows on multiple resources
-  // where some succeed and others fail will appear in BOTH
-  // successUserIds and failureUserIds — the names line will say
-  // "Revoked for: alice" while one of alice's links actually failed.
-  // Acceptable for v1 since the multi-row case is rare; bias to
-  // failure-wins or splitting by resource is a future refinement.
+  // Per-row count (for "X/Y links") + deduped per-recipient ids
+  // (for the names line). A recipient with multi-resource rows
+  // (handleAddRecipients's file + location branches) can land in
+  // both lists when results diverge; see PR description for v2 note.
   let successRowCount = 0;
   const seenSuccess = new Set();
   const seenFailure = new Set();
@@ -2627,6 +2591,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
   // dashboard queries don't silently break). User-facing message uses
   // `total` (per-row) — same item across both call paths means
   // backward-compat for callers expecting the {success, total} shape.
+  // Per-resource units; preserves pre-PR dashboard shape.
   const auditTotal = byResource.size;
   const auditSuccess = results.filter(r => r.status === 'fulfilled').length;
 
