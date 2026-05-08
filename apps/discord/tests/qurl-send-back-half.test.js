@@ -724,7 +724,7 @@ describe('revokeAllLinks', () => {
 describe('renderSendConfirm — post-send confirmation overflow', () => {
   // Common args.
   const baseArgs = {
-    delivered: 0, expiresIn: '1h', failed: 0,
+    delivered: 0, expiresIn: '1h',
     failedNamesPlain: [], successNames: [], showAll: false,
   };
 
@@ -763,7 +763,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     const failedNamesPlain = Array.from({ length: 50 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name`);
     const r = renderSendConfirm({
       ...baseArgs,
-      delivered: successNames.length, failed: failedNamesPlain.length,
+      delivered: successNames.length,
       successNames, failedNamesPlain, showAll: true,
     });
     expect(r.attachmentText).toContain('DELIVERED (100):');
@@ -797,7 +797,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
   it('failed-only overflow: NOT DELIVERED block alone, no DELIVERED block, no leading separator', () => {
     const failedNamesPlain = Array.from({ length: 200 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name_to_force_overflow`);
     const r = renderSendConfirm({
-      ...baseArgs, delivered: 0, failed: failedNamesPlain.length, failedNamesPlain,
+      ...baseArgs, delivered: 0, failedNamesPlain,
     });
     expect(r.attachmentText).toMatch(/^NOT DELIVERED \(200\):\n/);
     expect(r.attachmentText).not.toContain('DELIVERED (0):');
@@ -842,7 +842,7 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     const failedNamesPlain = ['fail1', 'fail2'];
     const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderSendConfirm({
-      ...baseArgs, delivered: successNames.length, failed: failedNamesPlain.length,
+      ...baseArgs, delivered: successNames.length,
       successNames, failedNamesPlain, showAll: true,
     });
     // Failed line: full inline, no pointer.

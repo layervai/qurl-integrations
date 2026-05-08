@@ -1834,11 +1834,11 @@ async function handleSend(interaction, apiKey) {
   // file; message-content rendering escapes per name.
   const failedNamesPlain = failedUsers.map(u => resolveRecipientAlias(u, interaction));
   const buildConfirmMsg = (showAll) => renderSendConfirm({
-    delivered, expiresIn, failed,
+    delivered, expiresIn,
     failedNamesPlain, successNames, showAll,
   });
 
-  let confirmRendered = buildConfirmMsg(false);
+  const confirmRendered = buildConfirmMsg(false);
   let confirmMsg = confirmRendered.content;
   // In attachment mode the file IS the full list, so suppress the
   // Show All toggle — the same shape the post-revoke flow uses.
@@ -2661,14 +2661,15 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
 // `recipients.txt` attachment; "(see attached)" is appended only to
 // lines that were actually truncated.
 function renderSendConfirm({
-  delivered, expiresIn, failed,
+  delivered, expiresIn,
   failedNamesPlain = [], successNames = [], showAll = false,
 }) {
   const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
   const escapedFailed = failedNamesPlain.map(escapeDiscordMarkdown);
   const escapedSuccess = successNames.map(escapeDiscordMarkdown);
 
-  const fullFailedLine = failed > 0 ? `\n${failed} could not be reached: ${escapedFailed.join(', ')}` : '';
+  const failedCount = failedNamesPlain.length;
+  const fullFailedLine = failedCount > 0 ? `\n${failedCount} could not be reached: ${escapedFailed.join(', ')}` : '';
   const fullRecipientsLine = successNames.length > 0 ? `\nRecipients: ${escapedSuccess.join(', ')}` : '';
   const fullFits = (header + fullFailedLine + fullRecipientsLine).length <= REVOKE_CONTENT_SAFE_MAX;
 
@@ -2682,21 +2683,21 @@ function renderSendConfirm({
 
   if (!fullFits) {
     let msg = header;
-    if (failed > 0) msg += truncatedLine(escapedFailed, failedNamesPlain, `\n${failed} could not be reached: `);
+    if (failedCount > 0) msg += truncatedLine(escapedFailed, failedNamesPlain, `\n${failedCount} could not be reached: `);
     if (successNames.length > 0) msg += truncatedLine(escapedSuccess, successNames, '\nRecipients: ');
     let attachmentText = '';
     if (successNames.length > 0) {
       attachmentText += `DELIVERED (${successNames.length}):\n${successNames.join('\n')}`;
     }
-    if (failedNamesPlain.length > 0) {
+    if (failedCount > 0) {
       if (attachmentText) attachmentText += '\n\n';
-      attachmentText += `NOT DELIVERED (${failedNamesPlain.length}):\n${failedNamesPlain.join('\n')}`;
+      attachmentText += `NOT DELIVERED (${failedCount}):\n${failedNamesPlain.join('\n')}`;
     }
     return { content: msg, attachmentText, needsExpand: false };
   }
 
   let msg = header;
-  if (failed > 0) msg += fullFailedLine;
+  if (failedCount > 0) msg += fullFailedLine;
   if (successNames.length > 0) {
     if (showAll || escapedSuccess.length <= REVOKE_TRUNC_LIMIT) {
       msg += fullRecipientsLine;
