@@ -198,8 +198,14 @@ describe('startGatewayHeartbeat', () => {
     // then advanceTimersByTime drifts the fake clock — Math.max(0,…)
     // papers over the negative diff so tests pass, but the activity
     // gate isn't actually being exercised in these tests.
+    //
+    // Reset the recovery cooldown too: a previous test in this block
+    // may have stamped lastRecoveryAttemptAt, which would silently
+    // make a downstream test that expects a triggered recovery
+    // pass-as-cooldown'd instead.
     if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
       gatewayMetricsTest._resetGatewayActivity();
+      gatewayMetricsTest._resetRecoveryClock();
     }
     noteGatewayActivity();
   });

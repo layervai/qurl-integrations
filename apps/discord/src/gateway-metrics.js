@@ -2,19 +2,24 @@
  * Periodic gateway-side metric emitters for Phase 1 monitoring.
  *
  * Two timers, both run on the gateway-only ECS task:
- *   1. Positive-signal heartbeat (30 s) — emits gateway_heartbeat_healthy
- *      when discord.js reports a connected, ack'd, recently-active
- *      WebSocket. Missing emissions are the alarm condition (paired
- *      with treat_missing_data = breaching at the alarm side), which
- *      catches the wedge classes client.isReady() alone misses:
- *      heartbeat-zombie, dispatch-deadlock, event-loop saturation.
+ *   1. Heartbeat (30 s) — dual-emission. Healthy ticks emit
+ *      gateway_heartbeat_healthy (paired with the missing-data
+ *      `gateway_heartbeat_silence` alarm); unhealthy ticks emit
+ *      gateway_heartbeat_unhealthy carrying activity_age_ms (paired
+ *      with the Max-on-value `gateway_activity_age_ms_high` alarm in
+ *      qurl-integrations-infra #446). Two metrics catch two failure
+ *      shapes: total silence (process-level wedge) vs. flapping
+ *      dispatch wedge (5/8 zombie-WS — heartbeat-ACKs land but event
+ *      frames don't, so silence alarm misses it).
  *   2. Active-guild gauge (60 s) — emits active_guild_count carrying
  *      client.guilds.cache.size. Used for install/uninstall trend
  *      detection and as a sanity check on guild-scoped features.
  *
  * Composite readiness threshold (60 s ack age) lines up with the alarm
- * window: alarm fires after 60 s of missing heartbeats. Client-side
- * threshold one heartbeat-interval (~41 s) plus one buffer cycle.
+ * window: silence alarm fires after 60 s of missing heartbeats.
+ * Client-side threshold one heartbeat-interval (~41 s) plus one
+ * buffer cycle. Unhealthy ticks ALSO trigger auto-recovery via
+ * maybeAutoRecoverZombieWS at activity_age_ms > 120 s.
  */
 const { WebSocketShardDestroyRecovery } = require('discord.js');
 const logger = require('./logger');
@@ -257,13 +262,16 @@ function readGatewayHealth(client, now = Date.now) {
 }
 
 /**
- * Start the positive-signal heartbeat timer. Returns the timer handle
- * so callers (gracefulShutdown) can clear it.
+ * Start the heartbeat timer. Returns the timer handle so callers
+ * (gracefulShutdown) can clear it.
  *
- * Only emits on the healthy path — silence is the alarm condition.
- * Emitting an "unhealthy" event would create a second metric the
- * operator would have to remember to watch; the missing-data trick
- * collapses that into one alarm.
+ * Dual-emission: healthy ticks emit gateway_heartbeat_healthy (paired
+ * with the silence/missing-data alarm — one shape of wedge: total
+ * silence). Unhealthy ticks emit gateway_heartbeat_unhealthy carrying
+ * activity_age_ms (paired with the Max-on-value alarm — second shape
+ * of wedge: flapping dispatch where intermittent healthy ticks keep
+ * the silence alarm quiet). Unhealthy ticks also trigger
+ * maybeAutoRecoverZombieWS for self-heal at activity_age_ms > 120 s.
  *
  * @param {import('discord.js').Client} client
  * @param {{ intervalMs?: number, now?: () => number }} [opts]
