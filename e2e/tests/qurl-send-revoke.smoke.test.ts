@@ -46,10 +46,12 @@ describe('qURL send revoke confirmation format (smoke)', () => {
     expect(r.content).not.toMatch(/^Revoked 1\/1 users\./);
   });
 
-  test('Show All hard-cap: full list capped at Discord 2000-char content limit', () => {
+  test('large lists overflow to file attachment instead of inline truncation', () => {
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
-    const r = renderRevokeMsg('send-6', names, names.length, /* showAll */ true);
+    const r = renderRevokeMsg('send-6', names, names.length, true);
     expect(r.content.length).toBeLessThanOrEqual(2000);
-    expect(r.content).toMatch(/\+\d+ more/);
+    expect(r.content).toContain('(see attached)');
+    expect(r.attachmentText).not.toBeNull();
+    expect(r.attachmentText.split('\n')).toHaveLength(200);
   });
 });

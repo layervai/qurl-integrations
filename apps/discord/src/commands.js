@@ -12,6 +12,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  AttachmentBuilder,
 } = require('discord.js');
 const crypto = require('crypto');
 const config = require('./config');
@@ -1944,10 +1945,7 @@ async function handleSend(interaction, apiKey) {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         revokeShowAll = !revokeShowAll;
         const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
-        await interaction.editReply({
-          content: updated.content,
-          components: updated.needsExpand ? [updated.row] : [],
-        }).catch(logIgnoredDiscordErr);
+        await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
         return;
       }
 
@@ -1968,10 +1966,7 @@ async function handleSend(interaction, apiKey) {
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
           const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
-          await interaction.editReply({
-            content: initial.content,
-            components: initial.needsExpand ? [initial.row] : [],
-          }).catch(logIgnoredDiscordErr);
+          await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
           revokeSucceeded = true;
         } catch (err) {
           logger.error('Revoke failed', { sendId, error: err.message });
@@ -2088,9 +2083,11 @@ async function handleSend(interaction, apiKey) {
         // message ("Failed to revoke links…") isn't overwritten with
         // a stale "Revoked 0/0 links" line.
         if (revokeSucceeded) {
-          // Honor revokeShowAll on terminal render; strip components.
+          // Terminal state: keep attachment if any, strip components.
           const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll);
-          interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
+          const payload = revokeReplyPayload(final);
+          payload.components = [];
+          interaction.editReply(payload).catch(logIgnoredDiscordErr);
           return;
         }
         // Revoke attempted but failed — leave the failure message.
@@ -2509,6 +2506,21 @@ async function handleRevoke(interaction, apiKey) {
 // Shared truncation limit for both send + revoke recipient lists.
 const REVOKE_TRUNC_LIMIT = 5;
 
+// Builds the editReply payload from a `renderRevokeMsg` result. When
+// the rendered names list overflowed the Discord content cap,
+// `attachmentText` is populated → wrap in a `revoked-users.txt`
+// attachment and drop the Show All button (the file IS the full list).
+function revokeReplyPayload(rendered) {
+  const payload = { content: rendered.content };
+  payload.components = rendered.row ? [rendered.row] : [];
+  if (rendered.attachmentText) {
+    payload.files = [new AttachmentBuilder(Buffer.from(rendered.attachmentText, 'utf8'), { name: 'revoked-users.txt' })];
+  } else {
+    payload.files = [];
+  }
+  return payload;
+}
+
 // Discord message content cap is 2000 chars. Leave headroom for the
 // header + "Revoked for: " prefix; force truncation in renderRevokeMsg
 // even when showAll=true if the full names list would push the total
@@ -2517,39 +2529,40 @@ const REVOKE_TRUNC_LIMIT = 5;
 const REVOKE_CONTENT_SAFE_MAX = 1900;
 
 // Builds the post-revoke confirmation message + Show All toggle row.
-// User-centric: `success` and `total` are unique-recipient counts;
-// `names` is the strict-success list (recipient with all links
-// revoked, none failed). Show All hard-caps when the full list would
-// exceed the Discord content limit (REVOKE_CONTENT_SAFE_MAX).
+// User-centric: `success`/`total` are unique-recipient counts; `names`
+// is the strict-success list. Returns `attachmentText` (newline-joined
+// full list) when the inline rendering would exceed Discord's 2000-char
+// content cap — caller wraps in an AttachmentBuilder. In attachment
+// mode the Show All button is suppressed since the file IS the full
+// list.
 function renderRevokeMsg(sendId, names, total, showAll) {
-  // names.length is the strict-success count (revokeAllLinks already
-  // filtered out mixed-outcome users into failureUserIds).
   const success = names.length;
   const header = `Revoked ${success}/${total} user${total !== 1 ? 's' : ''}.`;
   const note = total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
   let content = header + note;
+  let attachmentText = null;
 
-  if (names.length > 0) {
-    const wantTruncate = !showAll && names.length > REVOKE_TRUNC_LIMIT;
-    if (wantTruncate) {
-      content += `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
-    } else {
-      const fullLine = `\nRevoked for: ${names.join(', ')}`;
-      if (content.length + fullLine.length <= REVOKE_CONTENT_SAFE_MAX) {
-        content += fullLine;
-      } else {
-        // Show All would exceed the Discord 2000-char cap; binary-
-        // search the largest prefix of names that fits.
-        let lo = 0, hi = names.length;
-        while (lo < hi) {
-          const mid = Math.ceil((lo + hi) / 2);
-          const candidate = `\nRevoked for: ${names.slice(0, mid).join(', ')} +${names.length - mid} more`;
-          if ((content + candidate).length <= REVOKE_CONTENT_SAFE_MAX) lo = mid;
-          else hi = mid - 1;
-        }
-        content += `\nRevoked for: ${names.slice(0, lo).join(', ')} +${names.length - lo} more`;
-      }
-    }
+  if (names.length === 0) {
+    return { content, needsExpand: false, row: null, attachmentText };
+  }
+
+  const fullLine = `\nRevoked for: ${names.join(', ')}`;
+  const fullFits = content.length + fullLine.length <= REVOKE_CONTENT_SAFE_MAX;
+
+  if (!fullFits) {
+    // Full list won't fit inline → emit as a file attachment. Inline
+    // shows the first TRUNC_LIMIT names + "(see attached)" pointer.
+    const preview = names.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
+    content += `\nRevoked for: ${preview} +${names.length - REVOKE_TRUNC_LIMIT} more (see attached)`;
+    attachmentText = names.join('\n');
+    return { content, needsExpand: false, row: null, attachmentText };
+  }
+
+  // Full list fits inline — current Show All / Show Less behavior.
+  if (showAll || names.length <= REVOKE_TRUNC_LIMIT) {
+    content += fullLine;
+  } else {
+    content += `\nRevoked for: ${names.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${names.length - REVOKE_TRUNC_LIMIT} more`;
   }
 
   const needsExpand = names.length > REVOKE_TRUNC_LIMIT;
@@ -2561,7 +2574,7 @@ function renderRevokeMsg(sendId, names, total, showAll) {
         .setStyle(ButtonStyle.Secondary),
     )
     : null;
-  return { content, needsExpand, row };
+  return { content, needsExpand, row, attachmentText };
 }
 
 async function revokeAllLinks(sendId, senderDiscordId, apiKey) {

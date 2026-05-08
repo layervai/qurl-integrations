@@ -127,6 +127,7 @@ jest.mock('discord.js', () => {
     ModalBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
+    AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
     PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n },
   };
 });
@@ -764,13 +765,24 @@ describe('renderRevokeMsg', () => {
     expect(r.content).not.toContain('already-opened');
   });
 
-  it('truncates Show All output when full list would exceed Discord 2000-char content cap', () => {
+  it('emits attachmentText + suppresses Show All when full list would exceed Discord 2000-char cap', () => {
     // 200 long usernames (~30 chars each) → ~6000 chars uncapped.
     const names = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
     const r = renderRevokeMsg('send-cap', names, names.length, /* showAll */ true);
     expect(r.content.length).toBeLessThanOrEqual(2000);
-    // Truncation marker still appears even with showAll=true when forced.
-    expect(r.content).toMatch(/\+\d+ more/);
+    expect(r.content).toContain('(see attached)');
+    expect(r.attachmentText).not.toBeNull();
+    // Newline-separated full list — every name present.
+    expect(r.attachmentText.split('\n')).toHaveLength(200);
+    expect(r.attachmentText).toContain(names[199]);
+    // Show All button suppressed — file IS the full list.
+    expect(r.needsExpand).toBe(false);
+    expect(r.row).toBeNull();
+  });
+
+  it('does NOT emit attachmentText when full list fits inline', () => {
+    const r = renderRevokeMsg('send-fits', ['alice', 'bob', 'carol'], 3, false);
+    expect(r.attachmentText).toBeNull();
   });
 });
 
