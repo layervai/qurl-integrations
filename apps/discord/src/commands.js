@@ -2162,12 +2162,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   const newRecipients = [...usersCollection
     .filter(u => !u.bot && u.id !== senderDiscordId)
     .values()];
-  // {id, username} surfaced on every pre-mint return so the caller
-  // can extend its recipients[] (post-Add revoke shows names).
-  // Post-mint returns omit it — those paths fail BEFORE writing
-  // qurl_sends rows, so a subsequent revoke would never surface
-  // those ids and the caller's lookup-or-fallback handles the
-  // omitted case correctly.
+  // {id, username} returned on every path after this point so the
+  // caller can extend its recipients[] (post-Add revoke shows
+  // names). The success path is the only one where this is load-
+  // bearing; failure paths return it for contract consistency, and
+  // the caller's `successSet.has(r.id)` filter excludes phantom
+  // IDs from any path that didn't write qurl_sends rows.
   const resolvedRecipients = newRecipients.map(u => ({ id: u.id, username: u.username }));
 
   if (newRecipients.length === 0) {
@@ -2247,13 +2247,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
-        return { msg, newResourceIds: [], delivered: 0, failed: 0 };
+        return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients', { expected: newRecipients.length, got: allLinks.length });
         const newResourceIds = [...new Set(allLinks.map(l => l.resourceId))];
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds, delivered: 0, failed: 0 };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} links created. Try again.`, newResourceIds, delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
       // Iterate by allLinks length so an off-by-one can never index out of bounds.
       // The guard above ensures allLinks.length >= newRecipients.length.
@@ -2284,7 +2284,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
       if (allLinks.length < newRecipients.length) {
         logger.error('mintLinks returned fewer links than expected in addRecipients (location)', { expected: newRecipients.length, got: allLinks.length });
-        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [], delivered: 0, failed: 0 };
+        return { msg: `Only ${allLinks.length} of ${newRecipients.length} location links created. Try again.`, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
       newRecipients.forEach((r, i) => {
         if (!recipientLinks[r.id]) recipientLinks[r.id] = [];
@@ -2302,7 +2302,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    return { msg, newResourceIds: [], delivered: 0, failed: 0 };
+    return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Single emission per send. `kind` carries the composition so a future
@@ -2315,7 +2315,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
 
   const recipientIds = Object.keys(recipientLinks);
   if (recipientIds.length === 0) {
-    return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0 };
+    return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
   // Persist to DB before DMs
