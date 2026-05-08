@@ -1818,7 +1818,9 @@ async function handleSend(interaction, apiKey) {
   // Ephemeral confirmation with Add Recipients + Revoke buttons.
   // Match on the Discord id (snowflake, globally unique) rather than the
   // display username — usernames can collide within a guild.
-  const TRUNC_LIMIT = 5;
+  // Shares REVOKE_TRUNC_LIMIT (module scope) so the send-confirmation
+  // "Recipients: …" line and the post-revoke "Revoked for: …" line
+  // truncate at the same threshold.
   const failedUserIds = new Set(failedUsers.map(u => u.id || u));
   const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => resolveRecipientAlias(r, interaction));
 
@@ -1828,17 +1830,17 @@ async function handleSend(interaction, apiKey) {
       msg += `\n${failed} could not be reached: ${failedUsers.map(u => resolveRecipientAlias(u, interaction)).join(', ')}`;
     }
     if (successNames.length > 0) {
-      if (showAll || successNames.length <= TRUNC_LIMIT) {
+      if (showAll || successNames.length <= REVOKE_TRUNC_LIMIT) {
         msg += `\nRecipients: ${successNames.join(', ')}`;
       } else {
-        msg += `\nRecipients: ${successNames.slice(0, TRUNC_LIMIT).join(', ')} +${successNames.length - TRUNC_LIMIT} more`;
+        msg += `\nRecipients: ${successNames.slice(0, REVOKE_TRUNC_LIMIT).join(', ')} +${successNames.length - REVOKE_TRUNC_LIMIT} more`;
       }
     }
     return msg;
   }
 
   let confirmMsg = buildConfirmMsg(false);
-  const needsExpand = successNames.length > TRUNC_LIMIT;
+  const needsExpand = successNames.length > REVOKE_TRUNC_LIMIT;
 
   const buttonRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -2067,13 +2069,17 @@ async function handleSend(interaction, apiKey) {
               sendId, selectInteraction.users, interaction, apiKey,
             );
 
-            // Extend recipients[] whenever names were resolved — even
-            // if DM delivery failed, the qurl_sends rows were written
-            // by handleAddRecipients, so a subsequent revoke would
-            // surface those recipient_ids; without this push the
-            // names line falls back to `user-<id>`. Dedupe by id so a
-            // re-Add of an already-included user doesn't render
-            // "alice, bob, alice" on the post-revoke list.
+            // Extend recipients[] whenever names were resolved.
+            // Pre-mint early-return paths (config not found, attachment
+            // url stale, link save failed) populate `newRecipients`
+            // even though no qurl_sends rows were written — the
+            // post-revoke filter `successSet.has(r.id)` excludes
+            // those phantom IDs, so the cost is just the unused
+            // entries on `recipients[]`. Post-mint failure paths DO
+            // write rows, where this push is load-bearing for the
+            // revoke names line. Dedupe by id so a re-Add of an
+            // already-included user doesn't render "alice, bob,
+            // alice".
             if (addResult.newRecipients?.length) {
               const existingIds = new Set(recipients.map(r => r.id));
               for (const r of addResult.newRecipients) {
@@ -2607,7 +2613,7 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
 
   if (!fullFits) {
     // Full list won't fit inline → emit as a file attachment. Inline
-    // shows the first TRUNC_LIMIT names + "(see attached)" pointer.
+    // shows the first REVOKE_TRUNC_LIMIT names + "(see attached)" pointer.
     const preview = names.slice(0, REVOKE_TRUNC_LIMIT).join(', ');
     content += `\nRevoked for: ${preview} +${names.length - REVOKE_TRUNC_LIMIT} more (see attached)`;
     attachmentText = names.join('\n');
