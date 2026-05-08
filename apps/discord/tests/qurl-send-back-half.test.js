@@ -194,6 +194,7 @@ const {
   monitorLinkStatus,
   revokeAllLinks,
   renderRevokeMsg,
+  renderSendConfirm,
   REVOKE_TRUNC_LIMIT,
   handleAddRecipients,
   mintLinksInBatches,
@@ -717,6 +718,141 @@ describe('revokeAllLinks', () => {
     expect(result.success).toBe(1); // only bob (alice has a failure)
     expect(result.successUserIds).toEqual(['bob']);
     expect(result.failureUserIds).toEqual(['alice']);
+  });
+});
+
+describe('renderSendConfirm — post-send confirmation overflow', () => {
+  // Common args.
+  const baseArgs = {
+    delivered: 0, expiresIn: '1h',
+    failedNamesPlain: [], successNames: [], showAll: false,
+  };
+
+  it('small list: full inline + Show All toggle when >TRUNC_LIMIT', () => {
+    const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
+    expect(r.content).toMatch(/^Sent to \d+ users? \| /);
+    expect(r.content).toContain('Recipients: u0, u1, u2, u3, u4 +2 more');
+    expect(r.attachmentText).toBeNull();
+    expect(r.needsExpand).toBe(true);
+  });
+
+  it('small list, showAll=true: full names inline, no truncation marker', () => {
+    const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
+    expect(r.content).toContain('Recipients: u0, u1, u2, u3, u4, u5, u6');
+    expect(r.content).not.toMatch(/\+\d+ more/);
+    expect(r.attachmentText).toBeNull();
+  });
+
+  it('overflow: full list >2000 chars triggers attachment + suppresses Show All', () => {
+    // 200 long names ~= ~6kB inline; well over Discord's 2000-char cap.
+    const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });
+    expect(r.content.length).toBeLessThanOrEqual(2000);
+    expect(r.content).toContain('(see attached)');
+    expect(r.content).toContain('Recipients: verylongusername0000, verylongusername0001');
+    expect(r.attachmentText).not.toBeNull();
+    expect(r.attachmentText).toContain('DELIVERED (200):');
+    expect(r.attachmentText.split('\n')).toContain('verylongusername0199');
+    expect(r.needsExpand).toBe(false);
+  });
+
+  it('overflow: failed list also rolls into the same attachment', () => {
+    const successNames = Array.from({ length: 100 }, (_, i) => `delivered_${String(i).padStart(3, '0')}_with_long_name`);
+    const failedNamesPlain = Array.from({ length: 50 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name`);
+    const r = renderSendConfirm({
+      ...baseArgs,
+      delivered: successNames.length,
+      successNames, failedNamesPlain, showAll: true,
+    });
+    expect(r.attachmentText).toContain('DELIVERED (100):');
+    expect(r.attachmentText).toContain('NOT DELIVERED (50):');
+    expect(r.attachmentText).toContain('failed_049_with_long_name');
+    expect(r.content).toContain('could not be reached');
+    expect(r.content).toContain('(see attached)');
+  });
+
+  it('plain names land verbatim in attachment (markdown not escaped)', () => {
+    // 100 names with markdown chars to force overflow + verify plain rendering.
+    const successNames = Array.from({ length: 100 }, () => '*alice*_long_name_to_force_overflow');
+    const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames });
+    expect(r.attachmentText).toContain('*alice*_long_name_to_force_overflow');
+    expect(r.attachmentText).not.toContain('\\*alice\\*');
+    // Inline preview escapes for message rendering.
+    expect(r.content).toContain('\\*alice\\*');
+  });
+
+  it('zero recipients (delivered=0): no Recipients line, no attachment', () => {
+    const r = renderSendConfirm({ ...baseArgs });
+    expect(r.content).not.toContain('Recipients:');
+    expect(r.attachmentText).toBeNull();
+    expect(r.needsExpand).toBe(false);
+  });
+
+  // failed-only overflow: 0 success + 200 long failed names. Exercises
+  // the attachment branch where the DELIVERED block is absent (no
+  // leading `\n\n` separator) and the failed line is the only content
+  // driver.
+  it('failed-only overflow: NOT DELIVERED block alone, no DELIVERED block, no leading separator', () => {
+    const failedNamesPlain = Array.from({ length: 200 }, (_, i) => `failed_${String(i).padStart(3, '0')}_with_long_name_to_force_overflow`);
+    const r = renderSendConfirm({
+      ...baseArgs, delivered: 0, failedNamesPlain,
+    });
+    expect(r.attachmentText).toMatch(/^NOT DELIVERED \(200\):\n/);
+    expect(r.attachmentText).not.toContain('DELIVERED (0):');
+    expect(r.attachmentText).not.toMatch(/\n\n/); // no orphan separator
+    expect(r.content).toContain('could not be reached');
+    expect(r.content).toContain('(see attached)');
+    expect(r.content).not.toContain('Recipients:');
+  });
+
+  // Pin the boundary at REVOKE_CONTENT_SAFE_MAX = 1900. Off-by-one in
+  // the size calc would not be caught by 200-name (way over) or small-
+  // list (way under) tests. Use plain alphanumeric names so escape
+  // doesn't double underscores and skew the math.
+  it('overflow-vs-inline boundary at REVOKE_CONTENT_SAFE_MAX', () => {
+    // 20-char alphanumeric, no markdown chars → escaped == raw.
+    const make = (n) => Array.from({ length: n }, (_, i) => `aaaaaaaaaaaaa${String(i).padStart(7, '0')}`);
+    // Per-name footprint: 20 chars + ", " = 22 chars. Header ~50 +
+    // prefix 13 = 63. So budget = (1900 - 63) / 22 ≈ 83 names.
+    // Subtract 2 to leave headroom for the trailing comma not present:
+    // 80 names = 50 + 13 + (80*22 − 2) = ~1821 — under cap.
+    const namesUnder = make(80);
+    const under = renderSendConfirm({
+      ...baseArgs, delivered: namesUnder.length, successNames: namesUnder, showAll: true,
+    });
+    expect(under.attachmentText).toBeNull();
+    expect(under.content.length).toBeLessThanOrEqual(1900);
+
+    // 95 names: 50 + 13 + (95*22 − 2) = ~2151 — over cap → attachment.
+    const namesOver = make(95);
+    const over = renderSendConfirm({
+      ...baseArgs, delivered: namesOver.length, successNames: namesOver, showAll: true,
+    });
+    expect(over.attachmentText).not.toBeNull();
+    expect(over.content.length).toBeLessThanOrEqual(2000);
+  });
+
+  // "(see attached)" pointer must NOT appear on a line that fits
+  // inline — even when overflow is driven by the OTHER list. Pinned
+  // because Agent 1 flagged the unconditional-pointer bug.
+  it('(see attached) only on lines that were truncated', () => {
+    // 2 failed names (fits) + 200 success names (overflows).
+    const failedNamesPlain = ['fail1', 'fail2'];
+    const successNames = Array.from({ length: 200 }, (_, i) => `verylongusername${String(i).padStart(4, '0')}`);
+    const r = renderSendConfirm({
+      ...baseArgs, delivered: successNames.length,
+      successNames, failedNamesPlain, showAll: true,
+    });
+    // Failed line: full inline, no pointer.
+    expect(r.content).toContain('2 could not be reached: fail1, fail2');
+    expect(r.content).not.toMatch(/could not be reached:[^\n]*\(see attached\)/);
+    // Recipients line: truncated, with pointer.
+    expect(r.content).toMatch(/Recipients:.*\(see attached\)/);
+    // Attachment still has both lists.
+    expect(r.attachmentText).toContain('DELIVERED (200):');
+    expect(r.attachmentText).toContain('NOT DELIVERED (2):');
   });
 });
 
