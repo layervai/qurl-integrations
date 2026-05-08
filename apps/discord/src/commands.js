@@ -2510,8 +2510,13 @@ async function handleRevoke(interaction, apiKey) {
     const sendId = selectInteraction.values[0];
     const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
 
+    // Counts are per-user (matches the inline-button path's wording).
+    // Slash-command path lacks the in-scope `recipients` array needed
+    // to resolve names → no "Revoked for: …" line here. Operators
+    // wanting names should use the inline button after a send.
+    const noteSuffix = revoked.total > 0 ? ' Note: already-opened links cannot be revoked.' : '';
     await selectInteraction.update({
-      content: `Revoked ${revoked.success}/${revoked.total} links. Note: already-opened links cannot be revoked.`,
+      content: `Revoked ${revoked.success}/${revoked.total} user${revoked.total !== 1 ? 's' : ''}.${noteSuffix}`,
       components: [],
     });
   } catch {
