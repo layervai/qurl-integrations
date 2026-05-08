@@ -2508,13 +2508,13 @@ const REVOKE_TRUNC_LIMIT = 5;
 
 // Builds the editReply payload from a `renderRevokeMsg` result. When
 // the rendered names list overflowed the Discord content cap,
-// `attachmentText` is populated → wrap in a `revoked_users.txt`
+// `attachmentText` is populated → wrap in a `revoked-users.txt`
 // attachment and drop the Show All button (the file IS the full list).
 function revokeReplyPayload(rendered) {
   const payload = { content: rendered.content };
   payload.components = rendered.row ? [rendered.row] : [];
   if (rendered.attachmentText) {
-    payload.files = [new AttachmentBuilder(Buffer.from(rendered.attachmentText, 'utf8'), { name: 'revoked_users.txt' })];
+    payload.files = [new AttachmentBuilder(Buffer.from(rendered.attachmentText, 'utf8'), { name: 'revoked-users.txt' })];
   } else {
     payload.files = [];
   }
