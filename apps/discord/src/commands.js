@@ -2056,10 +2056,15 @@ async function handleSend(interaction, apiKey) {
               sendId, selectInteraction.users, interaction, apiKey,
             );
 
+            // Extend recipients[] whenever names were resolved — even
+            // if DM delivery failed, the qurl_sends rows were written
+            // by handleAddRecipients, so a subsequent revoke would
+            // surface those recipient_ids; without this push the
+            // names line falls back to `user-<id>`.
+            if (addResult.newRecipients?.length) recipients.push(...addResult.newRecipients);
+
             if (addResult.delivered > 0) {
               addRecipientsCount += addResult.delivered;
-              // Extend recipients[] for post-Add revoke name resolution.
-              if (addResult.newRecipients?.length) recipients.push(...addResult.newRecipients);
               // Tell the monitor to track the new links (including new resource IDs for location sends)
               monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
               const totalSent = delivered + addRecipientsCount;
@@ -2673,6 +2678,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     total: auditTotal,
     users: { success, total },
   });
+  // failureUserIds is computed but not yet rendered — the "Note:
+  // already-opened links cannot be revoked" disclaimer covers the
+  // common cause. Returned for callers that want to surface partial-
+  // failure detail (e.g., a future "Failed for: …" line or follow-up
+  // alert when count is large).
   return { success, total, successUserIds, failureUserIds };
 }
 
