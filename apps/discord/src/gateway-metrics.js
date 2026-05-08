@@ -108,7 +108,7 @@ function _resetRecoveryClock() {
  *    re-IDENTIFYs cleanly. Per-shard so a future multi-shard config
  *    only restarts the wedged shard, not the whole client.
  *
- * @returns {{ triggered: boolean, reason: string }}
+ * @returns {{ triggered: boolean, reason: string, shardsTerminated?: number }}
  */
 function maybeAutoRecoverZombieWS(client, snapshot, now = Date.now) {
   if (!snapshot.is_ready) return { triggered: false, reason: 'not_ready' };
@@ -271,7 +271,7 @@ function readGatewayHealth(client, now = Date.now) {
  * activity_age_ms (paired with the Max-on-value alarm — second shape
  * of wedge: flapping dispatch where intermittent healthy ticks keep
  * the silence alarm quiet). Unhealthy ticks also trigger
- * maybeAutoRecoverZombieWS for self-heal at activity_age_ms > 120 s.
+ * maybeAutoRecoverZombieWS for self-heal at activity_age_ms >= 120 s.
  *
  * @param {import('discord.js').Client} client
  * @param {{ intervalMs?: number, now?: () => number }} [opts]
