@@ -1974,9 +1974,14 @@ async function handleSend(interaction, apiKey) {
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
           const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-          // Map ids → per-guild alias snapshot from send time.
-          const idToName = new Map(recipients.map(r => [r.id, resolveRecipientAlias(r, interaction)]));
-          revokeResultUserNames = revoked.successUserIds.map(id => idToName.get(id) || `user-${id}`);
+          // Iterate `recipients` (canonical send-confirmation order)
+          // and filter by membership — `successUserIds` walks Set
+          // insertion order from resource-grouped iteration, which
+          // doesn't match what the user saw on "Recipients: …".
+          const successSet = new Set(revoked.successUserIds);
+          revokeResultUserNames = recipients
+            .filter(r => successSet.has(r.id))
+            .map(r => resolveRecipientAlias(r, interaction));
           revokeResultTotal = revoked.total;
           revokeShowAll = false;
           const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false);
