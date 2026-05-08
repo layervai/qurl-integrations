@@ -1280,20 +1280,31 @@ async function getSendConfig(sendId, senderDiscordId) {
     : row;
 }
 
+// Deduped resource_id list. Currently only used by tests; src/ uses
+// `getSendItems` for the per-recipient mapping. Delegates to
+// `getSendItems` (single source of truth for pagination).
 async function getSendResourceIds(sendId, senderDiscordId) {
-  // Pagination required: a single send fanning out to thousands of
-  // recipients can exceed the 1MB Query page cap. Without queryAll,
-  // resource_ids on later pages would silently drop and the revoke
-  // path would skip them. Caller relies on the full set for cleanup.
+  const items = await getSendItems(sendId, senderDiscordId);
+  return [...new Set(items.map(i => i.resource_id))];
+}
+
+// Returns the full per-recipient items so the revoke path can map
+// per-link success/failure back to a Discord user id for display.
+// Pagination required: a single send fanning out to thousands of
+// recipients can exceed the 1MB Query page cap. Without queryAll,
+// resource_ids on later pages would silently drop and the revoke
+// path would skip them.
+async function getSendItems(sendId, senderDiscordId) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
     KeyConditionExpression: 'send_id = :sid',
     FilterExpression: 'sender_discord_id = :s',
     ExpressionAttributeValues: { ':sid': sendId, ':s': senderDiscordId },
   });
-  const ids = new Set();
-  for (const item of items) ids.add(item.resource_id);
-  return [...ids];
+  return items.map(item => ({
+    resource_id: item.resource_id,
+    recipient_discord_id: item.recipient_discord_id,
+  }));
 }
 
 // ── Guild (BYOK) API keys ──
@@ -1504,7 +1515,7 @@ module.exports = {
   getWeeklyDigestData,
   // QURL sends
   recordQURLSend, recordQURLSendBatch, updateSendDMStatus, getRecentSends, markSendRevoked,
-  saveSendConfig, getSendConfig, getSendResourceIds,
+  saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
   // Orphaned tokens

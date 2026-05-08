@@ -28,6 +28,27 @@ function escapeDiscordMarkdown(s) {
   return String(s ?? '').replace(/[\\*_~`>|[\]()]/g, '\\$&');
 }
 
+// Bidi / zero-width / control / BOM / line-separator chars that Discord
+// allows in display names but `escapeDiscordMarkdown` doesn't strip.
+// Built via `new RegExp(...)` (instead of a literal /.../) so the
+// \uXXXX escapes go through string parsing — keeps the source
+// ASCII-only and avoids editor-/tool-chain confusion over raw control
+// codepoints in a regex literal.
+const STRIP_RE = new RegExp(
+  // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
+  '[\\u0000-\\u001F\\u007F\\u00AD\\u061C\\u200B-\\u200F\\u2028\\u2029\\u202A-\\u202E\\u2066-\\u2069\\uFEFF]',
+  'g',
+);
+
+function stripControlAndBidi(s) {
+  const cleaned = String(s ?? 'Someone').normalize('NFKC').replace(STRIP_RE, '');
+  // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
+  // code units, so a 64-char cap on a name like `'A'.repeat(63) + emoji`
+  // would split a surrogate pair and Discord would render the lone high
+  // surrogate as tofu. `Array.from(str)` iterates by codepoint.
+  return Array.from(cleaned).slice(0, 64).join('') || 'Someone';
+}
+
 /**
  * Sanitize a Discord display name (alias) for safe rendering inside `**...**`
  * markdown. Two layers:
@@ -39,40 +60,28 @@ function escapeDiscordMarkdown(s) {
  *      spoof a different sender identity. ZWSP-padded names mimicking
  *      another member are similarly defused.
  *   2. escapeDiscordMarkdown — handles markdown injection (bold, italics,
- *      backtick code, block-quote, masked-link `[text](url)`). Display
- *      names allow these chars too.
+ *      backtick code, block-quote, masked-link `[text](url)`).
  * Returns 'Someone' if input is null/undefined/empty or becomes empty after
  * the strip (e.g. an alias composed entirely of zero-width chars).
  *
  * 64-char slice caps the post-strip INPUT length, not the rendered
  * length: `escapeDiscordMarkdown` runs after the slice and may double
- * the string (each escapable char becomes two) so the rendered alias
- * can be up to ~128 chars. That's still well under Discord's embed
- * field limits, so the in-input bound is what matters for the spoof
- * defense. Slice happens AFTER the strip and BEFORE the escape so a
- * trailing escape sequence (\\) cannot be truncated mid-pair into a
- * single backslash. Use this at every site that renders a Discord
- * username / display name / nickname inside markdown formatting (DM
- * embed, channel announcement, etc.) so the spoof defense does not
- * drift between sites.
+ * the string (each escapable char becomes two). Slice happens AFTER
+ * the strip and BEFORE the escape so a trailing escape sequence (\\)
+ * cannot be truncated mid-pair into a single backslash.
  */
 function sanitizeDisplayName(s) {
-  // `?? 'Someone'` (not `||`) — matches the `??` in resolveSenderAlias's
-  // fallback chain, so the two halves of the same flow read consistently.
-  // Difference is academic for string inputs (empty string falls through
-  // the post-escape `|| 'Someone'` anyway), but keeps the intent
-  // unambiguous: only `null`/`undefined` should trip the fallback here.
-  const cleaned = String(s ?? 'Someone').normalize('NFKC')
-    // eslint-disable-next-line no-control-regex -- intentional: bidi/zero-width/control strip
-    .replace(/[\u0000-\u001F\u007F\u00AD\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g, '');
-  // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
-  // code units, so a 64-char cap on a name like `'A'.repeat(63) + '🎉'`
-  // would split the emoji's surrogate pair and Discord would render the
-  // lone high surrogate as tofu. `Array.from(str)` iterates by codepoint,
-  // so an emoji at the boundary either fully survives (if it fits) or is
-  // fully dropped — never half-included.
-  const stripped = Array.from(cleaned).slice(0, 64).join('');
-  return escapeDiscordMarkdown(stripped) || 'Someone';
+  return escapeDiscordMarkdown(stripControlAndBidi(s)) || 'Someone';
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName };
+/**
+ * Like sanitizeDisplayName but skips markdown escaping. Use for
+ * plain-text contexts where backslash-escapes would render literally
+ * (e.g. inside a `.txt` file attachment). NFKC + bidi/zero-width/
+ * control strip + 64-codepoint cap still apply.
+ */
+function sanitizeDisplayNamePlain(s) {
+  return stripControlAndBidi(s);
+}
+
+module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain };

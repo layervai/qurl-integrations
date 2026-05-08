@@ -154,6 +154,7 @@ const mockDb = {
   updateSendDMStatus: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
+  getSendItems: jest.fn(() => []),
   markSendRevoked: jest.fn(),
   getSendConfig: jest.fn(),
   saveSendConfig: jest.fn(),
@@ -1270,7 +1271,11 @@ describe('handleCommand — autocomplete', () => {
 
 describe('revokeAllLinks', () => {
   it('revokes multiple resource IDs', async () => {
-    mockDb.getSendResourceIds.mockReturnValue(['res-1', 'res-2', 'res-3']);
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
+    ]);
     mockDeleteLink.mockResolvedValue(undefined);
 
     // Access revokeAllLinks indirectly through the revoke flow
@@ -1317,7 +1322,10 @@ describe('revokeAllLinks', () => {
   });
 
   it('handles partial revocation failures', async () => {
-    mockDb.getSendResourceIds.mockReturnValue(['res-1', 'res-2']);
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+    ]);
     mockDeleteLink
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error('not found'));
