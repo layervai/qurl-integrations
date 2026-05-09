@@ -264,10 +264,13 @@ if (isGateway) {
   client.on('interactionCreate', handleCommand);
 
   // Tick the gateway-activity timestamp on every WebSocket frame.
-  // Catches event-loop saturation: if the loop is saturated, raw events
-  // queue up and the timestamp goes stale, flipping the heartbeat
-  // composite to unhealthy. Pass the function directly (not wrapped) so
-  // v8 keeps a single shape and avoids per-frame closure allocation.
+  // Feeds the `activity_age_ms` observability gauge ONLY — does not
+  // gate gateway health (post-#210). The signal can't distinguish "no
+  // traffic because idle" from "no traffic because wedged", so an
+  // alarm on it would false-positive on quiet bots; real zombie-WS
+  // detection lives elsewhere (see PR description on #210). Pass the
+  // function directly (not wrapped) so v8 keeps a single shape and
+  // avoids per-frame closure allocation.
   client.on('raw', noteGatewayActivity);
 
   // Error handling
