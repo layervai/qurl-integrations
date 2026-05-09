@@ -57,6 +57,18 @@ const router = express.Router();
 // The runner-to-bot path is synchronous and shouldn't see clock skew
 // above a few seconds, but matching the established window keeps the
 // timestamp-tolerance contract uniform across HMAC-authed routes.
+//
+// Replay-trade note: a captured valid request CAN be replayed within
+// the 5-min window (each replay mints a new connector resource +
+// runs through to a DM). Acceptable surface here because:
+//   - 4 KB body cap bounds replay payload size
+//   - bad-sig throttle bounds attack rate per-IP
+//   - allowlist on recipient_user_id bounds DM blast radius
+//   - canary scenarios are idempotent (the audit row tags the run-id
+//     and a duplicate qURL-mint is functionally a no-op)
+// A nonce table would close this hole tightly but adds DDB/Redis
+// state for marginal gain. Future reader who's tempted to add one —
+// re-examine the threat model first.
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
 // Allowed `test` values. The Lambda iterates `SCENARIOS_JSON`; this

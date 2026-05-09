@@ -175,7 +175,7 @@ describe('/canary/exec — auth', () => {
     expect(res.body.error).toBe('bad_signature');
   });
 
-  it('returns 401 bad_signature with a length-mismatched signature (timing-safe rejection)', async () => {
+  it('returns 401 bad_signature when SIG_SHAPE_RE rejects a too-short signature (regex pre-check, before timing-safe compare)', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(VALID_BODY)
