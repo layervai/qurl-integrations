@@ -1,27 +1,42 @@
-// Canary exec endpoint — exercised by the canary runner ECS service to
-// verify the bot's *back-end* health: connector reachability, qURL API
-// auth, mint-link round-trip latency. Discord Gateway readiness is
-// covered by the existing /health probe + LB target-group; the front-
-// half interactive state machine is NOT exercised here (it requires a
-// real Discord client to drive component clicks, which the HTTP-only
-// canary deliberately can't do).
+// Canary exec endpoint — exercised by the canary runner Lambda
+// (qurl-integrations-infra/qurl-bot-discord/terraform/canary-exec.tf)
+// to verify the bot's qURL send pipeline end-to-end every 3 hours.
 //
 // Auth is HMAC-SHA256 over `<unix_seconds>.<raw_body>` with the
-// CANARY_SHARED_SECRET (SSM SecureString, mirrored on the runner).
+// CANARY_SHARED_SECRET (SSM SecureString, mirrored on the Lambda).
 // 5-minute timestamp window guards against replay. The endpoint is
 // disabled (503) when the secret isn't configured — both for local
-// dev safety and for the bot's first deploy before the runner exists.
+// dev safety and for the bot's first deploy before the canary infra
+// exists.
 //
-// The exec mints exactly ONE token against a synthetic location
-// resource. Side effects: a single ephemeral connector resource +
-// one mint API call per probe. No DM, no DB write, no channel post —
-// the canary is a back-end health probe, not a synthetic /qurl send.
+// Body shape (all fields optional for back-compat):
+//   { test: "send_file" | "send_location", recipient_user_id: "<snowflake>" }
+//
+// When `test` + `recipient_user_id` are both present, the canary:
+//   1. Builds a synthetic resource shaped like the named test
+//      (small text buffer for send_file, location JSON for send_location).
+//   2. Uploads to the connector (reUploadBuffer / uploadJsonToConnector).
+//   3. Mints a single short-TTL qURL via mintLinks.
+//   4. Sends a clearly-labeled "[Canary probe]" DM to the recipient.
+//
+// Empty body falls through to the legacy back-end-only probe shape
+// (synthetic location upload + mint, no DM). The legacy path stays
+// because the EventBridge → Lambda canary on infra side may run
+// before the bot extension has shipped — undifferentiated test runs
+// are better than 503s during the rollout window.
+//
+// Response includes per-step status so the Lambda's per-test pass/fail
+// metric can attribute failures to the correct subsystem:
+//   { ok, step: "upload"|"mint"|"dm"|null, latency_ms, dm_status, ... }
 
 const express = require('express');
 const crypto = require('crypto');
+const { EmbedBuilder } = require('discord.js');
 const config = require('../config');
 const logger = require('../logger');
-const { uploadJsonToConnector, mintLinks } = require('../connector');
+const { reUploadBuffer, uploadJsonToConnector, mintLinks } = require('../connector');
+const { sendDM } = require('../discord');
+const { COLORS } = require('../constants');
 
 const router = express.Router();
 
@@ -29,6 +44,16 @@ const router = express.Router();
 // are 5 min too) because the runner-to-bot path is synchronous and
 // shouldn't see clock skew above a few seconds.
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
+
+// Allowed `test` values. The Lambda iterates `SCENARIOS_JSON`; this
+// set is the bot-side guardrail so a typo'd scenario in the Lambda
+// env returns a clear 400 instead of being silently mistreated as
+// the legacy back-end-only path.
+const VALID_TESTS = new Set(['send_file', 'send_location']);
+
+// Discord snowflake validation: 17-20 digits. Same shape the
+// terraform `canary_recipient_user_ids` validation uses.
+const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
 function verifyCanarySignature(req, res, next) {
   const secret = config.CANARY_SHARED_SECRET;
@@ -83,6 +108,110 @@ function verifyCanarySignature(req, res, next) {
   next();
 }
 
+// Build a clearly-labeled canary DM payload. Intentionally NOT using
+// `buildDeliveryPayload` from commands.js — that helper is gated
+// behind `_test` (non-production only). The canary's purpose is to
+// exercise client.users.fetch → user.send; embed shape doesn't need
+// to match `/qurl send` exactly. Recipients know this is a probe.
+function buildCanaryDmPayload({ test, qurlLink, resourceId, expiresAt }) {
+  const expiresUnix = Math.floor(new Date(expiresAt).getTime() / 1000);
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setTitle(`[Canary probe] ${test}`)
+    .setDescription(`Synthetic test from the canary-exec probe — confirms the qURL pipeline (connector upload → mint → DM) is healthy.\n\n[qURL link](${qurlLink}) (resource_id: \`${resourceId}\`, expires <t:${expiresUnix}:R>)`)
+    .setTimestamp();
+  return { embeds: [embed] };
+}
+
+// Run a single canary scenario end-to-end. Returns { ok, step, ... }
+// where `step` names the failure point (upload | mint | dm) so the
+// Lambda's metric attribution is specific.
+async function runScenario({ test, recipientUserId, apiKey }) {
+  const startedAt = Date.now();
+
+  // Synthetic resource — shape differs by test so each scenario
+  // exercises a slightly different connector code path. send_file
+  // uses reUploadBuffer (raw bytes via multipart); send_location
+  // uses uploadJsonToConnector (JSON body, location-specific path).
+  let upload;
+  try {
+    if (test === 'send_file') {
+      const fileBuffer = Buffer.from(`canary probe @ ${new Date().toISOString()}\n`, 'utf8');
+      upload = await reUploadBuffer(fileBuffer, 'canary-probe.txt', 'text/plain', apiKey);
+    } else {
+      // send_location
+      const probePayload = {
+        type: 'google-map',
+        url: 'https://maps.app.goo.gl/canary-probe',
+        name: 'canary',
+      };
+      upload = await uploadJsonToConnector(probePayload, 'canary-location.json', apiKey);
+    }
+  } catch (err) {
+    return {
+      ok: false, step: 'upload', error: 'upload_threw',
+      reason: err?.message, apiCode: err?.apiCode,
+      latency_ms: Date.now() - startedAt,
+    };
+  }
+  if (!upload?.resource_id) {
+    return {
+      ok: false, step: 'upload', error: 'upload_no_resource_id',
+      latency_ms: Date.now() - startedAt,
+    };
+  }
+
+  // 60-second TTL on canary links — short window keeps the qURL
+  // backend's bookkeeping costs negligible.
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  let minted;
+  try {
+    minted = await mintLinks(upload.resource_id, expiresAt, 1, apiKey);
+  } catch (err) {
+    return {
+      ok: false, step: 'mint', error: 'mint_threw',
+      reason: err?.message, apiCode: err?.apiCode,
+      latency_ms: Date.now() - startedAt,
+      resource_id: upload.resource_id,
+    };
+  }
+  const link = minted?.[0]?.qurl_link;
+  if (!link) {
+    return {
+      ok: false, step: 'mint', error: 'no_link_in_mint_response',
+      latency_ms: Date.now() - startedAt,
+      resource_id: upload.resource_id,
+    };
+  }
+
+  // DM the recipient. sendDM swallows + logs internally and returns
+  // boolean — propagate that so the Lambda metric attributes a DM
+  // delivery regression to the dm step specifically.
+  const dmOk = await sendDM(recipientUserId, buildCanaryDmPayload({
+    test, qurlLink: link, resourceId: upload.resource_id, expiresAt,
+  }));
+
+  let linkHost;
+  try { linkHost = new URL(link).host; } catch { linkHost = 'invalid-url'; }
+
+  if (!dmOk) {
+    return {
+      ok: false, step: 'dm', error: 'dm_failed',
+      latency_ms: Date.now() - startedAt,
+      resource_id: upload.resource_id,
+      link_host: linkHost,
+    };
+  }
+
+  return {
+    ok: true, step: null,
+    latency_ms: Date.now() - startedAt,
+    resource_id: upload.resource_id,
+    link_host: linkHost,
+    dm_status: 'sent',
+  };
+}
+
 router.post('/exec', verifyCanarySignature, async (req, res) => {
   const startedAt = Date.now();
   const apiKey = config.QURL_API_KEY;
@@ -93,6 +222,54 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
     return res.status(503).json({ ok: false, error: 'no_api_key', latency_ms: Date.now() - startedAt });
   }
 
+  // Body is JSON-parsed by express.json() in server.js. req.body is
+  // {} when the request body is empty or non-JSON.
+  const body = req.body || {};
+  const test = typeof body.test === 'string' ? body.test : null;
+  const recipientUserId = typeof body.recipient_user_id === 'string' ? body.recipient_user_id : null;
+
+  // Differentiated path: scenario + recipient → upload → mint → DM.
+  if (test || recipientUserId) {
+    if (!test || !VALID_TESTS.has(test)) {
+      return res.status(400).json({
+        ok: false, error: 'invalid_test',
+        valid: Array.from(VALID_TESTS),
+        latency_ms: Date.now() - startedAt,
+      });
+    }
+    if (!recipientUserId || !SNOWFLAKE_RE.test(recipientUserId)) {
+      return res.status(400).json({
+        ok: false, error: 'invalid_recipient_user_id',
+        latency_ms: Date.now() - startedAt,
+      });
+    }
+
+    try {
+      const result = await runScenario({ test, recipientUserId, apiKey });
+      // Echo the test name + recipient so logs grep cleanly and the
+      // Lambda's per-test attribution is unambiguous.
+      const status = result.ok ? 200 : 500;
+      return res.status(status).json({ ...result, test, recipient_user_id: recipientUserId });
+    } catch (err) {
+      logger.warn('Canary scenario threw', {
+        test, recipient_user_id: recipientUserId,
+        error: err?.message,
+        latency_ms: Date.now() - startedAt,
+      });
+      return res.status(500).json({
+        ok: false, step: null, error: 'scenario_threw',
+        reason: err?.message,
+        latency_ms: Date.now() - startedAt,
+        test, recipient_user_id: recipientUserId,
+      });
+    }
+  }
+
+  // Legacy back-end-only path. Empty body falls through here —
+  // exercises connector + mint without DM. Kept for back-compat
+  // with any pre-extension Lambda or operator-manual probe
+  // (`curl ... /canary/exec` with no body).
+  //
   // Synthetic resource: a tiny location payload. Picked location
   // (not file) because it doesn't touch the Discord CDN download
   // path — the canary is testing the bot↔qURL hop, and the file
@@ -115,9 +292,7 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
       });
     }
 
-    // 60-second TTL on the canary link. Short window keeps the
-    // qURL backend's bookkeeping costs negligible even with the
-    // canary running 5x/min.
+    // 60-second TTL on the canary link.
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const minted = await mintLinks(upload.resource_id, expiresAt, 1, apiKey);
 

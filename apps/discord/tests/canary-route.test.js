@@ -10,9 +10,31 @@ const crypto = require('crypto');
 
 const mockUploadJsonToConnector = jest.fn();
 const mockMintLinks = jest.fn();
+const mockReUploadBuffer = jest.fn();
 jest.mock('../src/connector', () => ({
   uploadJsonToConnector: mockUploadJsonToConnector,
   mintLinks: mockMintLinks,
+  reUploadBuffer: mockReUploadBuffer,
+}));
+
+const mockSendDM = jest.fn();
+jest.mock('../src/discord', () => ({
+  sendDM: mockSendDM,
+}));
+
+// EmbedBuilder is the only discord.js export the canary route uses.
+// Keep the mock minimal — the canary's purpose is exercising the
+// connector → mint → DM call chain, not asserting on embed shape.
+jest.mock('discord.js', () => ({
+  EmbedBuilder: jest.fn().mockImplementation(() => {
+    const embed = {
+      setColor: jest.fn().mockReturnThis(),
+      setTitle: jest.fn().mockReturnThis(),
+      setDescription: jest.fn().mockReturnThis(),
+      setTimestamp: jest.fn().mockReturnThis(),
+    };
+    return embed;
+  }),
 }));
 
 jest.mock('../src/logger', () => ({
@@ -62,7 +84,9 @@ beforeEach(() => {
   mockConfig.CANARY_SHARED_SECRET = SECRET;
   mockConfig.QURL_API_KEY = 'test-api-key';
   mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-canary-1' });
+  mockReUploadBuffer.mockResolvedValue({ resource_id: 'res-canary-file-1' });
   mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/canary-token-abc' }]);
+  mockSendDM.mockResolvedValue(true);
 });
 
 describe('/canary/exec — auth', () => {
@@ -261,5 +285,126 @@ describe('/canary/exec — dispatch', () => {
     expect(res.body.latency_ms).toBeDefined();
     expect(typeof res.body.latency_ms).toBe('number');
     expect(res.body.latency_ms).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// Differentiated path — Lambda canary sends {test, recipient_user_id}
+// in the body. Each test = upload (file or location) → mint → DM.
+describe('/canary/exec — differentiated scenario path', () => {
+  const VALID_USER_ID = '1483661063835750551';
+  const SEND_FILE_BODY      = { test: 'send_file',     recipient_user_id: VALID_USER_ID };
+  const SEND_LOCATION_BODY  = { test: 'send_location', recipient_user_id: VALID_USER_ID };
+
+  it('returns 400 invalid_test for an unrecognized test value', async () => {
+    const body = { test: 'send_carrier_pigeon', recipient_user_id: VALID_USER_ID };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(body)
+      .set(signedHeaders(body));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_test');
+    expect(res.body.valid).toEqual(expect.arrayContaining(['send_file', 'send_location']));
+  });
+
+  it('returns 400 invalid_recipient_user_id for a non-snowflake recipient', async () => {
+    const body = { test: 'send_file', recipient_user_id: 'not-a-snowflake' };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(body)
+      .set(signedHeaders(body));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_recipient_user_id');
+  });
+
+  it('returns 400 invalid_test when only recipient_user_id is supplied (partial body)', async () => {
+    // Either both or neither — partial body is rejected to catch
+    // Lambda misconfig early.
+    const body = { recipient_user_id: VALID_USER_ID };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(body)
+      .set(signedHeaders(body));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_test');
+  });
+
+  it('send_file: uploads via reUploadBuffer (NOT uploadJsonToConnector), mints, DMs', async () => {
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.test).toBe('send_file');
+    expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
+    expect(res.body.dm_status).toBe('sent');
+    expect(mockReUploadBuffer).toHaveBeenCalledTimes(1);
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+    expect(mockMintLinks).toHaveBeenCalledTimes(1);
+    expect(mockSendDM).toHaveBeenCalledWith(VALID_USER_ID, expect.objectContaining({ embeds: expect.any(Array) }));
+  });
+
+  it('send_location: uploads via uploadJsonToConnector (NOT reUploadBuffer), mints, DMs', async () => {
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_LOCATION_BODY)
+      .set(signedHeaders(SEND_LOCATION_BODY));
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.test).toBe('send_location');
+    expect(res.body.dm_status).toBe('sent');
+    expect(mockUploadJsonToConnector).toHaveBeenCalledTimes(1);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
+    expect(mockSendDM).toHaveBeenCalledWith(VALID_USER_ID, expect.objectContaining({ embeds: expect.any(Array) }));
+  });
+
+  it('attributes failure to step="upload" when reUploadBuffer rejects', async () => {
+    mockReUploadBuffer.mockRejectedValueOnce(new Error('connector 502'));
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.step).toBe('upload');
+    expect(res.body.error).toBe('upload_threw');
+    // Mint + DM never run when upload fails — pin the early-return.
+    expect(mockMintLinks).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('attributes failure to step="mint" when mintLinks returns no link', async () => {
+    mockMintLinks.mockResolvedValueOnce([]);
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_LOCATION_BODY)
+      .set(signedHeaders(SEND_LOCATION_BODY));
+    expect(res.status).toBe(500);
+    expect(res.body.step).toBe('mint');
+    expect(res.body.error).toBe('no_link_in_mint_response');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('attributes failure to step="dm" when sendDM returns false', async () => {
+    mockSendDM.mockResolvedValueOnce(false);
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(500);
+    expect(res.body.step).toBe('dm');
+    expect(res.body.error).toBe('dm_failed');
+    // Upload + mint succeeded — confirm the link_host is still echoed
+    // so the failure log lands on the right qURL pool.
+    expect(res.body.link_host).toBeDefined();
+  });
+
+  it('echoes test + recipient_user_id back to the Lambda for unambiguous metric attribution', async () => {
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.body.test).toBe('send_file');
+    expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
   });
 });
