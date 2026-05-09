@@ -87,6 +87,13 @@ beforeEach(() => {
   mockReUploadBuffer.mockResolvedValue({ resource_id: 'res-canary-file-1' });
   mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/canary-token-abc' }]);
   mockSendDM.mockResolvedValue(true);
+  // Per-IP bad-sig counter is module-level state — reset between
+  // tests so the rate-limit doesn't leak across cases (an earlier
+  // bad-sig test would otherwise carry counter into a later test
+  // and silently shift assertions to "rate-limited" semantics).
+  if (canaryRouter._test && canaryRouter._test._resetBadSigState) {
+    canaryRouter._test._resetBadSigState();
+  }
 });
 
 describe('/canary/exec — auth', () => {
@@ -406,5 +413,75 @@ describe('/canary/exec — differentiated scenario path', () => {
       .set(signedHeaders(SEND_FILE_BODY));
     expect(res.body.test).toBe('send_file');
     expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
+  });
+});
+
+// Per-IP bad-signature throttle. Mirror of the webhooks.js test
+// pattern — without this, an attacker can spam invalid signatures
+// and burn unbounded HMAC compute on the public endpoint.
+describe('/canary/exec — bad-signature rate limit', () => {
+  it('rejects with 401 bad_signature when sig shape is non-hex (regex pre-check, no HMAC compute)', async () => {
+    const headers = { 'X-Canary-Signature': 'not-hex!!!!' + 'x'.repeat(53), 'X-Canary-Timestamp': String(Math.floor(Date.now() / 1000)) };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(headers);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('bad_signature');
+    // Must NOT have called HMAC-dependent connector code — regex
+    // pre-check should short-circuit before the HMAC verify.
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+  });
+
+  it('rejects with 401 bad_signature when sig is the wrong length (regex)', async () => {
+    const headers = { 'X-Canary-Signature': 'abc123', 'X-Canary-Timestamp': String(Math.floor(Date.now() / 1000)) };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(headers);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('bad_signature');
+  });
+
+  it('returns 429 rate_limited after 30 bad-signature attempts in a 60s window', async () => {
+    const app = makeApp();
+    const wrongSecret = 'b'.repeat(64);
+    // Fire 30 bad sigs to fill the per-IP bucket. supertest preserves
+    // the same source IP across requests in this jest worker, so the
+    // counter accumulates as expected.
+    for (let i = 0; i < 30; i++) {
+      await request(app)
+        .post('/canary/exec')
+        .send(VALID_BODY)
+        .set(signedHeaders(VALID_BODY, wrongSecret));
+    }
+    // 31st attempt — even with a VALID sig, rate-limit short-circuits
+    // before signature verification (rate limit must precede HMAC
+    // compute to actually defend against the attack class).
+    const res = await request(app)
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(signedHeaders(VALID_BODY));
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe('rate_limited');
+  });
+
+  it('does NOT count a successful request against the bad-sig bucket', async () => {
+    const app = makeApp();
+    // 25 valid requests — under the 30-cap and SHOULD all succeed.
+    for (let i = 0; i < 25; i++) {
+      const res = await request(app)
+        .post('/canary/exec')
+        .send(VALID_BODY)
+        .set(signedHeaders(VALID_BODY));
+      expect(res.status).toBe(200);
+    }
+    // 26th valid request — would hit 429 if successful requests
+    // counted, but they don't.
+    const res = await request(app)
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(signedHeaders(VALID_BODY));
+    expect(res.status).toBe(200);
   });
 });

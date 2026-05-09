@@ -40,9 +40,10 @@ const { COLORS } = require('../constants');
 
 const router = express.Router();
 
-// 5-minute replay window. Tighter than the OAuth/webhook windows (which
-// are 5 min too) because the runner-to-bot path is synchronous and
-// shouldn't see clock skew above a few seconds.
+// 5-minute replay window — same value the OAuth/webhook routes use.
+// The runner-to-bot path is synchronous and shouldn't see clock skew
+// above a few seconds, but matching the established window keeps the
+// timestamp-tolerance contract uniform across HMAC-authed routes.
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
 // Allowed `test` values. The Lambda iterates `SCENARIOS_JSON`; this
@@ -55,7 +56,73 @@ const VALID_TESTS = new Set(['send_file', 'send_location']);
 // terraform `canary_recipient_user_ids` validation uses.
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
+// HMAC signature shape: 64 hex chars (sha256 → 32 bytes → 64 hex).
+// Pre-checking here lets us reject obvious garbage WITHOUT spending
+// HMAC-compute cycles, which is the primary CPU-burn vector for an
+// unauthenticated public endpoint. Mirrors the regex pre-check in
+// routes/webhooks.js.
+const SIG_SHAPE_RE = /^[0-9a-f]{64}$/;
+
+// Per-IP bad-signature throttle. Same shape as webhooks.js — without
+// it, an attacker can spam invalid signatures and force unbounded
+// HMAC compute on a public endpoint. Legitimate runner traffic (valid
+// HMAC) is never throttled. Swept every 5 minutes.
+// SCALING: single-instance only. Move to Redis if the bot runs
+// horizontally. Same caveat as webhooks.js.
+const BAD_SIG_WINDOW_MS = 60_000;
+const BAD_SIG_MAX = 30;
+const BAD_SIG_PER_IP_CAP = BAD_SIG_MAX * 4;
+const badSigAttempts = new Map(); // ip -> number[]  (timestamps)
+setInterval(() => {
+  const cutoff = Date.now() - BAD_SIG_WINDOW_MS * 2;
+  for (const [ip, times] of badSigAttempts) {
+    const recent = times.filter(t => t > cutoff);
+    if (recent.length === 0) badSigAttempts.delete(ip);
+    else badSigAttempts.set(ip, recent);
+  }
+}, 5 * 60 * 1000).unref();
+
+function recordBadSig(ip) {
+  const now = Date.now();
+  let list = (badSigAttempts.get(ip) || []).filter(t => t > now - BAD_SIG_WINDOW_MS);
+  list.push(now);
+  if (list.length > BAD_SIG_PER_IP_CAP) {
+    list = list.slice(-BAD_SIG_PER_IP_CAP);
+  }
+  if (badSigAttempts.size > 10_000) {
+    // 10%-drop eviction — single-entry can't keep up with a
+    // distributed flood of unique IPs. Same strategy as
+    // oauth.js rateLimitStore.
+    const dropCount = Math.max(1, Math.floor(badSigAttempts.size / 10));
+    const it = badSigAttempts.keys();
+    for (let i = 0; i < dropCount; i++) {
+      const k = it.next().value;
+      if (k === undefined) break;
+      badSigAttempts.delete(k);
+    }
+  }
+  badSigAttempts.set(ip, list);
+  return list.length;
+}
+
+// Test-only export: clears the rate-limit map between tests so
+// per-IP counters don't leak across the suite. NODE_ENV-gated so
+// the handle isn't reachable from prod consumers.
+function _resetBadSigState() {
+  badSigAttempts.clear();
+}
+
 function verifyCanarySignature(req, res, next) {
+  const ip = req.ip || 'unknown';
+
+  // Bad-sig rate limit BEFORE any HMAC work — blocks the unauthenticated
+  // CPU-burn vector on a public endpoint. Mirrors webhooks.js shape.
+  const recent = (badSigAttempts.get(ip) || []).filter(t => t > Date.now() - BAD_SIG_WINDOW_MS);
+  if (recent.length >= BAD_SIG_MAX) {
+    logger.warn('Canary rate limit exceeded (bad signatures)', { ip, recentFailures: recent.length });
+    return res.status(429).json({ ok: false, error: 'rate_limited' });
+  }
+
   const secret = config.CANARY_SHARED_SECRET;
   if (!secret) {
     // Don't leak that the secret is unset to unauthenticated callers
@@ -67,6 +134,16 @@ function verifyCanarySignature(req, res, next) {
   const ts = req.header('X-Canary-Timestamp');
   if (!sig || !ts) {
     return res.status(401).json({ ok: false, error: 'missing_signature' });
+  }
+
+  // Regex pre-check on the signature shape — rejects obvious garbage
+  // (wrong length, non-hex chars) WITHOUT computing the HMAC. Saves
+  // CPU on the unauthenticated path. Counts as a bad-sig attempt so
+  // shape-fuzz attackers hit the rate limit too.
+  if (!SIG_SHAPE_RE.test(sig)) {
+    const n = recordBadSig(ip);
+    logger.warn('Canary signature rejected (bad shape)', { ip, totalInWindow: n });
+    return res.status(401).json({ ok: false, error: 'bad_signature' });
   }
 
   const tsInt = parseInt(ts, 10);
@@ -86,6 +163,11 @@ function verifyCanarySignature(req, res, next) {
     return res.status(500).json({ ok: false, error: 'server_misconfigured' });
   }
 
+  // HMAC over `<ts>.<rawBody>` — `rawBody` is the EXACT bytes the
+  // client signed, NOT a re-serialized req.body (key reorder /
+  // whitespace differences would break the HMAC). Lambda side
+  // (qurl-integrations-infra canary-exec.tf) signs the same
+  // `<ts>.<body>` string before POSTing.
   const expected = crypto.createHmac('sha256', secret)
     .update(`${tsInt}.${req.rawBody.toString('utf8')}`)
     .digest('hex');
@@ -102,6 +184,8 @@ function verifyCanarySignature(req, res, next) {
   }
 
   if (!valid) {
+    const n = recordBadSig(ip);
+    logger.warn('Canary signature rejected (HMAC mismatch)', { ip, totalInWindow: n });
     return res.status(401).json({ ok: false, error: 'bad_signature' });
   }
 
@@ -154,6 +238,13 @@ async function runScenario({ test, recipientUserId, apiKey }) {
       latency_ms: Date.now() - startedAt,
     };
   }
+  // Belt-and-suspenders: connector.js's reUploadBuffer +
+  // uploadJsonToConnector both throw on missing resource_id today
+  // (`Connector JSON upload returned no resource_id` etc.), so this
+  // branch is unreachable against the real client. Kept so a future
+  // connector refactor that switches to a return-shape contract
+  // doesn't silently degrade the canary into a "no link minted, no
+  // alarm" state.
   if (!upload?.resource_id) {
     return {
       ok: false, step: 'upload', error: 'upload_no_resource_id',
@@ -336,3 +427,9 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
 });
 
 module.exports = router;
+// Test-only handle for clearing the per-IP bad-sig counter between
+// jest cases. Gate on NODE_ENV === 'test' so live state stays unreachable
+// from prod consumers (matches the gateway-metrics.js pattern).
+if (process.env.NODE_ENV === 'test') {
+  module.exports._test = { _resetBadSigState };
+}
