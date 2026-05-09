@@ -143,6 +143,11 @@ describe('readGatewayHealth', () => {
     noteGatewayActivity(() => Date.now() + 10_000);
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.activity_age_ms).toBe(0);
+    // Parity with the ack_age_ms NTP test: clamp must not flip
+    // healthy. activity_age_ms doesn't gate health post-#210, but
+    // pinning it here prevents a future regression where clamp +
+    // gating drift apart.
+    expect(snap.healthy).toBe(true);
   });
 
   test('noteGatewayActivity treats non-function arg as Date.now (production caller shape)', () => {
@@ -274,12 +279,16 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
-  test('idle bot stays healthy across many ticks (regression: pre-#210 false-positive)', () => {
+  test('idle bot stays healthy when activity_age_ms exceeds the legacy 60s threshold (regression: pre-#210 false-positive)', () => {
     // Pin the #210 fix: with no dispatched events for a long stretch
     // (idle sandbox / low-traffic prod), the bot must remain healthy
     // as long as heartbeat ACKs keep landing. The pre-#210 design
     // gated health on activity_age_ms < 60s, which silently failed
-    // every idle environment.
+    // every idle environment. We seed activity 10 minutes in the past
+    // (well past the 60s threshold) and freeze ack_age at 5s — the
+    // assertion is that healthy still holds. (Mock has a frozen
+    // lastPingTimestamp by design; pushing the test window past 60s
+    // would trip ack_age itself and fail for the wrong reason.)
     gatewayMetricsTest._resetGatewayActivity();
     noteGatewayActivity(() => Date.now() - 10 * 60_000); // 10 min idle
     const client = {

@@ -175,11 +175,12 @@ const AUDIT_EVENTS = {
   GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
 
   // Negative-signal heartbeat. Emitted every 30 s when the composite
-  // readiness check FAILS — pairs with the healthy event so the
-  // unhealthy snapshot is observable as a metric (carries activity_age_ms
-  // unbounded, where the healthy emission caps at <60s by definition).
-  // The 5/8 zombie-WS incident showed an alarm on Max(activity_age_ms)
-  // is the right shape; that needs unhealthy emissions to fire on.
+  // readiness check FAILS (post-#210: !is_ready || ping_ms <= 0 ||
+  // ack_age_ms >= 60_000). Pairs with the healthy event so a real WS
+  // wedge surfaces as a metric. `activity_age_ms` rides along on both
+  // emissions for dashboarding only — it is NOT part of the gating
+  // predicate (#210 backed out the false-positive on idle bots). Don't
+  // alarm on activity_age_ms; alarm on missing healthy emissions.
   GATEWAY_HEARTBEAT_UNHEALTHY: 'gateway_heartbeat_unhealthy',
 
   // Bot added/removed from a guild. Single emission on the

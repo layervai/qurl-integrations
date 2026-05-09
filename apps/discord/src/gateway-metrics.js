@@ -11,9 +11,13 @@
  *      client.guilds.cache.size.
  *
  * Health is gated on heartbeat ACK age only. activity_age_ms is
- * reported as a metric for observability but does NOT gate health —
- * see the PR description for #210 for why (idle ≠ zombie at this
- * signal level).
+ * reported as a metric for observability but does NOT gate health.
+ * Why: discord.js's `client.on('raw', ...)` fires on op-0 dispatched
+ * events only — HEARTBEAT_ACK and other control packets never trigger
+ * it. So an idle bot (no chat traffic) and a wedged bot (no ACKs)
+ * look identical at this signal level. Gating health on
+ * activity_age_ms therefore false-positives on quiet workspaces;
+ * gating on ACK age catches the real WS-wedge case.
  */
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
