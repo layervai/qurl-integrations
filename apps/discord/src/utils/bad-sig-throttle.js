@@ -9,7 +9,7 @@
 // horizontally; same caveat as the OAuth rate limiter and the original
 // webhooks.js inline throttle this helper subsumes.
 //
-// Migration note (qurl-integrations#NNN follow-up): apps/discord/src/
+// Migration note (qurl-integrations#211 follow-up): apps/discord/src/
 // routes/webhooks.js still has its own inline copy of this pattern.
 // That file's BAD_SIG_WINDOW_MS / BAD_SIG_MAX / recordBadSig + sweep
 // interval should migrate to this factory in a separate PR — touching

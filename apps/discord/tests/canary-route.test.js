@@ -50,6 +50,10 @@ jest.mock('../src/logger', () => ({
 const mockConfig = {
   CANARY_SHARED_SECRET: undefined,
   QURL_API_KEY: undefined,
+  // Allowlist gates the differentiated path. Suite-default contains
+  // the canonical test user-ID used across the differentiated-path
+  // tests below; allowlist-specific tests override per-case.
+  CANARY_RECIPIENT_USER_IDS: ['1483661063835750551'],
 };
 jest.mock('../src/config', () => mockConfig);
 
@@ -83,6 +87,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockConfig.CANARY_SHARED_SECRET = SECRET;
   mockConfig.QURL_API_KEY = 'test-api-key';
+  // Reset allowlist to suite default — individual tests override
+  // (e.g. empty for "unconfigured" case, mismatched for "not allowed").
+  mockConfig.CANARY_RECIPIENT_USER_IDS = ['1483661063835750551'];
   mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-canary-1' });
   mockReUploadBuffer.mockResolvedValue({ resource_id: 'res-canary-file-1' });
   mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/canary-token-abc' }]);
@@ -413,6 +420,50 @@ describe('/canary/exec — differentiated scenario path', () => {
       .set(signedHeaders(SEND_FILE_BODY));
     expect(res.body.test).toBe('send_file');
     expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
+  });
+
+  it('returns 400 canary_recipients_unconfigured when allowlist is empty (fail-closed)', async () => {
+    mockConfig.CANARY_RECIPIENT_USER_IDS = [];
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('canary_recipients_unconfigured');
+    // No connector / DM side-effect when the allowlist gate fires
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 recipient_not_allowed when recipient is not in the allowlist', async () => {
+    mockConfig.CANARY_RECIPIENT_USER_IDS = ['9999999999999999999'];
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('recipient_not_allowed');
+    expect(mockSendDM).not.toHaveBeenCalled();
+  });
+
+  it('logs a structured warn when a scenario step fails (so on-call has a correlatable log)', async () => {
+    const logger = require('../src/logger');
+    mockSendDM.mockResolvedValueOnce(false);
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY)
+      .set(signedHeaders(SEND_FILE_BODY));
+    expect(res.status).toBe(500);
+    expect(res.body.step).toBe('dm');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Canary scenario failed',
+      expect.objectContaining({
+        test: 'send_file',
+        recipient_user_id: VALID_USER_ID,
+        step: 'dm',
+        error: 'dm_failed',
+      })
+    );
   });
 });
 

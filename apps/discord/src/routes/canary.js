@@ -9,25 +9,37 @@
 // dev safety and for the bot's first deploy before the canary infra
 // exists.
 //
-// Body shape (all fields optional for back-compat):
+// Body shape — empty OR both fields together. Partial body
+// (one of the two) is rejected with 400 invalid_test:
+//   {} → legacy back-end-only path (no DM)
 //   { test: "send_file" | "send_location", recipient_user_id: "<snowflake>" }
+//      → differentiated path: upload → mint → DM
 //
 // When `test` + `recipient_user_id` are both present, the canary:
-//   1. Builds a synthetic resource shaped like the named test
-//      (small text buffer for send_file, location JSON for send_location).
+//   1. Builds a synthetic resource shaped like the named test —
+//      small text Buffer for send_file (raw-bytes connector path),
+//      `{type, url, name}` location JSON for send_location (the JSON
+//      connector path).
 //   2. Uploads to the connector (reUploadBuffer / uploadJsonToConnector).
-//   3. Mints a single short-TTL qURL via mintLinks.
-//   4. Sends a clearly-labeled "[Canary probe]" DM to the recipient.
+//   3. Mints a single 60s-TTL qURL via mintLinks.
+//   4. DMs the recipient via sendDM with a clearly-labeled
+//      "[Canary probe]" embed.
 //
-// Empty body falls through to the legacy back-end-only probe shape
-// (synthetic location upload + mint, no DM). The legacy path stays
-// because the EventBridge → Lambda canary on infra side may run
-// before the bot extension has shipped — undifferentiated test runs
-// are better than 503s during the rollout window.
+// Empty body falls through to the legacy back-end-only path. Kept
+// for any operator-manual probe (curl with no body) and during the
+// rollout window before the EventBridge Lambda starts sending the
+// differentiated body.
 //
 // Response includes per-step status so the Lambda's per-test pass/fail
 // metric can attribute failures to the correct subsystem:
 //   { ok, step: "upload"|"mint"|"dm"|null, latency_ms, dm_status, ... }
+//
+// Recipient allowlist: the differentiated path rejects any
+// `recipient_user_id` not in `config.CANARY_RECIPIENT_USER_IDS`
+// with 400 recipient_not_allowed. Defense-in-depth — if the HMAC
+// secret is ever exfiltrated, an attacker still can't DM arbitrary
+// users. Allowlist mirrors the recipient list terraform passes
+// into the Lambda's RECIPIENT_USER_IDS_JSON env.
 
 const express = require('express');
 const crypto = require('crypto');
@@ -292,9 +304,40 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
         latency_ms: Date.now() - startedAt,
       });
     }
+    // Allowlist enforcement — defense-in-depth against secret
+    // exfiltration. Empty allowlist = differentiated path disabled
+    // (fail-closed). Mismatched recipient = 400, not 403, because
+    // the request is well-formed but pointing at an out-of-scope
+    // user; the bot doesn't expose its allowlist in the response.
+    const allowlist = config.CANARY_RECIPIENT_USER_IDS;
+    if (!Array.isArray(allowlist) || allowlist.length === 0) {
+      return res.status(400).json({
+        ok: false, error: 'canary_recipients_unconfigured',
+        latency_ms: Date.now() - startedAt,
+      });
+    }
+    if (!allowlist.includes(recipientUserId)) {
+      return res.status(400).json({
+        ok: false, error: 'recipient_not_allowed',
+        latency_ms: Date.now() - startedAt,
+      });
+    }
 
     try {
       const result = await runScenario({ test, recipientUserId, apiKey });
+      // Add a structured warn line on any non-OK result so an on-call
+      // who clicks through from a CloudWatch alarm finds a
+      // correlatable log entry. Without this, `step: 'upload'` /
+      // 'mint' / 'dm' failures emit metrics but no log — outer
+      // catch only fires if runScenario throws, which is rare.
+      if (!result.ok) {
+        logger.warn('Canary scenario failed', {
+          test, recipient_user_id: recipientUserId,
+          step: result.step, error: result.error,
+          reason: result.reason, apiCode: result.apiCode,
+          latency_ms: result.latency_ms,
+        });
+      }
       // Echo the test name + recipient so logs grep cleanly and the
       // Lambda's per-test attribution is unambiguous.
       const status = result.ok ? 200 : 500;

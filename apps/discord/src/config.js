@@ -275,6 +275,20 @@ module.exports = {
   // rolled).
   CANARY_SHARED_SECRET: process.env.CANARY_SHARED_SECRET,
 
+  // Comma-separated allowlist of Discord user-IDs the canary's
+  // differentiated path may DM. Defense-in-depth: if CANARY_SHARED_SECRET
+  // is ever exfiltrated, an attacker holding a valid HMAC could
+  // otherwise force the bot to DM arbitrary user-IDs they supply.
+  // The allowlist mirrors the recipient list terraform passes into
+  // the Lambda's RECIPIENT_USER_IDS_JSON env. Empty allowlist
+  // disables the differentiated path entirely (route returns 400
+  // canary_recipients_unconfigured) — fail-closed posture matches
+  // the inert-by-default shape of the rest of the route.
+  CANARY_RECIPIENT_USER_IDS: (process.env.CANARY_RECIPIENT_USER_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+
   // /qurl send limits — both must be > 0. A cooldown of 0 would silently
   // disable the rate limit; a recipients cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
