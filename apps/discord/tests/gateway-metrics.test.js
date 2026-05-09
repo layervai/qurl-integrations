@@ -1,10 +1,5 @@
 /**
  * Tests for the Phase 1 gateway-side periodic metric emitters.
- *
- * Coverage focuses on the readiness composite (the only non-trivial
- * logic) and the audit-event shape the terraform metric filters rely
- * on. The setInterval timers are exercised via jest fake timers so
- * each test can advance time deterministically.
  */
 const logger = require('../src/logger');
 const {
@@ -26,9 +21,7 @@ jest.mock('../src/logger', () => ({
 
 function fakeClient({ isReady = true, ping = 42, ackedAgo = 5_000, guildCount = 3 } = {}) {
   // Mirror discord.js v14 shape: WebSocketShard.lastPingTimestamp is
-  // a numeric ms epoch (-1 pre-first-ack). Tests use null to indicate
-  // "no shards have an ack at all" (whole shards Map empty / each
-  // shard pre-first-ack).
+  // a numeric ms epoch (-1 pre-first-ack).
   const lastPingTimestamp = ackedAgo === null ? -1 : Date.now() - ackedAgo;
   const shards = new Map([[0, { lastPingTimestamp }]]);
   return {
@@ -38,11 +31,6 @@ function fakeClient({ isReady = true, ping = 42, ackedAgo = 5_000, guildCount = 
   };
 }
 
-// Most readGatewayHealth tests want a "recent activity" baseline so
-// the activity-gate (Justin #193 §2) doesn't make every test report
-// unhealthy. Reset + tick at the start of each test that exercises
-// the composite. Tests for the pre-first-frame ("no activity yet")
-// path explicitly skip this.
 beforeEach(() => {
   if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
     gatewayMetricsTest._resetGatewayActivity();
@@ -93,8 +81,6 @@ describe('readGatewayHealth', () => {
   });
 
   test('unhealthy when shard reports lastPingTimestamp = 0 (legacy/null shape)', () => {
-    // Future-proof: if a future discord.js version flips the
-    // pre-first-ack sentinel to 0, the > 0 guard still catches it.
     const client = {
       isReady: () => true,
       ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: 0 }]]) },
@@ -128,59 +114,53 @@ describe('readGatewayHealth', () => {
     expect(snap.ack_age_ms).toBe(null);
   });
 
-  test('unhealthy before the first gateway frame (lastGatewayActivityAt = 0 sentinel)', () => {
-    // Justin #193 §2: dispatch wedge / event-loop saturation case.
-    // At fresh-boot, before client.on('raw') has fired even once,
-    // lastGatewayActivityAt = 0 so activity_age_ms is null and
-    // composite must report unhealthy regardless of other signals.
+  test('activity_age_ms reports null before the first gateway frame', () => {
+    // Pre-first-frame: lastGatewayActivityAt = 0 sentinel. The metric
+    // payload must be null (not 0 or a giant number from the epoch),
+    // so dashboards don't render a misleading value.
     gatewayMetricsTest._resetGatewayActivity();
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
-    expect(snap.healthy).toBe(false);
     expect(snap.activity_age_ms).toBe(null);
-    expect(snap.is_ready).toBe(true); // ready, but never tick'd → still unhealthy
+    // Health is gated only on ack_age_ms, so a fresh boot with a recent
+    // ack and no dispatched event yet is still healthy.
+    expect(snap.healthy).toBe(true);
   });
 
-  test('unhealthy when activity is stale (>60s — event-loop saturation)', () => {
+  test('healthy regardless of activity_age_ms (idle bot is healthy)', () => {
+    // The pre-#210 design required activity_age_ms < 60s for healthy,
+    // which false-positived in idle environments where dispatched
+    // events (interactions, messages) don't arrive for long stretches.
+    // Health now depends only on ack_age_ms; activity is metric-only.
     gatewayMetricsTest._resetGatewayActivity();
-    // Simulate a tick 90 s ago by calling noteGatewayActivity() with a
-    // back-dated `now` injection.
-    noteGatewayActivity(() => Date.now() - 90_000);
-    const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
-    expect(snap.healthy).toBe(false);
-    expect(snap.activity_age_ms).toBeGreaterThanOrEqual(60_000);
-  });
-
-  test('healthy when activity is recent and other signals OK', () => {
-    gatewayMetricsTest._resetGatewayActivity();
-    noteGatewayActivity();
+    noteGatewayActivity(() => Date.now() - 5 * 60_000); // 5 min idle
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.healthy).toBe(true);
-    expect(snap.activity_age_ms).toBeLessThan(60_000);
+    expect(snap.activity_age_ms).toBeGreaterThanOrEqual(5 * 60_000);
   });
 
   test('NTP step-backward clamps activity_age_ms to 0', () => {
     gatewayMetricsTest._resetGatewayActivity();
-    // Simulate a tick "in the future" (clock just stepped backward).
     noteGatewayActivity(() => Date.now() + 10_000);
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.activity_age_ms).toBe(0);
+    // Parity with the ack_age_ms NTP test: clamp must not flip
+    // healthy. activity_age_ms doesn't gate health post-#210, but
+    // pinning it here prevents a future regression where clamp +
+    // gating drift apart.
     expect(snap.healthy).toBe(true);
   });
 
   test('noteGatewayActivity treats non-function arg as Date.now (production caller shape)', () => {
     // discord.js's `raw` event passes a packet object as the first
     // arg, not a clock function. The defensive `typeof === 'function'`
-    // fallback must keep the timestamp updating in that case. Without
-    // this test, a future refactor that drops the typeof check would
-    // pass tests that only exercise the clock-fn injection form.
+    // fallback must keep the timestamp updating in that case.
     gatewayMetricsTest._resetGatewayActivity();
-    const fakePacket = { op: 11, t: null, s: null, d: null }; // discord.js raw shape
+    const fakePacket = { op: 0, t: 'INTERACTION_CREATE', s: 1, d: {} };
     const before = Date.now();
     noteGatewayActivity(fakePacket);
     const snap = readGatewayHealth(fakeClient({ ackedAgo: 5_000 }));
     expect(snap.activity_age_ms).toBeGreaterThanOrEqual(0);
     expect(snap.activity_age_ms).toBeLessThan(Date.now() - before + 100);
-    expect(snap.healthy).toBe(true);
   });
 });
 
@@ -188,12 +168,6 @@ describe('startGatewayHeartbeat', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    // Reset + tick activity AFTER useFakeTimers so the timestamp uses
-    // the same fake-clock source as the readGatewayHealth comparisons.
-    // Without this, the outer beforeEach() ticks with real Date.now(),
-    // then advanceTimersByTime drifts the fake clock — Math.max(0,…)
-    // papers over the negative diff so tests pass, but the activity
-    // gate isn't actually being exercised in these tests.
     if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
       gatewayMetricsTest._resetGatewayActivity();
     }
@@ -214,11 +188,30 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
-  test('does NOT emit when unhealthy (silence is the alarm signal)', () => {
+  test('does NOT emit gateway_heartbeat_healthy when unhealthy (silence is the existing alarm signal)', () => {
     const client = fakeClient({ isReady: false });
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
     jest.advanceTimersByTime(1_000);
-    expect(logger.audit).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
+  });
+
+  test('emits gateway_heartbeat_unhealthy carrying activity_age_ms when unhealthy', () => {
+    // Pin the contract that the unhealthy companion event always
+    // carries activity_age_ms — terraform's metric filter extracts
+    // that field directly.
+    const client = fakeClient({ isReady: false });
+    startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(1_000);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT_UNHEALTHY,
+      expect.objectContaining({
+        activity_age_ms: expect.any(Number),
+        is_ready: false,
+      }),
+    );
   });
 
   test('emits on every interval tick when healthy', () => {
@@ -227,6 +220,10 @@ describe('startGatewayHeartbeat', () => {
     // 1 immediate runOnce + 3 interval ticks at t=1000/2000/3000 = 4
     jest.advanceTimersByTime(3_500);
     expect(logger.audit).toHaveBeenCalledTimes(4);
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
   });
 
   test('swallows sampler errors so a future API change does not wedge the bot', () => {
@@ -252,10 +249,6 @@ describe('startGatewayHeartbeat', () => {
   });
 
   test('logs healthy → unhealthy transition exactly once (edge-triggered, not per-tick)', () => {
-    // Start healthy, run two healthy ticks, then flip the client to
-    // unhealthy and run two more ticks. Expect exactly ONE warn at
-    // the edge — NOT one per unhealthy tick. Pin the broken contract
-    // ("warn fires every interval while wedged") that would spam logs.
     let isReady = true;
     const client = {
       isReady: () => isReady,
@@ -263,7 +256,6 @@ describe('startGatewayHeartbeat', () => {
       guilds: { cache: { size: 1 } },
     };
     startGatewayHeartbeat(client, { intervalMs: 1_000 });
-    // Initial runOnce + 1 tick = 2 healthy samples
     jest.advanceTimersByTime(1_000);
     expect(logger.warn).not.toHaveBeenCalled();
 
@@ -276,7 +268,6 @@ describe('startGatewayHeartbeat', () => {
       expect.objectContaining({ is_ready: false }),
     );
 
-    // Recovery → exactly one info, not one per healthy tick
     isReady = true;
     logger.info.mockClear();
     jest.advanceTimersByTime(1_000); // recovery → info
@@ -288,11 +279,35 @@ describe('startGatewayHeartbeat', () => {
     );
   });
 
+  test('idle bot stays healthy when activity_age_ms exceeds the legacy 60s threshold (regression: pre-#210 false-positive)', () => {
+    // Pin the #210 fix: with no dispatched events for a long stretch
+    // (idle sandbox / low-traffic prod), the bot must remain healthy
+    // as long as heartbeat ACKs keep landing. The pre-#210 design
+    // gated health on activity_age_ms < 60s, which silently failed
+    // every idle environment. We seed activity 10 minutes in the past
+    // (well past the 60s threshold) and freeze ack_age at 5s — the
+    // assertion is that healthy still holds. (Mock has a frozen
+    // lastPingTimestamp by design; pushing the test window past 60s
+    // would trip ack_age itself and fail for the wrong reason.)
+    gatewayMetricsTest._resetGatewayActivity();
+    noteGatewayActivity(() => Date.now() - 10 * 60_000); // 10 min idle
+    const client = {
+      isReady: () => true,
+      ws: { ping: 42, shards: new Map([[0, { lastPingTimestamp: Date.now() - 5_000 }]]) },
+      guilds: { cache: { size: 1 } },
+    };
+    startGatewayHeartbeat(client, { intervalMs: 1_000 });
+    jest.advanceTimersByTime(5_000);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.audit).toHaveBeenCalledWith(
+      AUDIT_EVENTS.GATEWAY_HEARTBEAT,
+      expect.any(Object),
+    );
+  });
+
   test('runs once immediately so the first datapoint lands inside the boot alarm window', () => {
     const client = fakeClient({ ackedAgo: 5_000 });
     startGatewayHeartbeat(client, { intervalMs: 60_000 });
-    // No timer advance — just invocation. The runOnce should already
-    // have emitted a heartbeat without waiting for the first interval.
     expect(logger.audit).toHaveBeenCalledTimes(1);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.GATEWAY_HEARTBEAT,
@@ -301,7 +316,7 @@ describe('startGatewayHeartbeat', () => {
   });
 
   test('Math.max(0, …) guards against negative ack_age_ms from NTP step backward', () => {
-    const future = Date.now() + 10_000; // simulate clock that jumped backward
+    const future = Date.now() + 10_000;
     const shards = new Map([[0, { lastPingTimestamp: future }]]);
     const client = {
       isReady: () => true,
@@ -310,9 +325,6 @@ describe('startGatewayHeartbeat', () => {
     };
     const snap = readGatewayHealth(client);
     expect(snap.ack_age_ms).toBe(0);
-    // healthy still requires ack_age_ms < 60_000 — clamp keeps the
-    // signal correct: a backward clock step now produces "very recent
-    // ack" which is the right semantic, not "stale by Number.MIN".
     expect(snap.healthy).toBe(true);
   });
 });
@@ -321,8 +333,6 @@ describe('startActiveGuildCount', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    // See startGatewayHeartbeat beforeEach for why activity reset
-    // happens AFTER useFakeTimers (clock-source consistency).
     if (gatewayMetricsTest && typeof gatewayMetricsTest._resetGatewayActivity === 'function') {
       gatewayMetricsTest._resetGatewayActivity();
     }
@@ -348,13 +358,8 @@ describe('startActiveGuildCount', () => {
   });
 
   test('runs once immediately so the first gauge sample lands without waiting for the interval', () => {
-    // Symmetric with the startGatewayHeartbeat runOnce test. Pins the
-    // round-3 addition: a future refactor that drops the immediate
-    // tick() would otherwise pass CI silently because the existing
-    // tests advance fake timers before asserting.
     const client = fakeClient({ guildCount: 5 });
     startActiveGuildCount(client, { intervalMs: 60_000 });
-    // No timer advance — runOnce should already have emitted.
     expect(logger.audit).toHaveBeenCalledTimes(1);
     expect(logger.audit).toHaveBeenCalledWith(
       AUDIT_EVENTS.ACTIVE_GUILD_COUNT,

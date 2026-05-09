@@ -174,6 +174,15 @@ const AUDIT_EVENTS = {
   // ack_age_ms < 60000). Missing emissions = wedge.
   GATEWAY_HEARTBEAT: 'gateway_heartbeat_healthy',
 
+  // Negative-signal heartbeat. Emitted every 30 s when the composite
+  // readiness check FAILS (post-#210: !is_ready || ping_ms <= 0 ||
+  // ack_age_ms >= 60_000). Pairs with the healthy event so a real WS
+  // wedge surfaces as a metric. `activity_age_ms` rides along on both
+  // emissions for dashboarding only — it is NOT part of the gating
+  // predicate (#210 backed out the false-positive on idle bots). Don't
+  // alarm on activity_age_ms; alarm on missing healthy emissions.
+  GATEWAY_HEARTBEAT_UNHEALTHY: 'gateway_heartbeat_unhealthy',
+
   // Bot added/removed from a guild. Single emission on the
   // guildCreate / guildDelete event. `guild_id` is in the payload
   // for log-grep / forensic queries; it MUST NOT be promoted to a

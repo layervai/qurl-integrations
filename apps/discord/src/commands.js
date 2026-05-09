@@ -308,13 +308,12 @@ function resolveRecipientAlias(r, interaction) {
 
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Portal closes",
-// "what's on the other side is invisible to … scanners, bots, crawlers,
-// strangers") rather than literal ("shared a file with you") — the brand
-// goal is to convey the qURL hidden-layer model, not just announce a
-// file transfer. The qURL link is rendered as a `🔗 Step Through` Link
-// button rather than a bare URL field; recipients click the button to
-// open the link in their default browser.
+// embed copy is intentionally evocative ("opened a door", "Door closes")
+// rather than literal ("shared a file with you") — the brand goal is to
+// convey the qURL hidden-layer model, not just announce a file transfer.
+// The qURL link is rendered as a `🔗 Step Through` Link button rather
+// than a bare URL field; recipients click the button to open the link
+// in their default browser.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) — same source resolveSenderAlias used at the
@@ -336,11 +335,7 @@ function resolveRecipientAlias(r, interaction) {
 //     │                                                             │
 //     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
 //     │                                                             │
-//     │  This link is your portal — what's on the other side is    │  (fixed body copy)
-//     │  invisible to everyone else on the internet: scanners,     │
-//     │  bots, crawlers, strangers.                                │
-//     │                                                             │
-//     │  🕐 Portal closes in 24 hours                               │  (Discord <t:N:R> — auto-updates client-side
+//     │  🕐 Door closes in 1 day                                    │  (Discord <t:N:R> — auto-updates client-side
 //     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
@@ -394,22 +389,18 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     // does not span newlines, so a multi-line message would render with
     // only the first line styled. Flatten newlines to a space so the
     // recipient sees one tidy quote — matches the design mockup which
-    // shows the message as a single-line styled box. 450-char cap keeps
-    // the body paragraph visible without scroll.
-    const capped = personalMessage.substring(0, 450).replace(/[\r\n]+/g, ' ').trim();
+    // shows the message as a single-line styled box. 280-char cap keeps
+    // the embed visually compact now that the fixed body copy is gone.
+    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
     embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
   }
 
   embed.addFields(
     {
-      name: '\u200B',
-      value: "This link is your portal — what's on the other side is invisible to everyone else on the internet: scanners, bots, crawlers, strangers.",
-    },
-    {
       // Discord's native relative-time markdown: <t:UNIX:R> renders
       // CLIENT-SIDE based on the viewer's current time, so the recipient
-      // sees "in 24 hours" at send time and "in 16 hours" 8 hours later
-      // (and "1 hour ago" once the link has expired). No bot-side editing
+      // sees "in 1 day" at send time, "in 16 hours" 8 hours later, and
+      // "1 hour ago" once the link has expired. No bot-side editing
       // needed — Discord handles the live update.
       //
       // Fail-loud on a missing/invalid expiresAt rather than rendering
@@ -421,7 +412,7 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
         if (!Number.isFinite(expiresAt)) {
           throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
         }
-        return `\ud83d\udd50 Portal closes <t:${expiresAt}:R>`;
+        return `\ud83d\udd50 Door closes <t:${expiresAt}:R>`;
       })(),
     },
     {
@@ -1516,7 +1507,7 @@ async function handleSend(interaction, apiKey) {
           .setCustomId(messageInputId)
           .setLabel('Optional note (leave blank to clear)')
           .setStyle(TextInputStyle.Paragraph)
-          .setMaxLength(450)
+          .setMaxLength(280)
           .setRequired(false)
           .setValue(personalMessage || '')
       ));
