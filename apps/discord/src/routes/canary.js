@@ -36,7 +36,7 @@
 //
 // Recipient allowlist: the differentiated path rejects any
 // `recipient_user_id` not in `config.CANARY_RECIPIENT_USER_IDS`
-// with 400 recipient_not_allowed. Defense-in-depth — if the HMAC
+// with 403 recipient_not_allowed. Defense-in-depth — if the HMAC
 // secret is ever exfiltrated, an attacker still can't DM arbitrary
 // users. Allowlist mirrors the recipient list terraform passes
 // into the Lambda's RECIPIENT_USER_IDS_JSON env.
@@ -138,8 +138,19 @@ function verifyCanarySignature(req, res, next) {
   // whitespace differences would break the HMAC). Lambda side
   // (qurl-integrations-infra canary-exec.tf) signs the same
   // `<ts>.<body>` string before POSTing.
+  //
+  // Two .update() calls — feed the timestamp prefix as a string and
+  // the raw body as the original Buffer. Concatenating into a
+  // template literal would round-trip the buffer through
+  // toString('utf8'), wasting a UTF-8 decode on every request and
+  // (more importantly) silently corrupting the HMAC if the body
+  // ever contains non-UTF-8 bytes. Today the 4 KB express.json
+  // parser guarantees valid UTF-8, but the buffer-pass form is
+  // robust regardless. .update(string) auto-encodes ASCII-safe
+  // input as UTF-8 — `<ts>.` is a digit-and-dot string, no risk.
   const expected = crypto.createHmac('sha256', secret)
-    .update(`${tsInt}.${req.rawBody.toString('utf8')}`)
+    .update(`${tsInt}.`)
+    .update(req.rawBody)
     .digest('hex');
 
   let valid = false;
@@ -305,19 +316,21 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
       });
     }
     // Allowlist enforcement — defense-in-depth against secret
-    // exfiltration. Empty allowlist = differentiated path disabled
-    // (fail-closed). Mismatched recipient = 400, not 403, because
-    // the request is well-formed but pointing at an out-of-scope
-    // user; the bot doesn't expose its allowlist in the response.
+    // exfiltration. Empty allowlist → 503 (server config state, not
+    // a client error — matches the canary_disabled / no_api_key
+    // shape). Mismatched recipient → 403 (request is well-formed,
+    // authentication succeeded, but the principal is not authorized
+    // to act on this target — textbook 403). Response body still
+    // names the error code; the allowlist itself is never exposed.
     const allowlist = config.CANARY_RECIPIENT_USER_IDS;
     if (!Array.isArray(allowlist) || allowlist.length === 0) {
-      return res.status(400).json({
+      return res.status(503).json({
         ok: false, error: 'canary_recipients_unconfigured',
         latency_ms: Date.now() - startedAt,
       });
     }
     if (!allowlist.includes(recipientUserId)) {
-      return res.status(400).json({
+      return res.status(403).json({
         ok: false, error: 'recipient_not_allowed',
         latency_ms: Date.now() - startedAt,
       });

@@ -422,26 +422,26 @@ describe('/canary/exec — differentiated scenario path', () => {
     expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
   });
 
-  it('returns 400 canary_recipients_unconfigured when allowlist is empty (fail-closed)', async () => {
+  it('returns 503 canary_recipients_unconfigured when allowlist is empty (server-config state)', async () => {
     mockConfig.CANARY_RECIPIENT_USER_IDS = [];
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(SEND_FILE_BODY)
       .set(signedHeaders(SEND_FILE_BODY));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(503);
     expect(res.body.error).toBe('canary_recipients_unconfigured');
     // No connector / DM side-effect when the allowlist gate fires
     expect(mockReUploadBuffer).not.toHaveBeenCalled();
     expect(mockSendDM).not.toHaveBeenCalled();
   });
 
-  it('returns 400 recipient_not_allowed when recipient is not in the allowlist', async () => {
+  it('returns 403 recipient_not_allowed when recipient is not in the allowlist (textbook 403)', async () => {
     mockConfig.CANARY_RECIPIENT_USER_IDS = ['9999999999999999999'];
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(SEND_FILE_BODY)
       .set(signedHeaders(SEND_FILE_BODY));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(403);
     expect(res.body.error).toBe('recipient_not_allowed');
     expect(mockSendDM).not.toHaveBeenCalled();
   });
