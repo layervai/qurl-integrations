@@ -365,6 +365,12 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
+// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
+// limit is 25; capping at 10 bounds the UX. Both the initial user-
+// target select AND the channel-target's "Add more recipients" flow
+// use this — keep them in lockstep so a future bump doesn't drift.
+const USER_SELECT_PER_PICK_CAP = 10;
+
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Same helper used at the channel
@@ -1321,18 +1327,12 @@ async function handleSend(interaction, apiKey) {
     ));
 
     if (target === 'user') {
-      // Multi-user select. Per-pick cap mirrors the channel-target's
-      // "Add more recipients" flow (~line 2058) — Discord allows up
-      // to 25 in one user-select, but capping at 10 keeps the UX
-      // bounded and matches the existing add-more cadence. The
-      // per-send envelope cap (config.QURL_SEND_MAX_RECIPIENTS) is
-      // re-checked downstream alongside the channel-target path.
       rows.push(new ActionRowBuilder().addComponents(
         new UserSelectMenuBuilder()
           .setCustomId(ids.userSelect)
           .setPlaceholder('Pick one or more users')
           .setMinValues(1)
-          .setMaxValues(Math.min(10, config.QURL_SEND_MAX_RECIPIENTS))
+          .setMaxValues(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
       ));
     }
 
@@ -1482,22 +1482,18 @@ async function handleSend(interaction, apiKey) {
     }
 
     if (compInt.customId === ids.userSelect) {
-      // Multi-select: read every picked user, validate each, and
-      // replace `recipients` with the full picked set on success.
-      // compInt.users is a discord.js Collection (Map subclass), so
-      // .values() yields every entry; spreading materializes the
-      // array. A previous single-pick build used .first() — that
-      // shape silently dropped extra picks when the dropdown was
-      // bumped to multi-select.
+      // REPLACE semantic (not append): Discord's user-select shows
+      // the previously-picked set as the default and the user edits
+      // it; un-picking Bob and adding Carol must yield [Carol], not
+      // [Bob, Carol]. Use the channel-target's "Add more recipients"
+      // button for the additive path.
       const selected = [...compInt.users.values()];
       if (selected.length === 0) {
         await safeCompDefer(compInt);
         continue;
       }
-      // Reject the whole selection if ANY entry is invalid (vs.
-      // silently dropping bad picks) — matches the prior single-pick
-      // "warn loud, don't accept partial" UX. Operator re-picks
-      // without the offender.
+      // Fail-loud over silent-drop — operator re-picks without the
+      // offender. Matches the prior single-pick UX.
       if (selected.some(u => u.bot)) {
         await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Re-pick without any bot users.' }), components: formRows() });
         continue;
@@ -2072,7 +2068,7 @@ async function handleSend(interaction, apiKey) {
           setCooldown(interaction.user.id);
 
           // Show user select menu — collect the response on the REPLY message
-          const maxSelect = Math.min(10, remaining);
+          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
           const userSelectRow = new ActionRowBuilder().addComponents(
             new UserSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)

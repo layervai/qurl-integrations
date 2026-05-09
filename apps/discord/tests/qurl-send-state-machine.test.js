@@ -979,6 +979,60 @@ describe('handleSend — Step 3: final form', () => {
     }));
   });
 
+  it('target=user re-picking REPLACES the previous set (matches Discord user-select edit semantic)', async () => {
+    // Pin REPLACE-vs-APPEND. User picks Bob first, then re-opens the
+    // dropdown and picks Carol+Dave (without Bob). Final recipients
+    // must be [Carol, Dave], not [Bob, Carol, Dave]. Discord shows
+    // the previously-picked set as the default and the user edits it
+    // — un-picking Bob and adding the others is an explicit removal.
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/c' },
+      { qurl_link: 'https://q.test/d' },
+    ]);
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect1 = makeCompInt(ids.userSelect, {
+      users: mockUsers({ id: 'user-2', bot: false, username: 'Bob' }),
+    });
+    const userSelect2 = makeCompInt(ids.userSelect, {
+      users: mockUsers(
+        { id: 'user-3', bot: false, username: 'Carol' },
+        { id: 'user-4', bot: false, username: 'Dave' },
+      ),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelect1, userSelect2, sendBtn],
+    });
+    await cmd.execute(interaction);
+    // 2 DMs (Carol + Dave) — Bob from the first pick is gone.
+    expect(mockSendDM).toHaveBeenCalledTimes(2);
+    const recipientIds = mockSendDM.mock.calls.map(c => c[0]);
+    expect(recipientIds).toEqual(expect.arrayContaining(['user-3', 'user-4']));
+    expect(recipientIds).not.toContain('user-2');
+  });
+
+  it('target=user picks at the cap (10 users) — all delivered', async () => {
+    // Pin the boundary at Math.min(USER_SELECT_PER_PICK_CAP, ...).
+    // Discord won't let setMaxValues exceed 25; bumping our cap above
+    // 10 silently here would risk drift — the test fails loud if a
+    // future change drops a recipient at the boundary.
+    const cap = 10;
+    const tenUsers = Array.from({ length: cap }, (_, i) => ({
+      id: `user-${i + 2}`, bot: false, username: `User${i + 2}`,
+    }));
+    mockMintLinks.mockResolvedValueOnce(
+      tenUsers.map((_, i) => ({ qurl_link: `https://q.test/u${i}` })),
+    );
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, { users: mockUsers(...tenUsers) });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelect, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(mockSendDM).toHaveBeenCalledTimes(cap);
+  });
+
   it('target=user rejects the whole selection if ANY pick is the sender', async () => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelectSelf = makeCompInt(ids.userSelect, {
