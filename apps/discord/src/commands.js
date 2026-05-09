@@ -1315,18 +1315,24 @@ async function handleSend(interaction, apiKey) {
         .setCustomId(ids.targetSelect)
         .setPlaceholder('Recipient(s) — choose type')
         .addOptions(
-          { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
+          { label: 'A specific user', value: 'user', description: 'Pick one or more users to send to', default: target === 'user' },
           { label: channelOptionLabel, value: 'channel', description: channelOptionDescription, default: target === 'channel' },
         )
     ));
 
     if (target === 'user') {
+      // Multi-user select. Per-pick cap mirrors the channel-target's
+      // "Add more recipients" flow (~line 2058) — Discord allows up
+      // to 25 in one user-select, but capping at 10 keeps the UX
+      // bounded and matches the existing add-more cadence. The
+      // per-send envelope cap (config.QURL_SEND_MAX_RECIPIENTS) is
+      // re-checked downstream alongside the channel-target path.
       rows.push(new ActionRowBuilder().addComponents(
         new UserSelectMenuBuilder()
           .setCustomId(ids.userSelect)
-          .setPlaceholder('Pick a user')
+          .setPlaceholder('Pick one or more users')
           .setMinValues(1)
-          .setMaxValues(1)
+          .setMaxValues(Math.min(10, config.QURL_SEND_MAX_RECIPIENTS))
       ));
     }
 
@@ -1350,7 +1356,7 @@ async function handleSend(interaction, apiKey) {
         )
     ));
 
-    const recipientsResolved = (target === 'user' && recipients.length === 1)
+    const recipientsResolved = (target === 'user' && recipients.length >= 1)
       || (target === 'channel' && recipients.length > 0);
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -1476,20 +1482,31 @@ async function handleSend(interaction, apiKey) {
     }
 
     if (compInt.customId === ids.userSelect) {
-      const selectedUser = compInt.users.first();
-      if (!selectedUser) {
+      // Multi-select: read every picked user, validate each, and
+      // replace `recipients` with the full picked set on success.
+      // compInt.users is a discord.js Collection (Map subclass), so
+      // .values() yields every entry; spreading materializes the
+      // array. A previous single-pick build used .first() — that
+      // shape silently dropped extra picks when the dropdown was
+      // bumped to multi-select.
+      const selected = [...compInt.users.values()];
+      if (selected.length === 0) {
         await safeCompDefer(compInt);
         continue;
       }
-      if (selectedUser.bot) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Pick a different user.' }), components: formRows() });
+      // Reject the whole selection if ANY entry is invalid (vs.
+      // silently dropping bad picks) — matches the prior single-pick
+      // "warn loud, don't accept partial" UX. Operator re-picks
+      // without the offender.
+      if (selected.some(u => u.bot)) {
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Re-pick without any bot users.' }), components: formRows() });
         continue;
       }
-      if (selectedUser.id === interaction.user.id) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Pick a different user.' }), components: formRows() });
+      if (selected.some(u => u.id === interaction.user.id)) {
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Re-pick without your own user.' }), components: formRows() });
         continue;
       }
-      recipients = [selectedUser];
+      recipients = selected;
       await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
