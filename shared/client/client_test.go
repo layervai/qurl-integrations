@@ -1041,10 +1041,10 @@ func TestCreateResource(t *testing.T) {
 	if got.Status != StatusActive {
 		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
 	}
-	// Pin UpdatedAt decoding — *time.Time round-trip with explicit
-	// timezone offset. nil-vs-zero distinction matters for "field
-	// present on response" semantics.
-	if got.UpdatedAt == nil {
+	// Pin UpdatedAt decoding — time.Time + omitzero round-trip. The
+	// non-zero check confirms the field decoded; year/month assertion
+	// catches a future timezone-parsing regression.
+	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt should be populated when present on the wire")
 	}
 	if got.UpdatedAt.Year() != 2026 || got.UpdatedAt.Month() != 5 {

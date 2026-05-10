@@ -556,12 +556,17 @@ type Resource struct {
 	// ResourceData schema (qurl-service/api/openapi.yaml:2546). Tag
 	// matches QURL.Status.
 	Status string `json:"status"`
-	// CreatedAt has no `omitempty` because encoding/json's omitempty does
-	// not honor the time.Time zero value (it would still serialize as
-	// "0001-01-01T00:00:00Z"). Matches the QURL type's `created_at` tag.
-	// Once the repo is on Go 1.24+, switching to `omitzero` would honor it.
-	CreatedAt    time.Time     `json:"created_at"`
-	UpdatedAt    *time.Time    `json:"updated_at,omitempty"`
+	// CreatedAt uses `omitzero` (Go 1.24+) — it honors the time.Time
+	// zero value, eliding "0001-01-01T00:00:00Z" from the wire when
+	// the field is unset on a response. (QURL.CreatedAt still uses
+	// `json:"created_at"` without omitzero — that's a separate
+	// migration tracked outside this PR.)
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	// UpdatedAt is also a time.Time + omitzero now that we're on
+	// Go 1.24+. The pre-1.24 *time.Time idiom is no longer needed —
+	// keeping it as a value avoids the nil-vs-zero ambiguity for a
+	// field that's structurally just "missing on the wire".
+	UpdatedAt    time.Time     `json:"updated_at,omitzero"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
