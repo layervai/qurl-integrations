@@ -94,14 +94,19 @@ function verifyCanaryTimestamp(req, res, next) {
   // signal instead.
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
-    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp', has_header: false });
+    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp' });
     return res.status(401).json({ ok: false, error: 'missing_timestamp' });
   }
-  const tsInt = parseInt(ts, 10);
-  if (!Number.isFinite(tsInt)) {
-    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp', has_header: true });
+  // Strict shape — `parseInt('1234567890extra', 10)` returns
+  // `1234567890`, so a digit-prefixed garbage string would slip past
+  // a permissive isFinite check. Lock the contract to "Unix epoch
+  // seconds, 10 digits today, 11 around the year ~2286" before
+  // trusting it for a drift comparison.
+  if (!/^[0-9]{10,11}$/.test(ts)) {
+    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp' });
     return res.status(401).json({ ok: false, error: 'bad_timestamp' });
   }
+  const tsInt = parseInt(ts, 10);
   const drift = Math.floor(Date.now() / 1000) - tsInt;
   if (Math.abs(drift) > TIMESTAMP_TOLERANCE_SECONDS) {
     logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift });

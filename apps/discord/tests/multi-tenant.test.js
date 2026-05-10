@@ -478,6 +478,28 @@ describe('multi-tenant mode — server.js route mounting', () => {
     const res = await request(app).post('/webhook/github').send({});
     expect(res.status).toBe(404);
   });
+
+  it('multi-tenant: POST /canary/exec returns 404 (route not mounted)', async () => {
+    // Threat-model dependency: post-HMAC-rip the canary's only network
+    // -layer auth is the NHP knock. In multi-tenant or NHP-disabled
+    // environments isOpenNHPActive is false and the route MUST NOT
+    // mount — otherwise a public unauthenticated route would expose
+    // connector upload + qURL mint to anyone who can reach the bot's
+    // listener. Pin the unmount.
+    delete process.env.GUILD_ID;
+    jest.resetModules();
+    jest.doMock('../src/discord', () => ({ sendDM: jest.fn() }));
+    jest.doMock('../src/database', () => ({
+      getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
+    }));
+    const request = require('supertest');
+    const { app } = require('../src/server');
+    const res = await request(app)
+      .post('/canary/exec')
+      .send({})
+      .set('X-Canary-Timestamp', String(Math.floor(Date.now() / 1000)));
+    expect(res.status).toBe(404);
+  });
 });
 
 // Note: discord.js's `refreshCache()` early-return is covered indirectly by

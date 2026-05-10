@@ -255,7 +255,7 @@ if (config.isOpenNHPActive) {
   app.use('/canary', canaryRouter);
   logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');
   if (!config.QURL_API_KEY) {
-    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until the secret is seeded.');
+    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
   }
 } else {
   logger.info('Canary endpoint NOT mounted — isOpenNHPActive is false (multi-tenant or NHP disabled).');

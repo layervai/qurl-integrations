@@ -133,6 +133,21 @@ describe('/canary/exec — timestamp replay-window', () => {
     expect(res.body.latency_ms).toBeUndefined();
   });
 
+  it('returns 401 bad_timestamp when X-Canary-Timestamp is digit-prefixed garbage (parseInt would have accepted it)', async () => {
+    // Regression-pin for the strict-shape regex: parseInt('1234567890extra', 10)
+    // returns 1234567890 — a permissive isFinite check would have
+    // accepted the leading-digits and let the drift comparison handle
+    // it (which would still reject, but at the wrong layer). Stricter
+    // form: only digit-only strings of plausible epoch-seconds length
+    // ever reach the drift check.
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set('X-Canary-Timestamp', `${Math.floor(Date.now() / 1000)}extra`);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('bad_timestamp');
+  });
+
   it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (past)', async () => {
     const tooOld = Math.floor(Date.now() / 1000) - 301;
     const res = await request(makeApp())
