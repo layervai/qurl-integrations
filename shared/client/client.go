@@ -185,8 +185,20 @@ type AccessPolicy struct {
 }
 
 // CreateInput is the input for creating a qURL.
+//
+// Either TargetURL or ResourceID must be supplied — never both. Server-side
+// validation enforces a `mutually_exclusive_fields` rule (per Phase 3a.3:
+// `resource_id` is mutually exclusive with `target_url` and explicit `type`).
+// The `,omitempty` JSON tag on TargetURL is load-bearing: it lets the
+// ResourceID-only flow ship a request body that omits `target_url` entirely
+// rather than serializing the zero value `""`, which would otherwise trip the
+// server's exclusivity check.
 type CreateInput struct {
-	TargetURL    string        `json:"target_url"`
+	TargetURL string `json:"target_url,omitempty"`
+	// ResourceID, when set, mints a qURL bound to an existing resource
+	// (e.g. a tunnel resource resolved via GetResourceByAlias). Mutually
+	// exclusive with TargetURL on the wire.
+	ResourceID   string        `json:"resource_id,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	ExpiresIn    string        `json:"expires_in,omitempty"`
 	OneTimeUse   bool          `json:"one_time_use,omitempty"`
@@ -243,7 +255,14 @@ func validateIdempotencyKey(key string) error {
 
 // Create creates a new qURL.
 //
-//nolint:gocritic // hugeParam: CreateInput is 88 bytes; *CreateInput migration tracked at #146.
+// Either input.TargetURL or input.ResourceID must be set, never both — see
+// [CreateInput] for the rationale. The function does not enforce the
+// exclusivity itself; the server returns 400 `mutually_exclusive_fields`
+// if both are populated. The client only ensures that empty fields elide
+// from the wire payload (via `omitempty`) so a ResourceID-only call
+// doesn't accidentally trip the rule.
+//
+//nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
@@ -413,6 +432,133 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 
 	var out MintOutput
 	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// --- Resources ---
+//
+// These methods target the post-PR-3a.2 surface in qurl-service: alias
+// fields on `Resource`, the `GET /v1/resources/by-alias/{alias}` endpoint,
+// and `clear_alias` on `PATCH /v1/resources/{id}`. The OpenAPI schema for
+// PR-3a.2 has not shipped at the time this client method set lands — they
+// are added here so the Slack `setalias`/`get` flows in PR-3c.3+ have a
+// stable Go surface to call against. Until PR-3a.2 ships in qurl-service,
+// these methods will return 404/400 from the API.
+
+// Resource represents a qURL resource (the durable object behind a qURL link).
+//
+// Field shapes mirror the `ResourceData` schema in `qurl-service/api/openapi.yaml`
+// post-PR-3a.2; consumers should treat unknown fields as best-effort.
+type Resource struct {
+	ResourceID   string        `json:"resource_id"`
+	OwnerID      string        `json:"owner_id,omitempty"`
+	TargetURL    string        `json:"target_url,omitempty"`
+	Type         string        `json:"type,omitempty"`
+	Alias        string        `json:"alias,omitempty"`
+	CustomDomain string        `json:"custom_domain,omitempty"`
+	Description  string        `json:"description,omitempty"`
+	CreatedAt    time.Time     `json:"created_at,omitempty"`
+	UpdatedAt    *time.Time    `json:"updated_at,omitempty"`
+	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// CreateResourceInput is the input for `POST /v1/resources`. Idempotent on
+// `(owner_id, target_url_hash)` — repeat calls with the same target return
+// the existing resource. Per the PR-3a.2 contract, supplying `Alias` here
+// when a matching resource exists *without* an alias yields 409
+// `alias_in_use`; callers must use UpdateResource to set alias on an
+// already-existing resource.
+type CreateResourceInput struct {
+	TargetURL    string        `json:"target_url,omitempty"`
+	Type         string        `json:"type,omitempty"`
+	Alias        string        `json:"alias,omitempty"`
+	CustomDomain string        `json:"custom_domain,omitempty"`
+	Description  string        `json:"description,omitempty"`
+	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// UpdateResourceInput is the input for `PATCH /v1/resources/{id}`.
+//
+// Pointer fields distinguish "field absent" (caller didn't provide it,
+// server keeps existing value) from "field present with zero value"
+// (server should accept the zero). For Alias specifically: a non-nil
+// non-empty pointer sets the alias, ClearAlias=true clears it. Setting
+// both is invalid; the server returns 400.
+type UpdateResourceInput struct {
+	Description  *string       `json:"description,omitempty"`
+	Alias        *string       `json:"alias,omitempty"`
+	ClearAlias   bool          `json:"clear_alias,omitempty"`
+	CustomDomain *string       `json:"custom_domain,omitempty"`
+	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// CreateResource creates a (or returns the existing) qURL resource.
+func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput) (*Resource, error) {
+	if input == nil {
+		return nil, errors.New("client: CreateResource input is nil")
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal create resource input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/resources", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out Resource
+	if _, err := c.do(req, &out, "POST /v1/resources"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateResource updates a resource's mutable properties (alias, description,
+// access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
+// must first resolve via GetResourceByAlias.
+func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
+	if resourceID == "" {
+		return nil, errors.New("client: UpdateResource resourceID is empty")
+	}
+	if input == nil {
+		return nil, errors.New("client: UpdateResource input is nil")
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal update resource input: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL+"/v1/resources/"+url.PathEscape(resourceID), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out Resource
+	if _, err := c.do(req, &out, "PATCH /v1/resources/:id"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetResourceByAlias resolves an alias to its underlying resource.
+//
+// alias must NOT include the leading `$` sigil used in Slack/Discord
+// surfaces — pass the bare alias string. Returns a typed APIError with
+// 404 status if the alias is not registered for the caller's owner.
+func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
+	if alias == "" {
+		return nil, errors.New("client: GetResourceByAlias alias is empty")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out Resource
+	if _, err := c.do(req, &out, "GET /v1/resources/by-alias/:alias"); err != nil {
 		return nil, err
 	}
 	return &out, nil
