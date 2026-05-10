@@ -136,8 +136,8 @@ const StatusRevoked = "revoked"
 // StatusConsumed indicates a one-time qURL has been used.
 const StatusConsumed = "consumed"
 
-// --- Resource type constants (mirrors `ResourceType` enum at
-// qurl-service/api/openapi.yaml:2468-2474).
+// --- Resource type constants (mirrors qurl-service/api/openapi.yaml
+// `ResourceType` enum).
 
 // ResourceTypeURL is the target-URL proxy type (default).
 const ResourceTypeURL = "url"
@@ -546,15 +546,17 @@ type Resource struct {
 	ResourceID string `json:"resource_id"`
 	TargetURL  string `json:"target_url,omitempty"`
 	// Type is one of "url" (target-URL proxy, default) or "tunnel"
-	// (FRP-backed reverse tunnel). Mirrors the `ResourceType` enum at
-	// qurl-service/api/openapi.yaml:2468-2474.
+	// (FRP-backed reverse tunnel). Mirrors the qurl-service
+	// `ResourceType` enum.
 	Type         string `json:"type,omitempty"`
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	Description  string `json:"description,omitempty"`
-	// Status is one of [StatusActive] or [StatusRevoked] per the live
-	// ResourceData schema (qurl-service/api/openapi.yaml:2546). Tag
-	// matches QURL.Status.
+	// Status is one of [StatusActive] or [StatusRevoked] per the
+	// `ResourceData` schema in qurl-service/api/openapi.yaml. The
+	// QURL-only [StatusConsumed] / [StatusExpired] don't apply at the
+	// resource level — resource state is binary (live or revoked);
+	// per-qURL TTL/one-time semantics are tracked on QURL instead.
 	Status string `json:"status"`
 	// CreatedAt uses `omitzero` (Go 1.24+) — it honors the time.Time
 	// zero value, eliding "0001-01-01T00:00:00Z" from the wire when
@@ -584,8 +586,7 @@ type CreateResourceInput struct {
 	TargetURL string `json:"target_url,omitempty"`
 	// Type is one of "url" (default; required for target-URL proxies)
 	// or "tunnel". When type=tunnel, TargetURL is ignored server-side.
-	// Mirrors the `ResourceType` enum at
-	// qurl-service/api/openapi.yaml:2468-2474.
+	// Mirrors the qurl-service `ResourceType` enum.
 	Type string `json:"type,omitempty"`
 	// Alias: empty string elides via `omitempty` and yields a resource
 	// with no alias. Server validates non-empty values against
@@ -735,6 +736,11 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
 // must first resolve via GetResourceByAlias.
 //
+// Validation order (first match wins): empty resourceID → nil input →
+// no-fields-set → Alias/ClearAlias exclusivity → empty-Alias-pointer
+// guard. The exclusivity-before-empty-pointer leg is pinned by
+// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst.
+//
 // Retry semantics: do() retries 5xx/429 with the buffered body, so a
 // successfully-applied PATCH that returns 502 will be re-applied on retry.
 // All currently-supported PATCH fields (alias, description, custom_domain,
@@ -760,6 +766,17 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	}
 	if !input.hasAnyFieldSet() {
 		return nil, ErrUpdateResourceNoFieldsSet
+	}
+	// Trim *input.Alias for symmetry with the resourceID and
+	// GetResourceByAlias trim contracts. Make a defensive copy of
+	// input so the trim doesn't mutate the caller's struct, then
+	// re-point Alias at the trimmed value. The trimmed string is what
+	// hits the wire and what the empty-pointer guard below sees.
+	if input.Alias != nil {
+		trimmed := strings.TrimSpace(*input.Alias)
+		copyInput := *input
+		copyInput.Alias = &trimmed
+		input = &copyInput
 	}
 	// Order: the exclusivity check runs before the empty-pointer
 	// footgun guard. A caller passing both `Alias: &""` and

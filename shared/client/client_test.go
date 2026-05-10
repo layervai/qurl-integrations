@@ -1710,6 +1710,61 @@ func TestUpdateResourceTrimsSurroundingWhitespace(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceTrimsAliasPointer pins symmetry with the path-segment
+// trim contract — a caller passing `Alias: &" prod-grafana "` should
+// see the trimmed value on the wire (the server regex would 400 on
+// surrounding whitespace anyway). Also pins the defensive-copy posture:
+// the caller's input struct must NOT be mutated.
+func TestUpdateResourceTrimsAliasPointer(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	original := "  " + testAliasAlt + "  "
+	in := &UpdateResourceInput{Alias: &original}
+	if _, err := c.UpdateResource(context.Background(), testResourceID, in); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+
+	// Wire: alias is the trimmed value.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := raw["alias"]; got != testAliasAlt {
+		t.Errorf("alias on wire: got %v, want %q", got, testAliasAlt)
+	}
+
+	// Caller's struct: untouched. The defensive copy must not
+	// mutate the original *string.
+	if *in.Alias != original {
+		t.Errorf("caller's input.Alias was mutated; got %q, want %q", *in.Alias, original)
+	}
+}
+
+// TestUpdateResourceWhitespaceOnlyAliasRejected pins what happens when
+// an Alias-only payload trims to "": the empty-pointer footgun guard
+// should fire (use ClearAlias=true). Symmetric with the explicit
+// `Alias: &""` case but exercises the new trim path.
+func TestUpdateResourceWhitespaceOnlyAliasRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	whitespace := "   "
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &whitespace,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasEmpty) {
+		t.Fatalf("expected ErrUpdateResourceAliasEmpty on whitespace-only alias, got %v", err)
+	}
+}
+
 func TestUpdateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.UpdateResource(context.Background(), testResourceID, nil)
