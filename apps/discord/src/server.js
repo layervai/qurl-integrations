@@ -93,6 +93,12 @@ if (config.isOpenNHPActive) {
 // caller that completes the qURL/NHP knock. Gated on isOpenNHPActive
 // for symmetry with the router mount below; without NHP gating the
 // network layer, the route would be unauthenticated.
+//
+// IMPORTANT: this gate must stay in lockstep with the canaryRouter
+// mount further down (search "/canary mounts" below). If they drift
+// — e.g. the router mounts unconditionally while the parser stays
+// gated — the global 1 MB JSON parser would apply and the 4 KB cap
+// silently disappears.
 if (config.isOpenNHPActive) {
   app.use('/canary', express.json({ limit: '4kb' }));
 }
@@ -252,22 +258,33 @@ if (!config.isDiscordInstallConfigured) {
 // NHP, etc.) we don't mount it at all, returning the framework's
 // default 404 to anyone probing /canary/exec.
 //
-// LOAD-BEARING ASSUMPTION: this gate trusts that `isOpenNHPActive`
+// LOAD-BEARING ASSUMPTION: this gate trusts that isOpenNHPActive
 // implies an NHP listener is actually fronting this process at the
-// network layer. The flag was designed for *OpenNHP-feature gating*
-// (slash commands, role assignments) — wiring NHP in front of the
-// bot is a deploy-side decision in qurl-integrations-infra
-// (qurl-bot-discord/terraform/cert.tf + the ALB → bot target-group
-// chain). If a future operator flips ENABLE_OPENNHP_FEATURES on a
-// single-tenant instance whose ALB does NOT route through NHP,
-// `/canary/exec` would mount with only the in-process timestamp +
-// allowlist as defenses. Keep that wiring in lockstep — or
-// strengthen this gate to a dedicated CANARY_ENDPOINT_ENABLED env.
+// network layer. The flag was designed for OpenNHP feature gating,
+// not for "is NHP at the listener in front of me" — wiring NHP in
+// front of the bot is a deploy-side decision in qurl-integrations-
+// infra (qurl-bot-discord/terraform/cert.tf + ALB chain). Tracked
+// for replacement with a dedicated CANARY_ENDPOINT_ENABLED env in
+// layervai/qurl-integrations#216.
+// (The /canary/* JSON-parser gate above MUST stay paired with this
+// router gate. Drifting one without the other reverts the 4 KB cap.)
+//
+// Replacing this isOpenNHPActive coupling with a dedicated
+// CANARY_ENDPOINT_ENABLED env is tracked in #216 — the flag here was
+// designed for OpenNHP feature gating, not "is NHP at the network
+// layer in front of this process."
 if (config.isOpenNHPActive) {
   app.use('/canary', canaryRouter);
   logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');
   if (!config.QURL_API_KEY) {
     logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
+  }
+  // CANARY_RECIPIENT_USER_IDS is now the primary defense against
+  // DM-blast-against-arbitrary-IDs (HMAC is gone). Surface unset-
+  // allowlist at boot rather than on the first canary fire — same
+  // shape as the QURL_API_KEY warn above.
+  if (!Array.isArray(config.CANARY_RECIPIENT_USER_IDS) || config.CANARY_RECIPIENT_USER_IDS.length === 0) {
+    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — differentiated-path requests will return 503 canary_recipients_unconfigured. Legacy empty-body path still works.');
   }
 } else {
   logger.info('Canary endpoint NOT mounted — isOpenNHPActive is false (multi-tenant or NHP disabled).');

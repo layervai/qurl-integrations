@@ -70,7 +70,13 @@ const router = express.Router();
 //   - 4 KB body cap bounds replay payload size
 //   - qURL one-time-use semantics make re-resolving the same token
 //     impossible past the first resolve, so a captured request can
-//     only be replayed against a still-open NHP firewall hole
+//     only be replayed against a still-open NHP firewall hole. This
+//     leans on the qurl-service contract — see
+//     `internal/service/resolve.go` (`atomicConsumeOneTimeUse` /
+//     similar) in layervai/qurl-service. If that contract relaxes
+//     (cache TTL, retry-on-timeout window, partial-resolve rollback)
+//     the replay window widens in practice; this comment is the
+//     load-bearing dependency marker.
 //   - allowlist on recipient_user_id bounds DM blast radius
 //   - canary scenarios are idempotent (the audit row tags the run-id
 //     and a duplicate qURL-mint is functionally a no-op)
