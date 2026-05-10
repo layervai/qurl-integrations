@@ -301,6 +301,79 @@ func TestAdminClient_WithHTTPClientOption(t *testing.T) {
 	}
 }
 
+// TestAdminClient_WithAdminUserAgent fences the version-plumbing
+// option. The product half is fixed; the version half is whatever
+// the caller passes. Empty version falls back to the default so
+// callers don't have to special-case the build-info-missing path.
+func TestAdminClient_WithAdminUserAgent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		version  string
+		wantUA   string
+		wantStub bool
+	}{
+		{name: "explicit version", version: "1.2.3-deadbeef", wantUA: "qurl-slack-admin/1.2.3-deadbeef"},
+		{name: "empty falls back to default", version: "", wantUA: "qurl-slack-admin/dev", wantStub: true},
+		{name: "vcs revision shape", version: "vcs-7f3c9a1", wantUA: "qurl-slack-admin/vcs-7f3c9a1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newAdminFixture(t, http.StatusOK, `{"data":{"is_admin":true,"owner_id":"u_1"}}`)
+			ac := NewAdminClient(fx.srv.URL, testInternalToken, WithAdminUserAgent(tc.version))
+			if _, _, err := ac.CheckAdmin(context.Background(), "T1", "U1"); err != nil {
+				t.Fatalf("CheckAdmin: %v", err)
+			}
+			if fx.gotUA != tc.wantUA {
+				t.Errorf("user-agent = %q, want %q", fx.gotUA, tc.wantUA)
+			}
+		})
+	}
+}
+
+// TestAdminClient_EmptyDataSurfacesSentinel fences the empty-envelope
+// guard. A buggy server that returns `{"data": null}` or `{}` on a
+// 2xx must surface [ErrEmptyAdminResponse] rather than silently
+// leaving the caller's `out` at zero values — which would otherwise
+// be indistinguishable from a successful response carrying defaults.
+func TestAdminClient_EmptyDataSurfacesSentinel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"data is null", `{"data":null}`},
+		{"data is missing", `{}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newAdminFixture(t, http.StatusOK, tc.body)
+			ac := fx.client()
+			_, _, err := ac.CheckAdmin(context.Background(), "T1", "U1")
+			if err == nil {
+				t.Fatal("CheckAdmin: error = nil, want ErrEmptyAdminResponse")
+			}
+			if !errors.Is(err, ErrEmptyAdminResponse) {
+				t.Errorf("error = %v, want ErrEmptyAdminResponse", err)
+			}
+		})
+	}
+}
+
+// TestAdminClient_VoidEndpointAcceptsEmptyData fences the inverse:
+// methods that pass `out=nil` (allow/disallow) must NOT surface the
+// empty-data sentinel — they don't expect any payload.
+func TestAdminClient_VoidEndpointAcceptsEmptyData(t *testing.T) {
+	t.Parallel()
+	fx := newAdminFixture(t, http.StatusOK, `{"data":null}`)
+	ac := fx.client()
+	if err := ac.AllowResource(context.Background(), "T1", "C1", "r_1"); err != nil {
+		t.Errorf("AllowResource with empty data should succeed (out=nil), got: %v", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

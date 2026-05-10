@@ -45,8 +45,10 @@ type AdminAction string
 const (
 	// AdminClaim opens the bootstrap-code modal. The code is NEVER passed
 	// as slash-command text — it would land in Slack's audit log in
-	// plaintext. The argument-less form opens a `views.open` modal whose
-	// `private_value` field accepts the code.
+	// plaintext. The argument-less form opens a `views.open` modal
+	// (see [AdminClaimModal]) whose `plain_text_input` block accepts
+	// the code; the bot's logging middleware redacts the block on
+	// submission so it never reaches diagnostics either.
 	AdminClaim AdminAction = "claim"
 	// AdminAllow whitelists an alias for use in a specific channel.
 	AdminAllow AdminAction = "allow"
@@ -126,6 +128,17 @@ var ErrMissingChannel = errors.New("missing #channel argument")
 // without the trailing target/URL argument.
 var ErrMissingTarget = errors.New("missing target argument")
 
+// ErrInvalidAlias is returned when an alias name (the part after `$`)
+// contains characters outside the recognized set. Catching this in
+// the parser surfaces a friendly slash-command error instead of
+// punting an obviously-bogus alias to qurl-service.
+var ErrInvalidAlias = errors.New("invalid alias")
+
+// ErrUnexpectedArgument is returned when a verb that takes no
+// positional arguments receives one (e.g. `admin policies extra`).
+// Catches user-facing typos earlier than the handler dispatch.
+var ErrUnexpectedArgument = errors.New("unexpected argument")
+
 // channelRefPattern matches Slack's encoded channel-mention form
 // `<#C12345|channel-name>`. The trailing `|name` is optional (Slack's UI
 // always includes it but the wire shape allows omission).
@@ -138,6 +151,12 @@ var channelRefPattern = regexp.MustCompile(`^<#([A-Z0-9]+)(?:\|[^>]*)?>$`)
 // the time we see the body, so we don't try to handle further escapes
 // here. Quoted values let users put spaces in `reason:"…"`.
 var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
+
+// aliasCharsetPattern is the alias-name shape qurl-service accepts:
+// lowercase alphanumeric with hyphens, no leading or trailing hyphen.
+// Surfacing the rejection here gives a friendlier slash-command error
+// than punting an obviously-bogus alias all the way to the API.
+var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
@@ -192,27 +211,42 @@ func Parse(text string) (*Command, error) {
 // single token. We don't need shell-grade quoting (no escapes, no single
 // quotes) — Slack's form already collapses surrounding control characters
 // before we see the body.
+//
+// Balanced outer double quotes around a positional token are stripped so
+// `setalias $a "https://x"` produces `Target = "https://x"` rather than
+// `Target = "\"https://x\""`. Flag values strip quotes via [flagPattern]
+// already; this normalizes the positional path so both surfaces behave
+// the same way.
 func tokenize(text string) []string {
 	var out []string
 	var cur strings.Builder
 	inQuotes := false
+	flush := func() {
+		if cur.Len() == 0 {
+			return
+		}
+		s := cur.String()
+		// Strip balanced outer quotes, e.g. `"foo"` -> `foo`. We
+		// don't touch unbalanced (`"foo` or `foo"`) because the
+		// caller may want to surface that as a parse error.
+		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+			s = s[1 : len(s)-1]
+		}
+		out = append(out, s)
+		cur.Reset()
+	}
 	for _, r := range text {
 		switch {
 		case r == '"':
 			cur.WriteRune(r)
 			inQuotes = !inQuotes
 		case (r == ' ' || r == '\t') && !inQuotes:
-			if cur.Len() > 0 {
-				out = append(out, cur.String())
-				cur.Reset()
-			}
+			flush()
 		default:
 			cur.WriteRune(r)
 		}
 	}
-	if cur.Len() > 0 {
-		out = append(out, cur.String())
-	}
+	flush()
 	return out
 }
 
@@ -270,9 +304,11 @@ func parseAliasOnly(cmd *Command, rest []string) (*Command, error) {
 
 // parseAdmin dispatches on the second word (the [AdminAction]). `claim`
 // takes no positional args (the code is collected via modal — see
-// Blocker #3 in the plan); `allow`/`disallow` take a `#channel` and a
-// `$alias`; `policies`/`status`/`revoke` are intentionally permissive
-// here so that PR-3c.5 can refine them without churning grammar tests.
+// Blocker #3 in the plan and [AdminClaimModal]); `allow`/`disallow`
+// take a `#channel` and a `$alias`; `policies`/`status` take no
+// args; `revoke` takes a `$alias`. Verbs that take no args fail
+// [ErrUnexpectedArgument] when given any — surfacing a typo like
+// `admin policies extra` early instead of silently routing it.
 func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, fmt.Errorf("%w: admin requires a verb", ErrUnknownAdminAction)
@@ -284,10 +320,16 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 	switch action {
 	case AdminClaim:
 		// Code never appears as text — modal-only flow.
+		if len(tail) > 0 {
+			return nil, fmt.Errorf("%w: %q (use the modal to enter the code)", ErrUnexpectedArgument, tail[0])
+		}
 		return cmd, nil
 	case AdminAllow, AdminDisallow:
 		return parseAdminChannelAlias(cmd, tail)
 	case AdminPolicies, AdminStatus:
+		if len(tail) > 0 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[0])
+		}
 		return cmd, nil
 	case AdminRevoke:
 		if len(tail) == 0 {
@@ -298,6 +340,9 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 			return nil, err
 		}
 		cmd.Alias = alias
+		if len(tail) > 1 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tail[1])
+		}
 		return cmd, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownAdminAction, verb)
@@ -344,8 +389,10 @@ func parseCreate(cmd *Command, rest []string) (*Command, error) {
 	return cmd, nil
 }
 
-// requireAlias enforces the `$` sigil and strips it. Empty after the
-// sigil (`$`) is treated as an empty-resource error.
+// requireAlias enforces the `$` sigil, strips it, and validates the
+// remaining alias against [aliasCharsetPattern]. Empty after the
+// sigil (`$`) is treated as an empty-resource error; out-of-charset
+// runs as an invalid-alias error.
 func requireAlias(tok string) (string, error) {
 	if !strings.HasPrefix(tok, "$") {
 		return "", fmt.Errorf("%w: got %q", ErrMissingSigil, tok)
@@ -353,6 +400,9 @@ func requireAlias(tok string) (string, error) {
 	alias := strings.TrimPrefix(tok, "$")
 	if alias == "" {
 		return "", ErrEmptyResource
+	}
+	if !aliasCharsetPattern.MatchString(alias) {
+		return "", fmt.Errorf("%w: %q (allowed: lowercase a-z, 0-9, hyphen, no leading/trailing hyphen)", ErrInvalidAlias, alias)
 	}
 	return alias, nil
 }
