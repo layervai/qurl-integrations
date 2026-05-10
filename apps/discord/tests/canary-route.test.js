@@ -99,8 +99,12 @@ describe('/canary/exec — timestamp replay-window', () => {
       .post('/canary/exec')
       .send(VALID_BODY);
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe('missing_timestamp');
-    expect(typeof res.body.latency_ms).toBe('number');
+    expect(res.body).toEqual({ ok: false, error: 'missing_timestamp' });
+    // Pre-auth 401s deliberately omit latency_ms (no triage value
+    // pre-auth, no benefit to echoing timing info in unauthenticated
+    // responses). Pin the absence so a future "uniformity" refactor
+    // doesn't silently re-add it.
+    expect(res.body.latency_ms).toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
       'Canary timestamp rejected',
       expect.objectContaining({ reason: 'missing_timestamp' }),
@@ -126,7 +130,7 @@ describe('/canary/exec — timestamp replay-window', () => {
       .set('X-Canary-Timestamp', 'tomorrow');
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('bad_timestamp');
-    expect(typeof res.body.latency_ms).toBe('number');
+    expect(res.body.latency_ms).toBeUndefined();
   });
 
   it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (past)', async () => {
@@ -137,7 +141,7 @@ describe('/canary/exec — timestamp replay-window', () => {
       .set(tsHeaders(tooOld));
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('expired_timestamp');
-    expect(typeof res.body.latency_ms).toBe('number');
+    expect(res.body.latency_ms).toBeUndefined();
   });
 
   it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (future-skewed)', async () => {

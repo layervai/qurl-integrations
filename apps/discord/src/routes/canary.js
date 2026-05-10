@@ -86,21 +86,26 @@ const VALID_TESTS = new Set(['send_file', 'send_location']);
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
 function verifyCanaryTimestamp(req, res, next) {
-  const startedAt = Date.now();
+  // Pre-auth 401s deliberately omit `latency_ms` — every other failure
+  // path on this route includes it for triage, but those are post-auth
+  // and triggered by the trusted Lambda. Echoing latency_ms on
+  // unauthenticated rejections leaks (microsecond-scale) timing info
+  // for no operational benefit; the warn line below is the on-call
+  // signal instead.
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
     logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp', has_header: false });
-    return res.status(401).json({ ok: false, error: 'missing_timestamp', latency_ms: Date.now() - startedAt });
+    return res.status(401).json({ ok: false, error: 'missing_timestamp' });
   }
   const tsInt = parseInt(ts, 10);
   if (!Number.isFinite(tsInt)) {
     logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp', has_header: true });
-    return res.status(401).json({ ok: false, error: 'bad_timestamp', latency_ms: Date.now() - startedAt });
+    return res.status(401).json({ ok: false, error: 'bad_timestamp' });
   }
   const drift = Math.floor(Date.now() / 1000) - tsInt;
   if (Math.abs(drift) > TIMESTAMP_TOLERANCE_SECONDS) {
     logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift });
-    return res.status(401).json({ ok: false, error: 'expired_timestamp', latency_ms: Date.now() - startedAt });
+    return res.status(401).json({ ok: false, error: 'expired_timestamp' });
   }
   next();
 }

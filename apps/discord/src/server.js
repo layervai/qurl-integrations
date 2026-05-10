@@ -90,8 +90,12 @@ if (config.isOpenNHPActive) {
 // /canary/* uses a 4 KB JSON cap — canary payloads are tiny (a probe
 // envelope of a few hundred bytes), so the small cap rejects
 // malformed/oversized requests early on a route reachable from any
-// caller that completes the qURL/NHP knock.
-app.use('/canary', express.json({ limit: '4kb' }));
+// caller that completes the qURL/NHP knock. Gated on isOpenNHPActive
+// for symmetry with the router mount below; without NHP gating the
+// network layer, the route would be unauthenticated.
+if (config.isOpenNHPActive) {
+  app.use('/canary', express.json({ limit: '4kb' }));
+}
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -242,13 +246,20 @@ if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
 }
 
-// /canary mounts unconditionally. Auth is the qURL/NHP knock — only
-// callers that resolved a qURL targeting this URL (and so triggered
-// an NHP knock for their egress IP) can reach the route. The handler
-// validates an X-Canary-Timestamp header for replay protection and
-// returns 503 no_api_key if QURL_API_KEY isn't configured.
-app.use('/canary', canaryRouter);
-logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');
+// /canary is gated on isOpenNHPActive — auth is the qURL/NHP knock,
+// so without NHP at the network layer the route would be wide open.
+// In multi-tenant or NHP-disabled environments (dev, sandbox without
+// NHP, etc.) we don't mount it at all, returning the framework's
+// default 404 to anyone probing /canary/exec.
+if (config.isOpenNHPActive) {
+  app.use('/canary', canaryRouter);
+  logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');
+  if (!config.QURL_API_KEY) {
+    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until the secret is seeded.');
+  }
+} else {
+  logger.info('Canary endpoint NOT mounted — isOpenNHPActive is false (multi-tenant or NHP disabled).');
+}
 
 // Error handler (Express requires the 4-arg signature; `next` unused)
 // eslint-disable-next-line no-unused-vars
