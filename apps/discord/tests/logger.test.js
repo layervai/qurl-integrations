@@ -449,6 +449,30 @@ describe('logger', () => {
       expect(parsed.audit.send_id).toBe('s1');
     });
 
+    it('mixed-case hash keys are still caught via .toLowerCase() lookup', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('uploaded', { Hash: FULL_MD5, HASH: FULL_MD5, HaSh: FULL_MD5 });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).not.toContain(FULL_MD5);
+      // Pin every case variant — guards a future refactor that drops the
+      // .toLowerCase() in shouldRedact().
+      expect((line.match(/\[REDACTED\]/g) || []).length).toBe(3);
+    });
+
+    it('redacts hash key inside an array element', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('uploaded', { items: [{ hash: FULL_MD5 }, { hash: FULL_MD5 }] });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).not.toContain(FULL_MD5);
+      expect((line.match(/"hash":"\[REDACTED\]"/g) || []).length).toBe(2);
+    });
+
     it('non-string hash values pass through unchanged (number, null, object)', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
