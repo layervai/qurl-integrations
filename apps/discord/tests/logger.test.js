@@ -383,23 +383,22 @@ describe('logger', () => {
     });
   });
 
-  // `hash` is exact-match-redacted at both the regular logger pathway
-  // (info/warn/error/debug via redact()) and the audit pathway
-  // (via redactAuditSecrets()). The intentional truncated form is
-  // `md5_prefix` (per md5Prefix() in connector.js); a future caller
-  // accidentally passing the full hash under the `hash` key gets
-  // caught here without needing per-call-site review.
+  // The intentional truncated form is `md5_prefix` (per md5Prefix() in
+  // connector.js); these tests pin both that `hash` is redacted and that
+  // `md5_prefix` survives.
   describe('hash key redaction', () => {
+    const FULL_MD5 = '5d41402abc4b2a76b9719d911017c592';
+
     it('redacts a top-level hash key on info()', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.info('uploaded', { hash: '5d41402abc4b2a76b9719d911017c592', resource_id: 'r1' });
+      logger.info('uploaded', { hash: FULL_MD5, resource_id: 'r1' });
 
       expect(consoleSpy.log).toHaveBeenCalledTimes(1);
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).toContain('"hash":"[REDACTED]"');
-      expect(line).not.toContain('5d41402abc4b2a76b9719d911017c592');
+      expect(line).not.toContain(FULL_MD5);
       expect(line).toContain('"resource_id":"r1"');
     });
 
@@ -414,13 +413,10 @@ describe('logger', () => {
       expect(line).not.toContain('REDACTED');
     });
 
-    it('does NOT redact hash-substring keys like commitHash / tokenHash-of-non-secret', () => {
+    it('does NOT redact hash-substring keys like commitHash / webhookHash', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      // `commitHash` is a legitimate non-MD5 field. `webhookHash` likewise.
-      // (note: tokenHash WOULD be redacted via the existing `token`
-      // substring rule — that's correct; not re-asserting here.)
       logger.info('deploy', { commitHash: 'abc1234', webhookHash: 'def5678' });
 
       const line = consoleSpy.log.mock.calls[0][0];
@@ -433,23 +429,21 @@ describe('logger', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.info('uploaded', { context: { hash: '5d41402abc4b2a76b9719d911017c592' } });
+      logger.info('uploaded', { context: { hash: FULL_MD5 } });
 
       const line = consoleSpy.log.mock.calls[0][0];
       expect(line).toContain('"hash":"[REDACTED]"');
-      expect(line).not.toContain('5d41402abc4b2a76b9719d911017c592');
+      expect(line).not.toContain(FULL_MD5);
     });
 
     it('redacts hash on audit() AND emits a warn line naming the key', () => {
       logger = require('../src/logger');
 
-      logger.audit('upload_success', { send_id: 's1', hash: '5d41402abc4b2a76b9719d911017c592' });
+      logger.audit('upload_success', { send_id: 's1', hash: FULL_MD5 });
 
-      // Warn line surfaces the offending key so a misbehaving caller is grep-able.
       expect(consoleSpy.error).toHaveBeenCalledTimes(1);
       expect(consoleSpy.error.mock.calls[0][0]).toContain('secret-shaped key');
       expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
-      // Value redacted in the emitted audit payload; sibling untouched.
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.hash).toBe('[REDACTED]');
       expect(parsed.audit.send_id).toBe('s1');
@@ -464,14 +458,10 @@ describe('logger', () => {
       logger.info('uploaded', { hash: { nested: 'object' } });
 
       const lines = consoleSpy.log.mock.calls.map(c => c[0]);
-      // null serializes as `null`, not `"[REDACTED]"`.
       expect(lines[0]).toContain('"hash":null');
-      // Number passes through.
       expect(lines[1]).toContain('"hash":12345');
-      // Object recurses (the redact pass walks into it); the inner key
-      // `nested` is not in any redact set, so its value passes through.
+      // Object value recurses; inner `nested` key isn't in any redact set.
       expect(lines[2]).toContain('"nested":"object"');
-      // No false-positive REDACTED markers from non-string inputs.
       expect(lines.every(l => !l.includes('REDACTED'))).toBe(true);
     });
   });
