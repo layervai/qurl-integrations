@@ -19,6 +19,7 @@ function formatTimestamp() {
 // Substrings that should never appear unredacted in logs. Matched case-
 // insensitively against the key name via includes(), so a future field
 // named refreshToken / bearerToken / apiSecret / myPassword is auto-caught.
+// See REDACT_EXACT_KEYS below for the exact-match alternative.
 const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];

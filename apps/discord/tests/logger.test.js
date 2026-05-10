@@ -460,7 +460,11 @@ describe('logger', () => {
       const lines = consoleSpy.log.mock.calls.map(c => c[0]);
       expect(lines[0]).toContain('"hash":null');
       expect(lines[1]).toContain('"hash":12345');
-      // Object value recurses; inner `nested` key isn't in any redact set.
+      // Non-string matched values pass through verbatim — redact() does
+      // NOT recurse into a value once its key matched. Inner `nested`
+      // survives because the whole object is copied as-is. (A future
+      // `{ hash: { token: ... } }` would NOT redact the inner `token` —
+      // tracked as a follow-up to tighten.)
       expect(lines[2]).toContain('"nested":"object"');
       expect(lines.every(l => !l.includes('REDACTED'))).toBe(true);
     });
