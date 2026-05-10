@@ -737,10 +737,12 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // TODO(#148): plumb Idempotency-Key on this method before any
 // non-idempotent PATCH field lands.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
-	// TrimSpace catches whitespace-only inputs that would otherwise hit
-	// the wire as `/v1/resources/%20%20` and 400 server-side; the
-	// client error stays actionable.
-	if strings.TrimSpace(resourceID) == "" {
+	// Normalize then validate: surrounding whitespace is silently
+	// stripped so " r_existing01 " hits the wire as
+	// /v1/resources/r_existing01 (not /v1/resources/%20r_existing01%20),
+	// and a whitespace-only input is rejected as empty.
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
 		return nil, ErrUpdateResourceEmptyID
 	}
 	if input == nil {
@@ -783,9 +785,11 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 // surfaces — pass the bare alias string. Returns a typed APIError with
 // 404 status if the alias is not registered for the caller's owner.
 func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
-	// TrimSpace catches whitespace-only inputs that would otherwise
-	// hit the wire and 400; client error stays actionable.
-	if strings.TrimSpace(alias) == "" {
+	// Normalize then validate (same posture as UpdateResource on
+	// resourceID) — strips surrounding whitespace so trimmed value
+	// is what hits the wire, and rejects whitespace-only as empty.
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
 		return nil, ErrGetResourceByAliasEmpty
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)

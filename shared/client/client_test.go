@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,11 +16,12 @@ import (
 )
 
 const (
-	testDescription = "updated"
-	testAlias       = "dev-dashboard"
-	testAliasAlt    = "prod-grafana"
-	testResourceID  = "r_existing01"
-	testTargetURL   = "https://internal.example.com"
+	testDescription   = "updated"
+	testAlias         = "dev-dashboard"
+	testAliasAlt      = "prod-grafana"
+	testResourceID    = "r_existing01"
+	testResourceIDAlt = "r_dev_dash01"
+	testTargetURL     = "https://internal.example.com"
 )
 
 // testClient creates a client with retries disabled for fast unit tests.
@@ -1010,7 +1012,7 @@ func TestCreateResource(t *testing.T) {
 			t.Errorf("got Alias %q, want %q", input.Alias, testAlias)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_dev_dash01",
+			"resource_id": testResourceIDAlt,
 			"target_url":  testTargetURL,
 			"alias":       testAlias,
 			"type":        ResourceTypeURL,
@@ -1028,7 +1030,7 @@ func TestCreateResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateResource: %v", err)
 	}
-	if got.ResourceID != "r_dev_dash01" {
+	if got.ResourceID != testResourceIDAlt {
 		t.Errorf("got ResourceID %q", got.ResourceID)
 	}
 	if got.Alias != testAlias {
@@ -1221,6 +1223,12 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 		if len(input.AccessPolicy.IPAllowlist) != 2 {
 			t.Errorf("IPAllowlist: got %v", input.AccessPolicy.IPAllowlist)
 		}
+		if len(input.AccessPolicy.IPDenylist) != 1 {
+			t.Errorf("IPDenylist: got %v", input.AccessPolicy.IPDenylist)
+		}
+		if len(input.AccessPolicy.GeoAllowlist) != 2 {
+			t.Errorf("GeoAllowlist: got %v", input.AccessPolicy.GeoAllowlist)
+		}
 		if len(input.AccessPolicy.GeoDenylist) != 1 {
 			t.Errorf("GeoDenylist: got %v", input.AccessPolicy.GeoDenylist)
 		}
@@ -1229,8 +1237,10 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 			"target_url":  testTargetURL,
 			"status":      StatusActive,
 			"access_policy": map[string]any{
-				"ip_allowlist": []string{"10.0.0.0/8", "192.168.0.0/16"},
-				"geo_denylist": []string{"CN"},
+				"ip_allowlist":  []string{"10.0.0.0/8", "192.168.0.0/16"},
+				"ip_denylist":   []string{"203.0.113.0/24"},
+				"geo_allowlist": []string{"US", "CA"},
+				"geo_denylist":  []string{"CN"},
 			},
 		})
 	}))
@@ -1240,8 +1250,10 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
 		TargetURL: testTargetURL,
 		AccessPolicy: &AccessPolicy{
-			IPAllowlist: []string{"10.0.0.0/8", "192.168.0.0/16"},
-			GeoDenylist: []string{"CN"},
+			IPAllowlist:  []string{"10.0.0.0/8", "192.168.0.0/16"},
+			IPDenylist:   []string{"203.0.113.0/24"},
+			GeoAllowlist: []string{"US", "CA"},
+			GeoDenylist:  []string{"CN"},
 		},
 	})
 	if err != nil {
@@ -1252,6 +1264,12 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 	}
 	if len(got.AccessPolicy.IPAllowlist) != 2 {
 		t.Errorf("response IPAllowlist: got %v", got.AccessPolicy.IPAllowlist)
+	}
+	if len(got.AccessPolicy.IPDenylist) != 1 {
+		t.Errorf("response IPDenylist: got %v", got.AccessPolicy.IPDenylist)
+	}
+	if len(got.AccessPolicy.GeoAllowlist) != 2 {
+		t.Errorf("response GeoAllowlist: got %v", got.AccessPolicy.GeoAllowlist)
 	}
 	if len(got.AccessPolicy.GeoDenylist) != 1 {
 		t.Errorf("response GeoDenylist: got %v", got.AccessPolicy.GeoDenylist)
@@ -1266,6 +1284,56 @@ func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
 	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{})
 	if !errors.Is(err, ErrUpdateResourceNoFieldsSet) {
 		t.Fatalf("expected ErrUpdateResourceNoFieldsSet, got %v", err)
+	}
+}
+
+// TestHasAnyFieldSetCoversAllFields walks UpdateResourceInput's struct
+// fields via reflection and asserts that setting *each one alone* makes
+// hasAnyFieldSet return true. Catches the failure mode where a future
+// contributor adds a new mutable field but forgets to update
+// hasAnyFieldSet — without this test, a no-op PATCH that exercises only
+// the new field would slip past the guard.
+//
+// The reflection walk is intentionally narrow: pointer fields get a
+// pointer to a zero value of the target type; bool fields flip to true.
+// Skip the test (with a t.Skip) for any field whose type isn't covered;
+// adding such a field here is a nudge to extend the helper. Today's
+// surface (5 fields: Description, Alias, ClearAlias, CustomDomain,
+// AccessPolicy) is fully covered.
+func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
+	emptyStr := ""
+	cases := []struct {
+		name  string
+		input UpdateResourceInput
+	}{
+		{"Description", UpdateResourceInput{Description: &emptyStr}},
+		{"Alias", UpdateResourceInput{Alias: &emptyStr}},
+		{"ClearAlias", UpdateResourceInput{ClearAlias: true}},
+		{"CustomDomain", UpdateResourceInput{CustomDomain: &emptyStr}},
+		{"AccessPolicy", UpdateResourceInput{AccessPolicy: &AccessPolicy{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.input.hasAnyFieldSet() {
+				t.Errorf("hasAnyFieldSet should be true with %s set; got false", tc.name)
+			}
+		})
+	}
+
+	// Sanity check: empty struct returns false.
+	var empty UpdateResourceInput
+	if empty.hasAnyFieldSet() {
+		t.Error("hasAnyFieldSet on empty UpdateResourceInput should return false")
+	}
+
+	// Coverage tripwire: if a new field is added to UpdateResourceInput
+	// without updating both hasAnyFieldSet and the cases above, the
+	// reflect-based field count diverges from the case count.
+	got := reflect.TypeOf(UpdateResourceInput{}).NumField()
+	if got != len(cases) {
+		t.Errorf("UpdateResourceInput has %d fields but TestHasAnyFieldSetCoversAllFields covers %d — "+
+			"add the new field to both hasAnyFieldSet and this test's cases slice",
+			got, len(cases))
 	}
 }
 
@@ -1505,9 +1573,35 @@ func TestUpdateResourceWhitespaceIDRejected(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceTrimsSurroundingWhitespace pins the "trim then
+// validate AND send" contract — `" r_existing01 "` must hit the wire
+// as `/v1/resources/r_existing01`, NOT `/v1/resources/%20r_existing01%20`.
+// Catches the bug where TrimSpace validated one value but the
+// un-trimmed value went into the URL.
+func TestUpdateResourceTrimsSurroundingWhitespace(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	desc := testDescription
+	if _, err := c.UpdateResource(context.Background(), "  "+testResourceID+"  ", &UpdateResourceInput{
+		Description: &desc,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	wantPath := "/v1/resources/" + testResourceID
+	if gotPath != wantPath {
+		t.Errorf("trimmed value should hit the wire: got %q, want %q", gotPath, wantPath)
+	}
+}
+
 func TestUpdateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	_, err := c.UpdateResource(context.Background(), "r_x", nil)
+	_, err := c.UpdateResource(context.Background(), testResourceID, nil)
 	if !errors.Is(err, ErrUpdateResourceNilInput) {
 		t.Fatalf("expected ErrUpdateResourceNilInput, got %v", err)
 	}
@@ -1523,7 +1617,7 @@ func TestGetResourceByAlias(t *testing.T) {
 			t.Errorf("expected %s, got %s", wantPath, r.URL.Path)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_dev_dash01",
+			"resource_id": testResourceIDAlt,
 			"alias":       testAlias,
 			"target_url":  testTargetURL,
 			"type":        ResourceTypeURL,
@@ -1537,7 +1631,7 @@ func TestGetResourceByAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetResourceByAlias: %v", err)
 	}
-	if got.ResourceID != "r_dev_dash01" {
+	if got.ResourceID != testResourceIDAlt {
 		t.Errorf("got ResourceID %q", got.ResourceID)
 	}
 	if got.Alias != testAlias {
@@ -1565,7 +1659,7 @@ func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
 	var gotEscapedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEscapedPath = r.URL.EscapedPath()
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
 	}))
 	defer srv.Close()
 
@@ -1589,7 +1683,7 @@ func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
 	var gotEscapedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEscapedPath = r.URL.EscapedPath()
-		apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
 	}))
 	defer srv.Close()
 
@@ -1623,6 +1717,27 @@ func TestGetResourceByAliasWhitespaceRejected(t *testing.T) {
 	_, err := c.GetResourceByAlias(context.Background(), "   ")
 	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
 		t.Fatalf("expected ErrGetResourceByAliasEmpty on whitespace, got %v", err)
+	}
+}
+
+// TestGetResourceByAliasTrimsSurroundingWhitespace pins the
+// "trim then validate AND send" contract for the alias path
+// (mirror of TestUpdateResourceTrimsSurroundingWhitespace).
+func TestGetResourceByAliasTrimsSurroundingWhitespace(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.GetResourceByAlias(context.Background(), "  "+testAlias+"  "); err != nil {
+		t.Fatalf("GetResourceByAlias: %v", err)
+	}
+	wantPath := "/v1/resources/by-alias/" + testAlias
+	if gotPath != wantPath {
+		t.Errorf("trimmed value should hit the wire: got %q, want %q", gotPath, wantPath)
 	}
 }
 
