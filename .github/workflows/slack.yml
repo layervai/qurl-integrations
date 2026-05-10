@@ -108,10 +108,17 @@ jobs:
           cache: true
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned (matches cli.yml) — `@latest` makes the gate non-
+        # reproducible: a brand-new tool release can flip the scan red
+        # without any code change in this repo.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck
-        run: govulncheck ./...
+        # Scope: slack + shared only. Sibling apps' vulns are gated by
+        # their own workflows (cli.yml, etc.) and a Go-toolchain
+        # advisory like GO-2026-4971 applies to everyone — we don't
+        # want the slack PR to be the place those org-wide bumps land.
+        run: govulncheck ./apps/slack/... ./shared/...
 
   docker-check:
     name: Docker Build Check

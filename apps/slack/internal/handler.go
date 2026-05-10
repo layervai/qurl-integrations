@@ -24,6 +24,17 @@ const methodPost = "POST"
 
 const authFailureMessage = "Failed to authenticate. Please check your qURL API key configuration."
 
+// Path constants (keep in lockstep with cmd/main.go's mux registration).
+// Defined here so the handler dispatch switch + the log-classifier helper
+// + any future test assertions all reference the same literal once.
+const (
+	pathHealth           = "/health"
+	pathSlackCommands    = "/slack/commands"
+	pathSlackEvents      = "/slack/events"
+	pathSlackInteraction = "/slack/interactions"
+	pathOther            = "/other"
+)
+
 // sigFailureResponse is the terse body we return for every 401 from the
 // signature-verify path. Distinguishing which check failed is already
 // captured in the structured slog line; the wire body stays uniform.
@@ -73,22 +84,22 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 	slog.Info("received request", "path", req.Path, "method", req.HTTPMethod)
 
 	switch {
-	case req.Path == "/slack/commands" && req.HTTPMethod == methodPost:
+	case req.Path == pathSlackCommands && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleSlashCommand(ctx, req)
-	case req.Path == "/slack/events" && req.HTTPMethod == methodPost:
+	case req.Path == pathSlackEvents && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleEvent(req)
-	case req.Path == "/slack/interactions" && req.HTTPMethod == methodPost:
+	case req.Path == pathSlackInteraction && req.HTTPMethod == methodPost:
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
 		return h.handleInteraction(req)
-	case req.Path == "/health":
+	case req.Path == pathHealth:
 		return respond(http.StatusOK, map[string]string{"status": "ok"})
 	default:
 		return respond(http.StatusNotFound, map[string]string{"error": "not found"})
@@ -106,14 +117,24 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 // stuck or hostile client can't tie up a goroutine before the HMAC check
 // has any input to reject.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Resolve which Slack path this request is bound to from a
+	// fixed allow-list. We mux only on /health + /slack/{commands,events,
+	// interactions} (cmd/main.go), so any other inbound path is either a
+	// probe or a misconfig — we log it as `/other` so a hostile client
+	// can't plant CR/LF or attacker-chosen content into our log lines
+	// (gosec G706, log forgery via taint).
+	logPath := classifyPath(r.URL.Path)
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxHTTPBodyBytes+1))
 	if err != nil {
-		slog.Warn("http body read failed", "path", r.URL.Path, "error", err)
+		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
+		slog.Warn("http body read failed", "path", logPath, "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
 	if len(body) > maxHTTPBodyBytes {
-		slog.Warn("http body exceeds cap", "path", r.URL.Path, "limit_bytes", maxHTTPBodyBytes)
+		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
+		slog.Warn("http body exceeds cap", "path", logPath, "limit_bytes", maxHTTPBodyBytes)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 		return
 	}
@@ -141,7 +162,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.Handle(r.Context(), req)
 	if err != nil {
-		slog.Error("handler returned error", "path", r.URL.Path, "error", err)
+		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
+		slog.Error("handler returned error", "path", logPath, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -153,8 +175,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.WriteHeader(resp.StatusCode)
-	if _, werr := io.WriteString(w, resp.Body); werr != nil {
-		slog.Warn("response write failed", "path", r.URL.Path, "error", werr)
+	// resp.Body is the JSON envelope produced by `respond()` — every
+	// path through Handle goes through `json.Marshal`, so the byte
+	// slice is never user-supplied content. gosec G705 still flags
+	// the write because its taint analysis can't see through
+	// `json.Marshal`; the nolint is narrow and cites the specific rule.
+	if _, werr := w.Write([]byte(resp.Body)); werr != nil { //nolint:gosec // G705: resp.Body is the marshaled JSON envelope from respond(), never user content
+		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
+		slog.Warn("response write failed", "path", logPath, "error", werr)
+	}
+}
+
+// classifyPath maps a request URL path to a fixed-set log label so
+// caller-controlled bytes never reach the log line. The allow-list
+// matches the mux wiring in cmd/main.go — a request that hits any
+// other path 404s and gets logged as `/other` for traffic visibility
+// without leaking the attacker-chosen string.
+func classifyPath(p string) string {
+	switch p {
+	case pathHealth:
+		return pathHealth
+	case pathSlackCommands:
+		return pathSlackCommands
+	case pathSlackEvents:
+		return pathSlackEvents
+	case pathSlackInteraction:
+		return pathSlackInteraction
+	default:
+		return pathOther
 	}
 }
 
