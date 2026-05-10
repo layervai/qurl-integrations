@@ -218,8 +218,7 @@ const ids = {
   userSelect: `qurl_form_${NONCE}_user`,
   msgBtn: `qurl_form_${NONCE}_msg_btn`,
   msgModal: `qurl_form_${NONCE}_msg_modal`,
-  selfDestructBtn: `qurl_form_${NONCE}_destruct_btn`,
-  selfDestructModal: `qurl_form_${NONCE}_destruct_modal`,
+  selfDestructSelect: `qurl_form_${NONCE}_destruct_select`,
   expirySelect: `qurl_form_${NONCE}_expiry`,
   sendBtn: `qurl_form_${NONCE}_send`,
   cancelBtn: `qurl_form_${NONCE}_cancel`,
@@ -902,27 +901,24 @@ describe('handleSend — Step 3: final form', () => {
   }
 
   // -------------------------------------------------------------------------
-  // Self-destruct timer (viewer_ttl_seconds bot-side capture)
+  // Self-destruct timer (viewer_ttl_seconds bot-side capture via dropdown)
   // -------------------------------------------------------------------------
 
-  it('self-destruct modal: valid value persists into the upload call', async () => {
-    // Form-loop sequence: location-init → self-destruct button click
-    // (modal returns "30") → user-select → send. The handleSend
-    // back-half runs uploadJsonToConnector with selfDestructSeconds
-    // threaded as the last argument.
+  it('self-destruct dropdown: picking a preset persists into the upload call', async () => {
+    // Form-loop sequence: location-init → self-destruct select (value="30")
+    // → user-select → send. The handleSend back-half runs
+    // uploadJsonToConnector with selfDestructSeconds threaded as the
+    // last argument.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30')),
-    });
+    const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructPick, sendBtn],
     });
     await cmd.execute(interaction);
-    expect(destructBtn.showModal).toHaveBeenCalled();
     // uploadJsonToConnector signature: (payload, filename, apiKey, selfDestructSeconds)
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map' }),
@@ -932,117 +928,114 @@ describe('handleSend — Step 3: final form', () => {
     );
   });
 
-  it('self-destruct modal: invalid value re-renders the form with a warning', async () => {
-    // "2" is not in the preset set. The handler must NOT abort the flow;
-    // it re-renders the form with an inline warning that lists the
-    // allowed options so the user can correct the value or skip the
-    // timer entirely.
+  it('self-destruct dropdown: picking a preset re-renders the form with a visible preview line', async () => {
+    // After the user picks a preset, the form re-render must include
+    // "_Self-destruct timer:_ <preset label>" so they have a visible
+    // echo of their choice (parity with the personal-message preview).
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('2')),
-    });
+    const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, cancel],
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructPick, cancel],
     });
     await cmd.execute(interaction);
-    const submit = await destructBtn.awaitModalSubmit.mock.results[0].value;
-    expect(submit.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/Self-destruct.*1\/2 second/),
-    }));
-    // Subsequent cancel — back-half should not run.
-    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
-  });
-
-  it('self-destruct modal: setting a value re-renders the form with a visible preview line', async () => {
-    // After the user submits a valid duration, the form re-render must
-    // include "_Self-destruct timer:_ <preset label>" so the user has
-    // a visible echo of their choice (parity with the personal-message
-    // preview). Without this, the only state signal is the button label,
-    // which is harder to spot at a glance.
-    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
-    const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
-    });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30 seconds')),
-    });
-    const cancel = makeCompInt(ids.cancelBtn);
-    const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, cancel],
-    });
-    await cmd.execute(interaction);
-    const submit = await destructBtn.awaitModalSubmit.mock.results[0].value;
-    expect(submit.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(destructPick.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('_Self-destruct timer:_ 30 seconds'),
     }));
   });
 
-  it('self-destruct modal: friendly label "5 minutes" parses to 300s', async () => {
-    // The placeholder advertises the friendly label form; users typing
-    // the label exactly must be honored without falling through to the
-    // option-list error.
-    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
-    const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
-    });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('5 minutes')),
-    });
-    const sendBtn = makeCompInt(ids.sendBtn);
-    const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
-    });
-    await cmd.execute(interaction);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'google-map' }),
-      'location.json',
-      expect.any(String),
-      300,
-    );
+  it('self-destruct dropdown: every preset value threads through to the upload call', async () => {
+    // Pin every preset's seconds value end-to-end so a future option-set
+    // change drops a value the connector is supposed to receive. Iterate
+    // and clear the cooldown between runs (cmd.execute sets it on each
+    // run; the next call fast-bails on cooldown without invoking the
+    // back-half).
+    const presetCases = [
+      { value: '0.5', expected: 0.5 },
+      { value: '1', expected: 1 },
+      { value: '5', expected: 5 },
+      { value: '300', expected: 300 },
+      { value: '3600', expected: 3600 },
+    ];
+    for (const { value, expected } of presetCases) {
+      mockUploadJsonToConnector.mockClear();
+      sendCooldowns.clear();
+      const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+      const userSelect = makeCompInt(ids.userSelect, {
+        users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      });
+      const destructPick = makeCompInt(ids.selfDestructSelect, { values: [value] });
+      const sendBtn = makeCompInt(ids.sendBtn);
+      const interaction = makeInteraction({
+        awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructPick, sendBtn],
+      });
+      await cmd.execute(interaction);
+      expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'google-map' }),
+        'location.json',
+        expect.any(String),
+        expected,
+      );
+    }
   });
 
-  it('self-destruct modal: empty submit AFTER a set value actually clears (not just stays null)', async () => {
-    // Two destruct-button clicks: first sets "30", second submits empty.
-    // The eventual upload call must carry null — proving the empty-submit
-    // path actively clears the previous value, rather than just being a
-    // no-op that happens to leave the trivially-already-null initial
-    // state intact.
+  it('self-destruct dropdown: "no-timer" option AFTER a preset clears the timer', async () => {
+    // Two select-menu interactions: first picks "30", second picks the
+    // no-timer sentinel. The eventual upload must carry null — pins the
+    // active-clear semantic rather than the trivially-already-null
+    // initial state.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructBtnSet = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30')),
-    });
-    const destructBtnClear = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('')),
-    });
+    const destructSet = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
+    const destructClear = makeCompInt(ids.selfDestructSelect, { values: ['no-timer'] });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
       awaitQueue: [
         locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')),
         targetUser, userSelect,
-        destructBtnSet,
-        destructBtnClear,
+        destructSet,
+        destructClear,
         sendBtn,
       ],
     });
     await cmd.execute(interaction);
-    // Mid-flight: after the SET submit, the form preview reflects "30 seconds".
-    const setSubmit = await destructBtnSet.awaitModalSubmit.mock.results[0].value;
-    expect(setSubmit.update).toHaveBeenCalledWith(expect.objectContaining({
+    // After the SET pick, preview shows "30 seconds".
+    expect(destructSet.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('_Self-destruct timer:_ 30 seconds'),
     }));
-    // After the CLEAR submit, the preview line is gone.
-    const clearSubmit = await destructBtnClear.awaitModalSubmit.mock.results[0].value;
-    expect(clearSubmit.update).toHaveBeenCalledWith(expect.objectContaining({
+    // After the CLEAR pick, the preview line is gone.
+    expect(destructClear.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.not.stringContaining('_Self-destruct timer:_'),
     }));
-    // And the eventual upload carries null — the actual contract under test.
+    // And the eventual upload carries null.
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+      expect.any(String),
+      null,
+    );
+  });
+
+  it('self-destruct dropdown: unexpected select value falls back to no-timer (forged interaction defense)', async () => {
+    // The option set is fixed by the form, but a forged component
+    // interaction could send any value. selfDestructSelectValueToSeconds
+    // returns null for anything not in {no-timer, preset values} so the
+    // safe default ("no timer") wins over a half-set state.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructForged = makeCompInt(ids.selfDestructSelect, { values: ['7200'] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructForged, sendBtn],
+    });
+    await cmd.execute(interaction);
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map' }),
       'location.json',
@@ -1339,7 +1332,7 @@ describe('handleSend — end-to-end happy paths', () => {
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalled();
   });
 
-  it('file send: self-destruct timer threads from modal into downloadAndUpload', async () => {
+  it('file send: self-destruct preset threads from dropdown into downloadAndUpload', async () => {
     // Symmetric with the location-path positive test above. The location
     // path's self-destruct test pins uploadJsonToConnector — this one
     // pins downloadAndUpload so a future refactor that drops the arg
@@ -1349,14 +1342,12 @@ describe('handleSend — end-to-end happy paths', () => {
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('5 minutes')),
-    });
+    const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['300'] });
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
     const interaction = makeInteraction({
-      awaitQueue: [fileInit, targetUser, userSelect, destructBtn, sendBtn],
+      awaitQueue: [fileInit, targetUser, userSelect, destructPick, sendBtn],
       awaitMessages,
     });
     await cmd.execute(interaction);
