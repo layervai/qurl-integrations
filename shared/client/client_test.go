@@ -1062,6 +1062,22 @@ func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
 	}
 }
 
+// TestCreateResourceTunnelTypeRejectsTargetURL pins the inverse of
+// TestCreateResourceTunnelTypeAcceptsEmptyTargetURL — a tunnel resource
+// with a non-empty TargetURL is almost always a stale field from
+// copy-pasted literals; failing fast yields a clearer error than a
+// silent server-side discard.
+func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type:      ResourceTypeTunnel,
+		TargetURL: "https://internal.example.com",
+	})
+	if !errors.Is(err, ErrCreateResourceTunnelRejectsTargetURL) {
+		t.Fatalf("expected ErrCreateResourceTunnelRejectsTargetURL, got %v", err)
+	}
+}
+
 // TestCreateResourceAccessPolicyRoundTrip pins the AccessPolicy decoding
 // path — if the server schema renames a subfield (ip_allowlist →
 // ip_allow, etc.) the round-trip would silently drop it without this
@@ -1493,5 +1509,22 @@ func TestUpdateResourceAliasAndClearAliasMutuallyExclusive(t *testing.T) {
 	})
 	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
 		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive, got %v", err)
+	}
+}
+
+// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst pins
+// the validation-order contract: when a caller passes both `Alias: &""`
+// AND `ClearAlias: true`, the structural conflict (mutual exclusion)
+// is the more actionable error and fires first. The empty-pointer
+// footgun guard fires only when Alias is the only field in conflict.
+func TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	empty := ""
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias:      &empty,
+		ClearAlias: true,
+	})
+	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
+		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive (exclusivity beats empty-pointer), got %v", err)
 	}
 }

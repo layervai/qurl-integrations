@@ -88,6 +88,13 @@ var ErrCreateResourceNilInput = errors.New("client: CreateResource input is nil"
 // compute the `(owner_id, target_url_hash)` idempotency key.
 var ErrCreateResourceRequiresTargetURL = errors.New("client: CreateResource requires TargetURL")
 
+// ErrCreateResourceTunnelRejectsTargetURL is returned by CreateResource
+// when Type is "tunnel" but TargetURL is non-empty. The server ignores
+// TargetURL on tunnel creates, but a non-empty value is almost always
+// a stale field from copy-pasted CreateResourceInput literals — fail
+// fast for a clearer error than a silent server discard.
+var ErrCreateResourceTunnelRejectsTargetURL = errors.New("client: CreateResource Type=tunnel must not set TargetURL (server ignores it)")
+
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
 var ErrUpdateResourceEmptyID = errors.New("client: UpdateResource resourceID is empty")
@@ -641,13 +648,23 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 	if input == nil {
 		return nil, ErrCreateResourceNilInput
 	}
-	// TargetURL is required for type=url (the default and the field used
-	// to compute the server's `(owner_id, target_url_hash)` idempotency
-	// key). For type=tunnel the server ignores TargetURL — don't reject
-	// the request just because it's empty. Server returns 400 either way
-	// for the type=url branch; failing fast saves a round-trip.
-	if input.Type != ResourceTypeTunnel && input.TargetURL == "" {
-		return nil, ErrCreateResourceRequiresTargetURL
+	// TargetURL handling by Type:
+	//   - "" / [ResourceTypeURL] — TargetURL required (uniquely
+	//     identifies the resource on `(owner_id, target_url_hash)`).
+	//   - [ResourceTypeTunnel]   — TargetURL must be empty (server
+	//     ignores it; a stale value usually indicates copy-pasted
+	//     literals).
+	// Server returns 400 either way; failing fast saves a round-trip
+	// and yields a typed Go error.
+	switch input.Type {
+	case "", ResourceTypeURL:
+		if input.TargetURL == "" {
+			return nil, ErrCreateResourceRequiresTargetURL
+		}
+	case ResourceTypeTunnel:
+		if input.TargetURL != "" {
+			return nil, ErrCreateResourceTunnelRejectsTargetURL
+		}
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -684,11 +701,16 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	if !input.hasAnyFieldSet() {
 		return nil, ErrUpdateResourceNoFieldsSet
 	}
-	if input.Alias != nil && *input.Alias == "" {
-		return nil, ErrUpdateResourceAliasEmpty
-	}
+	// Order: the exclusivity check runs before the empty-pointer
+	// footgun guard. A caller passing both `Alias: &""` and
+	// `ClearAlias: true` learns about the structural conflict first
+	// (the actionable fix is "pick one"); the empty-pointer error
+	// is the footgun guard for the single-field case.
 	if input.Alias != nil && input.ClearAlias {
 		return nil, ErrUpdateResourceAliasClearExclusive
+	}
+	if input.Alias != nil && *input.Alias == "" {
+		return nil, ErrUpdateResourceAliasEmpty
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
