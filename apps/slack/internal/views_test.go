@@ -21,8 +21,8 @@ func TestHelpResponse_ValidJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v\nbody: %s", err, raw)
 	}
-	if got["response_type"] != "ephemeral" {
-		t.Errorf("response_type = %v, want ephemeral", got["response_type"])
+	if got["response_type"] != responseTypeEphemeral {
+		t.Errorf("response_type = %v, want %s", got["response_type"], responseTypeEphemeral)
 	}
 	blocks, ok := got["blocks"].([]any)
 	if !ok {
@@ -162,7 +162,6 @@ func TestErrorResponse_Shape(t *testing.T) {
 		{"fresh response", false},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			raw, err := ErrorResponse("alias not found", tc.replace)
