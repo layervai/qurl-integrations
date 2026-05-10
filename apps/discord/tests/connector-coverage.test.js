@@ -279,3 +279,155 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
       .rejects.toThrow('QURL_API_KEY is not configured');
   });
 });
+
+// Guard the truncation invariant from md5Prefix(): the bot must never log the
+// full hash. These tests pin all three upload paths to the helper so a future
+// caller can't quietly revert to `hash: result.hash`. See md5Prefix() in
+// connector.js for the "why."
+describe('Connector client — MD5 hash truncation in upload logs', () => {
+  let connector;
+  let logger;
+
+  // 32-char hex string. The first 8 chars are what the bot is allowed to log.
+  const FULL_MD5 = '5d41402abc4b2a76b9719d911017c592';
+  const MD5_PREFIX = '5d41402a';
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_API_KEY: 'test-key',
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+      audit: jest.fn(),
+    }));
+    connector = require('../src/connector');
+    logger = require('../src/logger');
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function assertNoFullHashLeaked() {
+    for (const call of logger.info.mock.calls) {
+      const meta = call[1] ?? {};
+      expect(JSON.stringify(meta)).not.toContain(FULL_MD5);
+      expect(meta).not.toHaveProperty('hash');
+    }
+  }
+
+  it('uploadToConnector logs md5_prefix (8 chars), never the full hash', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: jest.fn(() => '10') },
+        arrayBuffer: async () => new ArrayBuffer(10),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: FULL_MD5, resource_id: 'r1' }),
+      });
+
+    await connector.uploadToConnector(
+      'https://cdn.discordapp.com/file.png', 'file.png', 'image/png',
+    );
+
+    expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
+      md5_prefix: MD5_PREFIX,
+      resource_id: 'r1',
+    });
+    assertNoFullHashLeaked();
+  });
+
+  it('reUploadBuffer logs md5_prefix (8 chars), never the full hash', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ success: true, hash: FULL_MD5, resource_id: 'r2' }),
+    });
+
+    await connector.reUploadBuffer(Buffer.from('payload'), 'file.png', 'image/png');
+
+    expect(logger.info).toHaveBeenCalledWith('Re-uploaded to connector (new resource)', {
+      md5_prefix: MD5_PREFIX,
+      resource_id: 'r2',
+    });
+    assertNoFullHashLeaked();
+  });
+
+  it('uploadJsonToConnector logs md5_prefix (8 chars), never the full hash', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ success: true, hash: FULL_MD5, resource_id: 'r3' }),
+    });
+
+    await connector.uploadJsonToConnector(
+      { type: 'google-map', url: 'https://maps.app.goo.gl/x' },
+      'location.json',
+    );
+
+    expect(logger.info).toHaveBeenCalledWith('Uploaded JSON to connector', {
+      md5_prefix: MD5_PREFIX,
+      resource_id: 'r3',
+    });
+    assertNoFullHashLeaked();
+  });
+
+  it('md5_prefix is undefined (not crash) when connector returns no hash', async () => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: jest.fn(() => '10') },
+        arrayBuffer: async () => new ArrayBuffer(10),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, resource_id: 'r4' }),
+      });
+
+    await connector.uploadToConnector(
+      'https://cdn.discordapp.com/file.png', 'file.png', 'image/png',
+    );
+
+    expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
+      md5_prefix: undefined,
+      resource_id: 'r4',
+    });
+    assertNoFullHashLeaked();
+  });
+
+  // Pins the `typeof hash === 'string'` guard against future schema drift
+  // where the connector returns a non-string non-undefined value (number,
+  // null, Buffer, ...). The guard must short-circuit to undefined; without
+  // it, `?.slice` on a Buffer would have produced a usable byte slice.
+  it.each([
+    ['null', null],
+    ['number', 12345],
+    ['object', { md5: 'embedded' }],
+  ])('md5_prefix is undefined when connector returns hash as %s', async (_label, hashValue) => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: jest.fn(() => '10') },
+        arrayBuffer: async () => new ArrayBuffer(10),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: hashValue, resource_id: 'r5' }),
+      });
+
+    await connector.uploadToConnector(
+      'https://cdn.discordapp.com/file.png', 'file.png', 'image/png',
+    );
+
+    expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
+      md5_prefix: undefined,
+      resource_id: 'r5',
+    });
+    assertNoFullHashLeaked();
+  });
+});

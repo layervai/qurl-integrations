@@ -6,6 +6,16 @@ const { sanitizeFilename } = require('./utils/sanitize');
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 
+// Truncate the connector's MD5 of an uploaded file before logging. The full
+// hash is treated as sensitive in our broader infrastructure; see internal
+// security docs for the threat model. 8 hex chars preserves cross-system
+// correlation. Single chokepoint — every upload-success log path goes through
+// this helper. The truncation is load-bearing; don't inline `result.hash`
+// back into a log call.
+function md5Prefix(hash) {
+  return typeof hash === 'string' ? hash.slice(0, 8) : undefined;
+}
+
 // Fetch from a Discord CDN URL with manual redirect handling. `redirect:
 // 'error'` would refuse legitimate Discord redirects (cdn.discordapp.com
 // sometimes 302s to media.discordapp.net). This walks the redirect chain
@@ -208,7 +218,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   }
 
   logger.info('Uploaded to connector', {
-    hash: result.hash,
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
@@ -249,7 +259,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   }
 
   logger.info('Re-uploaded to connector (new resource)', {
-    hash: result.hash,
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
@@ -364,7 +374,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
   }
 
   logger.info('Uploaded JSON to connector', {
-    hash: result.hash,
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
