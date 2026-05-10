@@ -736,10 +736,12 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
 // must first resolve via GetResourceByAlias.
 //
-// Validation order (first match wins): empty resourceID → nil input →
-// no-fields-set → Alias/ClearAlias exclusivity → empty-Alias-pointer
-// guard. The exclusivity-before-empty-pointer leg is pinned by
-// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst.
+// Validation order (first match wins): trim resourceID → empty
+// resourceID → nil input → no-fields-set → trim Alias → exclusivity
+// → empty-Alias-pointer. The exclusivity-before-empty-pointer leg is
+// pinned by TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst;
+// the alias-trim leg is pinned by TestUpdateResourceTrimsAliasPointer
+// and TestUpdateResourceWhitespaceOnlyAliasRejected.
 //
 // Retry semantics: do() retries 5xx/429 with the buffered body, so a
 // successfully-applied PATCH that returns 502 will be re-applied on retry.
@@ -768,10 +770,15 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 		return nil, ErrUpdateResourceNoFieldsSet
 	}
 	// Trim *input.Alias for symmetry with the resourceID and
-	// GetResourceByAlias trim contracts. Make a defensive copy of
-	// input so the trim doesn't mutate the caller's struct, then
-	// re-point Alias at the trimmed value. The trimmed string is what
-	// hits the wire and what the empty-pointer guard below sees.
+	// GetResourceByAlias trim contracts. Shallow-copy input so the
+	// trim doesn't mutate the caller's struct, then re-point Alias at
+	// the trimmed value. The trimmed string is what hits the wire and
+	// what the empty-pointer guard below sees.
+	//
+	// Note: this is a shallow copy — pointer fields like AccessPolicy
+	// still alias the caller's data. Today only Alias gets retargeted;
+	// adding more normalization (e.g. trimming Description/CustomDomain)
+	// would need either a deeper copy or per-field copy-on-mutate.
 	if input.Alias != nil {
 		trimmed := strings.TrimSpace(*input.Alias)
 		copyInput := *input
