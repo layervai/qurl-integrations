@@ -149,11 +149,23 @@ describe('utils/time', () => {
       }
     });
 
-    it('rejects oversized input (DoS bound)', () => {
+    it('rejects oversized input (DoS bound) and surfaces the limit', () => {
       const huge = '9'.repeat(33);
       const r = parseSelfDestructSeconds(huge);
       expect(r.seconds).toBeNull();
-      expect(r.error).toMatch(/too long/i);
+      // The handler renders this as "Self-destruct timer ${error}" so the
+      // error reads as a verb phrase ("is too long (max N characters).").
+      expect(r.error).toMatch(/^is too long/);
+      expect(r.error).toContain('32 characters');
+    });
+
+    it('error message reads as a verb phrase ("must be one of …") so the handler can frame it cleanly', () => {
+      // Both the rejection and the length-cap errors are concatenated by
+      // the modal handler as "Self-destruct timer ${error}". Pinning the
+      // shape here so a parser change can't break the rendered warning.
+      expect(parseSelfDestructSeconds('999').error).toMatch(/^must be one of:/);
+      expect(parseSelfDestructSeconds('999').error).toContain('1/2 second');
+      expect(parseSelfDestructSeconds('999').error).toContain('1 hour');
     });
   });
 
@@ -172,12 +184,13 @@ describe('utils/time', () => {
       expect(formatSelfDestructLabel(0.75)).toBe('0.75s');
     });
 
-    it('falls back gracefully on non-finite stored values (corrupted DB row)', () => {
+    it('renders "(invalid)" for non-finite stored values (corrupted DB row)', () => {
       // Defense against findPresetBySeconds receiving NaN/Infinity from a
-      // backfilled row — the formatter must not throw or substitute a
-      // preset, just render the raw value compactly.
-      expect(formatSelfDestructLabel(NaN)).toBe('NaNs');
-      expect(formatSelfDestructLabel(Infinity)).toBe('Infinitys');
+      // backfilled row — never substitute a preset, never throw, never
+      // surface the literal "NaNs"/"Infinitys" strings to the user.
+      expect(formatSelfDestructLabel(NaN)).toBe('(invalid)');
+      expect(formatSelfDestructLabel(Infinity)).toBe('(invalid)');
+      expect(formatSelfDestructLabel(-Infinity)).toBe('(invalid)');
     });
   });
 

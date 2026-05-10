@@ -957,6 +957,30 @@ describe('handleSend — Step 3: final form', () => {
     expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
   });
 
+  it('self-destruct modal: setting a value re-renders the form with a visible preview line', async () => {
+    // After the user submits a valid duration, the form re-render must
+    // include "_Self-destruct timer:_ <preset label>" so the user has
+    // a visible echo of their choice (parity with the personal-message
+    // preview). Without this, the only state signal is the button label,
+    // which is harder to spot at a glance.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30 seconds')),
+    });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, cancel],
+    });
+    await cmd.execute(interaction);
+    const submit = await destructBtn.awaitModalSubmit.mock.results[0].value;
+    expect(submit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('_Self-destruct timer:_ 30 seconds'),
+    }));
+  });
+
   it('self-destruct modal: friendly label "5 minutes" parses to 300s', async () => {
     // The placeholder advertises the friendly label form; users typing
     // the label exactly must be honored without falling through to the

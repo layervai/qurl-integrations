@@ -1307,6 +1307,9 @@ async function handleSend(interaction, apiKey) {
       const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
       content += `\n\n_Personal message:_ "${preview}"`;
     }
+    if (selfDestructSeconds) {
+      content += `\n\n_Self-destruct timer:_ ${formatSelfDestructLabel(selfDestructSeconds)}`;
+    }
     return content;
   };
 
@@ -1598,11 +1601,11 @@ async function handleSend(interaction, apiKey) {
       if (error) {
         // Inline warning on the form rather than killing the flow —
         // the user keeps their other selections and can correct the
-        // value with another click. The parser error already carries
-        // the full option list; the modal label already advertises
-        // "blank = no timer", so no extra prompt is needed here.
+        // value with another click. The parser error reads as a verb
+        // phrase ("must be one of: …") so the prefix here is just the
+        // field name, no colon-on-colon repetition.
         await destructSubmit.update({
-          content: formContent({ warning: `Self-destruct: ${error}` }),
+          content: formContent({ warning: `Self-destruct timer ${error}` }),
           components: formRows(),
         }).catch(logIgnoredDiscordErr);
       } else {
@@ -2282,6 +2285,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // qurl-integrations-infra#309). The collapsed event keeps UploadCount
   // = "number of fully-prepared sends" regardless of kind composition.
   const preparedKinds = [];
+  // Inherit the original send's self-destruct timer so additional
+  // recipients see the same vanish behavior. Persisted as a REAL/Number
+  // column; both stores return null when unset. Hoisted above the file/
+  // location branches because both pull the same value — the branches
+  // can both fire for a sendConfig that had both kinds, and a per-branch
+  // recompute would invite drift.
+  const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
   try {
     if (hasFile) {
       // Re-download from the stored Discord CDN URL, then upload a fresh
@@ -2315,10 +2325,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       let fileBuffer = null;
       const filename = sendConfig.attachment_name || 'file';
       const contentType = sendConfig.attachment_content_type || 'application/octet-stream';
-      // Inherit the original send's self-destruct timer so additional
-      // recipients see the same vanish behavior. Persisted as a REAL/
-      // Number column; sqlite returns null when unset, DDB likewise.
-      const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
 
       try {
         // Initial download+upload gives us the buffer for subsequent re-uploads.
@@ -2366,14 +2372,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
-      // Same inheritance as the file branch above — keeps the timer
-      // contract uniform across resource types.
-      const inheritedDestructLoc = sendConfig.self_destruct_seconds ?? null;
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestructLoc);
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestructLoc),
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
         expiresAt,
         recipientCount: newRecipients.length,
         apiKey,

@@ -99,9 +99,13 @@ function parseSelfDestructSeconds(raw) {
   // Length cap bounds CPU on hostile input before any parse. The modal
   // already enforces SELF_DESTRUCT_INPUT_MAX_LENGTH via setMaxLength, so
   // a string longer than this is either an upstream caller misuse or a
-  // forged interaction — fail loud.
+  // forged interaction — fail loud, but include the limit so anyone
+  // looking at the rendered warning has the constraint in front of them.
   if (trimmed.length > SELF_DESTRUCT_INPUT_MAX_LENGTH) {
-    return { seconds: null, error: 'Value is too long.' };
+    return {
+      seconds: null,
+      error: `is too long (max ${SELF_DESTRUCT_INPUT_MAX_LENGTH} characters).`,
+    };
   }
 
   const canonical = canonicalize(trimmed);
@@ -121,19 +125,21 @@ function parseSelfDestructSeconds(raw) {
 
   return {
     seconds: null,
-    error: `Choose one of: ${SELF_DESTRUCT_OPTIONS_TEXT}.`,
+    error: `must be one of: ${SELF_DESTRUCT_OPTIONS_TEXT}.`,
   };
 }
 
 // formatSelfDestructLabel — renders a stored seconds value as the matching
 // preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
 // echo what the user picked. Falls back to a compact "Ns" rendering for
-// any seconds value that isn't a known preset, which is unreachable today
-// but defends against a future caller (e.g., a backfilled config) feeding
-// in an off-preset value.
+// any finite off-preset value (unreachable through the modal today but
+// defends against a backfilled config). Non-finite (NaN/Infinity) returns
+// "(invalid)" so a corrupted DB row doesn't surface as the literal string
+// "NaNs" / "Infinitys" in the button label or modal prefill.
 function formatSelfDestructLabel(seconds) {
   const match = findPresetBySeconds(seconds);
   if (match) return match.label;
+  if (!Number.isFinite(seconds)) return '(invalid)';
   return `${seconds}s`;
 }
 
