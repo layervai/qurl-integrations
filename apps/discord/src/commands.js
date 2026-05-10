@@ -1307,7 +1307,10 @@ async function handleSend(interaction, apiKey) {
       const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
       content += `\n\n_Personal message:_ "${preview}"`;
     }
-    if (selfDestructSeconds) {
+    // Same isFinite + > 0 invariant the modal prefill uses — a
+    // corrupted DDB row carrying Infinity is truthy and would otherwise
+    // surface as "_Self-destruct timer:_ (invalid)" in the form preview.
+    if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
       content += `\n\n_Self-destruct timer:_ ${formatSelfDestructLabel(selfDestructSeconds)}`;
     }
     return content;

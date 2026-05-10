@@ -198,6 +198,22 @@ describe('utils/time', () => {
       expect(formatSelfDestructLabel(0.75)).toBe('0.75s');
     });
 
+    it('format → parse round-trips every preset (re-edit modal preserves the value)', () => {
+      // The modal's setValue prefill uses formatSelfDestructLabel(seconds)
+      // when re-opening to edit. Submitting that prefilled label without
+      // changing it must parse back to the same seconds — otherwise a
+      // user re-opening the modal and hitting submit would silently
+      // change the timer to something else (or clear it). Pin every
+      // preset.
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        const formatted = formatSelfDestructLabel(preset.seconds);
+        expect(parseSelfDestructSeconds(formatted)).toEqual({
+          seconds: preset.seconds,
+          error: null,
+        });
+      }
+    });
+
     it('renders "(invalid)" for non-finite stored values (corrupted DB row)', () => {
       // Defense against findPresetBySeconds receiving NaN/Infinity from a
       // backfilled row — never substitute a preset, never throw, never

@@ -80,7 +80,10 @@ function findPresetByLabel(canonical) {
 }
 
 function findPresetBySeconds(n) {
-  if (!Number.isFinite(n)) return null;
+  // No explicit isFinite guard — NaN is never === anything, so the loop
+  // returns null naturally for it. ±Infinity also fails the equality
+  // check against every (finite) preset. formatSelfDestructLabel does
+  // its own non-finite handling for the "(invalid)" fallback.
   for (const preset of SELF_DESTRUCT_PRESETS) {
     if (n === preset.seconds) return preset;
   }

@@ -162,7 +162,10 @@ function connectorAuthHeaders(apiKey) {
 // field name. The connector validates the value (PR #477); we forward
 // it as a string and let the connector own the contract.
 function appendViewerTtl(form, viewerTtlSeconds) {
-  if (typeof viewerTtlSeconds === 'number' && Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
+  // Number.isFinite already filters non-numbers (Number.isFinite('30') is
+  // false), so the typeof guard would be redundant. Strict positive-finite
+  // is the same invariant the modal-prefill setValue uses.
+  if (Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
     form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
   }
 }
