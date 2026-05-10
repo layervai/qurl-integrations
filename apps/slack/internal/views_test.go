@@ -101,12 +101,67 @@ func TestSetAliasRebindModal_Shape(t *testing.T) {
 	}
 }
 
-// TestAdminClaimModal_PrivateValueOnCode is the load-bearing
-// security fence: the bootstrap-code input MUST have
-// `private_value: true` so Slack masks it in the UI and elides it
-// from view_submission audit logs. A regression that drops this
-// flag re-opens Blocker #3.
-func TestAdminClaimModal_PrivateValueOnCode(t *testing.T) {
+// TestSetAliasRebindModal_PrivateMetadataIsJSON fences the
+// `private_metadata` encoding contract. The value must round-trip
+// through `json.Unmarshal` into a [SetAliasRebindMetadata] — the
+// view-submission handler in PR-3c.3+ depends on this shape. An
+// alias name containing `=` (allowed by qurl-service) would have
+// broken the previous `key=value` ad-hoc encoding.
+func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		alias string
+	}{
+		{"plain alias", "prod-db"},
+		{"alias with equals (would have broken k=v)", "key=val"},
+		{"alias with ampersand", "a&b"},
+		{"alias with quote", `q"db`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := SetAliasRebindModal(tc.alias, "old", "new")
+			if err != nil {
+				t.Fatalf("SetAliasRebindModal: %v", err)
+			}
+			var modal map[string]any
+			if err := json.Unmarshal(raw, &modal); err != nil {
+				t.Fatalf("modal JSON: %v", err)
+			}
+			pm, ok := modal["private_metadata"].(string)
+			if !ok {
+				t.Fatalf("private_metadata not a string: %T", modal["private_metadata"])
+			}
+			var meta SetAliasRebindMetadata
+			if err := json.Unmarshal([]byte(pm), &meta); err != nil {
+				t.Fatalf("private_metadata is not valid JSON: %v\nraw: %s", err, pm)
+			}
+			if meta.Alias != tc.alias {
+				t.Errorf("alias = %q, want %q", meta.Alias, tc.alias)
+			}
+		})
+	}
+}
+
+// TestAdminClaimModal_StableIDsAndNoFakeMasking is the load-bearing
+// security fence for Blocker #3 ("no plaintext bootstrap codes
+// anywhere user-visible"). Because Slack's Block Kit has no
+// input-masking primitive (no `private_value`, no `secret`, no
+// `masked` — verified against api.slack.com/reference), the
+// mitigation lives at the bot's logging boundary: the handler
+// middleware redacts `state.values[blockIDClaimCode]` before any
+// view_submission payload is logged. This test fences the contract
+// that boundary depends on:
+//
+//  1. The block_id is exactly [blockIDClaimCode] (single source of
+//     truth in [RedactedSubmissionBlockIDs]).
+//  2. The action_id is exactly [actionIDClaimCode] (so the
+//     submission handler can pull the value out by a known key).
+//  3. The element does NOT carry a misleading `private_value` /
+//     `masked` / `secret` flag that would create a false sense of
+//     security at review time.
+func TestAdminClaimModal_StableIDsAndNoFakeMasking(t *testing.T) {
 	t.Parallel()
 	raw, err := AdminClaimModal()
 	if err != nil {
@@ -123,7 +178,7 @@ func TestAdminClaimModal_PrivateValueOnCode(t *testing.T) {
 		t.Errorf("callback_id = %v, want %s", got["callback_id"], callbackIDAdminClaim)
 	}
 	blocks, _ := got["blocks"].([]any)
-	var foundPrivate bool
+	var foundClaimBlock bool
 	for _, b := range blocks {
 		m, ok := b.(map[string]any)
 		if !ok || m["type"] != "input" {
@@ -139,13 +194,23 @@ func TestAdminClaimModal_PrivateValueOnCode(t *testing.T) {
 		if el["action_id"] != actionIDClaimCode {
 			t.Errorf("action_id = %v, want %s", el["action_id"], actionIDClaimCode)
 		}
-		if pv, ok := el["private_value"].(bool); !ok || !pv {
-			t.Errorf("private_value = %v (type %T), want true", el["private_value"], el["private_value"])
+		// Slack would silently accept any of these keys and ignore
+		// them — leaving the bot exposed while review thinks the
+		// field is masked. Fail loudly if any of them sneak back in.
+		for _, fake := range []string{"private_value", "masked", "secret", "is_password"} {
+			if _, present := el[fake]; present {
+				t.Errorf("element carries fictional masking key %q — Slack ignores this; redaction must live at the logging boundary, see RedactedSubmissionBlockIDs", fake)
+			}
 		}
-		foundPrivate = true
+		foundClaimBlock = true
 	}
-	if !foundPrivate {
+	if !foundClaimBlock {
 		t.Fatal("admin claim modal: input block for bootstrap code not found — Blocker #3 fence broken")
+	}
+	// Fence the redaction registry: the claim block_id must be in
+	// the set the handler middleware consults before logging.
+	if _, ok := RedactedSubmissionBlockIDs[blockIDClaimCode]; !ok {
+		t.Errorf("RedactedSubmissionBlockIDs missing %q — logging boundary will leak the bootstrap code", blockIDClaimCode)
 	}
 }
 

@@ -40,6 +40,8 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "create url legacy", text: "create https://example.com", wantSub: SubcmdCreate, wantTarget: "https://example.com", wantFlags: map[string]string{}},
 		{name: "list", text: "list", wantSub: SubcmdList, wantFlags: map[string]string{}},
 		{name: "channel ref without name", text: "admin allow <#C00001> $alias-name", wantSub: SubcmdAdmin, wantAdmin: AdminAllow, wantAlias: "alias-name", wantChannel: "C00001", wantFlags: map[string]string{}},
+		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
+		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
 	}
 
 	for _, tc := range cases {
@@ -102,6 +104,14 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "admin allow garbage positional", text: "admin allow notachannel notalias", wantErr: ErrMissingSigil},
 		{name: "admin revoke missing alias", text: "admin revoke", wantErr: ErrEmptyResource},
 		{name: "create without target", text: "create", wantErr: ErrMissingTarget},
+		{name: "alias with uppercase rejected", text: "get $ProdDB", wantErr: ErrInvalidAlias},
+		{name: "alias with leading hyphen rejected", text: "get $-foo", wantErr: ErrInvalidAlias},
+		{name: "alias with space (quoted) rejected", text: `get "$prod db"`, wantErr: ErrInvalidAlias},
+		{name: "alias with equals rejected", text: "setalias $a=b https://x.example", wantErr: ErrInvalidAlias},
+		{name: "admin policies with extra arg rejected", text: "admin policies extra-junk", wantErr: ErrUnexpectedArgument},
+		{name: "admin status with extra arg rejected", text: "admin status oops", wantErr: ErrUnexpectedArgument},
+		{name: "admin claim with positional rejected", text: "admin claim boot-code", wantErr: ErrUnexpectedArgument},
+		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke $alias extra", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {

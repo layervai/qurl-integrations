@@ -32,7 +32,9 @@ const callbackIDAdminClaim = "admin_claim_redeem"
 
 // blockIDClaimCode is the block ID for the bootstrap-code field in
 // the admin-claim modal. Stable so view-submission handlers can pull
-// the value out by a known key.
+// the value out by a known key — and so the bot's logging middleware
+// (PR-3c.3+) can match on it for the redaction set in
+// [RedactedSubmissionBlockIDs].
 const blockIDClaimCode = "claim_code_block"
 
 // actionIDClaimCode is the action ID for the bootstrap-code input
@@ -40,6 +42,29 @@ const blockIDClaimCode = "claim_code_block"
 // `state.values[block_id][action_id].value`, so both IDs need to be
 // stable.
 const actionIDClaimCode = "claim_code_input"
+
+// RedactedSubmissionBlockIDs is the set of view-submission `block_id`
+// values whose `state.values[block_id]` payload MUST NOT be logged or
+// otherwise echoed by the bot. The handler's logging middleware in
+// PR-3c.3+ consults this set before serializing a `view_submission`
+// for diagnostics — entries here are replaced with a sentinel.
+//
+// Why a set rather than a Slack-level masking primitive: Slack's
+// Block Kit `plain_text_input` element has no input-masking field
+// (no `private_value`, no `secret`, no `masked` — verified against
+// Slack's reference docs). The Slack client UI will render the
+// bootstrap code in plaintext, and the `view_submission` payload
+// will carry it in `state.values[claim_code_block][claim_code_input]
+// .value`. The mitigation for Blocker #3 ("no plaintext bootstrap
+// codes anywhere user-visible") therefore lives at the bot's
+// logging boundary, not in the modal payload itself: the code
+// transits the wire once (TLS to the bot, bot to qurl-service via
+// [AdminClient.RedeemBootstrap]) and is never written to logs or
+// telemetry. This map is the single source of truth for that
+// guarantee.
+var RedactedSubmissionBlockIDs = map[string]struct{}{
+	blockIDClaimCode: {},
+}
 
 // HelpResponse renders the JSON for `/qurl help`. Returned as the
 // slash-command HTTP response body (not a modal).
@@ -72,6 +97,15 @@ func HelpResponse() ([]byte, error) {
 	return json.Marshal(payload)
 }
 
+// SetAliasRebindMetadata is the typed shape the rebind modal stores
+// in `private_metadata`. JSON-encoded so the view-submission handler
+// (PR-3c.3+) can `json.Unmarshal` into a known struct rather than
+// parsing an ad-hoc query-string. Slack caps `private_metadata` at
+// 3000 chars; a JSON object with a single alias name fits comfortably.
+type SetAliasRebindMetadata struct {
+	Alias string `json:"alias"`
+}
+
 // SetAliasRebindModal renders the confirmation modal shown when a user
 // runs `setalias $alias <new-target>` and the alias already points
 // at a different resource. The user has to explicitly confirm the
@@ -80,16 +114,20 @@ func HelpResponse() ([]byte, error) {
 //
 // `aliasName` is the alias being rebound (no `$` sigil); `oldTarget`
 // and `newTarget` are the human-readable strings to show side-by-side.
-// `triggerID` is the Slack-supplied trigger to pass to `views.open`
-// (the caller wraps this payload accordingly).
+// The caller is expected to pass this payload to `views.open` along
+// with the Slack-supplied trigger ID.
 func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error) {
+	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName})
+	if err != nil {
+		return nil, fmt.Errorf("marshal private_metadata: %w", err)
+	}
 	payload := map[string]any{
 		"type":             "modal",
 		"callback_id":      callbackIDSetAliasRebind,
 		"title":            plainTextObj("Confirm alias rebind"),
 		"submit":           plainTextObj("Rebind"),
 		"close":            plainTextObj("Cancel"),
-		"private_metadata": "alias=" + aliasName,
+		"private_metadata": string(meta),
 		"blocks": []any{
 			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", aliasName)),
 			sectionBlock(fmt.Sprintf("*Current target:* `%s`", oldTarget)),
@@ -101,13 +139,19 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 }
 
 // AdminClaimModal renders the modal shown when a user runs
-// `/qurl admin claim`. The bootstrap code is a `private_value` field
-// so it is NOT echoed back into the `view_submission` payload as
-// plaintext (Slack treats `private_value` inputs differently from
-// regular text inputs — they're masked in client UI and redacted in
-// audit-logging surfaces). This satisfies Blocker #3 (no plaintext
-// codes via the slash-command grammar) and adds an additional layer
-// of defense for the post-submission hop.
+// `/qurl admin claim`. The bootstrap code is collected via a regular
+// `plain_text_input` (Slack's Block Kit has no input-masking
+// primitive — see [RedactedSubmissionBlockIDs] for the mitigation
+// strategy). The user-visible `:lock:` context line documents the
+// guarantee: the bot never logs the submitted code; the only place
+// it travels is into [AdminClient.RedeemBootstrap] over TLS.
+//
+// This satisfies Blocker #3 (no plaintext bootstrap codes anywhere
+// user-visible) at the slash-command grammar layer (the parser
+// rejects any `admin claim <args>` form so the code can't be typed
+// into the slash-command box) and at the bot's logging boundary
+// (handler middleware redacts [blockIDClaimCode] before serializing
+// any `view_submission` payload for diagnostics).
 func AdminClaimModal() ([]byte, error) {
 	payload := map[string]any{
 		"type":        "modal",
@@ -122,17 +166,12 @@ func AdminClaimModal() ([]byte, error) {
 				"block_id": blockIDClaimCode,
 				"label":    plainTextObj("Bootstrap code"),
 				"element": map[string]any{
-					"type":      "plain_text_input",
-					"action_id": actionIDClaimCode,
-					// `private_value: true` masks the value in the
-					// Slack client UI and elides it from
-					// view_submission audit logs. Belt-and-braces
-					// against Blocker #3.
-					"private_value": true,
-					"placeholder":   plainTextObj("e.g. boot_xxxx-xxxx-xxxx"),
+					"type":        "plain_text_input",
+					"action_id":   actionIDClaimCode,
+					"placeholder": plainTextObj("e.g. boot_xxxx-xxxx-xxxx"),
 				},
 			},
-			contextBlock(":lock: Codes are never echoed in slash-command text or audit logs."),
+			contextBlock(":lock: The bot never logs this code. It is sent once to LayerV over TLS and discarded from memory after redemption."),
 		},
 	}
 	return json.Marshal(payload)

@@ -14,24 +14,33 @@ import (
 	"time"
 )
 
-// adminClientUserAgent is the UA the admin client sends to qurl-service.
-// Distinct from the customer-style `qurl-go-client/...` UA so internal
-// traffic is grep-able in service-side logs.
-const adminClientUserAgent = "qurl-slack-admin/dev"
+// adminClientUserAgentName is the product portion of the User-Agent
+// the admin client sends to qurl-service. Distinct from the
+// customer-style `qurl-go-client/...` UA so internal traffic is
+// grep-able in service-side logs. Mirrors the `name/version` shape
+// that [shared/client.WithUserAgent] uses; the `version` half is
+// plumbed in through [WithAdminUserAgent].
+const adminClientUserAgentName = "qurl-slack-admin"
+
+// defaultAdminClientVersion is the placeholder used when no explicit
+// version is configured (e.g. tests, local `go run`). Production
+// callers wire `runtime/debug.ReadBuildInfo`'s `vcs.revision` (or a
+// build-time `-ldflags="-X"` string) into [WithAdminUserAgent].
+const defaultAdminClientVersion = "dev"
 
 // adminDefaultTimeout bounds a single internal call. Slack's outer
 // budget is the 28s `response_url` window — this floor keeps a stuck
 // admin endpoint from eating that whole budget.
 const adminDefaultTimeout = 10 * time.Second
 
-// JSON field names shared across multiple request bodies. Lifted to
-// constants so a server-side rename only edits one site, and
-// goconst's repeated-string lint stays satisfied.
+// Query-string field names shared across multiple GET requests.
+// Lifted to constants so a server-side rename only edits one site,
+// and goconst's repeated-string lint stays satisfied. JSON body
+// fields are fixed in their struct tags rather than via these
+// constants because the compiler will catch a rename in a tag.
 const (
-	fieldTeamID     = "team_id"
-	fieldChannelID  = "channel_id"
-	fieldUserID     = "user_id"
-	fieldResourceID = "resource_id"
+	fieldTeamID = "team_id"
+	fieldUserID = "user_id"
 )
 
 // AdminClient is a thin wrapper over qurl-service's `/internal/v1/...`
@@ -47,6 +56,7 @@ const (
 type AdminClient struct {
 	baseURL    string
 	authToken  string
+	userAgent  string
 	httpClient *http.Client
 }
 
@@ -58,12 +68,28 @@ func WithAdminHTTPClient(c *http.Client) AdminClientOption {
 	return func(ac *AdminClient) { ac.httpClient = c }
 }
 
+// WithAdminUserAgent overrides the User-Agent's `version` half. The
+// product half is fixed at [adminClientUserAgentName] so service-side
+// log grep stays simple; the version is whatever the caller passes
+// (typically `runtime/debug.ReadBuildInfo`'s `vcs.revision` or a
+// build-time ldflags string). Empty version falls back to
+// [defaultAdminClientVersion].
+func WithAdminUserAgent(version string) AdminClientOption {
+	return func(ac *AdminClient) {
+		if version == "" {
+			version = defaultAdminClientVersion
+		}
+		ac.userAgent = adminClientUserAgentName + "/" + version
+	}
+}
+
 // NewAdminClient builds an [AdminClient] for the given qurl-service
 // base URL and internal-service token.
 func NewAdminClient(baseURL, internalToken string, opts ...AdminClientOption) *AdminClient {
 	ac := &AdminClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		authToken: internalToken,
+		userAgent: adminClientUserAgentName + "/" + defaultAdminClientVersion,
 		httpClient: &http.Client{
 			Timeout: adminDefaultTimeout,
 		},
@@ -127,6 +153,13 @@ type AdminError struct {
 	Detail     string
 }
 
+// ErrEmptyAdminResponse is returned when a 2xx admin response carries
+// an empty `data` field but the caller expected a populated payload.
+// Distinguishes "endpoint shipped a buggy empty envelope" from "this
+// endpoint legitimately returns no data" — the latter is signaled by
+// passing `out=nil` to [AdminClient.do].
+var ErrEmptyAdminResponse = errors.New("admin client: empty data field in 2xx response")
+
 // Error returns a human-readable message.
 func (e *AdminError) Error() string {
 	if e.Detail != "" {
@@ -158,11 +191,7 @@ func (ac *AdminClient) CheckAdmin(ctx context.Context, teamID, slackUserID strin
 // alias-resolved id) is allowed in `channelID` for `teamID`. Used
 // by `/qurl get` after alias resolution.
 func (ac *AdminClient) ResolvePolicy(ctx context.Context, teamID, channelID, resourceID string) (bool, error) {
-	body := map[string]string{
-		fieldTeamID:     teamID,
-		fieldChannelID:  channelID,
-		fieldResourceID: resourceID,
-	}
+	body := policyMutationBody(teamID, channelID, resourceID)
 	var out struct {
 		Allowed bool `json:"allowed"`
 	}
@@ -172,15 +201,26 @@ func (ac *AdminClient) ResolvePolicy(ctx context.Context, teamID, channelID, res
 	return out.Allowed, nil
 }
 
+// redeemBootstrapRequest is the typed wire shape for the redeem call.
+// A struct (not `map[string]string`) so a server-side rename surfaces
+// at compile time when the JSON tag here is updated in lockstep.
+type redeemBootstrapRequest struct {
+	Code   string `json:"code"`
+	TeamID string `json:"team_id"`
+	UserID string `json:"user_id"`
+}
+
 // RedeemBootstrap exchanges a one-time bootstrap code for a workspace
 // mapping row. Called from the `admin claim` modal submit handler.
-// The code arrives via the modal's `private_value` field — never via
-// slash-command text (Blocker #3).
+// The code arrives via the modal's `plain_text_input` block (see
+// [AdminClaimModal]) — never via slash-command text (Blocker #3) and
+// never logged at the bot's logging boundary (the block_id is in
+// [RedactedSubmissionBlockIDs]).
 func (ac *AdminClient) RedeemBootstrap(ctx context.Context, code, teamID, slackUserID string) (*WorkspaceMapping, error) {
-	body := map[string]string{
-		"code":      code,
-		fieldTeamID: teamID,
-		fieldUserID: slackUserID,
+	body := redeemBootstrapRequest{
+		Code:   code,
+		TeamID: teamID,
+		UserID: slackUserID,
 	}
 	var out WorkspaceMapping
 	if err := ac.do(ctx, http.MethodPost, "/internal/v1/admin/workspace/redeem", body, &out); err != nil {
@@ -201,13 +241,22 @@ func (ac *AdminClient) DisallowResource(ctx context.Context, teamID, channelID, 
 	return ac.do(ctx, http.MethodPost, "/internal/v1/admin/policy/disallow", policyMutationBody(teamID, channelID, resourceID), nil)
 }
 
+// policyMutationRequest is the typed wire shape for allow/disallow.
+// A struct lets the compiler catch a server-side field rename at the
+// build step rather than runtime.
+type policyMutationRequest struct {
+	TeamID     string `json:"team_id"`
+	ChannelID  string `json:"channel_id"`
+	ResourceID string `json:"resource_id"`
+}
+
 // policyMutationBody is the shared body shape for allow/disallow.
 // Centralizing it satisfies dupl and keeps the two methods in sync.
-func policyMutationBody(teamID, channelID, resourceID string) map[string]string {
-	return map[string]string{
-		fieldTeamID:     teamID,
-		fieldChannelID:  channelID,
-		fieldResourceID: resourceID,
+func policyMutationBody(teamID, channelID, resourceID string) policyMutationRequest {
+	return policyMutationRequest{
+		TeamID:     teamID,
+		ChannelID:  channelID,
+		ResourceID: resourceID,
 	}
 }
 
@@ -230,14 +279,20 @@ func (ac *AdminClient) ListPolicies(ctx context.Context, teamID, cursor string, 
 	return &out, nil
 }
 
+// rateLimitCheckRequest is the typed body for the rate-limit endpoint.
+type rateLimitCheckRequest struct {
+	TeamID string `json:"team_id"`
+	UserID string `json:"user_id"`
+}
+
 // CheckRateLimit asks qurl-service whether a Slack user is currently
 // allowed to mint another link, and returns the retry-after window
 // when the answer is no. Per-user rate limiting is documented in
 // Phase 3b of the plan.
 func (ac *AdminClient) CheckRateLimit(ctx context.Context, slackUserID, teamID string) (bool, time.Duration, error) {
-	body := map[string]string{
-		fieldTeamID: teamID,
-		fieldUserID: slackUserID,
+	body := rateLimitCheckRequest{
+		TeamID: teamID,
+		UserID: slackUserID,
 	}
 	var out struct {
 		Allowed         bool `json:"allowed"`
@@ -282,7 +337,7 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+ac.authToken)
-	req.Header.Set("User-Agent", adminClientUserAgent)
+	req.Header.Set("User-Agent", ac.userAgent)
 	if reader != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -324,8 +379,13 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 			Detail:     env.Error.Detail,
 		}
 	}
-	if len(env.Data) == 0 {
-		return nil
+	// `out != nil` means the caller is expecting a populated payload
+	// — surface a sentinel rather than silently leaving zero values
+	// when the server returns `{"data": null}` or `{}`. A buggy
+	// internal endpoint that ships an empty envelope must not be
+	// confused with a successful zero-value response.
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		return ErrEmptyAdminResponse
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
 		return fmt.Errorf("unmarshal data: %w", err)
