@@ -487,11 +487,14 @@ describe('logger', () => {
 
       logger.info('uploaded', { Hash: FULL_MD5, HASH: FULL_MD5, HaSh: FULL_MD5 });
 
+      // Assert each case variant maps to REDACTED specifically, rather than
+      // counting global occurrences — robust against a future change that
+      // adds an unrelated redacted field to this test's fixture.
       const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain('"Hash":"[REDACTED]"');
+      expect(line).toContain('"HASH":"[REDACTED]"');
+      expect(line).toContain('"HaSh":"[REDACTED]"');
       expect(line).not.toContain(FULL_MD5);
-      // Pin every case variant — guards a future refactor that drops the
-      // .toLowerCase() in shouldRedact().
-      expect((line.match(/\[REDACTED\]/g) || []).length).toBe(3);
     });
 
     it('redacts hash key inside an array element', () => {
@@ -536,16 +539,16 @@ describe('logger', () => {
     });
 
     // Drift guard: REDACT_EXACT_KEYS and AUDIT_SECRET_KEYS are kept in
-    // sync by hand today (see #221). This test fires if a future edit
-    // adds an exact-match key to one set without mirroring it to the
-    // other — same shape of regression that consolidation in #221 will
-    // ultimately remove the need for.
+    // sync by hand today (see #221). This test iterates the LIVE
+    // REDACT_EXACT_KEYS set (via __testExports) and fires if a future
+    // edit adds an exact-match key without mirroring it to AUDIT_SECRET_KEYS.
+    // Reverse-direction drift (audit-only key without redact mirror) is NOT
+    // covered here — also tracked in #221.
     it('every REDACT_EXACT_KEYS entry is also redacted by audit()', () => {
+      const { __testExports } = require('../src/logger');
       logger = require('../src/logger');
-      const exactKeys = ['hash', 'md5', 'sha1', 'sha256', 'sha512',
-        'digest', 'checksum', 'content_hash', 'body_hash'];
 
-      for (const k of exactKeys) {
+      for (const k of __testExports.REDACT_EXACT_KEYS) {
         consoleSpy.log.mockClear();
         consoleSpy.error.mockClear();
         logger.audit('upload_success', { send_id: 's1', [k]: FULL_MD5 });

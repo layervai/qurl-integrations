@@ -99,12 +99,17 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     if (isAuditSecretKey(k)) {
-      // Blank non-empty strings; recurse into non-null objects/arrays so
-      // a `{ auth_token: { value: 'real' } }` accident still has `value`
-      // examined by the inner pass (the inner `value` won't match itself,
-      // but a nested `auth_token` / `password` etc. would). Other primitives
-      // (numbers, null, undefined) pass through — they can't carry a usable
-      // secret and zero-string-replace would lose type info.
+      // Blank non-empty strings; recurse into non-null objects/arrays so a
+      // `{ auth_token: { ... nested auth_token ... } }` accident still has
+      // its inner sensitive keys examined. Other primitives (numbers, null,
+      // undefined) pass through — they can't carry a usable secret and
+      // zero-string-replace would lose type info.
+      //
+      // Note: the recursion uses isAuditSecretKey (exact-match), NOT the
+      // wider shouldRedact (substring) rule. An inner `myToken` would
+      // therefore SURVIVE here even though it'd be blanked by redact().
+      // Intentional — audit dimensions like `tokens_minted` must not be
+      // redacted via substring.
       if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
       else if (v != null && typeof v === 'object') out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
       else out[k] = v;
@@ -273,3 +278,7 @@ const logger = {
 };
 
 module.exports = logger;
+// Test-only: exposes the redact constants so a drift-guard test can iterate
+// the live set rather than duplicate it. Not part of the public API; do
+// not consume from production code.
+module.exports.__testExports = { REDACT_EXACT_KEYS, AUDIT_SECRET_KEYS };
