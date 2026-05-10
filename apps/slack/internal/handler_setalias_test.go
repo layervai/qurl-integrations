@@ -318,13 +318,16 @@ func TestSetAlias_NonAdmin_RejectsEphemeral(t *testing.T) {
 	}
 }
 
-// TestUnsetAlias_NonAdmin_RejectsAfterLookup fences a subtle ordering
-// requirement: unsetalias resolves the alias *before* the admin gate
-// (so the user gets "no such alias" instead of "you're not admin"
-// when they typo). Then the admin gate fires.
-func TestUnsetAlias_NonAdmin_RejectsAfterLookup(t *testing.T) {
+// TestUnsetAlias_NonAdmin_BlocksBeforeLookup fences the ordering
+// requirement: the admin gate runs *before* alias resolution so a
+// non-admin can't probe alias existence by reading the difference
+// between "no such alias" and "you're not admin". The resource API
+// must not be called at all.
+func TestUnsetAlias_NonAdmin_BlocksBeforeLookup(t *testing.T) {
 	admin := stubAdminBackend(t, false)
 	resmock := newResourceMock(t, []resourceMockResponse{
+		// Server is wired to respond, but the handler must short-
+		// circuit on the admin gate so we never see this call.
 		{matchVerb: http.MethodGet, matchPath: pathByAlias, status: http.StatusOK, body: `{"data":{"resource_id":"r_x","alias":"prod-db"}}`},
 	})
 	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
@@ -339,11 +342,10 @@ func TestUnsetAlias_NonAdmin_RejectsAfterLookup(t *testing.T) {
 	if !strings.Contains(resp.Body, ":warning:") || !strings.Contains(resp.Body, "admin") {
 		t.Errorf("body = %s, expected :warning: admin error", resp.Body)
 	}
-	// PATCH must not have fired.
-	for _, r := range resmock.requests {
-		if r.Method == http.MethodPatch {
-			t.Errorf("non-admin should not reach PATCH, but PATCH was called: %+v", r)
-		}
+	// Resource API must not have been called at all — admin gate
+	// fires first to avoid info-disclosure on alias existence.
+	if len(resmock.requests) != 0 {
+		t.Errorf("resource API was called %d times, expected 0 (admin gate must run before resolution): %+v", len(resmock.requests), resmock.requests)
 	}
 }
 

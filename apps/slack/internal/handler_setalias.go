@@ -237,8 +237,10 @@ func (h *Handler) applySetAlias(ctx context.Context, rc *ResourceClient, alias, 
 }
 
 // handleUnsetAlias routes `/qurl unsetalias $<alias>`.
-//  1. Resolve alias → resource. 404 → friendly "no such alias".
-//  2. Admin gate.
+//  1. Admin gate (before resolution — non-admins must not be able to
+//     probe alias existence by reading the difference between a 404
+//     and an admin-rejection message).
+//  2. Resolve alias → resource. 404 → friendly "no such alias".
 //  3. PATCH with ClearAlias=true.
 func (h *Handler) handleUnsetAlias(ctx context.Context, cmd *Command, values url.Values) (events.APIGatewayProxyResponse, error) {
 	teamID := values.Get(formFieldTeamID)
@@ -246,6 +248,10 @@ func (h *Handler) handleUnsetAlias(ctx context.Context, cmd *Command, values url
 	responseURL := values.Get(formFieldResponseURL)
 
 	deps := h.setAliasDeps()
+
+	if err := h.requireAdmin(ctx, deps, teamID, userID); err != nil {
+		return ephemeralWarn(fmt.Sprintf("Only workspace admins can unset aliases. (%s)", classifyAdminError(err)))
+	}
 
 	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
 	if err != nil {
@@ -260,10 +266,6 @@ func (h *Handler) handleUnsetAlias(ctx context.Context, cmd *Command, values url
 			return ephemeralWarn(fmt.Sprintf("No resource has alias `$%s`.", cmd.Alias))
 		}
 		return mapResourceErrorToSlack(cmd.Alias, err)
-	}
-
-	if err := h.requireAdmin(ctx, deps, teamID, userID); err != nil {
-		return ephemeralWarn(fmt.Sprintf("Only workspace admins can unset aliases. (%s)", classifyAdminError(err)))
 	}
 
 	if _, err := rc.UpdateResource(ctx, res.ResourceID, UpdateResourceInput{ClearAlias: true}); err != nil {
