@@ -265,25 +265,14 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
-  // Canary HMAC shared secret. When unset, the /canary/exec endpoint
-  // returns 503 (canary_disabled) — keeps the surface inert in dev and
-  // on the bot's first deploy before the canary runner exists. The
-  // matching value lives in the runner's SSM under the same key name.
-  // Hex-encoded random 32 bytes recommended. Rotation is online: write
-  // the new value to both SSMs, then restart bot + runner in either
-  // order (each side falls back to 401 on signature mismatch until
-  // rolled).
-  CANARY_SHARED_SECRET: process.env.CANARY_SHARED_SECRET,
-
   // Comma-separated allowlist of Discord user-IDs the canary's
-  // differentiated path may DM. Defense-in-depth: if CANARY_SHARED_SECRET
-  // is ever exfiltrated, an attacker holding a valid HMAC could
-  // otherwise force the bot to DM arbitrary user-IDs they supply.
-  // The allowlist mirrors the recipient list terraform passes into
-  // the Lambda's RECIPIENT_USER_IDS_JSON env. Empty allowlist
-  // disables the differentiated path entirely (route returns 400
-  // canary_recipients_unconfigured) — fail-closed posture matches
-  // the inert-by-default shape of the rest of the route.
+  // differentiated path may DM. Defense-in-depth: if the qURL/NHP
+  // auth path is ever bypassed, an attacker could otherwise force
+  // the bot to DM arbitrary user-IDs they supply. The allowlist
+  // mirrors the recipient list terraform passes into the Lambda's
+  // RECIPIENT_USER_IDS_JSON env. Empty allowlist disables the
+  // differentiated path entirely (route returns 503
+  // canary_recipients_unconfigured).
   CANARY_RECIPIENT_USER_IDS: (process.env.CANARY_RECIPIENT_USER_IDS || '')
     .split(',')
     .map(s => s.trim())

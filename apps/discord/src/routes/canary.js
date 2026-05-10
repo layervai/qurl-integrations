@@ -2,12 +2,16 @@
 // (qurl-integrations-infra/qurl-bot-discord/terraform/canary-exec.tf)
 // to verify the bot's qURL send pipeline end-to-end every 3 hours.
 //
-// Auth is HMAC-SHA256 over `<unix_seconds>.<raw_body>` with the
-// CANARY_SHARED_SECRET (SSM SecureString, mirrored on the Lambda).
-// 5-minute timestamp window guards against replay. The endpoint is
-// disabled (503) when the secret isn't configured — both for local
-// dev safety and for the bot's first deploy before the canary infra
-// exists.
+// Auth is the qURL/NHP knock. The Lambda mints a single-use qURL
+// targeting this endpoint and calls qurl-service /v1/resolve, which
+// triggers an NHP knock that opens the bot's firewall to the
+// Lambda's egress IP. By the time a request reaches the route,
+// the caller has already proved possession of a valid qURL access
+// token for `${BOT_URL}/canary/exec`. No HMAC.
+//
+// The 5-minute X-Canary-Timestamp window is kept as belt-and-
+// suspenders against replay of a captured-and-resolved request
+// past the qURL's lifetime.
 //
 // Body shape — empty OR both fields together. Partial body
 // (one of the two) is rejected with 400 invalid_test:
@@ -36,39 +40,36 @@
 //
 // Recipient allowlist: the differentiated path rejects any
 // `recipient_user_id` not in `config.CANARY_RECIPIENT_USER_IDS`
-// with 403 recipient_not_allowed. Defense-in-depth — if the HMAC
-// secret is ever exfiltrated, an attacker still can't DM arbitrary
+// with 403 recipient_not_allowed. Defense-in-depth — if the qURL
+// auth path is ever bypassed, an attacker still can't DM arbitrary
 // users. Allowlist mirrors the recipient list terraform passes
 // into the Lambda's RECIPIENT_USER_IDS_JSON env.
 
 const express = require('express');
-const crypto = require('crypto');
 const { EmbedBuilder } = require('discord.js');
 const config = require('../config');
 const logger = require('../logger');
 const { reUploadBuffer, uploadJsonToConnector, mintLinks } = require('../connector');
 const { sendDM } = require('../discord');
 const { COLORS } = require('../constants');
-const { createBadSigThrottle } = require('../utils/bad-sig-throttle');
 
 const router = express.Router();
 
 // 5-minute replay window — same value the OAuth/webhook routes use.
 // The runner-to-bot path is synchronous and shouldn't see clock skew
-// above a few seconds, but matching the established window keeps the
-// timestamp-tolerance contract uniform across HMAC-authed routes.
+// above a few seconds; matching the established window keeps the
+// timestamp-tolerance contract uniform across timestamped routes.
 //
 // Replay-trade note: a captured valid request CAN be replayed within
 // the 5-min window (each replay mints a new connector resource +
 // runs through to a DM). Acceptable surface here because:
 //   - 4 KB body cap bounds replay payload size
-//   - bad-sig throttle bounds attack rate per-IP
+//   - qURL one-time-use semantics make re-resolving the same token
+//     impossible past the first resolve, so a captured request can
+//     only be replayed against a still-open NHP firewall hole
 //   - allowlist on recipient_user_id bounds DM blast radius
 //   - canary scenarios are idempotent (the audit row tags the run-id
 //     and a duplicate qURL-mint is functionally a no-op)
-// A nonce table would close this hole tightly but adds DDB/Redis
-// state for marginal gain. Future reader who's tempted to add one —
-// re-examine the threat model first.
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
 // Allowed `test` values. The Lambda iterates `SCENARIOS_JSON`; this
@@ -81,53 +82,11 @@ const VALID_TESTS = new Set(['send_file', 'send_location']);
 // terraform `canary_recipient_user_ids` validation uses.
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
-// HMAC signature shape: 64 hex chars (sha256 → 32 bytes → 64 hex).
-// Pre-checking here lets us reject obvious garbage WITHOUT spending
-// HMAC-compute cycles, which is the primary CPU-burn vector for an
-// unauthenticated public endpoint. Mirrors the regex pre-check in
-// routes/webhooks.js.
-const SIG_SHAPE_RE = /^[0-9a-f]{64}$/;
-
-// Per-IP bad-signature throttle. Without it, an attacker can spam
-// invalid signatures and burn unbounded HMAC compute on a public
-// endpoint. Legitimate runner traffic (valid HMAC) is never throttled.
-// Default factory shape: 30 bad attempts per 60s window per IP, swept
-// every 5 minutes. See utils/bad-sig-throttle.js for the contract.
-const badSigThrottle = createBadSigThrottle();
-
-function verifyCanarySignature(req, res, next) {
-  const ip = req.ip || 'unknown';
-
-  // Bad-sig rate limit BEFORE any HMAC work — blocks the unauthenticated
-  // CPU-burn vector on a public endpoint.
-  if (badSigThrottle.check(ip)) {
-    logger.warn('Canary rate limit exceeded (bad signatures)', { ip });
-    return res.status(429).json({ ok: false, error: 'rate_limited' });
-  }
-
-  const secret = config.CANARY_SHARED_SECRET;
-  if (!secret) {
-    // Don't leak that the secret is unset to unauthenticated callers
-    // beyond the 503 itself — log it once at boot, not per request.
-    return res.status(503).json({ ok: false, error: 'canary_disabled' });
-  }
-
-  const sig = req.header('X-Canary-Signature');
+function verifyCanaryTimestamp(req, res, next) {
   const ts = req.header('X-Canary-Timestamp');
-  if (!sig || !ts) {
-    return res.status(401).json({ ok: false, error: 'missing_signature' });
+  if (!ts) {
+    return res.status(401).json({ ok: false, error: 'missing_timestamp' });
   }
-
-  // Regex pre-check on the signature shape — rejects obvious garbage
-  // (wrong length, non-hex chars) WITHOUT computing the HMAC. Saves
-  // CPU on the unauthenticated path. Counts as a bad-sig attempt so
-  // shape-fuzz attackers hit the rate limit too.
-  if (!SIG_SHAPE_RE.test(sig)) {
-    const n = badSigThrottle.record(ip);
-    logger.warn('Canary signature rejected (bad shape)', { ip, totalInWindow: n });
-    return res.status(401).json({ ok: false, error: 'bad_signature' });
-  }
-
   const tsInt = parseInt(ts, 10);
   if (!Number.isFinite(tsInt)) {
     return res.status(401).json({ ok: false, error: 'bad_timestamp' });
@@ -136,52 +95,6 @@ function verifyCanarySignature(req, res, next) {
   if (drift > TIMESTAMP_TOLERANCE_SECONDS) {
     return res.status(401).json({ ok: false, error: 'expired_timestamp' });
   }
-
-  // verify() middleware (mounted in server.js) populated req.rawBody as
-  // a Buffer. If it's missing, the route was misconfigured — refuse
-  // rather than computing a signature over `undefined`.
-  if (!Buffer.isBuffer(req.rawBody)) {
-    logger.error('Canary route: req.rawBody missing — verify middleware not registered for this path');
-    return res.status(500).json({ ok: false, error: 'server_misconfigured' });
-  }
-
-  // HMAC over `<ts>.<rawBody>` — `rawBody` is the EXACT bytes the
-  // client signed, NOT a re-serialized req.body (key reorder /
-  // whitespace differences would break the HMAC). Lambda side
-  // (qurl-integrations-infra canary-exec.tf) signs the same
-  // `<ts>.<body>` string before POSTing.
-  //
-  // Two .update() calls — feed the timestamp prefix as a string and
-  // the raw body as the original Buffer. Concatenating into a
-  // template literal would round-trip the buffer through
-  // toString('utf8'), wasting a UTF-8 decode on every request and
-  // (more importantly) silently corrupting the HMAC if the body
-  // ever contains non-UTF-8 bytes. Today the 4 KB express.json
-  // parser guarantees valid UTF-8, but the buffer-pass form is
-  // robust regardless. .update(string) auto-encodes ASCII-safe
-  // input as UTF-8 — `<ts>.` is a digit-and-dot string, no risk.
-  const expected = crypto.createHmac('sha256', secret)
-    .update(`${tsInt}.`)
-    .update(req.rawBody)
-    .digest('hex');
-
-  let valid = false;
-  try {
-    const sigBuf = Buffer.from(sig, 'hex');
-    const expBuf = Buffer.from(expected, 'hex');
-    if (sigBuf.length === expBuf.length) {
-      valid = crypto.timingSafeEqual(sigBuf, expBuf);
-    }
-  } catch {
-    valid = false;
-  }
-
-  if (!valid) {
-    const n = badSigThrottle.record(ip);
-    logger.warn('Canary signature rejected (HMAC mismatch)', { ip, totalInWindow: n });
-    return res.status(401).json({ ok: false, error: 'bad_signature' });
-  }
-
   next();
 }
 
@@ -296,7 +209,7 @@ async function runScenario({ test, recipientUserId, apiKey }) {
   };
 }
 
-router.post('/exec', verifyCanarySignature, async (req, res) => {
+router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
   const startedAt = Date.now();
   const apiKey = config.QURL_API_KEY;
   if (!apiKey) {
@@ -327,13 +240,14 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
         latency_ms: Date.now() - startedAt,
       });
     }
-    // Allowlist enforcement — defense-in-depth against secret
-    // exfiltration. Empty allowlist → 503 (server config state, not
-    // a client error — matches the canary_disabled / no_api_key
-    // shape). Mismatched recipient → 403 (request is well-formed,
-    // authentication succeeded, but the principal is not authorized
-    // to act on this target — textbook 403). Response body still
-    // names the error code; the allowlist itself is never exposed.
+    // Allowlist enforcement — defense-in-depth against an attacker
+    // who somehow gets past the qURL/NHP knock. Empty allowlist →
+    // 503 (server config state, not a client error — matches the
+    // no_api_key shape). Mismatched recipient → 403 (request is
+    // well-formed, authentication succeeded, but the principal is
+    // not authorized to act on this target — textbook 403).
+    // Response body still names the error code; the allowlist
+    // itself is never exposed.
     const allowlist = config.CANARY_RECIPIENT_USER_IDS;
     if (!Array.isArray(allowlist) || allowlist.length === 0) {
       return res.status(503).json({
@@ -453,9 +367,3 @@ router.post('/exec', verifyCanarySignature, async (req, res) => {
 });
 
 module.exports = router;
-// Test-only handle for clearing the per-IP bad-sig counter between
-// jest cases. Gate on NODE_ENV === 'test' so live state stays unreachable
-// from prod consumers (matches the gateway-metrics.js pattern).
-if (process.env.NODE_ENV === 'test') {
-  module.exports._test = { _resetBadSigState: badSigThrottle.reset };
-}
