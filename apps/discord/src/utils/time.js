@@ -59,6 +59,12 @@ const SELF_DESTRUCT_OPTIONS_TEXT = SELF_DESTRUCT_PRESETS.map((p) => p.label).joi
 // has to defend against strings the modal would have rejected.
 const SELF_DESTRUCT_INPUT_MAX_LENGTH = 32;
 
+// Strict decimal-seconds shape — gates the numeric branch of the parser
+// so hex (`0x1`, `0x1e`) and scientific notation (`5e-1`) can't coerce
+// through Number() into a preset value. Optional sign + digits + optional
+// fractional part. See parseSelfDestructSeconds for the rationale.
+const DECIMAL_SECONDS_RE = /^[+-]?\d+(\.\d+)?$/;
+
 function canonicalize(s) {
   return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -103,13 +109,15 @@ function parseSelfDestructSeconds(raw) {
   const labelMatch = findPresetByLabel(canonical);
   if (labelMatch) return { seconds: labelMatch.seconds, error: null };
 
-  // Number() accepts whitespace and signs but not hex floats.
-  // No need to special-case hex: a hex literal like "0x1p3" would be
-  // rejected by both Number() AND the preset-membership check that
-  // follows — so the broad rejection error message covers it.
-  const n = Number(canonical);
-  const numericMatch = findPresetBySeconds(n);
-  if (numericMatch) return { seconds: numericMatch.seconds, error: null };
+  // Strict decimal notation only — Number() also accepts hex integers
+  // (`0x1` → 1, `0x1e` → 30, `0x12c` → 300) and scientific notation
+  // (`5e-1` → 0.5), all of which would silently coerce into preset
+  // values and bypass the user-visible label set. The placeholder
+  // advertises decimal seconds; honor that exactly.
+  if (DECIMAL_SECONDS_RE.test(canonical)) {
+    const numericMatch = findPresetBySeconds(Number(canonical));
+    if (numericMatch) return { seconds: numericMatch.seconds, error: null };
+  }
 
   return {
     seconds: null,

@@ -131,8 +131,18 @@ describe('utils/time', () => {
       }
     });
 
-    it('rejects non-numeric / NaN / Infinity / hex', () => {
-      for (const v of ['abc', 'NaN', 'Infinity', '-Infinity', '0x1p3', '+0x1', '-0x1']) {
+    it('rejects non-numeric / NaN / Infinity / hex / scientific notation', () => {
+      // Hex integers and scientific notation are accepted by Number() and
+      // would otherwise coerce into preset values (Number("0x1") → 1,
+      // Number("0x1e") → 30, Number("5e-1") → 0.5). The strict decimal
+      // gate in the parser blocks them so the placeholder's "decimal
+      // seconds" advertisement is the actual contract.
+      const cases = [
+        'abc', 'NaN', 'Infinity', '-Infinity',
+        '0x1', '0x1e', '0x12c', '0x1p3', '+0x1', '-0x1',
+        '5e-1', '3e2', '1e0', '0.5e0',
+      ];
+      for (const v of cases) {
         const r = parseSelfDestructSeconds(v);
         expect(r.seconds).toBeNull();
         expect(r.error).toBeTruthy();
@@ -160,6 +170,14 @@ describe('utils/time', () => {
       // off-preset state — never silently substitute a different preset.
       expect(formatSelfDestructLabel(2)).toBe('2s');
       expect(formatSelfDestructLabel(0.75)).toBe('0.75s');
+    });
+
+    it('falls back gracefully on non-finite stored values (corrupted DB row)', () => {
+      // Defense against findPresetBySeconds receiving NaN/Infinity from a
+      // backfilled row — the formatter must not throw or substitute a
+      // preset, just render the raw value compactly.
+      expect(formatSelfDestructLabel(NaN)).toBe('NaNs');
+      expect(formatSelfDestructLabel(Infinity)).toBe('Infinitys');
     });
   });
 
