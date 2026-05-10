@@ -245,6 +245,12 @@ type QURL struct {
 }
 
 // AccessPolicy defines access restrictions for a qURL.
+//
+// All subfields MUST keep `omitempty` — `&AccessPolicy{}` is the
+// documented "clear policy" signal in [UpdateResourceInput], and that
+// contract relies on every field eliding from the JSON payload when
+// zero. Adding a non-omitempty field (or one that doesn't elide on
+// zero, like a non-pointer time) silently breaks the clear convention.
 type AccessPolicy struct {
 	IPAllowlist  []string `json:"ip_allowlist,omitempty"`
 	IPDenylist   []string `json:"ip_denylist,omitempty"`
@@ -576,7 +582,11 @@ type CreateResourceInput struct {
 	// `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`. If a caller passes an empty
 	// string from upstream input intending an alias, they'll silently
 	// get a no-alias create — pre-validate at the caller if that's a
-	// concern.
+	// concern. (Note the asymmetry with [UpdateResourceInput.Alias],
+	// which is `*string` and rejects `&""` client-side: a `string`
+	// can't distinguish "unset" from "empty" without an extra sentinel,
+	// and the create surface accepts the silent-no-alias semantic so
+	// callers can pass an optional alias literal.)
 	Alias        string        `json:"alias,omitempty"`
 	CustomDomain string        `json:"custom_domain,omitempty"`
 	Description  string        `json:"description,omitempty"`
@@ -605,6 +615,16 @@ type CreateResourceInput struct {
 // empty input (no fields populated) is also rejected
 // ([ErrUpdateResourceNoFieldsSet]) — symmetric with Create's
 // no-target guard.
+//
+// Retry-safety invariant: every field on this struct MUST be
+// field-idempotent until Idempotency-Key plumbing lands (#148).
+// do() retries 5xx/429 with the buffered body, so a successfully-
+// applied PATCH that returns 502 will be re-applied on retry — that's
+// safe iff a second apply is a no-op (which is true for setting alias
+// to a value, clearing alias, setting description, etc., but NOT for
+// counters, appends, or audit-log-per-call semantics). Adding a
+// non-idempotent field requires #148 first; the [Client.UpdateResource]
+// doc-comment carries a TODO marker.
 type UpdateResourceInput struct {
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
@@ -667,7 +687,11 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 	//   - default                — unknown type; pass through and let
 	//     the server be the authority. This keeps the client
 	//     forward-compatible with future ResourceType values without
-	//     a release dependency.
+	//     a release dependency. The trade-off is that a typo (e.g.
+	//     "urll") skips the TargetURL validator and the caller learns
+	//     about it from a server 400 instead of a Go-typed error;
+	//     forward-compat won out here because the server's enum
+	//     enforcement is authoritative anyway.
 	// For known types: server returns 400 either way; failing fast
 	// saves a round-trip and yields a typed Go error.
 	switch input.Type {

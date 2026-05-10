@@ -972,6 +972,23 @@ func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
 	}
 }
 
+// TestCreateBothPopulatedBeatsInvalidIdempotencyKey is the both-populated
+// counterpart of the both-empty validation-order test. The exclusivity
+// error (a structural error) should fire before the idempotency-key
+// validation (a request-decoration error). Pinning both directions
+// ensures a future reorder of guards trips a test.
+func TestCreateBothPopulatedBeatsInvalidIdempotencyKey(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:      "https://example.com",
+		ResourceID:     testResourceID,
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
+		t.Fatalf("expected ErrCreateTargetResourceExclusive (exclusivity beats idempotency), got %v", err)
+	}
+}
+
 // --- Resource methods ---
 
 func TestCreateResource(t *testing.T) {
@@ -1509,6 +1526,8 @@ func TestGetResourceByAlias(t *testing.T) {
 			"resource_id": "r_dev_dash01",
 			"alias":       testAlias,
 			"target_url":  testTargetURL,
+			"type":        ResourceTypeURL,
+			"status":      StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -1523,6 +1542,15 @@ func TestGetResourceByAlias(t *testing.T) {
 	}
 	if got.Alias != testAlias {
 		t.Errorf("got Alias %q, want %q", got.Alias, testAlias)
+	}
+	// Pin response-side decode of Type and Status — the schema is
+	// the contract, and round-tripping these fields catches future
+	// JSON-tag regressions on the response side.
+	if got.Type != ResourceTypeURL {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeURL)
+	}
+	if got.Status != StatusActive {
+		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
 	}
 }
 
