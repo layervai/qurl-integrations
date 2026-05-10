@@ -932,13 +932,9 @@ async function handleSend(interaction, apiKey) {
           sendNonce, userId: interaction.user.id, error: err?.message,
         });
       }
-      // Tear down the DM prompt before returning. Without this the
-      // user is left with a stale "I'll wait 60 seconds" message
-      // sitting in their DM thread forever — bots can't go back and
-      // delete the prompt later, and the user sees no feedback that
-      // the timeout happened on the bot side. Cleanup is fire-and-
-      // forget so a delete failure doesn't mask the user-facing
-      // message.
+      // Tear down the DM prompt — bots can't delete it later, so a
+      // leftover orphans in the user's DM forever. Fire-and-forget
+      // so a delete failure doesn't mask the user-facing message.
       if (dmPromptMessage) {
         dmPromptMessage.delete().catch((dErr) => logger.warn('Failed to delete stale DM prompt after capture timeout/error', {
           sendNonce, userId: interaction.user.id, error: dErr?.message,
@@ -1026,16 +1022,10 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
-    // No fileMessage.delete() here — bots can't delete user messages
-    // in DMs (Manage Messages doesn't apply outside guild channels), and
-    // even if we could, the file is in a 1:1 DM with no other viewers.
-    //
-    // We CAN delete the bot-authored DM messages once capture is done,
-    // and that's worth doing for visual cleanup. Send a brief "Got your
-    // file" confirmation, then delete BOTH that confirmation and the
-    // earlier file-attach prompt. The user's attachment message stays
-    // — they can delete it themselves after Send if they want a fully
-    // clean DM thread.
+    // No fileMessage.delete() — bots can't delete user messages in
+    // DMs, and the file's in a 1:1 thread anyway. We DO delete the
+    // bot-authored prompt + "Got your file" confirmation for visual
+    // cleanup; the user can clear their own attachment message.
     if (dmPromptMessage) {
       const cleanup = async () => {
         // Build a Link button back to the channel where /qurl send was
