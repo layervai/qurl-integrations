@@ -29,50 +29,106 @@ function expiryToMs(expiresIn) {
   return ms === null ? DEFAULT_EXPIRY_MS : ms;
 }
 
-// Self-destruct timer parsing — bot-side validation that mirrors the
-// connector's `viewer_ttl_seconds` contract (qurl-s3-connector PR #477):
-// 0.5 to 3600 seconds, fractional accepted. Out-of-range / NaN / Inf /
-// non-numeric all map to a parse error so the caller can render an
-// inline modal validation message rather than silently dropping the value.
+// Self-destruct timer presets — the 7 durations exposed in the /qurl send
+// modal. Discord modals are TextInput-only, so we surface the choices in
+// the placeholder and accept either the friendly label or the seconds
+// value below. The set is intentionally narrow so creators don't ship a
+// 0.7s viewer that hits the 500ms-floor edge case in the connector by
+// accident — every preset is a value we'd recommend out loud.
 //
-// Internally named "self-destruct" (matches the user-facing modal label).
-// The wire field forwarded to the connector is `viewer_ttl_seconds`.
-const SELF_DESTRUCT_MIN_SECONDS = 0.5;
-const SELF_DESTRUCT_MAX_SECONDS = 3600;
+// The wire field forwarded to the connector is `viewer_ttl_seconds`
+// (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
+// so every preset here is in range; clamping is unreachable.
+const SELF_DESTRUCT_PRESETS = Object.freeze([
+  Object.freeze({ seconds: 0.5, label: '1/2 second' }),
+  Object.freeze({ seconds: 1, label: '1 second' }),
+  Object.freeze({ seconds: 5, label: '5 seconds' }),
+  Object.freeze({ seconds: 30, label: '30 seconds' }),
+  Object.freeze({ seconds: 300, label: '5 minutes' }),
+  Object.freeze({ seconds: 1800, label: '30 minutes' }),
+  Object.freeze({ seconds: 3600, label: '1 hour' }),
+]);
 
+const SELF_DESTRUCT_MIN_SECONDS = SELF_DESTRUCT_PRESETS[0].seconds;
+const SELF_DESTRUCT_MAX_SECONDS = SELF_DESTRUCT_PRESETS[SELF_DESTRUCT_PRESETS.length - 1].seconds;
+
+const SELF_DESTRUCT_OPTIONS_TEXT = SELF_DESTRUCT_PRESETS.map((p) => p.label).join(', ');
+
+function canonicalize(s) {
+  return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function findPresetByLabel(canonical) {
+  for (const preset of SELF_DESTRUCT_PRESETS) {
+    if (canonical === canonicalize(preset.label)) return preset;
+  }
+  return null;
+}
+
+function findPresetBySeconds(n) {
+  if (!Number.isFinite(n)) return null;
+  for (const preset of SELF_DESTRUCT_PRESETS) {
+    if (n === preset.seconds) return preset;
+  }
+  return null;
+}
+
+// parseSelfDestructSeconds — strict preset matcher used by the modal handler
+// in /qurl send. Empty / whitespace-only input means "no timer" (returns
+// {seconds: null, error: null}). Any other input that does not match one
+// of the 7 presets returns an error string with the full option list so
+// the modal handler renders an inline retry, not a hard rejection.
+//
+// Accepted forms (case-insensitive, internal whitespace tolerated):
+//   - the friendly label: "1/2 second", "5 minutes", "1 hour", ...
+//   - the raw seconds value: "0.5", "30", "300", ...
 function parseSelfDestructSeconds(raw) {
   const trimmed = String(raw ?? '').trim();
   if (trimmed === '') return { seconds: null, error: null };
-  // Length cap mirrors the connector — bounds CPU on hostile input
-  // before parseFloat. Max legal `"3600.0"` is 6 chars; 32 is generous.
+  // Length cap bounds CPU on hostile input before any parse.
+  // Longest legal label "30 minutes" + slack = 32 chars is plenty.
   if (trimmed.length > 32) {
     return { seconds: null, error: 'Value is too long.' };
   }
-  // strconv.ParseFloat accepts hex-float (`0x1p3`) per Go spec; the
-  // connector rejects it (PR #477). JS Number() does NOT accept hex
-  // floats, but reject the prefix explicitly so the bot's contract
-  // mirrors the connector's whether or not Number() is the parser.
-  const prefix = trimmed.replace(/^[+-]/, '');
-  if (/^0x/i.test(prefix)) {
-    return { seconds: null, error: 'Use a decimal number, not hex.' };
-  }
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || n <= 0) {
-    return { seconds: null, error: 'Enter a positive number of seconds.' };
-  }
-  if (n < SELF_DESTRUCT_MIN_SECONDS) {
-    return { seconds: null, error: `Minimum is ${SELF_DESTRUCT_MIN_SECONDS} seconds.` };
-  }
-  // Above-max is intentionally clamped (matches connector's silent clamp).
-  // Returning the clamped value keeps the persisted state honest with
-  // what the renderer will actually enforce.
-  return { seconds: Math.min(n, SELF_DESTRUCT_MAX_SECONDS), error: null };
+
+  const canonical = canonicalize(trimmed);
+
+  const labelMatch = findPresetByLabel(canonical);
+  if (labelMatch) return { seconds: labelMatch.seconds, error: null };
+
+  // Number() accepts whitespace and signs but not hex floats.
+  // No need to special-case hex: a hex literal like "0x1p3" would be
+  // rejected by both Number() AND the preset-membership check that
+  // follows — so the broad rejection error message covers it.
+  const n = Number(canonical);
+  const numericMatch = findPresetBySeconds(n);
+  if (numericMatch) return { seconds: numericMatch.seconds, error: null };
+
+  return {
+    seconds: null,
+    error: `Choose one of: ${SELF_DESTRUCT_OPTIONS_TEXT}.`,
+  };
+}
+
+// formatSelfDestructLabel — renders a stored seconds value as the matching
+// preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
+// echo what the user picked. Falls back to a compact "Ns" rendering for
+// any seconds value that isn't a known preset, which is unreachable today
+// but defends against a future caller (e.g., a backfilled config) feeding
+// in an off-preset value.
+function formatSelfDestructLabel(seconds) {
+  const match = findPresetBySeconds(seconds);
+  if (match) return match.label;
+  return `${seconds}s`;
 }
 
 module.exports = {
   expiryToISO,
   expiryToMs,
   parseSelfDestructSeconds,
+  formatSelfDestructLabel,
+  SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_MIN_SECONDS,
   SELF_DESTRUCT_MAX_SECONDS,
+  SELF_DESTRUCT_OPTIONS_TEXT,
 };

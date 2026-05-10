@@ -933,15 +933,16 @@ describe('handleSend — Step 3: final form', () => {
   });
 
   it('self-destruct modal: invalid value re-renders the form with a warning', async () => {
-    // "0.4" is sub-floor. The handler must NOT abort the flow; it
-    // re-renders the form with an inline warning so the user can
-    // correct the value or skip the timer entirely.
+    // "2" is not in the preset set. The handler must NOT abort the flow;
+    // it re-renders the form with an inline warning that lists the
+    // allowed options so the user can correct the value or skip the
+    // timer entirely.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
     const destructBtn = makeCompInt(ids.selfDestructBtn, {
-      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('0.4')),
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('2')),
     });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -950,10 +951,34 @@ describe('handleSend — Step 3: final form', () => {
     await cmd.execute(interaction);
     const submit = await destructBtn.awaitModalSubmit.mock.results[0].value;
     expect(submit.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/Self-destruct.*0\.5/),
+      content: expect.stringMatching(/Self-destruct.*1\/2 second/),
     }));
     // Subsequent cancel — back-half should not run.
     expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+  });
+
+  it('self-destruct modal: friendly label "5 minutes" parses to 300s', async () => {
+    // The placeholder advertises the friendly label form; users typing
+    // the label exactly must be honored without falling through to the
+    // option-list error.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('5 minutes')),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+      expect.any(String),
+      300,
+    );
   });
 
   it('self-destruct modal: empty value clears the timer (state stays null)', async () => {

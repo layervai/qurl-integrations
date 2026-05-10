@@ -19,7 +19,13 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
-const { expiryToISO, expiryToMs, parseSelfDestructSeconds } = require('./utils/time');
+const {
+  expiryToISO,
+  expiryToMs,
+  parseSelfDestructSeconds,
+  formatSelfDestructLabel,
+  SELF_DESTRUCT_OPTIONS_TEXT,
+} = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -55,20 +61,6 @@ let _warnedStateSecretFallback = false;
 // on every process start; tests that need a stable secret should set
 // OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
-// formatSelfDestructLabel renders a seconds value as a compact button
-// label fragment — `0.5s`, `30s`, `1m`, `5m`, `1h`. Avoids `30 seconds`
-// because Discord buttons truncate aggressively and pixel budget on the
-// 2-button row is tight when paired with the personal-note button.
-function formatSelfDestructLabel(seconds) {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) {
-    const m = seconds / 60;
-    return Number.isInteger(m) ? `${m}m` : `${m.toFixed(1)}m`;
-  }
-  const h = seconds / 3600;
-  return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
-}
-
 function stateSecret() {
   // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
   // can be rotated without also invalidating in-flight OAuth state tokens —
@@ -1267,8 +1259,9 @@ async function handleSend(interaction, apiKey) {
   let recipients = [];
   let personalMessage = null;
   let expiresIn = '24h';
-  // Self-destruct timer (seconds, 0.5–3600). null = no timer (default).
-  // Forwarded to the connector as `viewer_ttl_seconds` at upload time.
+  // Self-destruct timer — one of SELF_DESTRUCT_PRESETS in seconds, or null
+  // for no timer (default). Forwarded to the connector as
+  // `viewer_ttl_seconds` at upload time.
   let selfDestructSeconds = null;
 
   const formId = `qurl_form_${sendNonce}`;
@@ -1563,11 +1556,13 @@ async function handleSend(interaction, apiKey) {
     }
 
     if (compInt.customId === ids.selfDestructBtn) {
-      // Modal collects an optional self-destruct timer (seconds).
-      // Empty submit = no timer (also the way users clear an existing
-      // value). parseSelfDestructSeconds enforces 0.5–3600 mirror of
-      // the connector contract; on validation failure we re-render the
-      // form with an inline warning rather than rejecting the modal.
+      // Modal collects an optional self-destruct timer. Choices come from
+      // SELF_DESTRUCT_PRESETS — Discord modals are TextInput-only (no native
+      // dropdown nested in a modal), so the placeholder lists the 7 options
+      // and parseSelfDestructSeconds enforces preset membership. Empty
+      // submit = no timer (also the way users clear an existing value).
+      // On validation failure we re-render the form with an inline warning
+      // so the user keeps their other selections.
       const destructInputId = 'destruct_value';
       const destructModal = new ModalBuilder()
         .setCustomId(selfDestructModalId)
@@ -1575,12 +1570,12 @@ async function handleSend(interaction, apiKey) {
       destructModal.addComponents(new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId(destructInputId)
-          .setLabel('Seconds before content vanishes (0.5–3600)')
-          .setPlaceholder('e.g. 30 (or leave blank for no timer)')
+          .setLabel('Pick a duration (blank = no timer)')
+          .setPlaceholder(SELF_DESTRUCT_OPTIONS_TEXT)
           .setStyle(TextInputStyle.Short)
           .setMaxLength(32)
           .setRequired(false)
-          .setValue(selfDestructSeconds ? String(selfDestructSeconds) : '')
+          .setValue(selfDestructSeconds ? formatSelfDestructLabel(selfDestructSeconds) : '')
       ));
       await compInt.showModal(destructModal).catch(logIgnoredDiscordErr);
 
@@ -1602,9 +1597,11 @@ async function handleSend(interaction, apiKey) {
       if (error) {
         // Inline warning on the form rather than killing the flow —
         // the user keeps their other selections and can correct the
-        // value with another click.
+        // value with another click. The parser error already carries
+        // the full option list; the modal label already advertises
+        // "blank = no timer", so no extra prompt is needed here.
         await destructSubmit.update({
-          content: formContent({ warning: `Self-destruct: ${error} Try again or leave the field blank to skip.` }),
+          content: formContent({ warning: `Self-destruct: ${error}` }),
           components: formRows(),
         }).catch(logIgnoredDiscordErr);
       } else {

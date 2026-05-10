@@ -15,8 +15,11 @@ const {
   expiryToISO,
   expiryToMs,
   parseSelfDestructSeconds,
+  formatSelfDestructLabel,
+  SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_MIN_SECONDS,
   SELF_DESTRUCT_MAX_SECONDS,
+  SELF_DESTRUCT_OPTIONS_TEXT,
 } = require('../src/utils/time');
 
 describe('utils/time', () => {
@@ -43,10 +46,39 @@ describe('utils/time', () => {
     });
   });
 
+  describe('SELF_DESTRUCT_PRESETS', () => {
+    it('exposes the 7 user-specified durations in ascending order', () => {
+      const labels = SELF_DESTRUCT_PRESETS.map((p) => p.label);
+      expect(labels).toEqual([
+        '1/2 second',
+        '1 second',
+        '5 seconds',
+        '30 seconds',
+        '5 minutes',
+        '30 minutes',
+        '1 hour',
+      ]);
+      const seconds = SELF_DESTRUCT_PRESETS.map((p) => p.seconds);
+      expect(seconds).toEqual([0.5, 1, 5, 30, 300, 1800, 3600]);
+      // Ascending so the modal placeholder reads naturally short→long.
+      for (let i = 1; i < seconds.length; i++) {
+        expect(seconds[i]).toBeGreaterThan(seconds[i - 1]);
+      }
+    });
+
+    it('MIN/MAX track the first and last preset', () => {
+      expect(SELF_DESTRUCT_MIN_SECONDS).toBe(0.5);
+      expect(SELF_DESTRUCT_MAX_SECONDS).toBe(3600);
+    });
+
+    it('OPTIONS_TEXT is the comma-joined label list (used in the modal placeholder)', () => {
+      expect(SELF_DESTRUCT_OPTIONS_TEXT).toBe(
+        '1/2 second, 1 second, 5 seconds, 30 seconds, 5 minutes, 30 minutes, 1 hour'
+      );
+    });
+  });
+
   describe('parseSelfDestructSeconds', () => {
-    // Mirrors the connector's parseExpireAfterMs codomain (PR #477):
-    // 0.5–3600 inclusive accepted (above-max clamps), everything else
-    // returns an error string the modal handler renders inline.
     it('treats absent / empty / whitespace as no-timer (no error)', () => {
       for (const v of [undefined, null, '', ' ', '   ', '\t', ' \n\t ']) {
         const r = parseSelfDestructSeconds(v);
@@ -54,54 +86,56 @@ describe('utils/time', () => {
       }
     });
 
-    it('accepts the floor exactly', () => {
-      expect(parseSelfDestructSeconds('0.5')).toEqual({ seconds: 0.5, error: null });
-    });
-
-    it('accepts integers and decimals in range', () => {
-      expect(parseSelfDestructSeconds('1')).toEqual({ seconds: 1, error: null });
-      expect(parseSelfDestructSeconds('30')).toEqual({ seconds: 30, error: null });
-      expect(parseSelfDestructSeconds('0.7')).toEqual({ seconds: 0.7, error: null });
-      expect(parseSelfDestructSeconds('3600')).toEqual({ seconds: 3600, error: null });
-    });
-
-    it('clamps above-max silently (matches connector)', () => {
-      expect(parseSelfDestructSeconds('3601')).toEqual({ seconds: 3600, error: null });
-      expect(parseSelfDestructSeconds('100000')).toEqual({ seconds: 3600, error: null });
-    });
-
-    it('rejects sub-floor with a floor-specific message', () => {
-      const r = parseSelfDestructSeconds('0.4');
-      expect(r.seconds).toBeNull();
-      expect(r.error).toMatch(/0\.5/);
-    });
-
-    it('rejects zero / negative as non-positive', () => {
-      for (const v of ['0', '-5', '-0.5']) {
-        const r = parseSelfDestructSeconds(v);
-        expect(r.seconds).toBeNull();
-        expect(r.error).toMatch(/positive/i);
+    it('accepts every preset by its friendly label', () => {
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(parseSelfDestructSeconds(preset.label)).toEqual({
+          seconds: preset.seconds,
+          error: null,
+        });
       }
     });
 
-    it('rejects non-numeric / NaN / Infinity', () => {
-      for (const v of ['abc', 'NaN', 'Infinity', '-Infinity']) {
+    it('accepts every preset by its raw seconds value', () => {
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(parseSelfDestructSeconds(String(preset.seconds))).toEqual({
+          seconds: preset.seconds,
+          error: null,
+        });
+      }
+    });
+
+    it('is case- and whitespace-insensitive on labels', () => {
+      expect(parseSelfDestructSeconds('5 MINUTES').seconds).toBe(300);
+      expect(parseSelfDestructSeconds('  5   minutes  ').seconds).toBe(300);
+      expect(parseSelfDestructSeconds('1 Hour').seconds).toBe(3600);
+      expect(parseSelfDestructSeconds('1/2 SECOND').seconds).toBe(0.5);
+    });
+
+    it('rejects values outside the preset set with the option list', () => {
+      for (const v of ['2', '7', '60', '120', '0.7', '3600.5', '7200']) {
         const r = parseSelfDestructSeconds(v);
         expect(r.seconds).toBeNull();
-        // Different error text per class is fine — pin only the rejection.
+        expect(r.error).toContain('1/2 second');
+        expect(r.error).toContain('1 hour');
+      }
+    });
+
+    it('rejects non-preset friendly phrasings', () => {
+      // Plausible-looking inputs that aren't in the preset set must fail
+      // — the modal placeholder is the source of truth; partial matches
+      // would be misleading (e.g., "2 minutes" silently becoming 5).
+      for (const v of ['2 minutes', '10 seconds', '15 min', 'forever', '5 mins']) {
+        const r = parseSelfDestructSeconds(v);
+        expect(r.seconds).toBeNull();
         expect(r.error).toBeTruthy();
       }
     });
 
-    it('rejects hex prefix even though Number() does not accept hex floats', () => {
-      // Symmetric with the connector's parseExpireAfterMs (Go strconv
-      // accepts `0x1p3`). The bot's contract should reject the same
-      // inputs even though JS Number() would already reject — pinned
-      // so a future swap to a different parser doesn't regress.
-      for (const v of ['0x1p3', '+0x1', '-0x1']) {
+    it('rejects non-numeric / NaN / Infinity / hex', () => {
+      for (const v of ['abc', 'NaN', 'Infinity', '-Infinity', '0x1p3', '+0x1', '-0x1']) {
         const r = parseSelfDestructSeconds(v);
         expect(r.seconds).toBeNull();
-        expect(r.error).toMatch(/hex/i);
+        expect(r.error).toBeTruthy();
       }
     });
 
@@ -111,10 +145,21 @@ describe('utils/time', () => {
       expect(r.seconds).toBeNull();
       expect(r.error).toMatch(/too long/i);
     });
+  });
 
-    it('exports MIN/MAX constants for callers building UI labels', () => {
-      expect(SELF_DESTRUCT_MIN_SECONDS).toBe(0.5);
-      expect(SELF_DESTRUCT_MAX_SECONDS).toBe(3600);
+  describe('formatSelfDestructLabel', () => {
+    it('renders each preset seconds value as the matching label', () => {
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(formatSelfDestructLabel(preset.seconds)).toBe(preset.label);
+      }
+    });
+
+    it('falls back to a compact "Ns" rendering for off-preset values', () => {
+      // Unreachable through the modal today (the parser blocks off-preset
+      // input) but defends against a future caller feeding in stored
+      // off-preset state — never silently substitute a different preset.
+      expect(formatSelfDestructLabel(2)).toBe('2s');
+      expect(formatSelfDestructLabel(0.75)).toBe('0.75s');
     });
   });
 
