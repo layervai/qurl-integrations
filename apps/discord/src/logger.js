@@ -23,8 +23,18 @@ const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];
 
+// Exact-match key names (not substring) that always trigger redaction.
+// `hash` here is the connector's md5 of uploaded content — treated as
+// sensitive in our broader infrastructure (see internal security docs).
+// The per-call-site fix goes through connector.js's md5Prefix() helper;
+// this is the chokepoint that catches a future caller that bypasses it.
+// Kept separate from REDACT_SUBSTRINGS because legitimate names like
+// `commitHash` / `webhookHash` / `tokenHash` must NOT be blanked.
+const REDACT_EXACT_KEYS = new Set(['hash']);
+
 function shouldRedact(key) {
   const k = String(key).toLowerCase();
+  if (REDACT_EXACT_KEYS.has(k)) return true;
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
 
@@ -39,6 +49,10 @@ const AUDIT_SECRET_KEYS = new Set([
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
   'session_token', 'private_key', 'client_secret', 'webhook_secret',
+  // `hash` is the connector's md5 of uploaded content; same rationale
+  // as REDACT_EXACT_KEYS above. See md5Prefix() in connector.js for the
+  // intentional truncated form (`md5_prefix`) callers should use instead.
+  'hash',
 ]);
 
 function isAuditSecretKey(key) {
