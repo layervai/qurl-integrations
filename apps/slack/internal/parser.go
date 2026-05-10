@@ -156,7 +156,13 @@ var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
 // lowercase alphanumeric with hyphens, no leading or trailing hyphen.
 // Surfacing the rejection here gives a friendlier slash-command error
 // than punting an obviously-bogus alias all the way to the API.
-var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+//
+// The pattern is anchored both ends and uses a non-capturing group
+// to require a trailing alnum: `[a-z0-9]` (start) then optionally
+// `[a-z0-9-]*[a-z0-9]` (middle plus required trailing alnum). A
+// single-character alias (`$a`, `$1`) is allowed by the optional
+// non-capturing group.
+var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
 // [Command]. Empty or `help` text returns a [Command] with Subcommand =
