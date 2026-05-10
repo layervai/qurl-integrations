@@ -336,6 +336,11 @@ func validateIdempotencyKey(key string) error {
 // enforcement of last resort. Empty fields elide from the wire payload via
 // `omitempty`, so a ResourceID-only call doesn't accidentally trip the rule.
 //
+// Note: Create takes a value receiver for backward-compat with the existing
+// callers in apps/slack and apps/cli; the new methods ([Client.CreateResource],
+// [Client.UpdateResource]) take *Input pointers, which is the going-forward
+// idiom. Pointer migration tracked at #146.
+//
 //nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {

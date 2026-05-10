@@ -1326,14 +1326,23 @@ func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 		t.Error("hasAnyFieldSet on empty UpdateResourceInput should return false")
 	}
 
-	// Coverage tripwire: if a new field is added to UpdateResourceInput
-	// without updating both hasAnyFieldSet and the cases above, the
-	// reflect-based field count diverges from the case count.
-	got := reflect.TypeOf(UpdateResourceInput{}).NumField()
-	if got != len(cases) {
-		t.Errorf("UpdateResourceInput has %d fields but TestHasAnyFieldSetCoversAllFields covers %d — "+
+	// Coverage tripwire: if a new mutable field is added to
+	// UpdateResourceInput without updating both hasAnyFieldSet and
+	// the cases above, the reflect-based field count diverges from
+	// the case count. Filters out fields with `json:"-"` so future
+	// request-decoration fields (e.g. IdempotencyKey per #148) don't
+	// trip the count.
+	mutableFields := 0
+	tt := reflect.TypeOf(UpdateResourceInput{})
+	for i := 0; i < tt.NumField(); i++ {
+		if tt.Field(i).Tag.Get("json") != "-" {
+			mutableFields++
+		}
+	}
+	if mutableFields != len(cases) {
+		t.Errorf("UpdateResourceInput has %d mutable fields but TestHasAnyFieldSetCoversAllFields covers %d — "+
 			"add the new field to both hasAnyFieldSet and this test's cases slice",
-			got, len(cases))
+			mutableFields, len(cases))
 	}
 }
 
@@ -1428,6 +1437,56 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 	// Mirror of the assertion in TestUpdateResourceSetAlias.
 	if _, ok := raw["alias"]; ok {
 		t.Errorf("alias must elide when ClearAlias=true; body=%s", gotBody)
+	}
+}
+
+// TestUpdateResourceRetryPreservesBody pins the retry-safety contract
+// documented at [Client.UpdateResource]: do() retries 5xx with the
+// buffered body, so a successfully-applied PATCH that returns 502
+// will be re-applied with byte-identical request bytes. If a future
+// refactor breaks the body-buffering invariant, the per-attempt
+// payloads would diverge and this test catches it before any
+// non-idempotent PATCH field starts shipping.
+func TestUpdateResourceRetryPreservesBody(t *testing.T) {
+	var attempts atomic.Int32
+	var mu sync.Mutex
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("attempt %d: read body: %v", n, err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{"resource_id": testResourceID})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		withDelaysForTest(),
+	)
+	alias := testAliasAlt
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Alias: &alias,
+	}); err != nil {
+		t.Fatalf("UpdateResource after retries: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(bodies); i++ {
+		if !bytes.Equal(bodies[0], bodies[i]) {
+			t.Errorf("attempt %d body diverged from attempt 1.\n#1: %s\n#%d: %s", i+1, bodies[0], i+1, bodies[i])
+		}
 	}
 }
 
