@@ -168,11 +168,19 @@ func main() {
 		slog.Error("graceful shutdown failed", "error", err)
 		os.Exit(1)
 	}
-	// Drain the listener goroutine so the "server stopped" log only
-	// fires after Serve has actually returned. In practice Shutdown
-	// blocks until Serve returns, but joining the channel makes the
-	// ordering explicit and removes a theoretical race.
-	<-serverErr
+	// Drain the listener goroutine. The post-shutdown receive is
+	// comma-ok so we distinguish "channel closed (clean exit)" from
+	// "channel had a buffered error" (a real Serve failure that
+	// raced our SIGTERM). The earlier select can pick either branch
+	// when both are ready; if signal won and Serve had already
+	// pushed a real error onto the buffered channel, that error
+	// would otherwise be silently discarded here. Surfacing it as a
+	// non-zero exit ensures ECS replaces the task instead of letting
+	// us look healthy on a half-broken runtime.
+	if err, ok := <-serverErr; ok && err != nil {
+		slog.Error("server failed during shutdown", "error", err)
+		os.Exit(1)
+	}
 	slog.Info("server stopped")
 }
 
