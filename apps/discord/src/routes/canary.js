@@ -1,50 +1,9 @@
-// Canary exec endpoint — exercised by the canary runner Lambda
-// (qurl-integrations-infra/qurl-bot-discord/terraform/canary-exec.tf)
-// to verify the bot's qURL send pipeline end-to-end every 3 hours.
-//
-// Auth is the qURL/NHP knock. The Lambda mints a single-use qURL
-// targeting this endpoint and calls qurl-service /v1/resolve; that
-// resolve authenticates the caller via NHP, which then signals the
-// bot's firewall to admit the caller's egress IP for the qURL's
-// session window. By the time a request reaches the route, the
-// caller has already proved possession of a valid qURL access
-// token for `${BOT_URL}/canary/exec`. No HMAC.
-//
-// The 5-minute X-Canary-Timestamp window is kept as belt-and-
-// suspenders against replay of a captured-and-resolved request
-// past the qURL's lifetime.
-//
-// Body shape — empty OR both fields together. Partial body
-// (one of the two) is rejected with 400 invalid_test:
-//   {} → legacy back-end-only path (no DM)
-//   { test: "send_file" | "send_location", recipient_user_id: "<snowflake>" }
-//      → differentiated path: upload → mint → DM
-//
-// When `test` + `recipient_user_id` are both present, the canary:
-//   1. Builds a synthetic resource shaped like the named test —
-//      small text Buffer for send_file (raw-bytes connector path),
-//      `{type, url, name}` location JSON for send_location (the JSON
-//      connector path).
-//   2. Uploads to the connector (reUploadBuffer / uploadJsonToConnector).
-//   3. Mints a single 60s-TTL qURL via mintLinks.
-//   4. DMs the recipient via sendDM with a clearly-labeled
-//      "[Canary probe]" embed.
-//
-// Empty body falls through to the legacy back-end-only path. Kept
-// for any operator-manual probe (curl with no body) and during the
-// rollout window before the EventBridge Lambda starts sending the
-// differentiated body.
-//
-// Response includes per-step status so the Lambda's per-test pass/fail
-// metric can attribute failures to the correct subsystem:
-//   { ok, step: "upload"|"mint"|"dm"|null, latency_ms, dm_status, ... }
-//
-// Recipient allowlist: the differentiated path rejects any
-// `recipient_user_id` not in `config.CANARY_RECIPIENT_USER_IDS`
-// with 403 recipient_not_allowed. Defense-in-depth — if the qURL
-// auth path is ever bypassed, an attacker still can't DM arbitrary
-// users. Allowlist mirrors the recipient list terraform passes
-// into the Lambda's RECIPIENT_USER_IDS_JSON env.
+// Canary exec endpoint — synthetic-monitor probe driven by the
+// EventBridge Lambda in qurl-integrations-infra. Auth is the
+// qURL/NHP knock; reaching the route means the caller already
+// resolved a valid qURL targeting `${BOT_URL}/canary/exec`, so the
+// firewall hole IS the auth. X-Canary-Timestamp + 5-min replay
+// window are belt-and-suspenders.
 
 const express = require('express');
 const { EmbedBuilder } = require('discord.js');
@@ -56,55 +15,20 @@ const { COLORS } = require('../constants');
 
 const router = express.Router();
 
-// 5-minute replay window — matches the qurl-service / NHP standard
-// for token-resolution time, so an operator inspecting both layers
-// sees the same number. The runner-to-bot path is synchronous and
-// shouldn't see clock skew above a few seconds; the wider window
-// absorbs Lambda cold-start + qURL mint + resolve overhead without
-// forcing a tighter bound that would reject legit traffic during
-// NHP slowness.
-//
-// Replay-trade note: a captured valid request CAN be replayed within
-// the 5-min window (each replay mints a new connector resource +
-// runs through to a DM). Acceptable surface here because:
-//   - 4 KB body cap bounds replay payload size
-//   - qURL one-time-use semantics make re-resolving the same token
-//     impossible past the first resolve, so a captured request can
-//     only be replayed against a still-open NHP firewall hole. This
-//     leans on the qurl-service contract — see
-//     `internal/service/resolve.go` (`atomicConsumeOneTimeUse` /
-//     similar) in layervai/qurl-service. If that contract relaxes
-//     (cache TTL, retry-on-timeout window, partial-resolve rollback)
-//     the replay window widens in practice; this comment is the
-//     load-bearing dependency marker.
-//   - allowlist on recipient_user_id bounds DM blast radius
-//   - canary scenarios are idempotent (the audit row tags the run-id
-//     and a duplicate qURL-mint is functionally a no-op)
+// Matches qurl-service's NHP token-resolution window so operators
+// inspecting both layers see the same number. Replay defenses past
+// the window: qurl-service one-time-use (load-bearing — relaxing
+// that contract widens this window in practice), 4 KB body cap,
+// recipient allowlist.
 const TIMESTAMP_TOLERANCE_SECONDS = 300;
 
-// Allowed `test` values. The Lambda iterates `SCENARIOS_JSON`; this
-// set is the bot-side guardrail so a typo'd scenario in the Lambda
-// env returns a clear 400 instead of being silently mistreated as
-// the legacy back-end-only path.
 const VALID_TESTS = new Set(['send_file', 'send_location']);
-
-// Discord snowflake validation: 17-20 digits. Same shape the
-// terraform `canary_recipient_user_ids` validation uses.
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
 function verifyCanaryTimestamp(req, res, next) {
-  // Pre-auth 401s don't carry `latency_ms` — middleware runs before
-  // the route handler captures `startedAt`, so the field is structurally
-  // absent here. (Even if it were available, a header-shape check is
-  // microsecond-scale and not useful for triage; the warn line below
-  // is the on-call signal.) Tests pin the absence so a future refactor
-  // that surfaces a middleware-level startedAt and "uniformly" adds
-  // latency_ms to these branches gets caught.
-  // ip is observe-only (logged for triage, never gates) — the bad-
-  // sig-throttle that used to rate-limit per-IP went away with HMAC.
-  // Under NHP fronting the IP validates "yes this is the canary
-  // runner, not random internet"; on a misconfigured non-NHP mount
-  // a stream of 401s from arbitrary IPs is the first triage signal.
+  // ip is observe-only (logged, never gated) — under NHP it confirms
+  // the runner; without NHP, a 401 stream from arbitrary IPs is the
+  // first triage signal of a misconfigured mount.
   const ip = req.ip || 'unknown';
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
@@ -129,11 +53,9 @@ function verifyCanaryTimestamp(req, res, next) {
   next();
 }
 
-// Build a clearly-labeled canary DM payload. Intentionally NOT using
-// `buildDeliveryPayload` from commands.js — that helper is gated
-// behind `_test` (non-production only). The canary's purpose is to
-// exercise client.users.fetch → user.send; embed shape doesn't need
-// to match `/qurl send` exactly. Recipients know this is a probe.
+// Standalone embed (not commands.js's `buildDeliveryPayload`, which
+// is gated to non-production). Embed shape doesn't need to match
+// `/qurl send` — recipients know this is a probe.
 function buildCanaryDmPayload({ test, qurlLink, resourceId, expiresAt }) {
   const expiresUnix = Math.floor(new Date(expiresAt).getTime() / 1000);
   const embed = new EmbedBuilder()
@@ -175,13 +97,8 @@ async function runScenario({ test, recipientUserId, apiKey }) {
       latency_ms: Date.now() - startedAt,
     };
   }
-  // Belt-and-suspenders: connector.js's reUploadBuffer +
-  // uploadJsonToConnector both throw on missing resource_id today
-  // (`Connector JSON upload returned no resource_id` etc.), so this
-  // branch is unreachable against the real client. Kept so a future
-  // connector refactor that switches to a return-shape contract
-  // doesn't silently degrade the canary into a "no link minted, no
-  // alarm" state.
+  // Unreachable today — connector.js throws on missing resource_id.
+  // Kept against a future refactor to a return-shape contract.
   if (!upload?.resource_id) {
     return {
       ok: false, step: 'upload', error: 'upload_no_resource_id',
@@ -271,14 +188,9 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
         latency_ms: Date.now() - startedAt,
       });
     }
-    // Allowlist enforcement — defense-in-depth against an attacker
-    // who somehow gets past the qURL/NHP knock. Empty allowlist →
-    // 503 (server config state, not a client error — matches the
-    // no_api_key shape). Mismatched recipient → 403 (request is
-    // well-formed, authentication succeeded, but the principal is
-    // not authorized to act on this target — textbook 403).
-    // Response body still names the error code; the allowlist
-    // itself is never exposed.
+    // Allowlist is the last DM-blast defense if the qURL/NHP gate
+    // is ever bypassed. Empty list → 503 (server config); mismatch
+    // → 403 (auth OK, principal not authorized).
     const allowlist = config.CANARY_RECIPIENT_USER_IDS;
     if (!Array.isArray(allowlist) || allowlist.length === 0) {
       return res.status(503).json({
@@ -295,11 +207,8 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
 
     try {
       const result = await runScenario({ test, recipientUserId, apiKey });
-      // Add a structured warn line on any non-OK result so an on-call
-      // who clicks through from a CloudWatch alarm finds a
-      // correlatable log entry. Without this, `step: 'upload'` /
-      // 'mint' / 'dm' failures emit metrics but no log — outer
-      // catch only fires if runScenario throws, which is rare.
+      // Step-level metrics emit even when runScenario doesn't throw —
+      // log so on-call has a correlatable entry per CloudWatch alarm.
       if (!result.ok) {
         logger.warn('Canary scenario failed', {
           test, recipient_user_id: recipientUserId,
@@ -308,8 +217,6 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
           latency_ms: result.latency_ms,
         });
       }
-      // Echo the test name + recipient so logs grep cleanly and the
-      // Lambda's per-test attribution is unambiguous.
       const status = result.ok ? 200 : 500;
       return res.status(status).json({ ...result, test, recipient_user_id: recipientUserId });
     } catch (err) {
@@ -327,21 +234,11 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
     }
   }
 
-  // Legacy back-end-only path. Empty body falls through here —
-  // exercises connector + mint without DM. Reachable now only by a
-  // qURL/NHP-knocked caller that posts an empty body (no operator
-  // can curl this directly anymore — the route requires a recently-
-  // resolved qURL). Kept for back-compat with any pre-extension
-  // Lambda still in flight; once every fielded Lambda sends the
-  // differentiated body, the next reader can drop this branch.
-  //
-  // Synthetic resource: a tiny location payload. Picked location
-  // (not file) because it doesn't touch the Discord CDN download
-  // path — the canary is testing the bot↔qURL hop, and the file
-  // path's downloadAndUpload hits cdn.discordapp.com which is its
-  // own dependency cone. Location goes straight from the bot to
-  // the connector via uploadJsonToConnector, isolating the failure
-  // surface to the qURL stack.
+  // Legacy empty-body path — connector + mint, no DM. Pre-extension
+  // Lambdas still hit this; drop once every fielded Lambda sends the
+  // differentiated body. Location payload (not file) keeps this off
+  // the Discord CDN download path so the canary isolates the
+  // bot↔qURL hop.
   const probePayload = {
     type: 'google-map',
     url: 'https://maps.app.goo.gl/canary-probe',
@@ -375,16 +272,13 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
     return res.json({
       ok: true,
       latency_ms: Date.now() - startedAt,
-      // Echo the host but not the full link — the link itself is a
-      // single-use credential, no point ever logging it. Host is
-      // useful for verifying we're hitting the right qURL pool.
+      // Single-use credential — host only, never the full link.
       link_host: linkHost,
       resource_id: upload.resource_id,
     });
   } catch (err) {
-    // logger.warn (not error) — canary failures are expected during
-    // outages and shouldn't pollute the error log on top of whatever
-    // is already firing.
+    // warn not error — expected during outages; don't pollute the
+    // error log alongside whatever's already firing.
     logger.warn('Canary exec failed', {
       error: err?.message,
       apiCode: err?.apiCode,
