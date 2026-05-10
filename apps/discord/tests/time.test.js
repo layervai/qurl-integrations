@@ -76,6 +76,14 @@ describe('utils/time', () => {
         '1/2 second, 1 second, 5 seconds, 30 seconds, 5 minutes, 30 minutes, 1 hour'
       );
     });
+
+    it('OPTIONS_TEXT fits inside Discord\'s 100-char setPlaceholder cap', () => {
+      // Future preset additions (e.g. "15 minutes") could push the
+      // joined string past Discord's 100-char placeholder limit and
+      // fail at runtime as a Discord API error. Guard at build time so
+      // the regression is caught here, not in the bot's logs.
+      expect(SELF_DESTRUCT_OPTIONS_TEXT.length).toBeLessThanOrEqual(100);
+    });
   });
 
   describe('parseSelfDestructSeconds', () => {
@@ -131,16 +139,22 @@ describe('utils/time', () => {
       }
     });
 
-    it('rejects non-numeric / NaN / Infinity / hex / scientific notation', () => {
+    it('rejects non-numeric / NaN / Infinity / hex / scientific notation / signed', () => {
       // Hex integers and scientific notation are accepted by Number() and
       // would otherwise coerce into preset values (Number("0x1") → 1,
       // Number("0x1e") → 30, Number("5e-1") → 0.5). The strict decimal
       // gate in the parser blocks them so the placeholder's "decimal
       // seconds" advertisement is the actual contract.
+      //
+      // Leading + and - are also rejected — every preset is positive,
+      // a "+30" wouldn't be a typo of any placeholder string, and "-30"
+      // is meaningfully an error. Net: regex matches "0.5" and "30",
+      // not "+0.5", "+30", "-0.5", "-30".
       const cases = [
         'abc', 'NaN', 'Infinity', '-Infinity',
         '0x1', '0x1e', '0x12c', '0x1p3', '+0x1', '-0x1',
         '5e-1', '3e2', '1e0', '0.5e0',
+        '+0.5', '+1', '+30', '+300',
       ];
       for (const v of cases) {
         const r = parseSelfDestructSeconds(v);

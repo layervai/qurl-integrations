@@ -1005,22 +1005,44 @@ describe('handleSend — Step 3: final form', () => {
     );
   });
 
-  it('self-destruct modal: empty value clears the timer (state stays null)', async () => {
-    // User clicks the button with a previously-set value, then submits
-    // empty to clear. The form re-renders with the timer button label
-    // returning to its unset state. Subsequent send carries selfDestruct=null.
+  it('self-destruct modal: empty submit AFTER a set value actually clears (not just stays null)', async () => {
+    // Two destruct-button clicks: first sets "30", second submits empty.
+    // The eventual upload call must carry null — proving the empty-submit
+    // path actively clears the previous value, rather than just being a
+    // no-op that happens to leave the trivially-already-null initial
+    // state intact.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+    const destructBtnSet = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30')),
+    });
+    const destructBtnClear = makeCompInt(ids.selfDestructBtn, {
       awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('')),
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
-      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
+      awaitQueue: [
+        locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')),
+        targetUser, userSelect,
+        destructBtnSet,
+        destructBtnClear,
+        sendBtn,
+      ],
     });
     await cmd.execute(interaction);
+    // Mid-flight: after the SET submit, the form preview reflects "30 seconds".
+    const setSubmit = await destructBtnSet.awaitModalSubmit.mock.results[0].value;
+    expect(setSubmit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('_Self-destruct timer:_ 30 seconds'),
+    }));
+    // After the CLEAR submit, the preview line is gone.
+    const clearSubmit = await destructBtnClear.awaitModalSubmit.mock.results[0].value;
+    expect(clearSubmit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.not.stringContaining('_Self-destruct timer:_'),
+    }));
+    // And the eventual upload carries null — the actual contract under test.
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map' }),
       'location.json',

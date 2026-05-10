@@ -1579,7 +1579,15 @@ async function handleSend(interaction, apiKey) {
           .setStyle(TextInputStyle.Short)
           .setMaxLength(SELF_DESTRUCT_INPUT_MAX_LENGTH)
           .setRequired(false)
-          .setValue(selfDestructSeconds ? formatSelfDestructLabel(selfDestructSeconds) : '')
+          // Number.isFinite + > 0 instead of truthy so a corrupted DDB row
+          // surfacing Infinity/-Infinity (truthy) doesn't prefill the
+          // modal with the literal "(invalid)" formatter fallback. Same
+          // invariant as appendViewerTtl on the connector boundary.
+          .setValue(
+            Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0
+              ? formatSelfDestructLabel(selfDestructSeconds)
+              : ''
+          )
       ));
       await compInt.showModal(destructModal).catch(logIgnoredDiscordErr);
 
@@ -1604,6 +1612,15 @@ async function handleSend(interaction, apiKey) {
         // value with another click. The parser error reads as a verb
         // phrase ("must be one of: …") so the prefix here is just the
         // field name, no colon-on-colon repetition.
+        //
+        // We deliberately DON'T stash the rejected raw input for the
+        // next modal open. Re-opening prefills from `selfDestructSeconds`
+        // (still null/previous), so the user retypes. Trade-off:
+        // preserving the raw would let them edit a typo without
+        // retyping, but it would also imply the bad value is "almost
+        // right" — when the warning explicitly says "must be one of:
+        // <list>", a clean prefill nudges the user to pick a preset
+        // exactly rather than tweak their previous wrong guess.
         await destructSubmit.update({
           content: formContent({ warning: `Self-destruct timer ${error}` }),
           components: formRows(),

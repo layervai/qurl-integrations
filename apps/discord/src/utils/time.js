@@ -61,9 +61,12 @@ const SELF_DESTRUCT_INPUT_MAX_LENGTH = 32;
 
 // Strict decimal-seconds shape — gates the numeric branch of the parser
 // so hex (`0x1`, `0x1e`) and scientific notation (`5e-1`) can't coerce
-// through Number() into a preset value. Optional sign + digits + optional
-// fractional part. See parseSelfDestructSeconds for the rationale.
-const DECIMAL_SECONDS_RE = /^[+-]?\d+(\.\d+)?$/;
+// through Number() into a preset value. Bare digits + optional fractional
+// part. No leading sign: every preset is positive, the placeholder reads
+// "0.5" not "+0.5", and a "-" prefix is meaningfully an error (the user
+// asked for a negative duration). See parseSelfDestructSeconds for the
+// full rationale.
+const DECIMAL_SECONDS_RE = /^\d+(\.\d+)?$/;
 
 function canonicalize(s) {
   return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
