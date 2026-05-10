@@ -397,6 +397,7 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       md5_prefix: undefined,
       resource_id: 'r4',
     });
+    assertNoFullHashLeaked();
   });
 
   // Pins the `typeof hash === 'string'` guard against future schema drift
