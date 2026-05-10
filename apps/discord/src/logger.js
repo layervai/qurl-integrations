@@ -39,6 +39,9 @@ const REDACT_EXACT_KEYS = new Set([
   'content_hash', 'body_hash',
 ]);
 
+// Internal: callers must pass strings. Only invoked from Object.entries()
+// loops, which yield string keys. If this becomes externally-used, restore
+// a String() coercion or guard non-string inputs.
 function shouldRedact(key) {
   const k = key.toLowerCase();
   if (REDACT_EXACT_KEYS.has(k)) return true;
@@ -63,6 +66,7 @@ const AUDIT_SECRET_KEYS = new Set([
   'content_hash', 'body_hash',
 ]);
 
+// Internal: callers must pass strings (same contract as shouldRedact).
 function isAuditSecretKey(key) {
   return AUDIT_SECRET_KEYS.has(key.toLowerCase());
 }

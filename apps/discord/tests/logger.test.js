@@ -535,6 +535,26 @@ describe('logger', () => {
       expect(line).not.toContain('real-secret');
     });
 
+    // Drift guard: REDACT_EXACT_KEYS and AUDIT_SECRET_KEYS are kept in
+    // sync by hand today (see #221). This test fires if a future edit
+    // adds an exact-match key to one set without mirroring it to the
+    // other — same shape of regression that consolidation in #221 will
+    // ultimately remove the need for.
+    it('every REDACT_EXACT_KEYS entry is also redacted by audit()', () => {
+      logger = require('../src/logger');
+      const exactKeys = ['hash', 'md5', 'sha1', 'sha256', 'sha512',
+        'digest', 'checksum', 'content_hash', 'body_hash'];
+
+      for (const k of exactKeys) {
+        consoleSpy.log.mockClear();
+        consoleSpy.error.mockClear();
+        logger.audit('upload_success', { send_id: 's1', [k]: FULL_MD5 });
+        const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+        expect(parsed.audit[k]).toBe('[REDACTED]');
+        expect(consoleSpy.error.mock.calls[0][0]).toContain(k);
+      }
+    });
+
     it('audit() recurses into matched-key objects', () => {
       logger = require('../src/logger');
 
