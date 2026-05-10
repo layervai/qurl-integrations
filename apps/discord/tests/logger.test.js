@@ -425,6 +425,38 @@ describe('logger', () => {
       expect(line).not.toContain('REDACTED');
     });
 
+    // Other canonical content-hash names share `hash`'s exact-match treatment
+    // so a future caller using a different name doesn't slip through.
+    it.each([
+      'md5', 'sha1', 'sha256', 'sha512',
+      'digest', 'checksum',
+      'content_hash', 'body_hash',
+    ])('redacts content-hash key "%s" (exact-match)', (keyName) => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('uploaded', { [keyName]: FULL_MD5 });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain(`"${keyName}":"[REDACTED]"`);
+      expect(line).not.toContain(FULL_MD5);
+    });
+
+    // Adjacent names that look like content hashes but aren't on the
+    // exact-match list — they must survive (no over-redaction).
+    it.each([
+      'md5_prefix', 'sha256_prefix', 'commit_hash', 'fileHash',
+    ])('does NOT redact adjacent name "%s"', (keyName) => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('deploy', { [keyName]: 'value-survives' });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain(`"${keyName}":"value-survives"`);
+      expect(line).not.toContain('REDACTED');
+    });
+
     it('redacts nested hash key inside a meta object', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');

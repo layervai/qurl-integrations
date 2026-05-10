@@ -24,11 +24,20 @@ const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];
 
-// Exact-match keys (not substring): `hash` is the connector's md5 of
-// uploaded content; per-call-site truncation goes through md5Prefix() in
-// connector.js. Exact-match so legitimate names like `commitHash` /
-// `webhookHash` don't trip.
-const REDACT_EXACT_KEYS = new Set(['hash']);
+// Exact-match keys (not substring): content-derived hash names that are
+// sensitive in our broader infrastructure. The connector's md5 of uploaded
+// content is the original motivator (per-call-site truncation goes through
+// md5Prefix() in connector.js); the rest are forward-looking guards so a
+// future caller using a different canonical name doesn't slip through.
+// Exact-match so legitimate names like `commitHash` / `commit_hash` /
+// `webhookHash` / `md5_prefix` don't trip. Mirrored in AUDIT_SECRET_KEYS
+// below — the two sets are kept in sync by hand today (see #221).
+const REDACT_EXACT_KEYS = new Set([
+  'hash',
+  'md5', 'sha1', 'sha256', 'sha512',
+  'digest', 'checksum',
+  'content_hash', 'body_hash',
+]);
 
 function shouldRedact(key) {
   const k = String(key).toLowerCase();
@@ -47,7 +56,11 @@ const AUDIT_SECRET_KEYS = new Set([
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
   'session_token', 'private_key', 'client_secret', 'webhook_secret',
-  'hash', // see REDACT_EXACT_KEYS above
+  // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
+  // Kept in sync by hand today; consolidation tracked in #221.
+  'hash', 'md5', 'sha1', 'sha256', 'sha512',
+  'digest', 'checksum',
+  'content_hash', 'body_hash',
 ]);
 
 function isAuditSecretKey(key) {
