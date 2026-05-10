@@ -1276,6 +1276,58 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreateResourceRetryPreservesBody pins the body-buffering invariant
+// on the CreateResource retry path, mirroring
+// TestUpdateResourceRetryPreservesBody. POST /v1/resources is server-side
+// idempotent on (owner_id, target_url_hash), but client-side body bytes
+// must stay byte-identical across attempts so the server's hash matches.
+func TestCreateResourceRetryPreservesBody(t *testing.T) {
+	var attempts atomic.Int32
+	var mu sync.Mutex
+	var bodies [][]byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("attempt %d: read body: %v", n, err)
+		}
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceIDAlt,
+			"target_url":  testTargetURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-key",
+		WithRetry(3),
+		withDelaysForTest(),
+	)
+	if _, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: testTargetURL,
+		Alias:     testAlias,
+	}); err != nil {
+		t.Fatalf("CreateResource after retries: %v", err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(bodies); i++ {
+		if !bytes.Equal(bodies[0], bodies[i]) {
+			t.Errorf("attempt %d body diverged from attempt 1.\n#1: %s\n#%d: %s", i+1, bodies[0], i+1, bodies[i])
+		}
+	}
+}
+
 // TestUpdateResourceNoFieldsSetRejected pins the client-side fail-fast
 // for the all-nil-pointers, ClearAlias=false case. Symmetric with
 // Create's no-target guard — saves a round-trip on a no-op PATCH.
