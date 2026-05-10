@@ -3,11 +3,27 @@ name: Slack Integration
 on:
   push:
     branches: [main]
+    paths:
+      - 'apps/slack/**'
+      - 'shared/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/slack.yml'
   pull_request:
+    paths:
+      - 'apps/slack/**'
+      - 'shared/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/slack.yml'
 
 permissions:
   contents: read
   pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -27,6 +43,7 @@ jobs:
               - 'shared/**'
               - 'go.mod'
               - 'go.sum'
+              - '.github/workflows/slack.yml'
 
   lint:
     name: Lint
@@ -96,29 +113,55 @@ jobs:
       - name: Run govulncheck
         run: govulncheck ./...
 
-  build:
-    name: Build
+  docker-check:
+    name: Docker Build Check
     runs-on: ubuntu-latest
     needs: [changes, lint, test]
     if: needs.changes.outputs.app == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      # Cross-architecture build target: the ECS task runs on Graviton
+      # (linux/arm64). Setting up qemu lets the ubuntu-latest amd64
+      # runner emulate arm64 so the same Dockerfile that ships to
+      # production is what CI verifies — not an amd64 facsimile.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
-      - name: Build Lambda binary
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: arm64
-        run: go build -o bootstrap ./apps/slack/cmd/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Build slack image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
-          name: slack-lambda
-          path: bootstrap
-          retention-days: 7
+          context: .
+          file: apps/slack/Dockerfile
+          platforms: linux/arm64
+          push: false
+          tags: qurl-bot-slack:ci
+
+  trigger-deploy:
+    name: Trigger ECS Deploy
+    needs: [changes, lint, test, vulnerability-scan, docker-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: |
+      needs.changes.outputs.app == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push'
+    steps:
+      # SECURITY: DEPLOY_PAT must be a *fine-grained* personal access token
+      # scoped to:
+      #   - Repository: layervai/qurl-integrations-infra (ONLY)
+      #   - Permissions: Contents = Read and write (repository_dispatch)
+      # A classic PAT with broad 'repo' scope would let a compromised run of
+      # this workflow trigger deploys or modify content on ANY repo the
+      # token-owner has access to. Mirrors the discord.yml pattern.
+      # Rotate on any suspected exposure.
+      - name: Trigger deploy in infra repo
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ secrets.DEPLOY_PAT }}
+          repository: layervai/qurl-integrations-infra
+          event-type: slack-bot-deploy
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "refs/heads/main"}'

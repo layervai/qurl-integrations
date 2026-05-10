@@ -11,13 +11,16 @@ Slack bot for creating and managing qURLs via slash commands, with link unfurlin
 
 ## Architecture
 
-- **Runtime:** AWS Lambda (arm64) behind API Gateway
+- **Runtime:** AWS Fargate (arm64, distroless container) behind an
+  ALB. Always-on; long-running-process needed for the
+  `response_url` async-defer pattern Slack publishes for slash
+  commands.
 - **Auth:** Workspace API key (per-user OAuth planned)
 - **Endpoints:**
   - `POST /slack/commands` — Slash command handler
   - `POST /slack/events` — Event subscriptions (link unfurling)
   - `POST /slack/interactions` — Interactive components
-  - `GET /health` — Health check
+  - `GET /health` — Health check (ALB / ECS probe target)
 
 ## Development
 
@@ -25,8 +28,13 @@ Slack bot for creating and managing qURLs via slash commands, with link unfurlin
 # Run tests
 go test -count=1 ./apps/slack/...
 
-# Build
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+# Build the container image (canonical CI/prod path):
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
+
+# Build a local Go binary (development / debugging):
+make build-slack
+# binary lands at release/slack/qurl-bot-slack (gitignored)
 ```
 
 ## Environment Variables
