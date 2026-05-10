@@ -160,12 +160,19 @@ type AdminError struct {
 // passing `out=nil` to [AdminClient.do].
 var ErrEmptyAdminResponse = errors.New("admin client: empty data field in 2xx response")
 
-// Error returns a human-readable message.
+// Error returns a human-readable message. Includes the service-side
+// `Code` field (e.g. "not_admin", "rate_limited") so log lines can
+// be cross-referenced against qurl-service logs by error code rather
+// than only by status text.
 func (e *AdminError) Error() string {
-	if e.Detail != "" {
-		return fmt.Sprintf("%s (%d): %s", e.Title, e.StatusCode, e.Detail)
+	codeSuffix := ""
+	if e.Code != "" {
+		codeSuffix = " [" + e.Code + "]"
 	}
-	return fmt.Sprintf("%s (%d)", e.Title, e.StatusCode)
+	if e.Detail != "" {
+		return fmt.Sprintf("%s%s (%d): %s", e.Title, codeSuffix, e.StatusCode, e.Detail)
+	}
+	return fmt.Sprintf("%s%s (%d)", e.Title, codeSuffix, e.StatusCode)
 }
 
 // CheckAdmin asks qurl-service whether `slackUserID` is a recognized
@@ -347,7 +354,14 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 	if err != nil {
 		return fmt.Errorf("admin request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		// Drain residue past the LimitReader cap so the connection
+		// can be reused by HTTP keep-alive instead of dropped on
+		// close. Low-impact at slash-command volumes but cheap
+		// hygiene against future high-frequency endpoints.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -362,14 +376,17 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 		return nil
 	}
 
+	// All admin endpoints ship enveloped JSON — `{"data": ...}` on
+	// success, `{"error": {...}}` on failure. The envelope is the
+	// load-bearing contract; a previous version had a "raw JSON
+	// fallback" branch but that branch was unreachable for any
+	// valid JSON object (adminEnvelope's fields are all optional
+	// and would unmarshal cleanly from `{"is_admin":true}`,
+	// silently masking a misshapen response). The contract is now
+	// explicit: enveloped or [ErrEmptyAdminResponse].
 	var env adminEnvelope
 	if err := json.Unmarshal(respBody, &env); err != nil {
-		// Fallback: some internal endpoints return raw JSON without
-		// the envelope. Treat the whole body as data.
-		if err2 := json.Unmarshal(respBody, out); err2 != nil {
-			return fmt.Errorf("unmarshal response: %w", err2)
-		}
-		return nil
+		return fmt.Errorf("unmarshal envelope: %w", err)
 	}
 	if env.Error != nil {
 		return &AdminError{
@@ -379,11 +396,12 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 			Detail:     env.Error.Detail,
 		}
 	}
-	// `out != nil` means the caller is expecting a populated payload
-	// — surface a sentinel rather than silently leaving zero values
-	// when the server returns `{"data": null}` or `{}`. A buggy
-	// internal endpoint that ships an empty envelope must not be
-	// confused with a successful zero-value response.
+	// `out != nil` (checked above) means the caller is expecting a
+	// populated payload — surface a sentinel rather than silently
+	// leaving zero values when the server returns `{"data": null}`
+	// or `{}`. A buggy internal endpoint that ships an empty
+	// envelope must not be confused with a successful zero-value
+	// response.
 	if len(env.Data) == 0 || string(env.Data) == "null" {
 		return ErrEmptyAdminResponse
 	}

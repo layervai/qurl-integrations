@@ -42,6 +42,8 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "channel ref without name", text: "admin allow <#C00001> $alias-name", wantSub: SubcmdAdmin, wantAdmin: AdminAllow, wantAlias: "alias-name", wantChannel: "C00001", wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
+		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
+		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
 	}
 
 	for _, tc := range cases {
@@ -112,6 +114,8 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "admin status with extra arg rejected", text: "admin status oops", wantErr: ErrUnexpectedArgument},
 		{name: "admin claim with positional rejected", text: "admin claim boot-code", wantErr: ErrUnexpectedArgument},
 		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke $alias extra", wantErr: ErrUnexpectedArgument},
+		{name: "admin allow with duplicate channel rejected", text: "admin allow <#C1|a> <#C2|b> $alias", wantErr: ErrUnexpectedArgument},
+		{name: "admin allow with duplicate alias rejected", text: "admin allow <#C1|a> $foo $bar", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {

@@ -43,11 +43,12 @@ const blockIDClaimCode = "claim_code_block"
 // stable.
 const actionIDClaimCode = "claim_code_input"
 
-// RedactedSubmissionBlockIDs is the set of view-submission `block_id`
+// redactedSubmissionBlockIDs is the set of view-submission `block_id`
 // values whose `state.values[block_id]` payload MUST NOT be logged or
 // otherwise echoed by the bot. The handler's logging middleware in
-// PR-3c.3+ consults this set before serializing a `view_submission`
-// for diagnostics — entries here are replaced with a sentinel.
+// PR-3c.3+ consults this set via [IsRedactedSubmissionBlock] before
+// serializing a `view_submission` for diagnostics — entries here are
+// replaced with a sentinel.
 //
 // Why a set rather than a Slack-level masking primitive: Slack's
 // Block Kit `plain_text_input` element has no input-masking field
@@ -62,8 +63,23 @@ const actionIDClaimCode = "claim_code_input"
 // [AdminClient.RedeemBootstrap]) and is never written to logs or
 // telemetry. This map is the single source of truth for that
 // guarantee.
-var RedactedSubmissionBlockIDs = map[string]struct{}{
+//
+// Unexported because [IsRedactedSubmissionBlock] is the supported
+// query surface — keeping the map private lets a future change to
+// the storage shape (a sync.Map, a regex set) avoid an API break.
+var redactedSubmissionBlockIDs = map[string]struct{}{
 	blockIDClaimCode: {},
+}
+
+// IsRedactedSubmissionBlock reports whether `blockID` names a
+// view-submission block whose `state.values[blockID]` content must
+// not be logged. The handler middleware in PR-3c.3+ calls this
+// before serializing any `view_submission` payload for diagnostics.
+// Exported so the (separate) handler package can consume it without
+// reaching into an unexported map.
+func IsRedactedSubmissionBlock(blockID string) bool {
+	_, ok := redactedSubmissionBlockIDs[blockID]
+	return ok
 }
 
 // HelpResponse renders the JSON for `/qurl help`. Returned as the
