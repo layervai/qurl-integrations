@@ -430,7 +430,7 @@ describe('handleSend — Step 2: file path', () => {
     const interaction = makeInteraction({ awaitQueue: [fileInit] });
     await cmd.execute(interaction);
     expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
-    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Tap **+** to attach a file'));
     expect(fileInit.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('I sent you a DM'),
     }));
@@ -474,7 +474,7 @@ describe('handleSend — Step 2: file path', () => {
     });
     await cmd.execute(interaction);
     expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
-    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Tap **+** to attach a file'));
   });
 
   it('keeps file capture in-channel when /qurl send is invoked already in a DM', async () => {
