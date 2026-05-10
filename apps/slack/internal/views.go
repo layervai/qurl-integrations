@@ -14,6 +14,12 @@ import (
 // slack-go/slack library here to avoid pulling a heavyweight
 // transitive into the binary just for a fixed set of view payloads.
 
+// responseTypeEphemeral is the Slack response_type that scopes a
+// message to the requester (visible only to them, in-channel).
+// Lifted to a constant because it appears in every response payload
+// shape — `:warning:` errors, the help block, the spinner replacement.
+const responseTypeEphemeral = "ephemeral"
+
 // callbackIDSetAliasRebind is the modal callback used by the
 // `setalias` rebind confirmation flow. The view-submission handler
 // matches on this to know which path to take.
@@ -39,7 +45,7 @@ const actionIDClaimCode = "claim_code_input"
 // slash-command HTTP response body (not a modal).
 func HelpResponse() ([]byte, error) {
 	payload := map[string]any{
-		"response_type": "ephemeral",
+		"response_type": responseTypeEphemeral,
 		"blocks": []any{
 			sectionBlock("*/qurl* — Create and manage qURLs from Slack"),
 			dividerBlock(),
@@ -83,7 +89,7 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 		"title":            plainTextObj("Confirm alias rebind"),
 		"submit":           plainTextObj("Rebind"),
 		"close":            plainTextObj("Cancel"),
-		"private_metadata": fmt.Sprintf("alias=%s", aliasName),
+		"private_metadata": "alias=" + aliasName,
 		"blocks": []any{
 			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", aliasName)),
 			sectionBlock(fmt.Sprintf("*Current target:* `%s`", oldTarget)),

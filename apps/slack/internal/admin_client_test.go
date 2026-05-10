@@ -17,16 +17,15 @@ const testInternalToken = "internal-test-token"
 // for a single request. Returns the captured request fields so tests
 // can fence wire-shape assertions (auth header, content type, body).
 type adminFixture struct {
-	srv          *httptest.Server
-	gotMethod    string
-	gotPath      string
-	gotAuth      string
-	gotUA        string
-	gotContent   string
-	gotBody      []byte
-	respondCode  int
-	respondBody  string
-	respondError bool
+	srv         *httptest.Server
+	gotMethod   string
+	gotPath     string
+	gotAuth     string
+	gotUA       string
+	gotContent  string
+	gotBody     []byte
+	respondCode int
+	respondBody string
 }
 
 func newAdminFixture(t *testing.T, status int, body string) *adminFixture {
@@ -162,7 +161,6 @@ func TestAdminClient_PolicyMutations(t *testing.T) {
 			return ac.DisallowResource(context.Background(), "T1", "C1", "r_1")
 		}},
 	} {
-		op := op
 		t.Run(op.name, func(t *testing.T) {
 			t.Parallel()
 			fx := newAdminFixture(t, http.StatusOK, `{"data":{}}`)
@@ -214,7 +212,6 @@ func TestAdminClient_CheckRateLimit_RetryAfter(t *testing.T) {
 		{"milliseconds field", `{"data":{"allowed":false,"retry_after_ms":750}}`, 750},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fx := newAdminFixture(t, http.StatusOK, tc.respondJSON)

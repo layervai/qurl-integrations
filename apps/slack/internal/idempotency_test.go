@@ -51,7 +51,6 @@ func TestIdempotencyKey_DifferentInputsDiffer(t *testing.T) {
 		{"trigger differs", IdempotencyKey("T1", "C1", "U1", "tr_xyz")},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if tc.key == base {

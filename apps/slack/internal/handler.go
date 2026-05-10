@@ -302,7 +302,7 @@ func respond(status int, body any) (events.APIGatewayProxyResponse, error) {
 
 func respondSlack(text string) (events.APIGatewayProxyResponse, error) {
 	return respond(http.StatusOK, map[string]string{
-		"response_type": "ephemeral",
+		"response_type": responseTypeEphemeral,
 		"text":          text,
 	})
 }

@@ -9,6 +9,7 @@ import (
 // One row per verb so a regression that drops or relabels a verb is the
 // failure that reaches review, not a behavioral diff in PR-3c.3+.
 func TestParse_HappyPaths(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		text        string
@@ -79,6 +80,7 @@ func TestParse_HappyPaths(t *testing.T) {
 // a malformed input the parser must reject, with a stable sentinel error
 // so the handler can render the right `:warning:` message in PR-3c.3+.
 func TestParse_ErrorPaths(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		text    string
@@ -120,6 +122,7 @@ func TestParse_ErrorPaths(t *testing.T) {
 // Unknown flags must reject so a typo (e.g. `dn:true`) doesn't silently
 // no-op into ephemeral-channel post.
 func TestParse_GetFlagErrors(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		text string

@@ -163,7 +163,7 @@ func TestSlashCommandCreate(t *testing.T) {
 	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result["response_type"] != "ephemeral" {
+	if result["response_type"] != responseTypeEphemeral {
 		t.Errorf("expected ephemeral response, got %q", result["response_type"])
 	}
 }

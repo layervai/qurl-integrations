@@ -140,7 +140,7 @@ func (e *AdminError) Error() string {
 //
 // PR-3c.1: stub. The HTTP call is wired but the slash-command
 // handler does not yet invoke this — that's PR-3c.3+.
-func (ac *AdminClient) CheckAdmin(ctx context.Context, teamID, slackUserID string) (bool, string, error) {
+func (ac *AdminClient) CheckAdmin(ctx context.Context, teamID, slackUserID string) (isAdmin bool, ownerID string, err error) {
 	q := url.Values{}
 	q.Set(fieldTeamID, teamID)
 	q.Set(fieldUserID, slackUserID)
