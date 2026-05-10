@@ -207,10 +207,28 @@ func TestAdminClaimModal_StableIDsAndNoFakeMasking(t *testing.T) {
 	if !foundClaimBlock {
 		t.Fatal("admin claim modal: input block for bootstrap code not found — Blocker #3 fence broken")
 	}
-	// Fence the redaction registry: the claim block_id must be in
-	// the set the handler middleware consults before logging.
-	if _, ok := RedactedSubmissionBlockIDs[blockIDClaimCode]; !ok {
-		t.Errorf("RedactedSubmissionBlockIDs missing %q — logging boundary will leak the bootstrap code", blockIDClaimCode)
+	// Fence the redaction registry: the claim block_id must be
+	// recognized by [IsRedactedSubmissionBlock], which is what the
+	// handler middleware consults before logging.
+	if !IsRedactedSubmissionBlock(blockIDClaimCode) {
+		t.Errorf("IsRedactedSubmissionBlock(%q) = false — logging boundary will leak the bootstrap code", blockIDClaimCode)
+	}
+}
+
+// TestIsRedactedSubmissionBlock exercises the redaction-registry
+// query surface used by the (separate) handler package. Asserts the
+// happy and miss paths so a refactor of the underlying storage
+// shape (set, sync.Map, regex) can't silently change the contract.
+func TestIsRedactedSubmissionBlock(t *testing.T) {
+	t.Parallel()
+	if !IsRedactedSubmissionBlock(blockIDClaimCode) {
+		t.Errorf("IsRedactedSubmissionBlock(%q) = false, want true", blockIDClaimCode)
+	}
+	if IsRedactedSubmissionBlock("some_other_block") {
+		t.Errorf("IsRedactedSubmissionBlock(\"some_other_block\") = true, want false")
+	}
+	if IsRedactedSubmissionBlock("") {
+		t.Errorf("IsRedactedSubmissionBlock(\"\") = true, want false")
 	}
 }
 

@@ -374,6 +374,70 @@ func TestAdminClient_VoidEndpointAcceptsEmptyData(t *testing.T) {
 	}
 }
 
+// TestAdminClient_RawUnenvelopedResponseFails fences the contract
+// boundary the cr feedback tightened: all admin endpoints ship
+// enveloped JSON, and a server that ships raw JSON (e.g. `{
+// "is_admin":true,...}` without the `{"data":...}` wrapper) is
+// misbehaving — surface ErrEmptyAdminResponse rather than silently
+// unmarshaling into the caller's `out`. Catches a class of
+// service-side bugs (envelope decoder dropped, framework
+// regression) that would otherwise look like a "successful" zero-
+// or partial-value response.
+func TestAdminClient_RawUnenvelopedResponseFails(t *testing.T) {
+	t.Parallel()
+	fx := newAdminFixture(t, http.StatusOK, `{"is_admin":true,"owner_id":"u_raw"}`)
+	ac := fx.client()
+	_, _, err := ac.CheckAdmin(context.Background(), "T1", "U1")
+	if err == nil {
+		t.Fatal("CheckAdmin: error = nil, want ErrEmptyAdminResponse for unenveloped body")
+	}
+	if !errors.Is(err, ErrEmptyAdminResponse) {
+		t.Errorf("error = %v, want ErrEmptyAdminResponse", err)
+	}
+}
+
+// TestAdminError_ErrorIncludesCode fences the error-message format.
+// The service-side `Code` field (e.g. "not_admin", "rate_limited")
+// is the most useful identifier for cross-referencing service-side
+// logs; dropping it from Error() loses that context.
+func TestAdminError_ErrorIncludesCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  *AdminError
+		want string
+	}{
+		{
+			name: "with code and detail",
+			err:  &AdminError{StatusCode: 403, Code: "not_admin", Title: "Forbidden", Detail: "user not admin"},
+			want: "Forbidden [not_admin] (403): user not admin",
+		},
+		{
+			name: "with code, no detail",
+			err:  &AdminError{StatusCode: 403, Code: "not_admin", Title: "Forbidden"},
+			want: "Forbidden [not_admin] (403)",
+		},
+		{
+			name: "no code, with detail",
+			err:  &AdminError{StatusCode: 500, Title: "Server Error", Detail: "boom"},
+			want: "Server Error (500): boom",
+		},
+		{
+			name: "no code, no detail",
+			err:  &AdminError{StatusCode: 500, Title: "Server Error"},
+			want: "Server Error (500)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.err.Error(); got != tc.want {
+				t.Errorf("Error() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

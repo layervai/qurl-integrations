@@ -229,6 +229,11 @@ func tokenize(text string) []string {
 		// Strip balanced outer quotes, e.g. `"foo"` -> `foo`. We
 		// don't touch unbalanced (`"foo` or `foo"`) because the
 		// caller may want to surface that as a parse error.
+		// Byte-level comparison is safe here: `"` is ASCII 0x22,
+		// which never appears as a continuation byte in a
+		// multi-byte UTF-8 sequence (those are 0x80-0xBF). So a
+		// rune like `世界` ending in a multi-byte char can't trigger
+		// a spurious match on the closing quote.
 		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 			s = s[1 : len(s)-1]
 		}
@@ -350,10 +355,16 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseAdminChannelAlias extracts `<#channel|name> $alias` in either order
-// (Slack's autocomplete sometimes interleaves them). Both must be present.
+// (Slack's autocomplete sometimes interleaves them). Both must be
+// present, and each may appear at most once — duplicate channels or
+// aliases are an [ErrUnexpectedArgument] (consistent with the strict
+// posture parseAdmin takes for verbs like `admin policies`).
 func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 	for _, tok := range rest {
 		if id, ok := matchChannel(tok); ok {
+			if cmd.ChannelID != "" {
+				return nil, fmt.Errorf("%w: duplicate #channel %q", ErrUnexpectedArgument, tok)
+			}
 			cmd.ChannelID = id
 			continue
 		}
@@ -361,6 +372,9 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 			alias, err := requireAlias(tok)
 			if err != nil {
 				return nil, err
+			}
+			if cmd.Alias != "" {
+				return nil, fmt.Errorf("%w: duplicate $alias %q", ErrUnexpectedArgument, tok)
 			}
 			cmd.Alias = alias
 			continue
@@ -419,9 +433,19 @@ func matchChannel(tok string) (string, bool) {
 
 // applyFlag parses a single `key:value` token into [Command.Flags]. Only
 // the recognized keys (`dm`, `reason`) survive — unknown keys are an
-// error so a typo doesn't silently no-op.
+// error so a typo doesn't silently no-op. The key half is
+// case-folded so `DM:true` and `Reason:foo` work the way users on
+// mobile clients (with auto-capitalize) expect; the value half is
+// preserved verbatim because reasons are user-facing prose.
 func applyFlag(cmd *Command, tok string) error {
-	m := flagPattern.FindStringSubmatch(tok)
+	colonIdx := strings.IndexByte(tok, ':')
+	if colonIdx <= 0 {
+		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+	}
+	// Lowercase only the key portion so `Reason:"On Call"` keeps
+	// its mixed-case value intact.
+	normalized := strings.ToLower(tok[:colonIdx]) + tok[colonIdx:]
+	m := flagPattern.FindStringSubmatch(normalized)
 	if len(m) == 0 {
 		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
 	}
