@@ -935,11 +935,8 @@ func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 		TargetURL:  "https://example.com",
 		ResourceID: "r_existing",
 	})
-	if err == nil {
-		t.Fatal("expected error when both TargetURL and ResourceID are set")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("error should mention mutual exclusivity; got %q", err.Error())
+	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
+		t.Fatalf("expected ErrCreateTargetResourceExclusive, got %v", err)
 	}
 }
 
@@ -950,11 +947,8 @@ func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.Create(context.Background(), CreateInput{})
-	if err == nil {
-		t.Fatal("expected error when neither TargetURL nor ResourceID is set")
-	}
-	if !strings.Contains(err.Error(), "TargetURL or ResourceID") {
-		t.Errorf("error should mention TargetURL or ResourceID; got %q", err.Error())
+	if !errors.Is(err, ErrCreateRequiresTarget) {
+		t.Fatalf("expected ErrCreateRequiresTarget, got %v", err)
 	}
 }
 
@@ -1011,8 +1005,9 @@ func TestCreateResource(t *testing.T) {
 
 func TestCreateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	if _, err := c.CreateResource(context.Background(), nil); err == nil {
-		t.Fatal("expected error on nil input")
+	_, err := c.CreateResource(context.Background(), nil)
+	if !errors.Is(err, ErrCreateResourceNilInput) {
+		t.Fatalf("expected ErrCreateResourceNilInput, got %v", err)
 	}
 }
 
@@ -1025,11 +1020,8 @@ func TestCreateResourceEmptyTargetURLRejected(t *testing.T) {
 	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
 		Alias: testAlias,
 	})
-	if err == nil {
-		t.Fatal("expected error on empty TargetURL")
-	}
-	if !strings.Contains(err.Error(), "TargetURL") {
-		t.Errorf("error should mention TargetURL; got %q", err.Error())
+	if !errors.Is(err, ErrCreateResourceRequiresTargetURL) {
+		t.Fatalf("expected ErrCreateResourceRequiresTargetURL, got %v", err)
 	}
 }
 
@@ -1119,17 +1111,58 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceClearDescriptionByEmptyString pins the documented
+// `&""` clear convention on Description (no sentinel-clear sibling). The
+// empty string must round-trip on the wire as `"description": ""` so the
+// server treats it as a clear; if a future contributor adds `omitempty` to
+// `Description` (echoing Alias), this test fails loudly.
+func TestUpdateResourceClearDescriptionByEmptyString(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	empty := ""
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		Description: &empty,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["description"]
+	if !ok {
+		t.Fatalf("description must be present (the &\"\" clear semantic); body=%s", gotBody)
+	}
+	if got != "" {
+		t.Errorf("description: got %v, want \"\"", got)
+	}
+}
+
 func TestUpdateResourceEmptyIDRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	if _, err := c.UpdateResource(context.Background(), "", &UpdateResourceInput{}); err == nil {
-		t.Fatal("expected error on empty resourceID")
+	_, err := c.UpdateResource(context.Background(), "", &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceEmptyID) {
+		t.Fatalf("expected ErrUpdateResourceEmptyID, got %v", err)
 	}
 }
 
 func TestUpdateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	if _, err := c.UpdateResource(context.Background(), "r_x", nil); err == nil {
-		t.Fatal("expected error on nil input")
+	_, err := c.UpdateResource(context.Background(), "r_x", nil)
+	if !errors.Is(err, ErrUpdateResourceNilInput) {
+		t.Fatalf("expected ErrUpdateResourceNilInput, got %v", err)
 	}
 }
 
@@ -1190,8 +1223,9 @@ func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
 
 func TestGetResourceByAliasEmptyRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
-	if _, err := c.GetResourceByAlias(context.Background(), ""); err == nil {
-		t.Fatal("expected error on empty alias")
+	_, err := c.GetResourceByAlias(context.Background(), "")
+	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
+		t.Fatalf("expected ErrGetResourceByAliasEmpty, got %v", err)
 	}
 }
 
@@ -1332,11 +1366,8 @@ func TestUpdateResourceEmptyAliasPointerRejected(t *testing.T) {
 	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		Alias: &empty,
 	})
-	if err == nil {
-		t.Fatal("expected error on Alias=&\"\"")
-	}
-	if !strings.Contains(err.Error(), "ClearAlias") {
-		t.Errorf("error should mention ClearAlias remediation; got %q", err.Error())
+	if !errors.Is(err, ErrUpdateResourceAliasEmpty) {
+		t.Fatalf("expected ErrUpdateResourceAliasEmpty, got %v", err)
 	}
 }
 
@@ -1351,10 +1382,7 @@ func TestUpdateResourceAliasAndClearAliasMutuallyExclusive(t *testing.T) {
 		Alias:      &alias,
 		ClearAlias: true,
 	})
-	if err == nil {
-		t.Fatal("expected error when both Alias and ClearAlias are set")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("error should mention mutual exclusivity; got %q", err.Error())
+	if !errors.Is(err, ErrUpdateResourceAliasClearExclusive) {
+		t.Fatalf("expected ErrUpdateResourceAliasClearExclusive, got %v", err)
 	}
 }

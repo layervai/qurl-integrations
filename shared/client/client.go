@@ -65,6 +65,51 @@ var ErrIdempotencyKeyTooLong = errors.New("idempotency key exceeds 256 bytes")
 // typed sentinel.
 var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid bytes (CR/LF/NUL/control, non-ASCII, or leading/trailing whitespace)")
 
+// --- Input-validation sentinels for Create / *Resource methods.
+//
+// These are exported so callers can branch with `errors.Is(err, ErrFoo)`
+// rather than substring-matching the error text. Pattern matches the
+// existing ErrIdempotencyKey* sentinels above.
+
+// ErrCreateRequiresTarget is returned by Create when both TargetURL and
+// ResourceID are empty — the qURL has no target to bind to.
+var ErrCreateRequiresTarget = errors.New("client: Create requires TargetURL or ResourceID")
+
+// ErrCreateTargetResourceExclusive is returned by Create when both TargetURL
+// and ResourceID are populated. The server-side `mutually_exclusive_fields`
+// rule rejects this combination; the client fails fast for a typed error.
+var ErrCreateTargetResourceExclusive = errors.New("client: Create TargetURL and ResourceID are mutually exclusive")
+
+// ErrCreateResourceNilInput is returned by CreateResource when input is nil.
+var ErrCreateResourceNilInput = errors.New("client: CreateResource input is nil")
+
+// ErrCreateResourceRequiresTargetURL is returned by CreateResource when
+// CreateResourceInput.TargetURL is empty — without it the server can't
+// compute the `(owner_id, target_url_hash)` idempotency key.
+var ErrCreateResourceRequiresTargetURL = errors.New("client: CreateResource requires TargetURL")
+
+// ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
+// is the empty string.
+var ErrUpdateResourceEmptyID = errors.New("client: UpdateResource resourceID is empty")
+
+// ErrUpdateResourceNilInput is returned by UpdateResource when input is nil.
+var ErrUpdateResourceNilInput = errors.New("client: UpdateResource input is nil")
+
+// ErrUpdateResourceAliasEmpty is returned by UpdateResource when
+// UpdateResourceInput.Alias is a pointer to the empty string. The empty
+// string is reserved as a footgun guard — the server's
+// `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` regex rejects it; use ClearAlias=true.
+var ErrUpdateResourceAliasEmpty = errors.New("client: UpdateResource Alias must not be a pointer to empty string; use ClearAlias=true to clear")
+
+// ErrUpdateResourceAliasClearExclusive is returned by UpdateResource when
+// both Alias != nil and ClearAlias=true. Server-side returns 400; client
+// fails fast for a typed error.
+var ErrUpdateResourceAliasClearExclusive = errors.New("client: UpdateResource Alias and ClearAlias are mutually exclusive")
+
+// ErrGetResourceByAliasEmpty is returned by GetResourceByAlias when alias
+// is the empty string.
+var ErrGetResourceByAliasEmpty = errors.New("client: GetResourceByAlias alias is empty")
+
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
 
@@ -76,6 +121,15 @@ const StatusRevoked = "revoked"
 
 // StatusConsumed indicates a one-time qURL has been used.
 const StatusConsumed = "consumed"
+
+// --- Resource type constants (mirrors `ResourceType` enum at
+// qurl-service/api/openapi.yaml:2468-2474).
+
+// ResourceTypeURL is the target-URL proxy type (default).
+const ResourceTypeURL = "url"
+
+// ResourceTypeTunnel is the FRP-backed reverse-tunnel type.
+const ResourceTypeTunnel = "tunnel"
 
 // Logger is an optional interface for debug logging.
 type Logger interface {
@@ -265,10 +319,10 @@ func validateIdempotencyKey(key string) error {
 //nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
 	if input.TargetURL == "" && input.ResourceID == "" {
-		return nil, errors.New("client: Create requires TargetURL or ResourceID")
+		return nil, ErrCreateRequiresTarget
 	}
 	if input.TargetURL != "" && input.ResourceID != "" {
-		return nil, errors.New("client: Create TargetURL and ResourceID are mutually exclusive")
+		return nil, ErrCreateTargetResourceExclusive
 	}
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
@@ -464,8 +518,11 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 // doesn't expose it (it's derived from auth); add it here only if/when the
 // server starts returning it.
 type Resource struct {
-	ResourceID   string `json:"resource_id"`
-	TargetURL    string `json:"target_url,omitempty"`
+	ResourceID string `json:"resource_id"`
+	TargetURL  string `json:"target_url,omitempty"`
+	// Type is one of "url" (target-URL proxy, default) or "tunnel"
+	// (FRP-backed reverse tunnel). Mirrors the `ResourceType` enum at
+	// qurl-service/api/openapi.yaml:2468-2474.
 	Type         string `json:"type,omitempty"`
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
@@ -490,7 +547,11 @@ type Resource struct {
 // `alias_in_use`; callers must use UpdateResource to set alias on an
 // already-existing resource.
 type CreateResourceInput struct {
-	TargetURL    string        `json:"target_url,omitempty"`
+	TargetURL string `json:"target_url,omitempty"`
+	// Type is one of "url" (default; required for target-URL proxies)
+	// or "tunnel". When type=tunnel, TargetURL is ignored server-side.
+	// Mirrors the `ResourceType` enum at
+	// qurl-service/api/openapi.yaml:2468-2474.
 	Type         string        `json:"type,omitempty"`
 	Alias        string        `json:"alias,omitempty"`
 	CustomDomain string        `json:"custom_domain,omitempty"`
@@ -502,11 +563,18 @@ type CreateResourceInput struct {
 //
 // Pointer fields distinguish "field absent" (caller didn't provide it,
 // server keeps existing value) from "field present with zero value"
-// (server should accept the zero). For Alias specifically: a non-nil
-// non-empty pointer sets the alias, ClearAlias=true clears it. Setting
-// both is invalid and rejected client-side by [Client.UpdateResource];
-// passing a pointer to the empty string is also rejected (use
-// ClearAlias=true to clear).
+// (server should accept the zero).
+//
+// Clear semantics are asymmetric across fields by design:
+//   - Description, CustomDomain — pass `&""` to clear; the empty string
+//     is a valid wire value the server accepts as a clear signal.
+//   - Alias — has a sentinel `ClearAlias bool`. The server's regex
+//     `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` rejects `""`, so the empty-string
+//     pointer is reserved as a footgun guard ([Client.UpdateResource]
+//     fails fast with [ErrUpdateResourceAliasEmpty]).
+//
+// Setting Alias and ClearAlias together is invalid and rejected
+// client-side ([ErrUpdateResourceAliasClearExclusive]).
 type UpdateResourceInput struct {
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
@@ -539,14 +607,14 @@ type UpdateResourceInput struct {
 // #148 alongside the other write methods.
 func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput) (*Resource, error) {
 	if input == nil {
-		return nil, errors.New("client: CreateResource input is nil")
+		return nil, ErrCreateResourceNilInput
 	}
 	// TargetURL is the field that uniquely identifies a resource on the
 	// server's `(owner_id, target_url_hash)` idempotency key — without it
 	// the request can't succeed. Server returns 400 either way; failing
 	// fast saves a round-trip on a programmer error.
 	if input.TargetURL == "" {
-		return nil, errors.New("client: CreateResource requires TargetURL")
+		return nil, ErrCreateResourceRequiresTargetURL
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -575,16 +643,16 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // re-execute on the server.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
 	if resourceID == "" {
-		return nil, errors.New("client: UpdateResource resourceID is empty")
+		return nil, ErrUpdateResourceEmptyID
 	}
 	if input == nil {
-		return nil, errors.New("client: UpdateResource input is nil")
+		return nil, ErrUpdateResourceNilInput
 	}
 	if input.Alias != nil && *input.Alias == "" {
-		return nil, errors.New("client: UpdateResource Alias must not be a pointer to empty string; use ClearAlias=true to clear")
+		return nil, ErrUpdateResourceAliasEmpty
 	}
 	if input.Alias != nil && input.ClearAlias {
-		return nil, errors.New("client: UpdateResource Alias and ClearAlias are mutually exclusive")
+		return nil, ErrUpdateResourceAliasClearExclusive
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -610,7 +678,7 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 // 404 status if the alias is not registered for the caller's owner.
 func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
 	if alias == "" {
-		return nil, errors.New("client: GetResourceByAlias alias is empty")
+		return nil, ErrGetResourceByAliasEmpty
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)
 	if err != nil {
