@@ -6,6 +6,18 @@ const { sanitizeFilename } = require('./utils/sanitize');
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 
+// Truncate the connector's MD5 of an uploaded file for CloudWatch logging.
+// The full MD5 + WM_SECRET reconstructs a fileviewer URL (handler.go
+// validateWatermarkSig signs md5|wm|ts), so anyone with logs:GetLogEvents on
+// this CloudWatch group could exfiltrate user uploads. 8 hex chars (32 bits)
+// is enough for cross-system correlation; the connector itself still logs
+// the full hash to journald (SSM-only access). This helper is the single
+// chokepoint for that invariant — every upload-success log path goes through
+// it. Don't inline `result.hash` back into a log call.
+function md5Prefix(hash) {
+  return typeof hash === 'string' ? hash.slice(0, 8) : undefined;
+}
+
 // Fetch from a Discord CDN URL with manual redirect handling. `redirect:
 // 'error'` would refuse legitimate Discord redirects (cdn.discordapp.com
 // sometimes 302s to media.discordapp.net). This walks the redirect chain
@@ -207,13 +219,8 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
     throw new Error('Connector upload returned no resource_id');
   }
 
-  // md5_prefix (not full hash): full MD5 + WM_SECRET reconstructs a fileviewer
-  // URL (handler.go validateWatermarkSig signs md5|wm|ts), so anyone with
-  // logs:GetLogEvents on this CloudWatch group could exfiltrate user uploads.
-  // 8 hex chars (32 bits) is enough for cross-system correlation; the connector
-  // still logs the full hash to journald (SSM-only access).
   logger.info('Uploaded to connector', {
-    md5_prefix: result.hash?.slice(0, 8),
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
@@ -254,7 +261,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   }
 
   logger.info('Re-uploaded to connector (new resource)', {
-    md5_prefix: result.hash?.slice(0, 8),
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
@@ -369,7 +376,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
   }
 
   logger.info('Uploaded JSON to connector', {
-    md5_prefix: result.hash?.slice(0, 8),
+    md5_prefix: md5Prefix(result.hash),
     resource_id: result.resource_id,
   });
 
