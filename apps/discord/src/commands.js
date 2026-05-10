@@ -19,7 +19,7 @@ const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
 const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
-const { expiryToISO, expiryToMs } = require('./utils/time');
+const { expiryToISO, expiryToMs, parseSelfDestructSeconds } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
@@ -55,6 +55,20 @@ let _warnedStateSecretFallback = false;
 // on every process start; tests that need a stable secret should set
 // OAUTH_STATE_SECRET explicitly in their own mocks.
 const _testFallbackSecret = crypto.randomBytes(32).toString('hex');
+// formatSelfDestructLabel renders a seconds value as a compact button
+// label fragment — `0.5s`, `30s`, `1m`, `5m`, `1h`. Avoids `30 seconds`
+// because Discord buttons truncate aggressively and pixel budget on the
+// 2-button row is tight when paired with the personal-note button.
+function formatSelfDestructLabel(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) {
+    const m = seconds / 60;
+    return Number.isInteger(m) ? `${m}m` : `${m.toFixed(1)}m`;
+  }
+  const h = seconds / 3600;
+  return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
+}
+
 function stateSecret() {
   // Prefer a dedicated OAUTH_STATE_SECRET so a compromised GITHUB_CLIENT_SECRET
   // can be rotated without also invalidating in-flight OAuth state tokens —
@@ -1253,6 +1267,9 @@ async function handleSend(interaction, apiKey) {
   let recipients = [];
   let personalMessage = null;
   let expiresIn = '24h';
+  // Self-destruct timer (seconds, 0.5–3600). null = no timer (default).
+  // Forwarded to the connector as `viewer_ttl_seconds` at upload time.
+  let selfDestructSeconds = null;
 
   const formId = `qurl_form_${sendNonce}`;
   // Component customIds for the form-loop filter. Every entry must be a
@@ -1264,14 +1281,16 @@ async function handleSend(interaction, apiKey) {
     targetSelect: `${formId}_target`,
     userSelect: `${formId}_user`,
     messageBtn: `${formId}_msg_btn`,
+    selfDestructBtn: `${formId}_destruct_btn`,
     expirySelect: `${formId}_expiry`,
     sendBtn: `${formId}_send`,
     cancelBtn: `${formId}_cancel`,
   };
-  // Modal customId — local to the messageBtn handler; never consumed by
-  // the form-loop filter, kept out of `ids` so Object.values(ids) doesn't
-  // grow noise.
+  // Modal customIds — local to their respective button handlers; never
+  // consumed by the form-loop filter, kept out of `ids` so
+  // Object.values(ids) doesn't grow noise.
   const messageModalId = `${formId}_msg_modal`;
+  const selfDestructModalId = `${formId}_destruct_modal`;
 
   // Sender's own filename in their own ephemeral form preview is low-blast,
   // but match the same defense the location path applies to locationName so
@@ -1330,14 +1349,22 @@ async function handleSend(interaction, apiKey) {
       ));
     }
 
+    // Two-button row: personal message + self-destruct timer. Discord
+    // allows up to 5 buttons per ActionRow; bundling these saves a row
+    // (the form is bumping against the 5-row max when target=user).
+    // Labels are shorter than they were as solo-button rows so both
+    // fit without truncation on standard widths.
+    const destructBtnLabel = selfDestructSeconds
+      ? `\u{1F4A5} Self-destruct: ${formatSelfDestructLabel(selfDestructSeconds)} · edit`
+      : '\u{1F4A5} Self-destruct timer (optional)';
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.messageBtn)
-        // Primary (blue) + a longer descriptive label so this button reads as
-        // a peer of the surrounding select dropdowns rather than a small
-        // grey afterthought. Discord doesn't let buttons match select-menu
-        // width, but a more present label closes most of the visual gap.
-        .setLabel(personalMessage ? '✏\u{FE0F} Edit personal message for recipients' : '✏\u{FE0F} Add a personal note for recipients (optional)')
+        .setLabel(personalMessage ? '✏\u{FE0F} Edit personal note' : '✏\u{FE0F} Add a personal note (optional)')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(ids.selfDestructBtn)
+        .setLabel(destructBtnLabel)
         .setStyle(ButtonStyle.Primary)
     ));
 
@@ -1535,6 +1562,58 @@ async function handleSend(interaction, apiKey) {
       continue;
     }
 
+    if (compInt.customId === ids.selfDestructBtn) {
+      // Modal collects an optional self-destruct timer (seconds).
+      // Empty submit = no timer (also the way users clear an existing
+      // value). parseSelfDestructSeconds enforces 0.5–3600 mirror of
+      // the connector contract; on validation failure we re-render the
+      // form with an inline warning rather than rejecting the modal.
+      const destructInputId = 'destruct_value';
+      const destructModal = new ModalBuilder()
+        .setCustomId(selfDestructModalId)
+        .setTitle('Self-destruct timer');
+      destructModal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(destructInputId)
+          .setLabel('Seconds before content vanishes (0.5–3600)')
+          .setPlaceholder('e.g. 30 (or leave blank for no timer)')
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(32)
+          .setRequired(false)
+          .setValue(selfDestructSeconds ? String(selfDestructSeconds) : '')
+      ));
+      await compInt.showModal(destructModal).catch(logIgnoredDiscordErr);
+
+      let destructSubmit;
+      try {
+        destructSubmit = await compInt.awaitModalSubmit({
+          filter: (i) => i.customId === selfDestructModalId && i.user.id === interaction.user.id,
+          time: 120000,
+        });
+      } catch {
+        // Modal timeout / close-without-submit — silent no-op (same
+        // posture as the messageBtn handler above). The form state is
+        // unchanged so re-rendering would redraw the same form.
+        continue;
+      }
+
+      const raw = destructSubmit.fields.getTextInputValue(destructInputId);
+      const { seconds, error } = parseSelfDestructSeconds(raw);
+      if (error) {
+        // Inline warning on the form rather than killing the flow —
+        // the user keeps their other selections and can correct the
+        // value with another click.
+        await destructSubmit.update({
+          content: formContent({ warning: `Self-destruct: ${error} Try again or leave the field blank to skip.` }),
+          components: formRows(),
+        }).catch(logIgnoredDiscordErr);
+      } else {
+        selfDestructSeconds = seconds; // null when raw is empty/whitespace
+        await destructSubmit.update({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
+      }
+      continue;
+    }
+
     if (compInt.customId === ids.expirySelect) {
       expiresIn = compInt.values[0];
       await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
@@ -1617,7 +1696,11 @@ async function handleSend(interaction, apiKey) {
       const expiresAt = expiryToISO(expiresIn);
 
       // Download once, cache the buffer for re-uploads.
-      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey);
+      // selfDestructSeconds threads through both initial upload AND every
+      // re-upload, so the bot's "Add Recipients" mints the same TTL on
+      // each new resource that gets registered (TOKENS_PER_RESOURCE
+      // exhaustion → re-upload → new connector resource).
+      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds);
       connectorResourceId = firstUpload.resource_id;
       // Use a holder so we can null out the reference after all re-uploads
       // finish — the subsequent link-monitor closure would otherwise pin up
@@ -1632,7 +1715,7 @@ async function handleSend(interaction, apiKey) {
       try {
         allLinks = await mintLinksInBatches({
           initialResourceId: firstUpload.resource_id,
-          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey),
+          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
           expiresAt,
           recipientCount: recipients.length,
           apiKey,
@@ -1657,13 +1740,18 @@ async function handleSend(interaction, apiKey) {
       // Location send — upload JSON payload to connector, then mint in batches
       // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
       const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      // Note: google-map JSON resources hit the connector's render
+      // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
+      // expire_after at view time — qurl-integrations-infra#480).
+      // We still forward selfDestructSeconds so behavior matches the
+      // contract once the carve-out is removed; today it's a no-op.
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
       connectorResourceId = firstUpload.resource_id;
 
       const expiresAt = expiryToISO(expiresIn);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey),
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
         expiresAt,
         recipientCount: recipients.length,
         apiKey,
@@ -1804,6 +1892,7 @@ async function handleSend(interaction, apiKey) {
       attachmentName: attachment?.name || null,
       attachmentContentType: attachment?.contentType || null,
       attachmentUrl: attachment?.url || null,
+      selfDestructSeconds,
     });
   } catch (err) {
     logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
@@ -2228,14 +2317,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       let fileBuffer = null;
       const filename = sendConfig.attachment_name || 'file';
       const contentType = sendConfig.attachment_content_type || 'application/octet-stream';
+      // Inherit the original send's self-destruct timer so additional
+      // recipients see the same vanish behavior. Persisted as a REAL/
+      // Number column; sqlite returns null when unset, DDB likewise.
+      const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
 
       try {
         // Initial download+upload gives us the buffer for subsequent re-uploads.
-        const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey);
+        const first = await downloadAndUpload(sendConfig.attachment_url, filename, contentType, apiKey, inheritedDestruct);
         fileBuffer = first.fileBuffer;
         allLinks = await mintLinksInBatches({
           initialResourceId: first.resource_id,
-          reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey),
+          reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey, inheritedDestruct),
           expiresAt,
           recipientCount: newRecipients.length,
           apiKey,
@@ -2275,11 +2368,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     }
     if (hasLocation) {
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey);
+      // Same inheritance as the file branch above — keeps the timer
+      // contract uniform across resource types.
+      const inheritedDestructLoc = sendConfig.self_destruct_seconds ?? null;
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestructLoc);
       const expiresAt = expiryToISO(sendConfig.expires_in);
       const allLinks = await mintLinksInBatches({
         initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey),
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestructLoc),
         expiresAt,
         recipientCount: newRecipients.length,
         apiKey,

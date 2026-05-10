@@ -300,6 +300,40 @@ describe('database module', () => {
     it('returns undefined for wrong sender', () => {
       expect(db.getSendConfig('sc1', 'wrong-sender')).toBeUndefined();
     });
+
+    it('roundtrips selfDestructSeconds (0.5–3600 range, optional)', () => {
+      // Persisted as REAL so sub-second values survive — the connector
+      // accepts fractional seconds (PR #477) and the bot must not
+      // truncate them at the storage layer. Pin both the round-trip
+      // shape AND the optional/null case so a future schema change
+      // can't silently drop the field.
+      db.saveSendConfig({
+        sendId: 'destruct-yes', senderDiscordId: 'sender1',
+        resourceType: 'file', connectorResourceId: 'conn-d1',
+        actualUrl: null, expiresIn: '1h', personalMessage: null,
+        locationName: null, attachmentName: 'snap.png',
+        selfDestructSeconds: 0.5,
+      });
+      expect(db.getSendConfig('destruct-yes', 'sender1').self_destruct_seconds).toBe(0.5);
+
+      db.saveSendConfig({
+        sendId: 'destruct-int', senderDiscordId: 'sender1',
+        resourceType: 'file', connectorResourceId: 'conn-d2',
+        actualUrl: null, expiresIn: '1h', personalMessage: null,
+        locationName: null, attachmentName: 'snap.png',
+        selfDestructSeconds: 30,
+      });
+      expect(db.getSendConfig('destruct-int', 'sender1').self_destruct_seconds).toBe(30);
+
+      db.saveSendConfig({
+        sendId: 'destruct-no', senderDiscordId: 'sender1',
+        resourceType: 'file', connectorResourceId: 'conn-d3',
+        actualUrl: null, expiresIn: '1h', personalMessage: null,
+        locationName: null, attachmentName: 'snap.png',
+        // selfDestructSeconds intentionally omitted
+      });
+      expect(db.getSendConfig('destruct-no', 'sender1').self_destruct_seconds).toBeNull();
+    });
   });
 
   describe('streak updates — consecutive months', () => {

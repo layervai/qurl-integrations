@@ -1551,6 +1551,8 @@ describe('handleAddRecipients', () => {
       'report.pdf',
       'application/pdf',
       'test-api-key',
+      // sendConfig has no self_destruct_seconds → null inherits through.
+      null,
     );
     // mintLinks is called against the NEW resource (conn-res-43)
     expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key');
@@ -1591,6 +1593,7 @@ describe('handleAddRecipients', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
       'location.json', 'test-api-key',
+      null,
     );
     expect(mockMintLinks).toHaveBeenCalledWith('res-loc-1', expect.any(String), 1, 'test-api-key');
     expect(mockSendDM).toHaveBeenCalledTimes(1);
@@ -1628,6 +1631,7 @@ describe('handleAddRecipients', () => {
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map', url: 'https://www.google.com/maps/place/Eiffel+Tower', name: 'Eiffel Tower' }),
       'location.json', 'test-api-key',
+      null,
     );
     expect(mockMintLinks).toHaveBeenCalledWith('conn-loc-maps', expect.any(String), 1, 'test-api-key');
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();

@@ -11,7 +11,13 @@ jest.mock('../src/logger', () => ({
   audit: jest.fn(),
 }));
 
-const { expiryToISO, expiryToMs } = require('../src/utils/time');
+const {
+  expiryToISO,
+  expiryToMs,
+  parseSelfDestructSeconds,
+  SELF_DESTRUCT_MIN_SECONDS,
+  SELF_DESTRUCT_MAX_SECONDS,
+} = require('../src/utils/time');
 
 describe('utils/time', () => {
   describe('expiryToMs', () => {
@@ -34,6 +40,81 @@ describe('utils/time', () => {
       expect(expiryToMs(null)).toBe(DEFAULT);
       expect(expiryToMs(undefined)).toBe(DEFAULT);
       expect(expiryToMs('0d')).toBe(DEFAULT); // zero-valued rejected
+    });
+  });
+
+  describe('parseSelfDestructSeconds', () => {
+    // Mirrors the connector's parseExpireAfterMs codomain (PR #477):
+    // 0.5–3600 inclusive accepted (above-max clamps), everything else
+    // returns an error string the modal handler renders inline.
+    it('treats absent / empty / whitespace as no-timer (no error)', () => {
+      for (const v of [undefined, null, '', ' ', '   ', '\t', ' \n\t ']) {
+        const r = parseSelfDestructSeconds(v);
+        expect(r).toEqual({ seconds: null, error: null });
+      }
+    });
+
+    it('accepts the floor exactly', () => {
+      expect(parseSelfDestructSeconds('0.5')).toEqual({ seconds: 0.5, error: null });
+    });
+
+    it('accepts integers and decimals in range', () => {
+      expect(parseSelfDestructSeconds('1')).toEqual({ seconds: 1, error: null });
+      expect(parseSelfDestructSeconds('30')).toEqual({ seconds: 30, error: null });
+      expect(parseSelfDestructSeconds('0.7')).toEqual({ seconds: 0.7, error: null });
+      expect(parseSelfDestructSeconds('3600')).toEqual({ seconds: 3600, error: null });
+    });
+
+    it('clamps above-max silently (matches connector)', () => {
+      expect(parseSelfDestructSeconds('3601')).toEqual({ seconds: 3600, error: null });
+      expect(parseSelfDestructSeconds('100000')).toEqual({ seconds: 3600, error: null });
+    });
+
+    it('rejects sub-floor with a floor-specific message', () => {
+      const r = parseSelfDestructSeconds('0.4');
+      expect(r.seconds).toBeNull();
+      expect(r.error).toMatch(/0\.5/);
+    });
+
+    it('rejects zero / negative as non-positive', () => {
+      for (const v of ['0', '-5', '-0.5']) {
+        const r = parseSelfDestructSeconds(v);
+        expect(r.seconds).toBeNull();
+        expect(r.error).toMatch(/positive/i);
+      }
+    });
+
+    it('rejects non-numeric / NaN / Infinity', () => {
+      for (const v of ['abc', 'NaN', 'Infinity', '-Infinity']) {
+        const r = parseSelfDestructSeconds(v);
+        expect(r.seconds).toBeNull();
+        // Different error text per class is fine — pin only the rejection.
+        expect(r.error).toBeTruthy();
+      }
+    });
+
+    it('rejects hex prefix even though Number() does not accept hex floats', () => {
+      // Symmetric with the connector's parseExpireAfterMs (Go strconv
+      // accepts `0x1p3`). The bot's contract should reject the same
+      // inputs even though JS Number() would already reject — pinned
+      // so a future swap to a different parser doesn't regress.
+      for (const v of ['0x1p3', '+0x1', '-0x1']) {
+        const r = parseSelfDestructSeconds(v);
+        expect(r.seconds).toBeNull();
+        expect(r.error).toMatch(/hex/i);
+      }
+    });
+
+    it('rejects oversized input (DoS bound)', () => {
+      const huge = '9'.repeat(33);
+      const r = parseSelfDestructSeconds(huge);
+      expect(r.seconds).toBeNull();
+      expect(r.error).toMatch(/too long/i);
+    });
+
+    it('exports MIN/MAX constants for callers building UI labels', () => {
+      expect(SELF_DESTRUCT_MIN_SECONDS).toBe(0.5);
+      expect(SELF_DESTRUCT_MAX_SECONDS).toBe(3600);
     });
   });
 

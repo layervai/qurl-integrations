@@ -218,6 +218,8 @@ const ids = {
   userSelect: `qurl_form_${NONCE}_user`,
   msgBtn: `qurl_form_${NONCE}_msg_btn`,
   msgModal: `qurl_form_${NONCE}_msg_modal`,
+  selfDestructBtn: `qurl_form_${NONCE}_destruct_btn`,
+  selfDestructModal: `qurl_form_${NONCE}_destruct_modal`,
   expirySelect: `qurl_form_${NONCE}_expiry`,
   sendBtn: `qurl_form_${NONCE}_send`,
   cancelBtn: `qurl_form_${NONCE}_cancel`,
@@ -234,6 +236,17 @@ function makeCompInt(customId, overrides = {}) {
     values: [],
     users: { first: jest.fn(() => null) },
     ...overrides,
+  };
+}
+
+// Module-scoped so both the location-path describe AND the final-form
+// describe (self-destruct modal tests) can build modal-submit fixtures
+// without per-describe re-declaration.
+function makeModalSubmit(value) {
+  return {
+    fields: { getTextInputValue: jest.fn(() => value) },
+    deferUpdate: jest.fn().mockResolvedValue(undefined),
+    update: jest.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -807,13 +820,8 @@ describe('handleSend — Step 2: location path', () => {
     });
   }
 
-  function makeModalSubmit(value) {
-    return {
-      fields: { getTextInputValue: jest.fn(() => value) },
-      deferUpdate: jest.fn().mockResolvedValue(undefined),
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-  }
+  // makeModalSubmit is module-scoped (see top of file) so the
+  // self-destruct tests in Step 3 can reuse it.
 
   it('cancels when location modal times out', async () => {
     const interaction = makeInteraction({ awaitQueue: [locInitBtn(null)] });
@@ -892,6 +900,85 @@ describe('handleSend — Step 3: final form', () => {
       }),
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Self-destruct timer (viewer_ttl_seconds bot-side capture)
+  // -------------------------------------------------------------------------
+
+  it('self-destruct modal: valid value persists into the upload call', async () => {
+    // Form-loop sequence: location-init → self-destruct button click
+    // (modal returns "30") → user-select → send. The handleSend
+    // back-half runs uploadJsonToConnector with selfDestructSeconds
+    // threaded as the last argument.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('30')),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(destructBtn.showModal).toHaveBeenCalled();
+    // uploadJsonToConnector signature: (payload, filename, apiKey, selfDestructSeconds)
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+      expect.any(String),
+      30,
+    );
+  });
+
+  it('self-destruct modal: invalid value re-renders the form with a warning', async () => {
+    // "0.4" is sub-floor. The handler must NOT abort the flow; it
+    // re-renders the form with an inline warning so the user can
+    // correct the value or skip the timer entirely.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('0.4')),
+    });
+    const cancel = makeCompInt(ids.cancelBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, cancel],
+    });
+    await cmd.execute(interaction);
+    const submit = await destructBtn.awaitModalSubmit.mock.results[0].value;
+    expect(submit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Self-destruct.*0\.5/),
+    }));
+    // Subsequent cancel — back-half should not run.
+    expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
+  });
+
+  it('self-destruct modal: empty value clears the timer (state stays null)', async () => {
+    // User clicks the button with a previously-set value, then submits
+    // empty to clear. The form re-renders with the timer button label
+    // returning to its unset state. Subsequent send carries selfDestruct=null.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('')),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructBtn, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+      expect.any(String),
+      null,
+    );
+  });
 
   it('cancel button clears cooldown and exits', async () => {
     const cancel = makeCompInt(ids.cancelBtn);
@@ -1172,6 +1259,9 @@ describe('handleSend — end-to-end happy paths', () => {
     await cmd.execute(interaction);
     expect(mockDownloadAndUpload).toHaveBeenCalledWith(
       attachment.url, expect.any(String), attachment.contentType, expect.any(String),
+      // selfDestructSeconds — null when the form leaves the timer unset
+      // (the default for this happy-path test).
+      null,
     );
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalled();

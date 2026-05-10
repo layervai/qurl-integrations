@@ -29,4 +29,50 @@ function expiryToMs(expiresIn) {
   return ms === null ? DEFAULT_EXPIRY_MS : ms;
 }
 
-module.exports = { expiryToISO, expiryToMs };
+// Self-destruct timer parsing — bot-side validation that mirrors the
+// connector's `viewer_ttl_seconds` contract (qurl-s3-connector PR #477):
+// 0.5 to 3600 seconds, fractional accepted. Out-of-range / NaN / Inf /
+// non-numeric all map to a parse error so the caller can render an
+// inline modal validation message rather than silently dropping the value.
+//
+// Internally named "self-destruct" (matches the user-facing modal label).
+// The wire field forwarded to the connector is `viewer_ttl_seconds`.
+const SELF_DESTRUCT_MIN_SECONDS = 0.5;
+const SELF_DESTRUCT_MAX_SECONDS = 3600;
+
+function parseSelfDestructSeconds(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (trimmed === '') return { seconds: null, error: null };
+  // Length cap mirrors the connector — bounds CPU on hostile input
+  // before parseFloat. Max legal `"3600.0"` is 6 chars; 32 is generous.
+  if (trimmed.length > 32) {
+    return { seconds: null, error: 'Value is too long.' };
+  }
+  // strconv.ParseFloat accepts hex-float (`0x1p3`) per Go spec; the
+  // connector rejects it (PR #477). JS Number() does NOT accept hex
+  // floats, but reject the prefix explicitly so the bot's contract
+  // mirrors the connector's whether or not Number() is the parser.
+  const prefix = trimmed.replace(/^[+-]/, '');
+  if (/^0x/i.test(prefix)) {
+    return { seconds: null, error: 'Use a decimal number, not hex.' };
+  }
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n <= 0) {
+    return { seconds: null, error: 'Enter a positive number of seconds.' };
+  }
+  if (n < SELF_DESTRUCT_MIN_SECONDS) {
+    return { seconds: null, error: `Minimum is ${SELF_DESTRUCT_MIN_SECONDS} seconds.` };
+  }
+  // Above-max is intentionally clamped (matches connector's silent clamp).
+  // Returning the clamped value keeps the persisted state honest with
+  // what the renderer will actually enforce.
+  return { seconds: Math.min(n, SELF_DESTRUCT_MAX_SECONDS), error: null };
+}
+
+module.exports = {
+  expiryToISO,
+  expiryToMs,
+  parseSelfDestructSeconds,
+  SELF_DESTRUCT_MIN_SECONDS,
+  SELF_DESTRUCT_MAX_SECONDS,
+};
