@@ -591,11 +591,25 @@ describe('logger', () => {
         nested: { token: 'sensitive-1' },
         body: { hash: 'sensitive-2' },
       });
+      logger.audit('upload_success', {
+        send_id: 's1',
+        hash: FULL_MD5,
+        nested: { auth_token: 'sensitive-3' },
+      });
 
-      const line = consoleSpy.log.mock.calls[0][0];
-      expect(line).not.toContain(FULL_MD5);
-      expect(line).not.toContain('sensitive-1');
-      expect(line).not.toContain('sensitive-2');
+      // Sweep BOTH stdout (info/warn/error/debug + audit JSON) and stderr
+      // (audit warn line). The warn line names the offending key but must
+      // not echo the value.
+      const allLines = [
+        ...consoleSpy.log.mock.calls.map(c => c[0]),
+        ...consoleSpy.error.mock.calls.map(c => c[0]),
+      ];
+      for (const line of allLines) {
+        expect(line).not.toContain(FULL_MD5);
+        expect(line).not.toContain('sensitive-1');
+        expect(line).not.toContain('sensitive-2');
+        expect(line).not.toContain('sensitive-3');
+      }
     });
 
     // Reverse drift guard: every entry in AUDIT_SECRET_KEYS should also
@@ -611,6 +625,10 @@ describe('logger', () => {
 
       // currentLevel is captured at module load; LOG_LEVEL defaults to
       // 'info' which is what we want here, so no per-iteration env work.
+      // Assumption: redact() is stateless across calls. If a future change
+      // adds per-call state (rate limiter, sampling counter), iteration
+      // coupling would silently couple cases — switch to per-iteration
+      // jest.resetModules() at that point.
       for (const k of __testExports.AUDIT_SECRET_KEYS) {
         consoleSpy.log.mockClear();
         logger.info('uploaded', { [k]: 'real-secret-value' });

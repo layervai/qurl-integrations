@@ -109,11 +109,15 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
       // undefined) pass through — they can't carry a usable secret and
       // zero-string-replace would lose type info.
       //
-      // Note: the recursion uses isAuditSecretKey (exact-match), NOT the
-      // wider shouldRedact (substring) rule. An inner `myToken` would
-      // therefore SURVIVE here even though it'd be blanked by redact().
-      // Intentional — audit dimensions like `tokens_minted` must not be
-      // redacted via substring.
+      // Recursion uses isAuditSecretKey (exact-match), NOT the wider
+      // shouldRedact (substring) rule, so legit dimensions like
+      // `tokens_minted` survive in the audit pathway. The asymmetry is
+      // intentional and pinned by a dedicated test.
+      //
+      // Push outer key BEFORE recursing so secretKeys order is parent-first
+      // (intuitive: the warn line reads "hash, auth_token" not the post-
+      // order "auth_token, hash" for `{ hash: { auth_token: ... } }`).
+      if (!secretKeys.includes(k)) secretKeys.push(k);
       if (typeof v === 'string' && v.length > 0) {
         out[k] = '[REDACTED]';
       } else if (v != null && typeof v === 'object') {
@@ -121,7 +125,6 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
       } else {
         out[k] = v;
       }
-      if (!secretKeys.includes(k)) secretKeys.push(k);
     } else {
       out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
     }
@@ -141,9 +144,13 @@ function redact(value, depth = 0) {
       // examined. Other primitives pass through.
       // Asymmetry note: see redactAuditSecrets() — this recursion uses the
       // wider substring rule; the audit pathway uses exact-match.
-      if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
-      else if (v != null && typeof v === 'object') out[k] = redact(v, depth + 1);
-      else out[k] = v;
+      if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (v != null && typeof v === 'object') {
+        out[k] = redact(v, depth + 1);
+      } else {
+        out[k] = v;
+      }
     } else {
       out[k] = redact(v, depth + 1);
     }
