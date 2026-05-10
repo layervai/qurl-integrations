@@ -943,6 +943,21 @@ func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 	}
 }
 
+// TestCreateNeitherTargetURLNorResourceIDRejected pins the client-side
+// fail-fast for the both-empty case (companion to the both-populated test).
+// Without a target on either field the server can't bind the qURL to
+// anything; failing fast saves a 400 round-trip.
+func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{})
+	if err == nil {
+		t.Fatal("expected error when neither TargetURL nor ResourceID is set")
+	}
+	if !strings.Contains(err.Error(), "TargetURL or ResourceID") {
+		t.Errorf("error should mention TargetURL or ResourceID; got %q", err.Error())
+	}
+}
+
 // --- Resource methods ---
 
 func TestCreateResource(t *testing.T) {
@@ -968,6 +983,7 @@ func TestCreateResource(t *testing.T) {
 			"target_url":  "https://internal.example.com",
 			"alias":       testAlias,
 			"type":        "url",
+			"status":      StatusActive,
 		})
 	}))
 	defer srv.Close()
@@ -986,12 +1002,34 @@ func TestCreateResource(t *testing.T) {
 	if got.Alias != testAlias {
 		t.Errorf("got Alias %q, want %q", got.Alias, testAlias)
 	}
+	// Pin Status decoding — confirms the response shape from
+	// qurl-service/api/openapi.yaml ResourceData.status round-trips.
+	if got.Status != StatusActive {
+		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
+	}
 }
 
 func TestCreateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	if _, err := c.CreateResource(context.Background(), nil); err == nil {
 		t.Fatal("expected error on nil input")
+	}
+}
+
+// TestCreateResourceEmptyTargetURLRejected pins the client-side fail-fast
+// when TargetURL is missing — without it the server can't compute the
+// `(owner_id, target_url_hash)` idempotency key. Companion to the nil-input
+// test.
+func TestCreateResourceEmptyTargetURLRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Alias: testAlias,
+	})
+	if err == nil {
+		t.Fatal("expected error on empty TargetURL")
+	}
+	if !strings.Contains(err.Error(), "TargetURL") {
+		t.Errorf("error should mention TargetURL; got %q", err.Error())
 	}
 }
 

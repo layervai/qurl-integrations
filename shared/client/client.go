@@ -256,14 +256,17 @@ func validateIdempotencyKey(key string) error {
 // Create creates a new qURL.
 //
 // Exactly one of input.TargetURL or input.ResourceID must be set. The client
-// fails fast on the both-populated case (saves a round-trip and yields a
-// Go-typed error rather than a deserialized *APIError); the server-side
-// `mutually_exclusive_fields` rule is the enforcement of last resort. Empty
-// fields elide from the wire payload via `omitempty`, so a ResourceID-only
-// call doesn't accidentally trip the rule.
+// fails fast on both the both-empty and both-populated cases (saves a
+// round-trip and yields a Go-typed error rather than a deserialized
+// *APIError); the server-side `mutually_exclusive_fields` rule is the
+// enforcement of last resort. Empty fields elide from the wire payload via
+// `omitempty`, so a ResourceID-only call doesn't accidentally trip the rule.
 //
 //nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
+	if input.TargetURL == "" && input.ResourceID == "" {
+		return nil, errors.New("client: Create requires TargetURL or ResourceID")
+	}
 	if input.TargetURL != "" && input.ResourceID != "" {
 		return nil, errors.New("client: Create TargetURL and ResourceID are mutually exclusive")
 	}
@@ -452,13 +455,14 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 
 // Resource represents a qURL resource (the durable object behind a qURL link).
 //
-// Field shapes mirror the `ResourceData` schema in `qurl-service/api/openapi.yaml`
-// post-PR-3a.2; consumers should treat unknown fields as best-effort. Fields
-// not yet on the OpenAPI surface (Alias, UpdatedAt, AccessPolicy) are added
-// in anticipation of the PR-3a.2 schema landing — until then they will be
-// the zero value on the wire. `owner_id` is intentionally omitted because
-// the live ResourceData schema doesn't expose it (it's derived from auth);
-// add it here only if/when the server starts returning it.
+// Field shapes mirror the `ResourceData` schema in
+// `qurl-service/api/openapi.yaml` post-PR-3a.2; consumers should treat
+// unknown fields as best-effort. Fields not yet on the OpenAPI surface
+// (Alias, UpdatedAt, AccessPolicy) are added in anticipation of the PR-3a.2
+// schema landing — until then they will be the zero value on the wire.
+// `owner_id` is intentionally omitted because the live ResourceData schema
+// doesn't expose it (it's derived from auth); add it here only if/when the
+// server starts returning it.
 type Resource struct {
 	ResourceID   string `json:"resource_id"`
 	TargetURL    string `json:"target_url,omitempty"`
@@ -466,6 +470,10 @@ type Resource struct {
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	Description  string `json:"description,omitempty"`
+	// Status is one of "active" or "revoked" per the live ResourceData
+	// schema (qurl-service/api/openapi.yaml:2546). Mirrors QURL.Status
+	// — keeping the two types' status surface in sync.
+	Status string `json:"status,omitempty"`
 	// CreatedAt has no `omitempty` because encoding/json's omitempty does
 	// not honor the time.Time zero value (it would still serialize as
 	// "0001-01-01T00:00:00Z"). Matches the QURL type's `created_at` tag.
@@ -500,15 +508,24 @@ type CreateResourceInput struct {
 // passing a pointer to the empty string is also rejected (use
 // ClearAlias=true to clear).
 type UpdateResourceInput struct {
+	// Description: pass `&""` to clear the field server-side (no
+	// `ClearDescription` sentinel — the empty string is the clear
+	// semantic). Pass nil to leave unchanged.
 	Description *string `json:"description,omitempty"`
 	// Alias sets the resource's alias when non-nil. Must NOT be a pointer
-	// to the empty string — use ClearAlias=true to clear. Server-side
-	// regex `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` would 400 on `""` anyway,
-	// but the client fails fast in UpdateResource for a clearer error.
+	// to the empty string — use ClearAlias=true to clear. The empty-string
+	// pointer is reserved as a fail-fast footgun guard because the server
+	// regex `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` would 400 on `""` anyway —
+	// the client raises a clearer error than the server's generic message.
 	Alias *string `json:"alias,omitempty"`
 	// ClearAlias=true sends `clear_alias: true` to the server, removing
 	// any existing alias. Mutually exclusive with a non-nil Alias.
-	ClearAlias   bool          `json:"clear_alias,omitempty"`
+	// Alias is the only field with a sentinel-clear; Description and
+	// CustomDomain use the `&""` convention because their server-side
+	// validators accept the empty string as a clear signal.
+	ClearAlias bool `json:"clear_alias,omitempty"`
+	// CustomDomain: pass `&""` to clear the custom domain mapping (same
+	// convention as Description). Pass nil to leave unchanged.
 	CustomDomain *string       `json:"custom_domain,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
@@ -523,6 +540,13 @@ type UpdateResourceInput struct {
 func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput) (*Resource, error) {
 	if input == nil {
 		return nil, errors.New("client: CreateResource input is nil")
+	}
+	// TargetURL is the field that uniquely identifies a resource on the
+	// server's `(owner_id, target_url_hash)` idempotency key — without it
+	// the request can't succeed. Server returns 400 either way; failing
+	// fast saves a round-trip on a programmer error.
+	if input.TargetURL == "" {
+		return nil, errors.New("client: CreateResource requires TargetURL")
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
