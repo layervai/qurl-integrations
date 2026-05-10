@@ -19,12 +19,31 @@ function formatTimestamp() {
 // Substrings that should never appear unredacted in logs. Matched case-
 // insensitively against the key name via includes(), so a future field
 // named refreshToken / bearerToken / apiSecret / myPassword is auto-caught.
+// See REDACT_EXACT_KEYS below for the exact-match alternative.
 const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];
 
+// Exact-match keys (not substring) — content-hash names where substring
+// would catch `commitHash` / `md5_prefix`, plus `private_key` which has
+// no broad-safe substring rule. Mirrored in AUDIT_SECRET_KEYS below;
+// drift-guarded by tests, consolidation tracked in #221.
+const REDACT_EXACT_KEYS = new Set([
+  'hash',
+  'md5', 'sha1', 'sha256', 'sha512',
+  'digest', 'checksum',
+  // body_hash covers both content-digest and HMAC interpretations;
+  // either is sensitive-shaped enough to redact.
+  'content_hash', 'body_hash',
+  'private_key',
+]);
+
+// `String(key)` coerces — Object.entries() yields strings today, but a
+// future caller (a different walker, a Map-like) might pass non-strings;
+// the coercion keeps the predicate safe for free.
 function shouldRedact(key) {
   const k = String(key).toLowerCase();
+  if (REDACT_EXACT_KEYS.has(k)) return true;
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
 
@@ -39,6 +58,11 @@ const AUDIT_SECRET_KEYS = new Set([
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
   'auth_token', 'access_token', 'refresh_token', 'bearer_token',
   'session_token', 'private_key', 'client_secret', 'webhook_secret',
+  // Content-derived hash names — see REDACT_EXACT_KEYS above for rationale.
+  // Kept in sync by hand today; consolidation tracked in #221.
+  'hash', 'md5', 'sha1', 'sha256', 'sha512',
+  'digest', 'checksum',
+  'content_hash', 'body_hash',
 ]);
 
 function isAuditSecretKey(key) {
@@ -53,15 +77,11 @@ function isAuditSecretKey(key) {
 // the warn line — partial reporting would let a caller fix one key
 // and re-run only to discover another the next time.
 //
-// Note on the contract shift: the original audit() bypassed redact()
-// entirely because the legacy substring-match REDACT_SUBSTRINGS would
-// blank legitimate dimensions like `tokens_minted`. AUDIT_SECRET_KEYS
-// uses exact-match against a closed set of canonical secret names
-// (auth_token, api_key, password, ...), none of which collide with any
-// known legitimate audit dimension. So we can redact the value of an
-// offending key without risk of corrupting a metric — and that's
-// strictly safer than emitting the secret verbatim and relying on a
-// dashboard sweep to catch it.
+// Exact-match (not substring) so legitimate audit dimensions like
+// `tokens_minted` survive — these are the canonical secret-bearer names
+// (auth_token, api_key, password, ...) that are safe to redact-by-value
+// without corrupting metrics. Recurses into matched-key non-null
+// object/array values (depth-5 cap inherited from the function body).
 function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   if (depth > 5 || value == null || typeof value !== 'object') {
     return { value, secretKeys };
@@ -73,11 +93,19 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     if (isAuditSecretKey(k)) {
-      // Match redact()'s shape: blank only non-empty strings; non-string
-      // values (numbers, null, etc.) survive — they can't carry a usable
-      // secret on their own and zero-string-replace would lose type info.
-      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+      // Blank non-empty strings; recurse into non-null objects/arrays so a
+      // `{ auth_token: { ... } }` accident still has its inner sensitive
+      // keys examined. Recursion uses exact-match — legit audit dimensions
+      // like `tokens_minted` survive (pinned by test). Push outer key
+      // BEFORE recursing for parent-first warn-line order.
       if (!secretKeys.includes(k)) secretKeys.push(k);
+      if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (v != null && typeof v === 'object') {
+        out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+      } else {
+        out[k] = v;
+      }
     } else {
       out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
     }
@@ -92,7 +120,18 @@ function redact(value, depth = 0) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     if (shouldRedact(k)) {
-      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+      // Blank non-empty strings; recurse into non-null objects/arrays so
+      // a `{ hash: { token: 'real' } }` accident still has its inner keys
+      // examined. Other primitives pass through.
+      // Asymmetry note: see redactAuditSecrets() — this recursion uses the
+      // wider substring rule; the audit pathway uses exact-match.
+      if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (v != null && typeof v === 'object') {
+        out[k] = redact(v, depth + 1);
+      } else {
+        out[k] = v;
+      }
     } else {
       out[k] = redact(v, depth + 1);
     }
@@ -155,17 +194,10 @@ const logger = {
   // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
   //
   // Audit lines bypass currentLevel — they're observability, not
-  // debug noise. They also bypass the top-level redact() pass on
-  // `meta` because that pass matches on KEY-name SUBSTRING and would
-  // blank legitimate dimensions like `tokens_minted` or `token_count`.
-  // Instead, audit() runs redactAuditSecrets() — same shape but uses
-  // exact-match against a closed AUDIT_SECRET_KEYS set so only canonical
-  // secret-bearer names (auth_token, api_key, password, ...) are
-  // blanked. Callers SHOULD still avoid passing secrets in meta —
-  // the AUDIT_EVENTS allowlist in constants.js documents the small,
-  // pre-vetted vocabulary (send_id, kind, count, expires_in, success,
-  // total). The redaction here is belt-and-suspenders: an error log
-  // fires too so a misbehaving caller is catchable in dashboards.
+  // debug noise. They also bypass redact() (which uses substring) in
+  // favor of redactAuditSecrets() (exact-match) so legitimate dimensions
+  // like `tokens_minted` survive. The AUDIT_EVENTS allowlist in
+  // constants.js documents the canonical vocabulary.
   audit(event, meta = {}) {
     // Default param only fires for `undefined`. A caller passing `null`
     // (easy mistake from optional chaining: `someObj?.meta`) would
@@ -237,3 +269,14 @@ const logger = {
 };
 
 module.exports = logger;
+// Test-only: exposes the redact constants so a drift-guard test can iterate
+// the live set rather than duplicate it. Gated on NODE_ENV='test' so it's
+// absent from prod bundles entirely (Jest sets NODE_ENV=test by default).
+// Defensive copies so a buggy test can't mutate the live Sets and corrupt
+// subsequent log calls.
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = {
+    REDACT_EXACT_KEYS: new Set(REDACT_EXACT_KEYS),
+    AUDIT_SECRET_KEYS: new Set(AUDIT_SECRET_KEYS),
+  };
+}
