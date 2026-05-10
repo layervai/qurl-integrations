@@ -224,7 +224,7 @@ func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGateway
 	}
 	switch cmd.Subcommand {
 	case SubcmdHelp:
-		return respondSlack(helpMessage())
+		return helpResponse()
 	case SubcmdSetAlias:
 		return h.handleSetAlias(ctx, cmd, values)
 	case SubcmdUnsetAlias:
@@ -346,13 +346,23 @@ func (h *Handler) handleInteraction(ctx context.Context, req *events.APIGatewayP
 	return respond(http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func helpMessage() string {
-	return `*/qurl* — Create and manage qURLs from Slack
-
-*Commands:*
-• ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
-• ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
-• ` + "`/qurl help`" + ` — Show this help message`
+// helpResponse renders the `/qurl help` block-kit payload from
+// [HelpResponse] (views.go) into an API Gateway response. The legacy
+// plain-string `helpMessage` was missing every PR-3c.* subcommand —
+// HelpResponse is the single source of truth for what's documented.
+func helpResponse() (events.APIGatewayProxyResponse, error) {
+	body, err := HelpResponse()
+	if err != nil {
+		// HelpResponse can't fail in practice (fixed shape), but if
+		// json.Marshal somehow does, fall back to a tiny ephemeral so
+		// the user gets something rather than a 500.
+		return respondSlack("`/qurl help` is currently unavailable.")
+	}
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{headerContentType: contentTypeJSON},
+		Body:       string(body),
+	}, nil
 }
 
 func respond(status int, body any) (events.APIGatewayProxyResponse, error) {

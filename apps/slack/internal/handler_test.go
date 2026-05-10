@@ -108,12 +108,19 @@ func TestSlashCommandHelp(t *testing.T) {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var result map[string]string
+	// Help now renders as a Block-Kit payload (response_type+blocks),
+	// not a plain {"text": ...}. Verify the envelope shape and that
+	// at least one block mentions a `/qurl` subcommand the user
+	// would want documented.
+	var result map[string]any
 	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result["text"] == "" {
-		t.Error("expected non-empty help text")
+	if result["response_type"] != responseTypeEphemeral {
+		t.Errorf("response_type = %v, want %s", result["response_type"], responseTypeEphemeral)
+	}
+	if !strings.Contains(resp.Body, "/qurl") || !strings.Contains(resp.Body, "setalias") {
+		t.Errorf("help body missing expected subcommand documentation; got: %s", resp.Body)
 	}
 }
 
@@ -277,12 +284,11 @@ func TestSlashCommand_Base64Body_Help(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("base64 body + valid signature: status = %d, want 200; body=%s", resp.StatusCode, resp.Body)
 	}
-	var result map[string]string
-	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !strings.Contains(result["text"], "qurl create") {
-		t.Errorf("base64 body + text=help did not produce help response — body threading regressed. Got: %q", result["text"])
+	// Help now returns Block-Kit payload, not a plain `text` field.
+	// The body-threading fence is whether help-shaped output landed
+	// in resp.Body — check for a documented subcommand string.
+	if !strings.Contains(resp.Body, "setalias") {
+		t.Errorf("base64 body + text=help did not produce help response — body threading regressed. Got: %s", resp.Body)
 	}
 }
 
