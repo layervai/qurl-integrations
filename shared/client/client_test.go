@@ -828,11 +828,12 @@ func TestCreateIdempotencyKeyAcceptsValidBytes(t *testing.T) {
 	})
 }
 
-// TestCreatePathIsPlural pins the canonical /v1/qurls path. PR #176 fixed
-// the singular `/v1/qurl` regression in production; this assertion lives
-// here so any future "let me just rename it back" change fails CI loudly,
-// not silently like the original bug did (the previous test mocked the
-// wrong path so it passed against /v1/qurl too).
+// TestCreatePathIsPlural pins the canonical /v1/qurls path as a named
+// regression assertion. TestCreate already asserts the path generically
+// at line 57; the value of this test is the explicit name — any future
+// "let me just rename it back" change surfaces by the regression-pin
+// test name, not by an unrelated TestCreate failure. PR #176 fixed the
+// original singular `/v1/qurl` bug in production.
 func TestCreatePathIsPlural(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1051,6 +1052,11 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 	if got, ok := raw["clear_alias"]; !ok || got != true {
 		t.Errorf("clear_alias: want true, got %v (ok=%v); body=%s", got, ok, gotBody)
 	}
+	// Symmetric pin: clearing must NOT also send a stale `alias` key.
+	// Mirror of the assertion in TestUpdateResourceSetAlias.
+	if _, ok := raw["alias"]; ok {
+		t.Errorf("alias must elide when ClearAlias=true; body=%s", gotBody)
+	}
 }
 
 func TestUpdateResourceEmptyIDRejected(t *testing.T) {
@@ -1161,5 +1167,126 @@ func TestGetResourceByAliasNotFound(t *testing.T) {
 	}
 	if apiErr.Code != "alias_not_found" {
 		t.Errorf("got code %q, want alias_not_found", apiErr.Code)
+	}
+}
+
+// TestCreateResourceAliasInUse pins the typed *APIError shape on the
+// `alias_in_use` 409 path documented in CreateResourceInput's doc comment
+// (alias attempted on an already-existing resource missing an alias).
+// Symmetric with TestGetResourceByAliasNotFound — pins the error envelope
+// for the second new resource method.
+func TestCreateResourceAliasInUse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Conflict",
+				"status": 409,
+				"detail": "alias already in use",
+				"code":   "alias_in_use",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: "https://internal.example.com",
+		Alias:     testAlias,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict {
+		t.Errorf("got status %d, want 409", apiErr.StatusCode)
+	}
+	if apiErr.Code != "alias_in_use" {
+		t.Errorf("got code %q, want alias_in_use", apiErr.Code)
+	}
+}
+
+// TestUpdateResourceInvalidAlias pins the typed *APIError shape on a 400
+// `invalid_alias` path — symmetric coverage with the other two new methods.
+func TestUpdateResourceInvalidAlias(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusBadRequest)
+		resp := map[string]any{
+			"error": map[string]any{
+				"title":  "Bad Request",
+				"status": 400,
+				"detail": "alias must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+				"code":   "invalid_alias",
+			},
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	alias := "Bad-Alias!"
+	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+		Alias: &alias,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("got status %d, want 400", apiErr.StatusCode)
+	}
+	if apiErr.Code != "invalid_alias" {
+		t.Errorf("got code %q, want invalid_alias", apiErr.Code)
+	}
+}
+
+// TestUpdateResourceEmptyAliasPointerRejected pins the client-side
+// fail-fast for the "pointer to empty string" footgun documented on
+// UpdateResourceInput.Alias — the server's regex would 400 it anyway,
+// but the client's error message tells the caller exactly what to do
+// (use ClearAlias=true).
+func TestUpdateResourceEmptyAliasPointerRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	empty := ""
+	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+		Alias: &empty,
+	})
+	if err == nil {
+		t.Fatal("expected error on Alias=&\"\"")
+	}
+	if !strings.Contains(err.Error(), "ClearAlias") {
+		t.Errorf("error should mention ClearAlias remediation; got %q", err.Error())
+	}
+}
+
+// TestUpdateResourceAliasAndClearAliasMutuallyExclusive pins the
+// client-side rejection of the (Alias != nil, ClearAlias=true) combo
+// — the server returns 400 for this combination, and the client
+// fails fast to save the round-trip.
+func TestUpdateResourceAliasAndClearAliasMutuallyExclusive(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	alias := testAlias
+	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+		Alias:      &alias,
+		ClearAlias: true,
+	})
+	if err == nil {
+		t.Fatal("expected error when both Alias and ClearAlias are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should mention mutual exclusivity; got %q", err.Error())
 	}
 }

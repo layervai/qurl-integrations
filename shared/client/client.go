@@ -450,10 +450,14 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 // Resource represents a qURL resource (the durable object behind a qURL link).
 //
 // Field shapes mirror the `ResourceData` schema in `qurl-service/api/openapi.yaml`
-// post-PR-3a.2; consumers should treat unknown fields as best-effort.
+// post-PR-3a.2; consumers should treat unknown fields as best-effort. Fields
+// not yet on the OpenAPI surface (Alias, UpdatedAt, AccessPolicy) are added
+// in anticipation of the PR-3a.2 schema landing — until then they will be
+// the zero value on the wire. `owner_id` is intentionally omitted because
+// the live ResourceData schema doesn't expose it (it's derived from auth);
+// add it here only if/when the server starts returning it.
 type Resource struct {
 	ResourceID   string        `json:"resource_id"`
-	OwnerID      string        `json:"owner_id,omitempty"`
 	TargetURL    string        `json:"target_url,omitempty"`
 	Type         string        `json:"type,omitempty"`
 	Alias        string        `json:"alias,omitempty"`
@@ -485,16 +489,30 @@ type CreateResourceInput struct {
 // server keeps existing value) from "field present with zero value"
 // (server should accept the zero). For Alias specifically: a non-nil
 // non-empty pointer sets the alias, ClearAlias=true clears it. Setting
-// both is invalid; the server returns 400.
+// both is invalid and rejected client-side by [Client.UpdateResource];
+// passing a pointer to the empty string is also rejected (use
+// ClearAlias=true to clear).
 type UpdateResourceInput struct {
-	Description  *string       `json:"description,omitempty"`
-	Alias        *string       `json:"alias,omitempty"`
+	Description *string `json:"description,omitempty"`
+	// Alias sets the resource's alias when non-nil. Must NOT be a pointer
+	// to the empty string — use ClearAlias=true to clear. Server-side
+	// regex `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` would 400 on `""` anyway,
+	// but the client fails fast in UpdateResource for a clearer error.
+	Alias *string `json:"alias,omitempty"`
+	// ClearAlias=true sends `clear_alias: true` to the server, removing
+	// any existing alias. Mutually exclusive with a non-nil Alias.
 	ClearAlias   bool          `json:"clear_alias,omitempty"`
 	CustomDomain *string       `json:"custom_domain,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
 
 // CreateResource creates a (or returns the existing) qURL resource.
+//
+// CreateResource is server-side idempotent on `(owner_id, target_url_hash)`:
+// repeating the same body returns the existing resource. A caller-supplied
+// Idempotency-Key would still be useful for layered retry semantics on top
+// of side-effecting Slack/Discord triggers; that plumbing is tracked at
+// #148 alongside the other write methods.
 func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput) (*Resource, error) {
 	if input == nil {
 		return nil, errors.New("client: CreateResource input is nil")
@@ -519,12 +537,23 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // UpdateResource updates a resource's mutable properties (alias, description,
 // access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
 // must first resolve via GetResourceByAlias.
+//
+// Idempotency-Key plumbing for resource mutations is tracked at #148 — until
+// it lands, callers needing at-least-once retry safety should dedupe on the
+// server's `(owner_id, resource_id)` model and accept that PATCH retries
+// re-execute on the server.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
 	if resourceID == "" {
 		return nil, errors.New("client: UpdateResource resourceID is empty")
 	}
 	if input == nil {
 		return nil, errors.New("client: UpdateResource input is nil")
+	}
+	if input.Alias != nil && *input.Alias == "" {
+		return nil, errors.New("client: UpdateResource Alias must not be a pointer to empty string; use ClearAlias=true to clear")
+	}
+	if input.Alias != nil && input.ClearAlias {
+		return nil, errors.New("client: UpdateResource Alias and ClearAlias are mutually exclusive")
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
