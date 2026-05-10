@@ -82,13 +82,15 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     if (isAuditSecretKey(k)) {
-      // Match redact()'s shape: blank only non-empty strings; non-string
-      // values (numbers, null, etc.) survive — they can't carry a usable
-      // secret on their own and zero-string-replace would lose type info.
-      // TODO: nested objects/arrays under a matched key pass through verbatim
-      // — `{ hash: { token: ... } }` would NOT redact inner keys. Tighten
-      // by recursing on non-string matched values.
-      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+      // Blank non-empty strings; recurse into non-null objects/arrays so
+      // a `{ auth_token: { value: 'real' } }` accident still has `value`
+      // examined by the inner pass (the inner `value` won't match itself,
+      // but a nested `auth_token` / `password` etc. would). Other primitives
+      // (numbers, null, undefined) pass through — they can't carry a usable
+      // secret and zero-string-replace would lose type info.
+      if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
+      else if (v != null && typeof v === 'object') out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+      else out[k] = v;
       if (!secretKeys.includes(k)) secretKeys.push(k);
     } else {
       out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
@@ -104,10 +106,12 @@ function redact(value, depth = 0) {
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     if (shouldRedact(k)) {
-      // TODO: nested objects/arrays under a matched key pass through verbatim
-      // — `{ hash: { token: ... } }` would NOT redact inner keys. Tighten
-      // by recursing on non-string matched values.
-      out[k] = typeof v === 'string' && v.length > 0 ? '[REDACTED]' : v;
+      // Blank non-empty strings; recurse into non-null objects/arrays so
+      // a `{ hash: { token: 'real' } }` accident still has its inner keys
+      // examined. Other primitives (numbers, null, etc.) pass through.
+      if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
+      else if (v != null && typeof v === 'object') out[k] = redact(v, depth + 1);
+      else out[k] = v;
     } else {
       out[k] = redact(v, depth + 1);
     }

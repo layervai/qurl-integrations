@@ -473,24 +473,45 @@ describe('logger', () => {
       expect((line.match(/"hash":"\[REDACTED\]"/g) || []).length).toBe(2);
     });
 
-    it('non-string hash values pass through unchanged (number, null, object)', () => {
+    it('primitive hash values (null, number, empty-string) pass through unchanged', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       logger.info('uploaded', { hash: null });
       logger.info('uploaded', { hash: 12345 });
-      logger.info('uploaded', { hash: { nested: 'object' } });
+      logger.info('uploaded', { hash: '' });
 
       const lines = consoleSpy.log.mock.calls.map(c => c[0]);
       expect(lines[0]).toContain('"hash":null');
       expect(lines[1]).toContain('"hash":12345');
-      // Non-string matched values pass through verbatim — redact() does
-      // NOT recurse into a value once its key matched. Inner `nested`
-      // survives because the whole object is copied as-is. (A future
-      // `{ hash: { token: ... } }` would NOT redact the inner `token` —
-      // tracked as a follow-up to tighten.)
-      expect(lines[2]).toContain('"nested":"object"');
+      expect(lines[2]).toContain('"hash":""');
       expect(lines.every(l => !l.includes('REDACTED'))).toBe(true);
+    });
+
+    it('recurses into matched-key objects so inner sensitive keys are redacted', () => {
+      process.env.LOG_LEVEL = 'info';
+      logger = require('../src/logger');
+
+      logger.info('uploaded', { hash: { token: 'real-secret', nested_hash: 'also-secret' } });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      // Inner `token` matches REDACT_SUBSTRINGS substring rule.
+      expect(line).toContain('"token":"[REDACTED]"');
+      // Inner `nested_hash` does NOT exact-match `hash` and doesn't
+      // substring-match any secret name, so it passes through.
+      expect(line).toContain('"nested_hash":"also-secret"');
+      expect(line).not.toContain('real-secret');
+    });
+
+    it('audit() recurses into matched-key objects', () => {
+      logger = require('../src/logger');
+
+      logger.audit('upload_success', { send_id: 's1', hash: { auth_token: 'real-secret' } });
+
+      const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(parsed.audit.hash.auth_token).toBe('[REDACTED]');
+      // Outer `hash` key still triggers the warn line so the caller is grep-able.
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
     });
   });
 });
