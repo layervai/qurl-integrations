@@ -86,12 +86,13 @@ const VALID_TESTS = new Set(['send_file', 'send_location']);
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
 function verifyCanaryTimestamp(req, res, next) {
-  // Pre-auth 401s deliberately omit `latency_ms` — every other failure
-  // path on this route includes it for triage, but those are post-auth
-  // and triggered by the trusted Lambda. Echoing latency_ms on
-  // unauthenticated rejections leaks (microsecond-scale) timing info
-  // for no operational benefit; the warn line below is the on-call
-  // signal instead.
+  // Pre-auth 401s don't carry `latency_ms` — middleware runs before
+  // the route handler captures `startedAt`, so the field is structurally
+  // absent here. (Even if it were available, a header-shape check is
+  // microsecond-scale and not useful for triage; the warn line below
+  // is the on-call signal.) Tests pin the absence so a future refactor
+  // that surfaces a middleware-level startedAt and "uniformly" adds
+  // latency_ms to these branches gets caught.
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
     logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp' });
@@ -99,10 +100,10 @@ function verifyCanaryTimestamp(req, res, next) {
   }
   // Strict shape — `parseInt('1234567890extra', 10)` returns
   // `1234567890`, so a digit-prefixed garbage string would slip past
-  // a permissive isFinite check. Lock the contract to "Unix epoch
-  // seconds, 10 digits today, 11 around the year ~2286" before
+  // a permissive isFinite check. Lock the contract to "10-digit Unix
+  // epoch seconds" (covers everything until ~year 2286) before
   // trusting it for a drift comparison.
-  if (!/^[0-9]{10,11}$/.test(ts)) {
+  if (!/^[0-9]{10}$/.test(ts)) {
     logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp' });
     return res.status(401).json({ ok: false, error: 'bad_timestamp' });
   }

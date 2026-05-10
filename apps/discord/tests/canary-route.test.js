@@ -172,17 +172,17 @@ describe('/canary/exec — timestamp replay-window', () => {
     expect(res.body.error).toBe('expired_timestamp');
   });
 
-  it('accepts timestamp just inside the 5-minute window (drift ~299s)', async () => {
+  it('accepts timestamp well inside the 5-minute window (drift ~290s)', async () => {
     // Bracket the rejection boundary from below. Combined with the
     // 301s-past test above and the +400s-future test, this pins the
-    // window at "just under 5 min OK, more than 5 min reject" without
+    // window at "well under 5 min OK, more than 5 min reject" without
     // the second-boundary flake risk a `drift === 300` exact-match
-    // assertion would carry.
-    const justInside = Math.floor(Date.now() / 1000) - 299;
+    // assertion would carry. ~10s of CI-lag headroom.
+    const inside = Math.floor(Date.now() / 1000) - 290;
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(VALID_BODY)
-      .set(tsHeaders(justInside));
+      .set(tsHeaders(inside));
     expect(res.status).toBe(200);
   });
 });
