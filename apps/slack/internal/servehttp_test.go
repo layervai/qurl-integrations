@@ -103,40 +103,13 @@ func TestServeHTTP_Unsigned_Returns401(t *testing.T) {
 	}
 }
 
-// TestServeHTTP_RejectsOversizedBody fences the body-cap defense. A body
-// larger than maxHTTPBodyBytes must be rejected with 413 (a stuck or
-// hostile client shouldn't be able to tie up a goroutine streaming an
-// unbounded body waiting for an HMAC check that will never run on
-// something reasonable).
+// TestServeHTTP_RejectsOversizedBody fences both the body-cap defense
+// AND the cap-before-HMAC ordering invariant. We send a SIGNED oversized
+// body and assert 413 — that's load-bearing. The unsigned-oversize case
+// would also 401, so unsigned alone can't tell us whether the cap or
+// sig-verify fired first; signing it makes the 413 unambiguous evidence
+// that the cap runs before signature verification.
 func TestServeHTTP_RejectsOversizedBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	// Cap is 1 MiB; send 1 MiB + 1 byte to land just past it.
-	oversize := bytes.Repeat([]byte("a"), maxHTTPBodyBytes+1)
-
-	req := httptest.NewRequest(http.MethodPost, "/slack/commands", bytes.NewReader(oversize))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusRequestEntityTooLarge {
-		t.Errorf("oversized body: status = %d, want 413", rr.Code)
-	}
-}
-
-// TestServeHTTP_RejectsOversizedBody_BeforeSigVerify fences the cap-
-// before-HMAC ordering invariant. The unsigned-oversize test passes
-// regardless of ordering (an unsigned request would 401 anyway), so a
-// regression that ran sig-verify before the body cap would slip through.
-// Here we send a *signed* but oversized body and assert 413 (not 401):
-// the only way to land 413 is for the cap to fire before the signature
-// check has any input to evaluate.
-func TestServeHTTP_RejectsOversizedBody_BeforeSigVerify(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -181,8 +154,6 @@ func TestServeHTTP_BodyReadError(t *testing.T) {
 	h := newTestHandler(t, srv)
 	req := httptest.NewRequest(http.MethodPost, "/slack/commands", io.NopCloser(errReader{}))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Force a known Content-Length so MaxBytesReader doesn't short-
-	// circuit before our errReader runs.
 	req.ContentLength = 16
 
 	rr := httptest.NewRecorder()
@@ -233,34 +204,14 @@ func TestServeHTTP_SignatureFromMultiValueHeaders(t *testing.T) {
 	}
 }
 
-// TestServeHTTP_HeaderRoundTrip fences the response-header copy from
-// resp.Headers into w.Header() at apps/slack/internal/handler.go (the
-// loop after Handle returns). Today every respond() only sets
-// Content-Type, but a future handler that emits a custom header (e.g.
-// X-Slack-Retry-After on a backoff signal) would silently regress if
-// the copy loop disappeared. We construct a synthetic envelope by
-// forcing a 404 path and asserting Content-Type round-trips.
-func TestServeHTTP_HeaderRoundTrip(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	h := newTestHandler(t, srv)
-	req := httptest.NewRequest(http.MethodGet, "/nope", http.NoBody)
-
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if got := rr.Header().Get("Content-Type"); got != "application/json" {
-		t.Errorf("response Content-Type = %q, want application/json", got)
-	}
-}
-
-// TestServeHTTP_UnknownPath confirms the catch-all 404 still fires
-// through the HTTP adapter. The mux only routes /slack/* and /health to
-// this handler, but Handle's default branch returning 404 is still
-// reachable if someone wires a stray path through.
+// TestServeHTTP_UnknownPath fences two invariants on the catch-all 404
+// branch: (1) Handle's default branch is still reachable through the
+// HTTP adapter, and (2) the response-header copy from resp.Headers into
+// w.Header() round-trips Content-Type. The mux only routes /slack/* and
+// /health here, but a future stray wiring would land on this branch —
+// and a future handler that emits a custom header (e.g.
+// X-Slack-Retry-After) would silently regress if the copy loop ever
+// disappeared.
 func TestServeHTTP_UnknownPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -275,5 +226,8 @@ func TestServeHTTP_UnknownPath(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("unknown path: status = %d, want 404", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("response Content-Type = %q, want application/json (header round-trip regressed)", got)
 	}
 }

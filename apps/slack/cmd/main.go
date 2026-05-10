@@ -82,23 +82,20 @@ func main() {
 	}
 
 	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
+	userAgent := "qurl-slack/" + version
 
 	handler := internal.NewHandler(internal.Config{
 		QURLEndpoint:       qurlEndpoint,
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
-			// Retries stay disabled here. The async response_url
-			// goroutine pattern (PR-3c.3+) hasn't landed yet, so
-			// handleCreate/handleList still call the qURL API
-			// synchronously inside the request lifecycle. Slack's
-			// 3s slash-command ack budget can't absorb default
-			// 3-retry exponential backoff on a transient 429.
-			// Re-enable retries in PR-3c.3 alongside the goroutine
-			// (or split into two client instances: sync = 0 retries,
-			// async = default).
+			// Retries stay disabled until PR-3c.3 lands the async
+			// response_url goroutine. handleCreate/handleList still
+			// call the qURL API synchronously inside the 3s Slack
+			// ack budget — default 3-retry exponential backoff would
+			// blow that budget on a transient 429.
 			return client.New(qurlEndpoint, apiKey,
-				client.WithUserAgent("qurl-slack/"+version),
+				client.WithUserAgent(userAgent),
 				client.WithRetry(0),
 			)
 		},

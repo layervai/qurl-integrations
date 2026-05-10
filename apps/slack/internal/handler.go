@@ -87,12 +87,10 @@ func NewHandler(cfg Config) *Handler {
 // Lambda runtime. The HTTP entry point (ServeHTTP) adapts incoming
 // net/http requests into this shape and reuses the same dispatch logic.
 func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// req.Path is user-controlled but slog's JSONHandler escapes
-	// structured field values, so a CRLF in the path can't break out
-	// of the log line. classifyPath in ServeHTTP exists to satisfy
-	// gosec G706 (which can't see through slog's escaping) and to
-	// constrain log labels to a fixed set for dashboarding — both
-	// goals, not a real injection-vector difference.
+	// slog's JSONHandler escapes structured field values, so the raw
+	// req.Path can't break out of the log line here. classifyPath in
+	// ServeHTTP enforces a fixed-label log discipline for dashboards
+	// and satisfies gosec G706 (which can't see through slog's escaping).
 	slog.Info("received request", "path", req.Path, "method", req.HTTPMethod)
 
 	switch {
@@ -232,17 +230,14 @@ func classifyPath(p string) string {
 // (body too big, body unreadable, dispatch returned an error). The Handle
 // code path already encodes its own JSON envelope and goes through the
 // header-copy branch in ServeHTTP.
+//
+// All callers in this file pass map[string]string literals — Marshal
+// can't fail on those — but we still handle the error path so a future
+// caller that passes a non-trivially-marshalable value emits a usable
+// envelope to the client and surfaces the regression in logs.
 func writeJSON(w http.ResponseWriter, status int, body any) {
-	// Inputs are always map[string]string literals from this file's
-	// own callers — Marshal can't fail on those. Explicit `_ =`
-	// (vs the `_, _ :=` shape) signals to readers and to errcheck
-	// that the swallow is deliberate.
 	b, err := json.Marshal(body)
 	if err != nil {
-		// Defensive: if a future caller passes something that DOES
-		// fail to marshal, fall back to a hand-built literal so the
-		// client still gets a usable error envelope and we log the
-		// regression for incident triage.
 		slog.Error("writeJSON marshal failed", "error", err)
 		b = []byte(`{"error":"internal error"}`)
 		status = http.StatusInternalServerError
