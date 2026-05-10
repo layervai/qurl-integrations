@@ -1112,16 +1112,12 @@ func TestCreateResourceEmptyTargetURLRejected(t *testing.T) {
 // this test ensures the client doesn't reject the request before it
 // reaches the server.
 func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
+	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var input CreateResourceInput
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if input.Type != ResourceTypeTunnel {
-			t.Errorf("got Type %q, want %q", input.Type, ResourceTypeTunnel)
-		}
-		if input.TargetURL != "" {
-			t.Errorf("got TargetURL %q, want empty", input.TargetURL)
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": "r_tunnel01",
@@ -1140,6 +1136,20 @@ func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
 	}
 	if got.Type != ResourceTypeTunnel {
 		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeTunnel)
+	}
+	// Pin wire elision — `target_url` must be absent from the JSON
+	// payload entirely (not serialized as `""`). Mirrors the
+	// TestCreateResourceIDFlow pattern so a future `,omitempty`
+	// removal on TargetURL trips here.
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if got := raw["type"]; got != ResourceTypeTunnel {
+		t.Errorf("type: got %v, want %q", got, ResourceTypeTunnel)
+	}
+	if _, ok := raw["target_url"]; ok {
+		t.Errorf("target_url must be omitted on tunnel creates; body=%s", gotBody)
 	}
 }
 
@@ -1391,6 +1401,51 @@ func TestUpdateResourceClearCustomDomainByEmptyString(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("custom_domain: got %v, want \"\"", got)
+	}
+}
+
+// TestUpdateResourceClearAccessPolicyByEmptyStruct pins the documented
+// `&AccessPolicy{}` clear convention. AccessPolicy has no sentinel
+// because it's a struct (not a scalar), so passing an all-zero pointer
+// is the clear signal. The wire shape must round-trip as
+// `"access_policy": {}` — if a future contributor adds a non-omitempty
+// field to AccessPolicy, the empty literal would no longer marshal as
+// `{}` and the clear contract would silently break; this test catches
+// that.
+func TestUpdateResourceClearAccessPolicyByEmptyStruct(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		AccessPolicy: &AccessPolicy{},
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["access_policy"]
+	if !ok {
+		t.Fatalf("access_policy must be present (the &AccessPolicy{} clear semantic); body=%s", gotBody)
+	}
+	policy, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("access_policy should decode as object; got %T (%v)", got, got)
+	}
+	if len(policy) != 0 {
+		t.Errorf("access_policy should marshal as `{}`; got %v", policy)
 	}
 }
 

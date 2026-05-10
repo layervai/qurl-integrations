@@ -703,6 +703,9 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // this contract; callers should plumb Idempotency-Key (tracked at #148)
 // before that happens. Until #148 lands, callers needing at-least-once
 // retry safety should dedupe on `(owner_id, resource_id)` server-side.
+//
+// TODO(#148): plumb Idempotency-Key on this method before any
+// non-idempotent PATCH field lands.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
 	if resourceID == "" {
 		return nil, ErrUpdateResourceEmptyID
