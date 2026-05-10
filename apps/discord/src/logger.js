@@ -48,11 +48,11 @@ const REDACT_EXACT_KEYS = new Set([
   'private_key',
 ]);
 
-// Internal: callers must pass strings. Only invoked from Object.entries()
-// loops, which yield string keys. If this becomes externally-used, restore
-// a String() coercion or guard non-string inputs.
+// `String(key)` coerces — Object.entries() yields strings today, but a
+// future caller (a different walker, a Map-like) might pass non-strings;
+// the coercion keeps the predicate safe for free.
 function shouldRedact(key) {
-  const k = key.toLowerCase();
+  const k = String(key).toLowerCase();
   if (REDACT_EXACT_KEYS.has(k)) return true;
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
@@ -75,9 +75,8 @@ const AUDIT_SECRET_KEYS = new Set([
   'content_hash', 'body_hash',
 ]);
 
-// Internal: callers must pass strings (same contract as shouldRedact).
 function isAuditSecretKey(key) {
-  return AUDIT_SECRET_KEYS.has(key.toLowerCase());
+  return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
 }
 
 // Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS

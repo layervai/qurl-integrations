@@ -525,19 +525,19 @@ describe('logger', () => {
       expect((line.match(/"hash":"\[REDACTED\]"/g) || []).length).toBe(2);
     });
 
-    it('primitive hash values (null, number, empty-string) pass through unchanged', () => {
+    it.each([
+      ['null', null, '"hash":null'],
+      ['number', 12345, '"hash":12345'],
+      ['empty-string', '', '"hash":""'],
+    ])('primitive hash value (%s) passes through unchanged', (_label, hashValue, expectedSubstring) => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
-      logger.info('uploaded', { hash: null });
-      logger.info('uploaded', { hash: 12345 });
-      logger.info('uploaded', { hash: '' });
+      logger.info('uploaded', { hash: hashValue });
 
-      const lines = consoleSpy.log.mock.calls.map(c => c[0]);
-      expect(lines[0]).toContain('"hash":null');
-      expect(lines[1]).toContain('"hash":12345');
-      expect(lines[2]).toContain('"hash":""');
-      expect(lines.every(l => !l.includes('REDACTED'))).toBe(true);
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain(expectedSubstring);
+      expect(line).not.toContain('REDACTED');
     });
 
     it('recurses into matched-key objects so inner sensitive keys are redacted', () => {
