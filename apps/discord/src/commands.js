@@ -3737,7 +3737,7 @@ const commands = [
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
             '\t1. Run `/qurl send` and pick **Send File** or **Send Location**\n' +
-            '  2. (Files only) I\'ll DM you privately — drop the file there, not in the public channel\n' +
+            '  2. (Files only) I\'ll DM you privately — attach the file there, not in the public channel\n' +
             '  3. Choose recipient(s), expiry, and optionally a personal message — then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
