@@ -152,6 +152,13 @@ jobs:
     needs: [changes, lint, test, vulnerability-scan, docker-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Principle of least privilege: this job only fires a
+    # repository_dispatch using DEPLOY_PAT; it never reads anything from
+    # this repo's GITHUB_TOKEN-scoped surface. Drop pull-requests; keep
+    # contents:read because actions/checkout-style steps default to
+    # needing it even when none are present here today.
+    permissions:
+      contents: read
     if: |
       needs.changes.outputs.app == 'true' &&
       github.ref == 'refs/heads/main' &&

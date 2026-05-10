@@ -32,7 +32,10 @@ const (
 	pathSlackCommands    = "/slack/commands"
 	pathSlackEvents      = "/slack/events"
 	pathSlackInteraction = "/slack/interactions"
-	pathOther            = "/other"
+	// logLabelOther is the log-only sentinel emitted by classifyPath
+	// when the request URL doesn't match any registered route. It is
+	// NOT a routable path — anything that lands here ultimately 404s.
+	logLabelOther = "/other"
 )
 
 // sigFailureResponse is the terse body we return for every 401 from the
@@ -41,10 +44,13 @@ const (
 const sigFailureResponse = "signature verification failed"
 
 // maxHTTPBodyBytes caps the request body the HTTP adapter will buffer.
-// Slack slash-command/interaction/event payloads sit well under 64 KiB in
-// practice; the cap protects the long-running process from a malicious or
-// stuck client streaming an unbounded body before signature verification has
-// a chance to run.
+// Slack documents a 30 KiB ceiling for slash-command payloads and a 4 KiB
+// ceiling for events; observed bodies sit well under 64 KiB in practice.
+// 1 MiB is the round-number cap with generous headroom for future Slack
+// payload-shape changes (block-kit interactions can grow under modal
+// flows). The cap exists so a malicious or stuck client can't stream an
+// unbounded body and tie up a goroutine before signature verification
+// has any input to reject.
 const maxHTTPBodyBytes = 1 << 20 // 1 MiB
 
 const (
@@ -81,6 +87,12 @@ func NewHandler(cfg Config) *Handler {
 // Lambda runtime. The HTTP entry point (ServeHTTP) adapts incoming
 // net/http requests into this shape and reuses the same dispatch logic.
 func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// req.Path is user-controlled but slog's JSONHandler escapes
+	// structured field values, so a CRLF in the path can't break out
+	// of the log line. classifyPath in ServeHTTP exists to satisfy
+	// gosec G706 (which can't see through slog's escaping) and to
+	// constrain log labels to a fixed set for dashboarding — both
+	// goals, not a real injection-vector difference.
 	slog.Info("received request", "path", req.Path, "method", req.HTTPMethod)
 
 	switch {
@@ -120,22 +132,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Resolve which Slack path this request is bound to from a
 	// fixed allow-list. We mux only on /health + /slack/{commands,events,
 	// interactions} (cmd/main.go), so any other inbound path is either a
-	// probe or a misconfig — we log it as `/other` so a hostile client
-	// can't plant CR/LF or attacker-chosen content into our log lines
-	// (gosec G706, log forgery via taint).
+	// probe or a misconfig — we log it as logLabelOther so a hostile
+	// client can't plant CR/LF or attacker-chosen content into our log
+	// lines (gosec G706, log forgery via taint).
 	logPath := classifyPath(r.URL.Path)
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxHTTPBodyBytes+1))
+	// http.MaxBytesReader is the idiomatic primitive for net/http body
+	// caps: it surfaces a typed *http.MaxBytesError on overflow and
+	// signals the server to close the connection cleanly so a chunked
+	// or `Transfer-Encoding: chunked` client can't keep the goroutine
+	// alive after we've decided to reject. The cap fires BEFORE
+	// signature verification (see prepareAndVerifySlackRequest in
+	// Handle) — that's load-bearing and is fenced by
+	// TestServeHTTP_RejectsOversizedBody_BeforeSigVerify.
+	r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
+			slog.Warn("http body exceeds cap", "path", logPath, "limit_bytes", maxHTTPBodyBytes)
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
 		slog.Warn("http body read failed", "path", logPath, "error", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-	if len(body) > maxHTTPBodyBytes {
-		//nolint:gosec // G706: logPath is one of the path-constant set returned by classifyPath, never user content
-		slog.Warn("http body exceeds cap", "path", logPath, "limit_bytes", maxHTTPBodyBytes)
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
 		return
 	}
 
@@ -189,8 +211,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // classifyPath maps a request URL path to a fixed-set log label so
 // caller-controlled bytes never reach the log line. The allow-list
 // matches the mux wiring in cmd/main.go — a request that hits any
-// other path 404s and gets logged as `/other` for traffic visibility
-// without leaking the attacker-chosen string.
+// other path 404s and gets logged as logLabelOther for traffic
+// visibility without leaking the attacker-chosen string.
 func classifyPath(p string) string {
 	switch p {
 	case pathHealth:
@@ -202,7 +224,7 @@ func classifyPath(p string) string {
 	case pathSlackInteraction:
 		return pathSlackInteraction
 	default:
-		return pathOther
+		return logLabelOther
 	}
 }
 
@@ -211,11 +233,24 @@ func classifyPath(p string) string {
 // code path already encodes its own JSON envelope and goes through the
 // header-copy branch in ServeHTTP.
 func writeJSON(w http.ResponseWriter, status int, body any) {
-	b, _ := json.Marshal(body)
+	// Inputs are always map[string]string literals from this file's
+	// own callers — Marshal can't fail on those. Explicit `_ =`
+	// (vs the `_, _ :=` shape) signals to readers and to errcheck
+	// that the swallow is deliberate.
+	b, err := json.Marshal(body)
+	if err != nil {
+		// Defensive: if a future caller passes something that DOES
+		// fail to marshal, fall back to a hand-built literal so the
+		// client still gets a usable error envelope and we log the
+		// regression for incident triage.
+		slog.Error("writeJSON marshal failed", "error", err)
+		b = []byte(`{"error":"internal error"}`)
+		status = http.StatusInternalServerError
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if _, err := w.Write(b); err != nil {
-		slog.Warn("writeJSON failed", "error", err)
+	if _, werr := w.Write(b); werr != nil {
+		slog.Warn("writeJSON write failed", "error", werr)
 	}
 }
 

@@ -34,6 +34,12 @@ go.work.sum
 # `apps/slack/` (help text, error template) still works in the
 # container build. Repo-root prose + per-app READMEs + docs/ are
 # the only things that can never be embed-needed.
+#
+# `apps/*/README.md` is intentionally redundant under the `apps/*` /
+# `!apps/slack` allow-list above (sibling apps' READMEs are already
+# excluded). Kept as belt-and-suspenders so a future re-include of an
+# `apps/slack/README.md` sibling pattern doesn't silently bring other
+# apps' READMEs along for the ride.
 /*.md
 apps/*/README.md
 docs/**/*.md

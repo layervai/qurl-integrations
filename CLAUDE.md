@@ -120,14 +120,20 @@ go test -count=1 ./...             # Skip cache
 
 ## Build
 
-Lambda apps use `CGO_ENABLED=0 GOOS=linux GOARCH=arm64`:
+Container apps (Slack — ECS Fargate, linux/arm64 Graviton):
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
+
+# Local Go binary for development / debugging:
+make build-slack
 ```
+
+Lambda apps still use `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ...`.
 
 ## Key Architecture Decisions
 
 - **Auth:** Start with workspace API keys (qurl-api-keys table exists). Per-user OAuth later.
-- **Runtime (Slack):** AWS Lambda behind API Gateway. Event-driven, scales to zero.
+- **Runtime (Slack):** AWS ECS Fargate behind an ALB (Graviton, distroless container). Long-running so the `response_url` async-defer pattern works — Lambda's freeze-on-response semantics broke it.
 - **Shared client:** `shared/client/` wraps the qURL API. Not a standalone module yet.
 - **Release:** Release Please monorepo mode with per-app version tracks.

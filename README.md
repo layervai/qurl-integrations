@@ -55,8 +55,12 @@ go test ./...
 # Run tests for a specific app
 go test ./apps/slack/...
 
-# Build Slack Lambda
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bootstrap ./apps/slack/cmd/
+# Build the Slack container image (canonical CI/prod path)
+docker buildx build --platform linux/arm64 \
+  -f apps/slack/Dockerfile -t qurl-bot-slack:dev .
+
+# Build a local Go binary (development / debugging only)
+make build-slack
 ```
 
 ## Contributing

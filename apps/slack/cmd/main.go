@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,10 +25,16 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
+// version is overridden at build time via `-ldflags="-X main.version=..."`
+// (see apps/slack/Dockerfile). Threaded into the qURL client User-Agent so
+// qurl-service request logs carry build provenance back to a specific image.
+var version = "dev"
+
 const (
 	// listenAddr is fixed at :8080 so the Dockerfile's EXPOSE, the ECS
-	// task's container port, and the ALB target group all line up.
-	// Changing it requires updating all four together.
+	// task's container port, the ALB target group, and the ALB target
+	// group's health-check path (`/health`) all line up. Changing it
+	// requires updating all four together.
 	listenAddr = ":8080"
 
 	// readHeaderTimeout caps how long we'll wait for a client to finish
@@ -81,20 +88,112 @@ func main() {
 		AuthProvider:       &authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		NewClient: func(apiKey string) *client.Client {
-			// Retry is enabled now that we're long-running — the 3s
-			// ack budget only governs the synchronous response, not the
-			// async response_url goroutine where retried calls land.
+			// Retries stay disabled here. The async response_url
+			// goroutine pattern (PR-3c.3+) hasn't landed yet, so
+			// handleCreate/handleList still call the qURL API
+			// synchronously inside the request lifecycle. Slack's
+			// 3s slash-command ack budget can't absorb default
+			// 3-retry exponential backoff on a transient 429.
+			// Re-enable retries in PR-3c.3 alongside the goroutine
+			// (or split into two client instances: sync = 0 retries,
+			// async = default).
 			return client.New(qurlEndpoint, apiKey,
-				client.WithUserAgent("qurl-slack/dev"),
+				client.WithUserAgent("qurl-slack/"+version),
+				client.WithRetry(0),
 			)
 		},
 	})
 
+	mux := buildMux(handler)
+
+	srv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+
+	// Register signal handler BEFORE starting the listener goroutine.
+	// A SIGTERM that arrives between goroutine launch and signal.Notify
+	// would otherwise fall through to the default disposition (immediate
+	// terminate, no graceful drain). The window is tiny but easy to close.
+	// SIGTERM is what ECS sends on task stop; SIGINT is for local Ctrl-C.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// Bind the listener BEFORE logging "listening" so the log line never
+	// claims success when the bind actually failed (e.g. port in use).
+	// ListenConfig.Listen takes a context and returns the bound listener
+	// synchronously; srv.Serve(ln) then takes ownership of the accept
+	// loop in the goroutine below.
+	//
+	// listenAddr binds to all interfaces (`:8080`) — the correct posture
+	// for an ALB-fronted ECS task: the container's network namespace is
+	// already isolated, the ALB is the only ingress, and binding to
+	// 127.0.0.1 would prevent the ALB from reaching the task. Same
+	// effective shape as the prior ListenAndServe(":8080").
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", listenAddr)
+	if err != nil {
+		slog.Error("listen failed", "addr", listenAddr, "error", err)
+		os.Exit(1)
+	}
+
+	// Run the server in a goroutine so the main goroutine can wait on
+	// signals. Serve always returns a non-nil error; we distinguish
+	// ErrServerClosed (graceful shutdown) from anything else.
+	serverErr := make(chan error, 1)
+	go func() {
+		slog.Info("slack server listening", "addr", listenAddr, "version", version)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
+
+	select {
+	case sig := <-sigCh:
+		slog.Info("shutdown signal received", "signal", sig.String())
+	case err := <-serverErr:
+		// Serve returned a real error before any shutdown signal.
+		// Exit non-zero so ECS replaces the task instead of letting it
+		// linger in a half-broken state.
+		if err != nil {
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := gracefulShutdown(srv); err != nil {
+		slog.Error("graceful shutdown failed", "error", err)
+		os.Exit(1)
+	}
+	// Drain the listener goroutine so the "server stopped" log only
+	// fires after Serve has actually returned. In practice Shutdown
+	// blocks until Serve returns, but joining the channel makes the
+	// ordering explicit and removes a theoretical race.
+	<-serverErr
+	slog.Info("server stopped")
+}
+
+// buildMux wires the routes for the slack server. Extracted so tests can
+// exercise the production mux wiring (in particular the /health closure
+// and the per-route adapter binding) without booting `main`.
+func buildMux(handler http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	// /health is the ALB and ECS health probe target. It must NOT go
 	// through Slack signature verification — the probe never carries
-	// a Slack signature header.
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	// a Slack signature header. Gated to GET so a stray non-GET probe
+	// (or a typo) doesn't get a 200 free pass.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
@@ -109,51 +208,7 @@ func main() {
 	mux.Handle("/slack/commands", handler)
 	mux.Handle("/slack/events", handler)
 	mux.Handle("/slack/interactions", handler)
-
-	srv := &http.Server{
-		Addr:              listenAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-	}
-
-	// Run the server in a goroutine so the main goroutine can wait on
-	// signals. ListenAndServe always returns a non-nil error; we
-	// distinguish ErrServerClosed (graceful shutdown) from anything else.
-	serverErr := make(chan error, 1)
-	go func() {
-		slog.Info("slack server listening", "addr", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-		close(serverErr)
-	}()
-
-	// SIGTERM is what ECS sends on task stop; SIGINT is for local Ctrl-C.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
-	select {
-	case sig := <-sigCh:
-		slog.Info("shutdown signal received", "signal", sig.String())
-	case err := <-serverErr:
-		// ListenAndServe returned a real error before any shutdown signal.
-		// Exit non-zero so ECS replaces the task instead of letting it
-		// linger in a half-broken state.
-		if err != nil {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if err := gracefulShutdown(srv); err != nil {
-		slog.Error("graceful shutdown failed", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("server stopped")
+	return mux
 }
 
 // gracefulShutdown owns the shutdown context lifetime so the deferred
