@@ -398,4 +398,35 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
       resource_id: 'r4',
     });
   });
+
+  // Pins the `typeof hash === 'string'` guard against future schema drift
+  // where the connector returns a non-string non-undefined value (number,
+  // null, Buffer, ...). The guard must short-circuit to undefined; without
+  // it, `?.slice` on a Buffer would have produced a usable byte slice.
+  it.each([
+    ['null', null],
+    ['number', 12345],
+    ['object', { md5: 'embedded' }],
+  ])('md5_prefix is undefined when connector returns hash as %s', async (_label, hashValue) => {
+    globalThis.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: jest.fn(() => '10') },
+        arrayBuffer: async () => new ArrayBuffer(10),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: hashValue, resource_id: 'r5' }),
+      });
+
+    await connector.uploadToConnector(
+      'https://cdn.discordapp.com/file.png', 'file.png', 'image/png',
+    );
+
+    expect(logger.info).toHaveBeenCalledWith('Uploaded to connector', {
+      md5_prefix: undefined,
+      resource_id: 'r5',
+    });
+    assertNoFullHashLeaked();
+  });
 });
