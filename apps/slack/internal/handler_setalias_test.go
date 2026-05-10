@@ -686,3 +686,34 @@ func TestSetAliasRebindSubmit_ResourceIDTarget(t *testing.T) {
 		t.Errorf("expected PATCH(clear) on r_old and PATCH(set-alias) on r_new; requests=%+v", resmock.requests)
 	}
 }
+
+// TestRebindNeedsConfirm_TrailingSlashEquivalence fences the URL
+// normalization in [rebindNeedsConfirm]: a trailing-slash difference
+// is treated as identical so the user isn't asked to confirm a
+// no-op rebind.
+func TestRebindNeedsConfirm_TrailingSlashEquivalence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		current string
+		next    string
+		want    bool
+	}{
+		{"identical urls", "https://example.com", "https://example.com", false},
+		{"trailing slash on current", "https://example.com/", "https://example.com", false},
+		{"trailing slash on new", "https://example.com", "https://example.com/", false},
+		{"both trailing slash", "https://example.com/", "https://example.com/", false},
+		{"different paths", "https://example.com/a", "https://example.com/b", true},
+		{"different hosts", "https://a.example.com", "https://b.example.com", true},
+		{"empty current → no-op (no rebind)", "", "https://example.com", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := rebindNeedsConfirm(&Resource{TargetURL: tc.current}, tc.next)
+			if got != tc.want {
+				t.Errorf("rebindNeedsConfirm(%q, %q) = %v, want %v", tc.current, tc.next, got, tc.want)
+			}
+		})
+	}
+}

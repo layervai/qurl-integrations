@@ -63,8 +63,13 @@ type Handler struct {
 
 // SetDeps overrides the setalias/unsetalias dependency wiring. Tests
 // inject httptest-backed stubs here; production callers leave it
-// untouched.
-func (h *Handler) SetDeps(d setAliasDeps) { h.deps = d }
+// untouched. Sets the `wired` sentinel on the deps so partial
+// overrides (e.g. only OpenView) don't silently fall back to
+// production wiring for the rest.
+func (h *Handler) SetDeps(d setAliasDeps) {
+	d.wired = true
+	h.deps = d
+}
 
 // NewHandler creates a new Slack handler.
 func NewHandler(cfg Config) *Handler {

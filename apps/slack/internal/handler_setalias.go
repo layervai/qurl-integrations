@@ -33,16 +33,13 @@ type rebindPrivateMetadata struct {
 	ResourceID string `json:"rid,omitempty"`
 }
 
-// targetIsResourceIDPrefix is the wire prefix every qurl-service
-// resource ID carries. Used as the cheapest possible discriminator
-// between "user pasted a URL" and "user pasted a resource_id" in
-// the setalias target argument.
+// targetIsResourceIDPrefix is the wire prefix on every qurl-service
+// resource ID. Discriminates URL targets from resource_id targets.
 const targetIsResourceIDPrefix = "r_"
 
-// commonAdminErrorMintFailed is the generic catch-all message for
-// admin-side errors that don't have a code-specific friendly text.
-// Mirrors the shape used by the get/handler error branches.
-const commonAdminErrorMintFailed = "Failed to update alias. Please try again."
+// errMsgAliasUpdateFailed is the catch-all user-facing message for
+// alias-update failures without a code-specific friendly mapping.
+const errMsgAliasUpdateFailed = "Failed to update alias. Please try again."
 
 // resourceTypeURL is the OpenAPI-spec value for URL-typed resources.
 // `tunnel` is the other recognized type today; the slack bot only
@@ -51,7 +48,7 @@ const commonAdminErrorMintFailed = "Failed to update alias. Please try again."
 const resourceTypeURL = "url"
 
 // Slack response-envelope JSON keys. Lifted to constants so the
-// `ephemeralOK` / `mustEphemeralOK` helpers and the legacy
+// `ephemeralOK` / `marshalEphemeralOK` helpers and the legacy
 // `respondSlack` (handler.go) path can share one source of truth.
 const (
 	respKeyResponseType  = "response_type"
@@ -74,8 +71,10 @@ type resourceClientFactory func(apiKey string) *ResourceClient
 
 // setAliasDeps is the indirection seam for setalias/unsetalias unit
 // tests. The production wiring builds these from `Handler.cfg`; tests
-// inject stubs against httptest fixtures.
+// inject stubs against httptest fixtures. `wired` is the explicit
+// override sentinel — see [Handler.setAliasDeps].
 type setAliasDeps struct {
+	wired             bool
 	NewResourceClient resourceClientFactory
 	NewAdminClient    func() *AdminClient
 	OpenView          func(ctx context.Context, triggerID string, viewJSON []byte) error
@@ -94,7 +93,6 @@ type setAliasDeps struct {
 // same shape).
 func (h *Handler) handleSetAlias(ctx context.Context, cmd *Command, values url.Values) (events.APIGatewayProxyResponse, error) {
 	teamID := values.Get(formFieldTeamID)
-	channelID := values.Get(formFieldChannelID)
 	userID := values.Get(formFieldUserID)
 	triggerID := values.Get(formFieldTriggerID)
 	responseURL := values.Get(formFieldResponseURL)
@@ -114,11 +112,9 @@ func (h *Handler) handleSetAlias(ctx context.Context, cmd *Command, values url.V
 	}
 	rc := deps.NewResourceClient(apiKey)
 
-	// Idempotency-Key bound to (team, channel, user, trigger). PR-3c.1
-	// helper. We compute it here even though only Create paths submit
-	// it to qurl-service today; future PR-3c.5 may attach it to
-	// PATCHes too.
-	_ = IdempotencyKey(teamID, channelID, userID, triggerID)
+	// TODO(PR-3c.5): submit Idempotency-Key on CreateResource. The
+	// helper exists (IdempotencyKey, parser.go) but ResourceClient
+	// doesn't accept the header yet.
 
 	// Resolve current binding.
 	existing, lookupErr := rc.GetResourceByAlias(ctx, cmd.Alias)
@@ -149,7 +145,9 @@ func (h *Handler) handleSetAlias(ctx context.Context, cmd *Command, values url.V
 	// same payload. Both shapes use the ephemeral envelope so the
 	// user-visible text is identical.
 	if responseURL != "" && deps.PostResponseURL != nil {
-		_ = deps.PostResponseURL(ctx, responseURL, mustEphemeralOK(fmt.Sprintf("Alias `$%s` set.", cmd.Alias)))
+		if err := deps.PostResponseURL(ctx, responseURL, marshalEphemeralOK(fmt.Sprintf("Alias `$%s` set.", cmd.Alias))); err != nil {
+			slog.Warn("setalias: response_url POST failed", "error", err)
+		}
 	}
 	return ephemeralOK(fmt.Sprintf("Alias `$%s` set.", cmd.Alias))
 }
@@ -159,6 +157,13 @@ func (h *Handler) handleSetAlias(ctx context.Context, cmd *Command, values url.V
 // distinguishably-different target. We compare conservatively — a
 // trailing slash difference is treated as identical so the user
 // isn't asked to confirm a no-op.
+//
+// Normalization deliberately stops at trailing-slash. Case
+// differences in scheme/host (`HTTPS://x` vs `https://x`) trip
+// through as distinct, which forces a confirmation modal — the
+// safer side of the trade-off in a multi-admin workspace. Upstream
+// input is normalized by the parser (lowercased scheme), so this
+// case is rare in practice.
 func rebindNeedsConfirm(existing *Resource, newTarget string) bool {
 	if existing == nil {
 		return false
@@ -190,7 +195,7 @@ func (h *Handler) openSetAliasRebindModal(
 	}
 	view, err := SetAliasRebindModal(alias, oldTargetDisplay, newTarget)
 	if err != nil {
-		return ephemeralWarn(commonAdminErrorMintFailed)
+		return ephemeralWarn(errMsgAliasUpdateFailed)
 	}
 	// The views.go template only carries `{"alias":<name>}` in
 	// private_metadata; we widen it here with the target + resource_id
@@ -201,14 +206,14 @@ func (h *Handler) openSetAliasRebindModal(
 		ResourceID: existing.ResourceID,
 	})
 	if err != nil {
-		return ephemeralWarn(commonAdminErrorMintFailed)
+		return ephemeralWarn(errMsgAliasUpdateFailed)
 	}
 	if deps.OpenView == nil {
 		return ephemeralWarn("Modal cannot be opened: Slack web API not configured.")
 	}
 	if err := deps.OpenView(ctx, triggerID, view); err != nil {
 		slog.Error("views.open failed", "error", err)
-		return ephemeralWarn(commonAdminErrorMintFailed)
+		return ephemeralWarn(errMsgAliasUpdateFailed)
 	}
 	// Ack the slash command with an empty 200 — the modal is the UX.
 	return events.APIGatewayProxyResponse{
@@ -273,7 +278,9 @@ func (h *Handler) handleUnsetAlias(ctx context.Context, cmd *Command, values url
 	}
 
 	if responseURL != "" && deps.PostResponseURL != nil {
-		_ = deps.PostResponseURL(ctx, responseURL, mustEphemeralOK(fmt.Sprintf("Alias `$%s` cleared.", cmd.Alias)))
+		if err := deps.PostResponseURL(ctx, responseURL, marshalEphemeralOK(fmt.Sprintf("Alias `$%s` cleared.", cmd.Alias))); err != nil {
+			slog.Warn("unsetalias: response_url POST failed", "error", err)
+		}
 	}
 	return ephemeralOK(fmt.Sprintf("Alias `$%s` cleared.", cmd.Alias))
 }
@@ -343,6 +350,14 @@ func (h *Handler) handleSetAliasSubmit(ctx context.Context, payload *interaction
 //
 // `resourceID == target` is a no-op (the user picked the same target
 // they were already bound to).
+//
+// Deliberate TOCTOU: the resource_id baked into private_metadata at
+// modal-open time is trusted at submit time. If another admin
+// rebinds the same alias between open and submit, the clear-alias
+// PATCH lands on a stale resource. Multi-admin races are rare
+// enough that re-resolving (and the extra GET-by-alias round-trip)
+// isn't worth the complexity; the qurl-service authz layer is the
+// last line of defense.
 func (h *Handler) rebindAlias(ctx context.Context, rc *ResourceClient, alias, target, resourceID string) error {
 	if resourceID == "" {
 		return h.applySetAlias(ctx, rc, alias, target)
@@ -411,9 +426,9 @@ func mapResourceErrorToSlack(alias string, err error) (events.APIGatewayProxyRes
 }
 
 // friendlyResourceMessage maps a resource-API error to the user-
-// visible string. Lifted to a helper so the modal-submit slog path
-// and the slash-command path (ephemeralWarn) share one source of
-// truth for the wording.
+// visible string. Lifted to a helper so the modal-submit path
+// (modalErrorResponse) and the slash-command path (ephemeralWarn)
+// share one source of truth for the wording.
 func friendlyResourceMessage(alias string, err error) string {
 	var rerr *ResourceError
 	if errors.As(err, &rerr) {
@@ -436,7 +451,7 @@ func friendlyResourceMessage(alias string, err error) string {
 			return "Permission denied for this alias."
 		}
 	}
-	return commonAdminErrorMintFailed
+	return errMsgAliasUpdateFailed
 }
 
 // isResourceNotFound returns true for 404s from the resource API.
@@ -530,10 +545,11 @@ func ephemeralOK(message string) (events.APIGatewayProxyResponse, error) {
 	})
 }
 
-// mustEphemeralOK is the JSON-bytes equivalent of [ephemeralOK] for
-// `response_url` posts. Errors are silently swallowed because the
-// payload is a fixed-shape map and json.Marshal on it cannot fail.
-func mustEphemeralOK(message string) []byte {
+// marshalEphemeralOK is the JSON-bytes equivalent of [ephemeralOK]
+// for `response_url` posts. The fixed-shape map can't fail
+// json.Marshal, so the error return is suppressed. Renamed from
+// `must…` to follow Go convention (must-prefix means panic-on-fail).
+func marshalEphemeralOK(message string) []byte {
 	body, _ := json.Marshal(map[string]any{
 		respKeyResponseType:  responseTypeEphemeral,
 		respKeyReplaceOrigin: true,
@@ -544,7 +560,9 @@ func mustEphemeralOK(message string) []byte {
 
 // interactionPayload is the subset of Slack's `view_submission`
 // payload we read. Fields we don't touch are intentionally elided so
-// the JSON unmarshal is forgiving to upstream additions.
+// the JSON unmarshal is forgiving to upstream additions. The rebind
+// modal has no input fields, so `view.state` is not modeled —
+// PR-3c.3's admin-claim modal will add it back.
 type interactionPayload struct {
 	Type string `json:"type"`
 	Team struct {
@@ -557,11 +575,6 @@ type interactionPayload struct {
 		ID              string `json:"id"`
 		CallbackID      string `json:"callback_id"`
 		PrivateMetadata string `json:"private_metadata"`
-		State           struct {
-			Values map[string]map[string]struct {
-				Value string `json:"value"`
-			} `json:"values"`
-		} `json:"state"`
 	} `json:"view"`
 	TriggerID string `json:"trigger_id"`
 }
@@ -586,14 +599,17 @@ func parseInteractionPayload(formBody string) (*interactionPayload, error) {
 }
 
 // setAliasDeps wires the production deps from h.cfg. Tests inject
-// their own struct; production callers go through this method so the
-// indirection seam is opaque to handler.go.
+// their own struct via [Handler.SetDeps] (which sets the explicit
+// `wired` sentinel); production callers go through this method so
+// the indirection seam is opaque to handler.go.
 //
-// Comparison-against-zero doesn't work here (struct contains func
-// fields); we use NewResourceClient as the sentinel since every test
-// path that overrides any dep also overrides this one.
+// We can't compare-against-zero here (the struct contains func
+// fields, which are not comparable); the explicit `wired` bool
+// avoids the "partial override silently falls back to production
+// wiring" footgun the previous NewResourceClient-as-sentinel path
+// could hit.
 func (h *Handler) setAliasDeps() setAliasDeps {
-	if h.deps.NewResourceClient != nil {
+	if h.deps.wired {
 		return h.deps
 	}
 	return setAliasDeps{

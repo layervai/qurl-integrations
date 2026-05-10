@@ -18,14 +18,13 @@ const testCustomerAPIKey = "lv_live_test_customer_key"
 // doesn't bury per-file findings under shared duplication, and so a
 // future rename only edits one site.
 const (
-	pathByAlias        = "/v1/resources/by-alias/"
-	pathResources      = "/v1/resources"
-	pathSlackCommands  = "/slack/commands"
-	pathSlackInteract  = "/slack/interactions"
-	testAliasProdDB    = "prod-db"
-	jsonAliasNotFound  = `{"error":{"code":"alias_not_found","status":404}}`
-	jsonContentType    = "application/json"
-	viewSubmissionType = "view_submission"
+	pathByAlias       = "/v1/resources/by-alias/"
+	pathResources     = "/v1/resources"
+	pathSlackCommands = "/slack/commands"
+	pathSlackInteract = "/slack/interactions"
+	testAliasProdDB   = "prod-db"
+	jsonAliasNotFound = `{"error":{"code":"alias_not_found","status":404}}`
+	jsonContentType   = "application/json"
 )
 
 // resourceFixture spins a fake `/v1/resources*` endpoint for a single
