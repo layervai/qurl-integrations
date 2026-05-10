@@ -1380,21 +1380,35 @@ func TestHasAnyFieldSetCoversAllFields(t *testing.T) {
 
 	// Coverage tripwire: if a new mutable field is added to
 	// UpdateResourceInput without updating both hasAnyFieldSet and
-	// the cases above, the reflect-based field count diverges from
-	// the case count. Filters out fields with `json:"-"` so future
-	// request-decoration fields (e.g. IdempotencyKey per #148) don't
-	// trip the count.
-	mutableFields := 0
+	// the cases above, the reflect-based set-equality check fires.
+	// Set-equality (not just count) catches the duplicate-case copy-
+	// paste mistake too — two cases named "Alias" and a missing case
+	// for a new field would slip past a count-only check.
+	// Filters out fields with `json:"-"` so future request-decoration
+	// fields (e.g. IdempotencyKey per #148) don't trip the check.
+	expected := make(map[string]bool)
 	tt := reflect.TypeOf(UpdateResourceInput{})
-	for i := 0; i < tt.NumField(); i++ {
-		if tt.Field(i).Tag.Get("json") != "-" {
-			mutableFields++
+	for i := range tt.NumField() {
+		f := tt.Field(i)
+		if f.Tag.Get("json") != "-" {
+			expected[f.Name] = true
 		}
 	}
-	if mutableFields != len(cases) {
-		t.Errorf("UpdateResourceInput has %d mutable fields but TestHasAnyFieldSetCoversAllFields covers %d — "+
-			"add the new field to both hasAnyFieldSet and this test's cases slice",
-			mutableFields, len(cases))
+	got := make(map[string]bool)
+	for _, tc := range cases {
+		got[tc.name] = true
+	}
+	for name := range expected {
+		if !got[name] {
+			t.Errorf("UpdateResourceInput field %q has no test case in TestHasAnyFieldSetCoversAllFields — "+
+				"add it to the cases slice (and ensure hasAnyFieldSet covers it)", name)
+		}
+	}
+	for name := range got {
+		if !expected[name] {
+			t.Errorf("test case %q does not match any UpdateResourceInput field — "+
+				"likely a typo or stale rename", name)
+		}
 	}
 }
 

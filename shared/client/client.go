@@ -639,7 +639,9 @@ type CreateResourceInput struct {
 type UpdateResourceInput struct {
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
-	// semantic). Pass nil to leave unchanged.
+	// semantic). Pass nil to leave unchanged. NOT trimmed by the
+	// client — surrounding whitespace round-trips verbatim; callers
+	// who care should pre-trim.
 	Description *string `json:"description,omitempty"`
 	// Alias sets the resource's alias when non-nil. Must NOT be a pointer
 	// to the empty string — use ClearAlias=true to clear. The empty-string
@@ -654,7 +656,8 @@ type UpdateResourceInput struct {
 	// validators accept the empty string as a clear signal.
 	ClearAlias bool `json:"clear_alias,omitempty"`
 	// CustomDomain: pass `&""` to clear the custom domain mapping (same
-	// convention as Description). Pass nil to leave unchanged.
+	// convention as Description). Pass nil to leave unchanged. NOT
+	// trimmed by the client (consistent with Description).
 	CustomDomain *string `json:"custom_domain,omitempty"`
 	// AccessPolicy: pass a non-nil pointer to update the policy in
 	// place. The server treats `&AccessPolicy{}` (all zero subfields)
