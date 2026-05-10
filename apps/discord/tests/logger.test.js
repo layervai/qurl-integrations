@@ -386,7 +386,7 @@ describe('logger', () => {
   // The intentional truncated form is `md5_prefix` (per md5Prefix() in
   // connector.js); these tests pin both that `hash` is redacted and that
   // `md5_prefix` survives.
-  describe('hash key redaction', () => {
+  describe('hash-family redaction, drift guards, and recursion semantics', () => {
     const FULL_MD5 = '5d41402abc4b2a76b9719d911017c592';
 
     it('redacts a top-level hash key on info()', () => {
@@ -448,6 +448,7 @@ describe('logger', () => {
     // so a future change that always blanks matched keys regardless of
     // value type would break this in CI rather than silently break dashboards.
     it('info() preserves tokens_minted / token_count with primitive (number) values', () => {
+      process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       logger.info('audit-event', { tokens_minted: 7, token_count: 3 });
@@ -561,6 +562,7 @@ describe('logger', () => {
     // Reverse-direction drift (audit-only key without redact mirror) is NOT
     // covered here — also tracked in #221.
     it('every REDACT_EXACT_KEYS entry is also redacted by audit()', () => {
+      process.env.LOG_LEVEL = 'info';
       const { __testExports } = require('../src/logger');
       logger = require('../src/logger');
 
@@ -581,6 +583,7 @@ describe('logger', () => {
     // in the JSON serialization — key-targeted asserts alone might miss
     // it; this catches the structural failure mode.
     it('sensitive values never appear as substrings anywhere in the log line', () => {
+      process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       logger.info('uploaded', {
@@ -602,6 +605,7 @@ describe('logger', () => {
     // a redact mirror or a substring match. #221 will eliminate this risk
     // via consolidation.
     it('every AUDIT_SECRET_KEYS entry is also redacted by info()', () => {
+      process.env.LOG_LEVEL = 'info';
       const { __testExports } = require('../src/logger');
       logger = require('../src/logger');
 
@@ -624,6 +628,7 @@ describe('logger', () => {
     // those dimensions in production dashboards; this test surfaces the
     // change in CI instead.
     it('redact() and audit() recursion semantics differ — substring vs exact-match', () => {
+      process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       // audit() pathway: exact-match does NOT catch `myToken` under `hash`,
@@ -643,6 +648,7 @@ describe('logger', () => {
     });
 
     it('audit() recurses into matched-key objects', () => {
+      process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
       logger.audit('upload_success', { send_id: 's1', hash: { auth_token: 'real-secret' } });

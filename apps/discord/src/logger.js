@@ -42,11 +42,8 @@ const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',
   'digest', 'checksum',
-  // body_hash here means a content digest of a payload (informational
-  // identifier of body bytes). If a future caller introduces a
-  // body_hash field that's actually an HMAC/MAC of the body (true secret-
-  // bearer), the exact-match still catches it correctly — listed here
-  // because EITHER interpretation is sensitive-shaped enough to redact.
+  // body_hash covers both content-digest and HMAC interpretations;
+  // either is sensitive-shaped enough to redact.
   'content_hash', 'body_hash',
   'private_key',
 ]);
@@ -304,10 +301,13 @@ const logger = {
 
 module.exports = logger;
 // Test-only: exposes the redact constants so a drift-guard test can iterate
-// the live set rather than duplicate it. Not part of the public API; do
-// not consume from production code. Defensive copies — a buggy test must
-// not be able to mutate the live Sets and corrupt subsequent log calls.
-module.exports.__testExports = {
-  REDACT_EXACT_KEYS: new Set(REDACT_EXACT_KEYS),
-  AUDIT_SECRET_KEYS: new Set(AUDIT_SECRET_KEYS),
-};
+// the live set rather than duplicate it. Gated on NODE_ENV='test' so it's
+// absent from prod bundles entirely (Jest sets NODE_ENV=test by default).
+// Defensive copies so a buggy test can't mutate the live Sets and corrupt
+// subsequent log calls.
+if (process.env.NODE_ENV === 'test') {
+  module.exports.__testExports = {
+    REDACT_EXACT_KEYS: new Set(REDACT_EXACT_KEYS),
+    AUDIT_SECRET_KEYS: new Set(AUDIT_SECRET_KEYS),
+  };
+}
