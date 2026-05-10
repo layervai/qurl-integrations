@@ -6,14 +6,12 @@ const { sanitizeFilename } = require('./utils/sanitize');
 const { MAX_FILE_SIZE } = require('./constants');
 const MAX_CDN_REDIRECTS = 3;
 
-// Truncate the connector's MD5 of an uploaded file for CloudWatch logging.
-// The full MD5 + WM_SECRET reconstructs a fileviewer URL (handler.go
-// validateWatermarkSig signs md5|wm|ts), so anyone with logs:GetLogEvents on
-// this CloudWatch group could exfiltrate user uploads. 8 hex chars (32 bits)
-// is enough for cross-system correlation; the connector itself still logs
-// the full hash to journald (SSM-only access). This helper is the single
-// chokepoint for that invariant — every upload-success log path goes through
-// it. Don't inline `result.hash` back into a log call.
+// Truncate the connector's MD5 of an uploaded file before logging. The full
+// hash is treated as sensitive in our broader infrastructure; see internal
+// security docs for the threat model. 8 hex chars preserves cross-system
+// correlation. Single chokepoint — every upload-success log path goes through
+// this helper. The truncation is load-bearing; don't inline `result.hash`
+// back into a log call.
 function md5Prefix(hash) {
   return typeof hash === 'string' ? hash.slice(0, 8) : undefined;
 }

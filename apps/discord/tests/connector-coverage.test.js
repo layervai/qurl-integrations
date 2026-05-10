@@ -280,10 +280,10 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
   });
 });
 
-// Full MD5 + WM_SECRET reconstructs a fileviewer URL (handler.go
-// validateWatermarkSig signs md5|wm|ts), so the bot must never log the full
-// value to its CloudWatch group. These tests guard against a future caller
-// reverting to `hash: result.hash` in any of the three upload paths.
+// Guard the truncation invariant from md5Prefix(): the bot must never log the
+// full hash. These tests pin all three upload paths to the helper so a future
+// caller can't quietly revert to `hash: result.hash`. See md5Prefix() in
+// connector.js for the "why."
 describe('Connector client — MD5 hash truncation in upload logs', () => {
   let connector;
   let logger;
