@@ -88,20 +88,11 @@ function isAuditSecretKey(key) {
 // the warn line — partial reporting would let a caller fix one key
 // and re-run only to discover another the next time.
 //
-// Note on the contract shift: the original audit() bypassed redact()
-// entirely because the legacy substring-match REDACT_SUBSTRINGS would
-// blank legitimate dimensions like `tokens_minted`. AUDIT_SECRET_KEYS
-// uses exact-match against a closed set of canonical secret names
-// (auth_token, api_key, password, ...), none of which collide with any
-// known legitimate audit dimension. So we can redact the value of an
-// offending key without risk of corrupting a metric — and that's
-// strictly safer than emitting the secret verbatim and relying on a
-// dashboard sweep to catch it.
-//
-// Recursion contract (added in #219): when a matched key's value is a
-// non-null object/array, we recurse so an `{ auth_token: { ... } }`
-// accident still has its inner sensitive keys examined. Inherits the
-// existing depth-5 cap.
+// Exact-match (not substring) so legitimate audit dimensions like
+// `tokens_minted` survive — these are the canonical secret-bearer names
+// (auth_token, api_key, password, ...) that are safe to redact-by-value
+// without corrupting metrics. Recurses into matched-key non-null
+// object/array values (depth-5 cap inherited from the function body).
 function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   if (depth > 5 || value == null || typeof value !== 'object') {
     return { value, secretKeys };
@@ -148,11 +139,9 @@ function redact(value, depth = 0) {
     if (shouldRedact(k)) {
       // Blank non-empty strings; recurse into non-null objects/arrays so
       // a `{ hash: { token: 'real' } }` accident still has its inner keys
-      // examined. Other primitives (numbers, null, etc.) pass through.
-      // Note: this recursion uses shouldRedact (substring rule); the
-      // audit pathway recursion uses isAuditSecretKey (exact-match) so a
-      // `{ hash: { myToken: ... } }` blanks here but survives audit. See
-      // redactAuditSecrets() for the rationale.
+      // examined. Other primitives pass through.
+      // Asymmetry note: see redactAuditSecrets() — this recursion uses the
+      // wider substring rule; the audit pathway uses exact-match.
       if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
       else if (v != null && typeof v === 'object') out[k] = redact(v, depth + 1);
       else out[k] = v;
@@ -218,17 +207,10 @@ const logger = {
   // canonical: "discord" | "slack" | "teams" | "cli" | "web" | "api".
   //
   // Audit lines bypass currentLevel — they're observability, not
-  // debug noise. They also bypass the top-level redact() pass on
-  // `meta` because that pass matches on KEY-name SUBSTRING and would
-  // blank legitimate dimensions like `tokens_minted` or `token_count`.
-  // Instead, audit() runs redactAuditSecrets() — same shape but uses
-  // exact-match against a closed AUDIT_SECRET_KEYS set so only canonical
-  // secret-bearer names (auth_token, api_key, password, ...) are
-  // blanked. Callers SHOULD still avoid passing secrets in meta —
-  // the AUDIT_EVENTS allowlist in constants.js documents the small,
-  // pre-vetted vocabulary (send_id, kind, count, expires_in, success,
-  // total). The redaction here is belt-and-suspenders: an error log
-  // fires too so a misbehaving caller is catchable in dashboards.
+  // debug noise. They also bypass redact() (which uses substring) in
+  // favor of redactAuditSecrets() (exact-match) so legitimate dimensions
+  // like `tokens_minted` survive. The AUDIT_EVENTS allowlist in
+  // constants.js documents the canonical vocabulary.
   audit(event, meta = {}) {
     // Default param only fires for `undefined`. A caller passing `null`
     // (easy mistake from optional chaining: `someObj?.meta`) would

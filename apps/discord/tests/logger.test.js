@@ -582,7 +582,7 @@ describe('logger', () => {
     // any other shape that bypasses the redact pass) would emit the value
     // in the JSON serialization — key-targeted asserts alone might miss
     // it; this catches the structural failure mode.
-    it('sensitive values never appear as substrings anywhere in the log line', () => {
+    it('no sensitive value appears as a substring in the log line', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
@@ -627,7 +627,7 @@ describe('logger', () => {
     // the two functions and silently tightens audit semantics would break
     // those dimensions in production dashboards; this test surfaces the
     // change in CI instead.
-    it('redact() and audit() recursion semantics differ — substring vs exact-match', () => {
+    it('recursion semantics: substring (redact) vs exact-match (audit)', () => {
       process.env.LOG_LEVEL = 'info';
       logger = require('../src/logger');
 
