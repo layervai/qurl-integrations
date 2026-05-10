@@ -574,6 +574,27 @@ describe('logger', () => {
       }
     });
 
+    // Structural regression guard: the formatted log line never contains
+    // a sensitive value as a substring, regardless of where it sat in the
+    // meta. A future change that stringifies meta before redacting (or
+    // any other shape that bypasses the redact pass) would emit the value
+    // in the JSON serialization — key-targeted asserts alone might miss
+    // it; this catches the structural failure mode.
+    it('sensitive values never appear as substrings anywhere in the log line', () => {
+      logger = require('../src/logger');
+
+      logger.info('uploaded', {
+        hash: FULL_MD5,
+        nested: { token: 'sensitive-1' },
+        body: { hash: 'sensitive-2' },
+      });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).not.toContain(FULL_MD5);
+      expect(line).not.toContain('sensitive-1');
+      expect(line).not.toContain('sensitive-2');
+    });
+
     // Reverse drift guard: every entry in AUDIT_SECRET_KEYS should also
     // be redacted by the regular pathway — either via REDACT_EXACT_KEYS
     // exact-match OR via REDACT_SUBSTRINGS substring. Catches the case

@@ -42,6 +42,11 @@ const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',
   'digest', 'checksum',
+  // body_hash here means a content digest of a payload (informational
+  // identifier of body bytes). If a future caller introduces a
+  // body_hash field that's actually an HMAC/MAC of the body (true secret-
+  // bearer), the exact-match still catches it correctly — listed here
+  // because EITHER interpretation is sensitive-shaped enough to redact.
   'content_hash', 'body_hash',
   'private_key',
 ]);
@@ -95,6 +100,11 @@ function isAuditSecretKey(key) {
 // offending key without risk of corrupting a metric — and that's
 // strictly safer than emitting the secret verbatim and relying on a
 // dashboard sweep to catch it.
+//
+// Recursion contract (added in #219): when a matched key's value is a
+// non-null object/array, we recurse so an `{ auth_token: { ... } }`
+// accident still has its inner sensitive keys examined. Inherits the
+// existing depth-5 cap.
 function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   if (depth > 5 || value == null || typeof value !== 'object') {
     return { value, secretKeys };
@@ -117,9 +127,13 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
       // therefore SURVIVE here even though it'd be blanked by redact().
       // Intentional — audit dimensions like `tokens_minted` must not be
       // redacted via substring.
-      if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
-      else if (v != null && typeof v === 'object') out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
-      else out[k] = v;
+      if (typeof v === 'string' && v.length > 0) {
+        out[k] = '[REDACTED]';
+      } else if (v != null && typeof v === 'object') {
+        out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
+      } else {
+        out[k] = v;
+      }
       if (!secretKeys.includes(k)) secretKeys.push(k);
     } else {
       out[k] = redactAuditSecrets(v, depth + 1, secretKeys).value;
