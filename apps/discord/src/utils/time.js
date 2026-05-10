@@ -72,11 +72,14 @@ function canonicalize(s) {
   return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+// Pre-canonicalized preset labels so findPresetByLabel doesn't re-canonicalize
+// constant strings on every parse. Same length and order as
+// SELF_DESTRUCT_PRESETS (parallel arrays).
+const SELF_DESTRUCT_CANONICAL_LABELS = SELF_DESTRUCT_PRESETS.map((p) => canonicalize(p.label));
+
 function findPresetByLabel(canonical) {
-  for (const preset of SELF_DESTRUCT_PRESETS) {
-    if (canonical === canonicalize(preset.label)) return preset;
-  }
-  return null;
+  const idx = SELF_DESTRUCT_CANONICAL_LABELS.indexOf(canonical);
+  return idx === -1 ? null : SELF_DESTRUCT_PRESETS[idx];
 }
 
 function findPresetBySeconds(n) {

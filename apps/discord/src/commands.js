@@ -1354,7 +1354,11 @@ async function handleSend(interaction, apiKey) {
     // (the form is bumping against the 5-row max when target=user).
     // Labels are shorter than they were as solo-button rows so both
     // fit without truncation on standard widths.
-    const destructBtnLabel = selfDestructSeconds
+    // Same isFinite + > 0 invariant the modal prefill and form preview
+    // use — keeps all three render sites on a single predicate so a
+    // future caller piping a corrupted (Infinity / NaN) value through
+    // selfDestructSeconds can't render "💥 Self-destruct: (invalid) · edit".
+    const destructBtnLabel = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0
       ? `\u{1F4A5} Self-destruct: ${formatSelfDestructLabel(selfDestructSeconds)} · edit`
       : '\u{1F4A5} Self-destruct timer (optional)';
     rows.push(new ActionRowBuilder().addComponents(
