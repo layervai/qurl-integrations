@@ -40,7 +40,7 @@ const REDACT_EXACT_KEYS = new Set([
 ]);
 
 function shouldRedact(key) {
-  const k = String(key).toLowerCase();
+  const k = key.toLowerCase();
   if (REDACT_EXACT_KEYS.has(k)) return true;
   return REDACT_SUBSTRINGS.some(s => k.includes(s));
 }
@@ -64,7 +64,7 @@ const AUDIT_SECRET_KEYS = new Set([
 ]);
 
 function isAuditSecretKey(key) {
-  return AUDIT_SECRET_KEYS.has(String(key).toLowerCase());
+  return AUDIT_SECRET_KEYS.has(key.toLowerCase());
 }
 
 // Returns a cloned meta value with any object key in AUDIT_SECRET_KEYS

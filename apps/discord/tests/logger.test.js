@@ -542,8 +542,11 @@ describe('logger', () => {
 
       const parsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
       expect(parsed.audit.hash.auth_token).toBe('[REDACTED]');
-      // Outer `hash` key still triggers the warn line so the caller is grep-able.
+      // Both outer (`hash`) and inner (`auth_token`) matches surface in the
+      // warn line — guards against a future refactor that returns early
+      // after finding the outer match.
       expect(consoleSpy.error.mock.calls[0][0]).toContain('hash');
+      expect(consoleSpy.error.mock.calls[0][0]).toContain('auth_token');
     });
   });
 });
