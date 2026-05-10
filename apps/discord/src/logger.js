@@ -138,6 +138,10 @@ function redact(value, depth = 0) {
       // Blank non-empty strings; recurse into non-null objects/arrays so
       // a `{ hash: { token: 'real' } }` accident still has its inner keys
       // examined. Other primitives (numbers, null, etc.) pass through.
+      // Note: this recursion uses shouldRedact (substring rule); the
+      // audit pathway recursion uses isAuditSecretKey (exact-match) so a
+      // `{ hash: { myToken: ... } }` blanks here but survives audit. See
+      // redactAuditSecrets() for the rationale.
       if (typeof v === 'string' && v.length > 0) out[k] = '[REDACTED]';
       else if (v != null && typeof v === 'object') out[k] = redact(v, depth + 1);
       else out[k] = v;

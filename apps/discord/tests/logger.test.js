@@ -442,6 +442,22 @@ describe('logger', () => {
       expect(line).not.toContain(FULL_MD5);
     });
 
+    // info()'s primitive-passthrough rule preserves legit-audit-dimension
+    // names (`tokens_minted`, `token_count`) when their values are numbers,
+    // even though the substring rule matches the keys. Pins the contract
+    // so a future change that always blanks matched keys regardless of
+    // value type would break this in CI rather than silently break dashboards.
+    it('info() preserves tokens_minted / token_count with primitive (number) values', () => {
+      logger = require('../src/logger');
+
+      logger.info('audit-event', { tokens_minted: 7, token_count: 3 });
+
+      const line = consoleSpy.log.mock.calls[0][0];
+      expect(line).toContain('"tokens_minted":7');
+      expect(line).toContain('"token_count":3');
+      expect(line).not.toContain('REDACTED');
+    });
+
     // Adjacent names that look like content hashes but aren't on the
     // exact-match list — they must survive (no over-redaction).
     it.each([
@@ -568,9 +584,10 @@ describe('logger', () => {
       const { __testExports } = require('../src/logger');
       logger = require('../src/logger');
 
+      // currentLevel is captured at module load; LOG_LEVEL defaults to
+      // 'info' which is what we want here, so no per-iteration env work.
       for (const k of __testExports.AUDIT_SECRET_KEYS) {
         consoleSpy.log.mockClear();
-        process.env.LOG_LEVEL = 'info';
         logger.info('uploaded', { [k]: 'real-secret-value' });
         const line = consoleSpy.log.mock.calls[0][0];
         expect(line).toContain(`"${k}":"[REDACTED]"`);
@@ -598,7 +615,6 @@ describe('logger', () => {
 
       // redact() pathway: substring catches `myToken` (contains `token`),
       // so the inner value is blanked.
-      process.env.LOG_LEVEL = 'info';
       logger.info('uploaded', { hash: { myToken: 'redact-blanks' } });
       const infoLine = consoleSpy.log.mock.calls[0][0];
       expect(infoLine).toContain('"myToken":"[REDACTED]"');
