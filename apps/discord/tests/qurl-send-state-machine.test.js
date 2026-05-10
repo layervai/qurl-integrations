@@ -1293,6 +1293,33 @@ describe('handleSend — end-to-end happy paths', () => {
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalled();
   });
 
+  it('file send: self-destruct timer threads from modal into downloadAndUpload', async () => {
+    // Symmetric with the location-path positive test above. The location
+    // path's self-destruct test pins uploadJsonToConnector — this one
+    // pins downloadAndUpload so a future refactor that drops the arg
+    // from one path but not the other gets caught by both branches.
+    const fileInit = makeCompInt(ids.initFile);
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructBtn = makeCompInt(ids.selfDestructBtn, {
+      awaitModalSubmit: jest.fn().mockResolvedValue(makeModalSubmit('5 minutes')),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetUser, userSelect, destructBtn, sendBtn],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+    expect(mockDownloadAndUpload).toHaveBeenCalledWith(
+      attachment.url, expect.any(String), attachment.contentType, expect.any(String),
+      300,
+    );
+  });
+
   it('location send: full flow from init → uploadJsonToConnector → mintLinks → sendDM', async () => {
     const locInit = makeCompInt(ids.initLoc, {
       showModal: jest.fn().mockResolvedValue(undefined),

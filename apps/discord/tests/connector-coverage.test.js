@@ -119,7 +119,6 @@ describe('Connector client — coverage boost', () => {
     // omit the field entirely otherwise. Pinning all four paths so a
     // future entry-point that forgets `appendViewerTtl` gets caught.
     function captureUploadFormFields() {
-      let formCaptured = null;
       globalThis.fetch = jest.fn()
         .mockResolvedValueOnce({ // CDN download (only used by file paths)
           ok: true,
@@ -142,9 +141,8 @@ describe('Connector client — coverage boost', () => {
         appended.push({ name: args[0], valueType: typeof args[1], filename: args[2] });
         return originalAppend.apply(this, args);
       };
-      formCaptured = appended;
       const restore = () => { globalThis.FormData.prototype.append = originalAppend; };
-      return { appended: formCaptured, restore };
+      return { appended, restore };
     }
 
     it('uploadToConnector appends viewer_ttl_seconds when provided', async () => {

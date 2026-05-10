@@ -1566,6 +1566,43 @@ describe('handleAddRecipients', () => {
     expect(result.msg).toMatch(/Added 2 recipients/);
   });
 
+  it('file send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
+    // Pins the inheritance contract — when /qurl send recipients is run
+    // against an original send that had a timer set, the additional
+    // recipients' re-uploaded resource carries the same timer through to
+    // the connector. Without this, Add Recipients would silently strip
+    // the self-destruct semantic from the second batch.
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-42',
+      actual_url: null,
+      expires_in: '6h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: 'report.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/report.pdf',
+      self_destruct_seconds: 30,
+    });
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'conn-res-44', fileBuffer: new ArrayBuffer(8) });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/mint-3' }]);
+    mockSendDM.mockResolvedValue(true);
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-3', bot: false, username: 'Carol' },
+    ]);
+
+    await handleAddRecipients('send-file-2', users, mockOriginalInteraction, 'test-api-key');
+
+    expect(mockDownloadAndUpload).toHaveBeenCalledWith(
+      'https://cdn.discordapp.com/attachments/1/2/report.pdf',
+      'report.pdf',
+      'application/pdf',
+      'test-api-key',
+      30,
+    );
+  });
+
   it('URL send: uploads location JSON and mints links', async () => {
     mockDb.getSendConfig.mockReturnValue({
       resource_type: 'url',
@@ -1600,6 +1637,37 @@ describe('handleAddRecipients', () => {
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(1);
     expect(result.msg).toMatch(/Added 1 recipient/);
+  });
+
+  it('URL/maps send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
+    // Symmetric with the file-path inheritance test — the location/url
+    // re-upload through uploadJsonToConnector must carry the timer too.
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'url',
+      connector_resource_id: null,
+      actual_url: 'https://example.com/doc',
+      expires_in: '24h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: null,
+      self_destruct_seconds: 300,
+    });
+    mockUploadJsonToConnector.mockResolvedValue({ resource_id: 'res-loc-2', hash: 'loc-hash' });
+    mockMintLinks.mockResolvedValue([{ qurl_link: 'https://q.test/otl-2' }]);
+    mockSendDM.mockResolvedValue(true);
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-2', bot: false, username: 'Dave' },
+    ]);
+
+    await handleAddRecipients('send-url-2', users, mockOriginalInteraction, 'test-api-key');
+
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map', url: 'https://example.com/doc' }),
+      'location.json',
+      'test-api-key',
+      300,
+    );
   });
 
   it('maps send: uploads location JSON with location_name and mints links', async () => {

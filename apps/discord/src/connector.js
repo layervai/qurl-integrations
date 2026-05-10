@@ -147,6 +147,15 @@ function isAllowedSourceUrl(sourceUrl) {
  * Build auth headers for connector requests.
  * Uses the provided API key, or falls back to the global config key.
  */
+function connectorAuthHeaders(apiKey) {
+  const key = apiKey || config.QURL_API_KEY;
+  const headers = {};
+  if (key) {
+    headers['Authorization'] = `Bearer ${key}`;
+  }
+  return headers;
+}
+
 // Append `viewer_ttl_seconds` to the multipart form when a positive value
 // is provided. Centralized so all four upload paths (file initial,
 // re-upload, file via Discord CDN download, JSON) thread the same wire
@@ -156,15 +165,6 @@ function appendViewerTtl(form, viewerTtlSeconds) {
   if (typeof viewerTtlSeconds === 'number' && Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
     form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
   }
-}
-
-function connectorAuthHeaders(apiKey) {
-  const key = apiKey || config.QURL_API_KEY;
-  const headers = {};
-  if (key) {
-    headers['Authorization'] = `Bearer ${key}`;
-  }
-  return headers;
 }
 
 /**

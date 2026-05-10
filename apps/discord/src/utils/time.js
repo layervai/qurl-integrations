@@ -54,6 +54,11 @@ const SELF_DESTRUCT_MAX_SECONDS = SELF_DESTRUCT_PRESETS[SELF_DESTRUCT_PRESETS.le
 
 const SELF_DESTRUCT_OPTIONS_TEXT = SELF_DESTRUCT_PRESETS.map((p) => p.label).join(', ');
 
+// Single source of truth for the modal's setMaxLength + the parser's
+// length cap — both bound the input the same way so the parser never
+// has to defend against strings the modal would have rejected.
+const SELF_DESTRUCT_INPUT_MAX_LENGTH = 32;
+
 function canonicalize(s) {
   return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -85,9 +90,11 @@ function findPresetBySeconds(n) {
 function parseSelfDestructSeconds(raw) {
   const trimmed = String(raw ?? '').trim();
   if (trimmed === '') return { seconds: null, error: null };
-  // Length cap bounds CPU on hostile input before any parse.
-  // Longest legal label "30 minutes" + slack = 32 chars is plenty.
-  if (trimmed.length > 32) {
+  // Length cap bounds CPU on hostile input before any parse. The modal
+  // already enforces SELF_DESTRUCT_INPUT_MAX_LENGTH via setMaxLength, so
+  // a string longer than this is either an upstream caller misuse or a
+  // forged interaction — fail loud.
+  if (trimmed.length > SELF_DESTRUCT_INPUT_MAX_LENGTH) {
     return { seconds: null, error: 'Value is too long.' };
   }
 
@@ -131,4 +138,5 @@ module.exports = {
   SELF_DESTRUCT_MIN_SECONDS,
   SELF_DESTRUCT_MAX_SECONDS,
   SELF_DESTRUCT_OPTIONS_TEXT,
+  SELF_DESTRUCT_INPUT_MAX_LENGTH,
 };

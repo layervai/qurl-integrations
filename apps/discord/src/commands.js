@@ -25,6 +25,7 @@ const {
   parseSelfDestructSeconds,
   formatSelfDestructLabel,
   SELF_DESTRUCT_OPTIONS_TEXT,
+  SELF_DESTRUCT_INPUT_MAX_LENGTH,
 } = require('./utils/time');
 const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
@@ -1573,7 +1574,7 @@ async function handleSend(interaction, apiKey) {
           .setLabel('Pick a duration (blank = no timer)')
           .setPlaceholder(SELF_DESTRUCT_OPTIONS_TEXT)
           .setStyle(TextInputStyle.Short)
-          .setMaxLength(32)
+          .setMaxLength(SELF_DESTRUCT_INPUT_MAX_LENGTH)
           .setRequired(false)
           .setValue(selfDestructSeconds ? formatSelfDestructLabel(selfDestructSeconds) : '')
       ));
