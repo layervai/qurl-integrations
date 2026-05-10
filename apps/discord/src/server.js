@@ -251,6 +251,18 @@ if (!config.isDiscordInstallConfigured) {
 // In multi-tenant or NHP-disabled environments (dev, sandbox without
 // NHP, etc.) we don't mount it at all, returning the framework's
 // default 404 to anyone probing /canary/exec.
+//
+// LOAD-BEARING ASSUMPTION: this gate trusts that `isOpenNHPActive`
+// implies an NHP listener is actually fronting this process at the
+// network layer. The flag was designed for *OpenNHP-feature gating*
+// (slash commands, role assignments) — wiring NHP in front of the
+// bot is a deploy-side decision in qurl-integrations-infra
+// (qurl-bot-discord/terraform/cert.tf + the ALB → bot target-group
+// chain). If a future operator flips ENABLE_OPENNHP_FEATURES on a
+// single-tenant instance whose ALB does NOT route through NHP,
+// `/canary/exec` would mount with only the in-process timestamp +
+// allowlist as defenses. Keep that wiring in lockstep — or
+// strengthen this gate to a dedicated CANARY_ENDPOINT_ENABLED env.
 if (config.isOpenNHPActive) {
   app.use('/canary', canaryRouter);
   logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');

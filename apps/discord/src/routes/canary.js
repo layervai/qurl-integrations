@@ -3,10 +3,11 @@
 // to verify the bot's qURL send pipeline end-to-end every 3 hours.
 //
 // Auth is the qURL/NHP knock. The Lambda mints a single-use qURL
-// targeting this endpoint and calls qurl-service /v1/resolve, which
-// triggers an NHP knock that opens the bot's firewall to the
-// Lambda's egress IP. By the time a request reaches the route,
-// the caller has already proved possession of a valid qURL access
+// targeting this endpoint and calls qurl-service /v1/resolve; that
+// resolve authenticates the caller via NHP, which then signals the
+// bot's firewall to admit the caller's egress IP for the qURL's
+// session window. By the time a request reaches the route, the
+// caller has already proved possession of a valid qURL access
 // token for `${BOT_URL}/canary/exec`. No HMAC.
 //
 // The 5-minute X-Canary-Timestamp window is kept as belt-and-
@@ -93,9 +94,15 @@ function verifyCanaryTimestamp(req, res, next) {
   // is the on-call signal.) Tests pin the absence so a future refactor
   // that surfaces a middleware-level startedAt and "uniformly" adds
   // latency_ms to these branches gets caught.
+  // ip is logged on every reject so on-call can correlate. Under NHP
+  // fronting it'll be the Lambda egress (validates "yes this is the
+  // canary runner, not random internet"); on a misconfigured non-NHP
+  // mount, surfaced 401 traffic from arbitrary IPs is the first
+  // signal something is wrong.
+  const ip = req.ip || 'unknown';
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
-    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp' });
+    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp', ip });
     return res.status(401).json({ ok: false, error: 'missing_timestamp' });
   }
   // Strict shape — `parseInt('1234567890extra', 10)` returns
@@ -104,13 +111,13 @@ function verifyCanaryTimestamp(req, res, next) {
   // epoch seconds" (covers everything until ~year 2286) before
   // trusting it for a drift comparison.
   if (!/^[0-9]{10}$/.test(ts)) {
-    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp' });
+    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp', ip });
     return res.status(401).json({ ok: false, error: 'bad_timestamp' });
   }
   const tsInt = parseInt(ts, 10);
   const drift = Math.floor(Date.now() / 1000) - tsInt;
   if (Math.abs(drift) > TIMESTAMP_TOLERANCE_SECONDS) {
-    logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift });
+    logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift, ip });
     return res.status(401).json({ ok: false, error: 'expired_timestamp' });
   }
   next();
