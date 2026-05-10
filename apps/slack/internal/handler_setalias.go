@@ -280,37 +280,49 @@ func (h *Handler) handleUnsetAlias(ctx context.Context, cmd *Command, values url
 // rebind confirmation modal. Reads alias + target out of
 // `private_metadata`, then performs the `UpdateResource` PATCH. Slack
 // requires a 200 (with empty body) to dismiss the modal.
+//
+// Failure surface: the rebind modal has no input blocks (only
+// section/context), so a `response_action=errors` keyed on a fake
+// block_id silently dismisses the modal — Slack only renders error
+// strings tied to a real input block in the current view. Instead,
+// we close the modal cleanly (`response_action=clear`) and surface
+// the failure via slog (operator-side) plus the same TODO PR-3c.0
+// will wire — a `chat.postEphemeral` follow-up to the original
+// channel keyed off `private_metadata.channel_id`. Until that lands,
+// slog is the operator signal and the user sees the modal close.
 func (h *Handler) handleSetAliasSubmit(ctx context.Context, payload *interactionPayload) (events.APIGatewayProxyResponse, error) {
 	teamID := payload.Team.ID
 	userID := payload.User.ID
 	deps := h.setAliasDeps()
 
 	if err := h.requireAdmin(ctx, deps, teamID, userID); err != nil {
-		// Modal-side rejection via response_action=errors block so the
-		// user sees the message inside the modal frame.
-		return modalErrorResponse(blockIDClaimCode, "Only workspace admins can rebind aliases.")
+		slog.Warn("setalias submit: admin gate rejected", "team_id", teamID, "user_id", userID, "error", err)
+		return modalClearResponse()
 	}
 
 	meta, err := parseRebindMetadata(payload.View.PrivateMetadata)
 	if err != nil {
-		return modalErrorResponse(blockIDClaimCode, "Modal payload malformed.")
+		slog.Error("setalias submit: malformed private_metadata", "error", err)
+		return modalClearResponse()
 	}
 	alias := meta.Alias
 	target := meta.Target
 	resourceID := meta.ResourceID
 	if alias == "" || target == "" {
-		return modalErrorResponse(blockIDClaimCode, "Modal payload missing alias or target.")
+		slog.Error("setalias submit: missing alias or target in private_metadata", "alias_empty", alias == "", "target_empty", target == "")
+		return modalClearResponse()
 	}
 
 	apiKey, err := h.cfg.AuthProvider.APIKey(ctx, teamID)
 	if err != nil {
-		slog.Error("setalias submit: API key", "error", err)
-		return modalErrorResponse(blockIDClaimCode, authFailureMessage)
+		slog.Error("setalias submit: API key", "error", err, "team_id", teamID)
+		return modalClearResponse()
 	}
 	rc := deps.NewResourceClient(apiKey)
 
 	if err := h.rebindAlias(ctx, rc, alias, target, resourceID); err != nil {
-		return modalErrorResponse(blockIDClaimCode, friendlyResourceMessage(alias, err))
+		slog.Error("setalias submit: rebind failed", "alias", alias, "error", err, "friendly_message", friendlyResourceMessage(alias, err))
+		return modalClearResponse()
 	}
 
 	// Slack expects a 200 with empty body to close the modal cleanly.
@@ -397,9 +409,9 @@ func mapResourceErrorToSlack(alias string, err error) (events.APIGatewayProxyRes
 }
 
 // friendlyResourceMessage maps a resource-API error to the user-
-// visible string. Lifted to a helper so the modal-submit path
-// (modalErrorResponse) and the slash-command path (ephemeralWarn)
-// share one source of truth for the wording.
+// visible string. Lifted to a helper so the modal-submit slog path
+// and the slash-command path (ephemeralWarn) share one source of
+// truth for the wording.
 func friendlyResourceMessage(alias string, err error) string {
 	var rerr *ResourceError
 	if errors.As(err, &rerr) {
@@ -470,15 +482,16 @@ func parseRebindMetadata(blob string) (*rebindPrivateMetadata, error) {
 	return &meta, nil
 }
 
-// modalErrorResponse renders the `response_action=errors` shape Slack
-// expects when a view submission needs to surface a field-level
-// error to the user without dismissing the modal.
-func modalErrorResponse(blockID, message string) (events.APIGatewayProxyResponse, error) {
+// modalClearResponse renders the `response_action=clear` shape Slack
+// expects when a view submission needs to dismiss the modal stack
+// without surfacing a field-level error. Used for the rebind
+// modal's failure paths because the modal has no input blocks to
+// key an `errors` payload against (the older field-error path
+// silently dropped the message). Operator-side visibility comes
+// from the slog records the callers emit before invoking this.
+func modalClearResponse() (events.APIGatewayProxyResponse, error) {
 	body, err := json.Marshal(map[string]any{
-		"response_action": "errors",
-		"errors": map[string]string{
-			blockID: message,
-		},
+		"response_action": "clear",
 	})
 	if err != nil {
 		return events.APIGatewayProxyResponse{StatusCode: http.StatusInternalServerError}, nil //nolint:nilerr // wire-shape failure surfaces via 500 only

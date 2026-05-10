@@ -499,3 +499,188 @@ func TestSlashCommand_ParserError_FriendlyEphemeral(t *testing.T) {
 		t.Errorf("body = %s, expected :warning: prefix on parser error", resp.Body)
 	}
 }
+
+// submitInteractionBody builds the form-encoded view_submission body
+// with the given private_metadata. Test helper for the modal-error
+// tests below — keeps the per-test setup terse.
+func submitInteractionBody(t *testing.T, pm string) string {
+	t.Helper()
+	payload := map[string]any{
+		"type":       "view_submission",
+		"trigger_id": "trig-x",
+		"team":       map[string]any{"id": "T1"},
+		"user":       map[string]any{"id": "U1"},
+		"view": map[string]any{
+			"id":               "V1",
+			"callback_id":      callbackIDSetAliasRebind,
+			"private_metadata": pm,
+		},
+	}
+	pj, _ := json.Marshal(payload)
+	return url.Values{"payload": {string(pj)}}.Encode()
+}
+
+// assertResponseActionClear fences the modal-clear envelope shape so
+// every modal-side error test reads the same way. The envelope must
+// be `{"response_action":"clear"}` — anything else either silently
+// dismisses the modal (the bug this PR fixes) or leaves it stuck.
+func assertResponseActionClear(t *testing.T, resp events.APIGatewayProxyResponse) {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(resp.Body), &got); err != nil {
+		t.Fatalf("unmarshal modal response: %v\nbody=%q", err, resp.Body)
+	}
+	if got["response_action"] != "clear" {
+		t.Errorf("response_action = %v, want \"clear\"; body=%s", got["response_action"], resp.Body)
+	}
+}
+
+// TestSetAliasRebindSubmit_NonAdmin_ClearsModal fences the modal-side
+// admin-gate failure path. With the rebind modal having no input
+// blocks, a `response_action=errors` keyed on a fake block_id would
+// silently dismiss the modal — so the handler must instead return
+// `response_action=clear` and surface the failure via slog (operator
+// signal). The PATCH must not fire.
+func TestSetAliasRebindSubmit_NonAdmin_ClearsModal(t *testing.T) {
+	admin := stubAdminBackend(t, false)
+	resmock := newResourceMock(t, []resourceMockResponse{
+		{matchVerb: http.MethodPatch, matchPath: "/v1/resources/r_old", status: http.StatusOK, body: `{"data":{"resource_id":"r_old"}}`},
+	})
+	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
+
+	pm, _ := json.Marshal(rebindPrivateMetadata{
+		Alias:      testAliasProdDB,
+		Target:     "https://new.example",
+		ResourceID: "r_old",
+	})
+	body := submitInteractionBody(t, string(pm))
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path: pathSlackInteract, HTTPMethod: methodPost, Body: body, Headers: signSlackBody(t, body),
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	assertResponseActionClear(t, resp)
+	for _, r := range resmock.requests {
+		if r.Method == http.MethodPatch {
+			t.Errorf("non-admin reached PATCH, but admin gate should short-circuit: %+v", r)
+		}
+	}
+}
+
+// TestSetAliasRebindSubmit_MalformedMetadata_ClearsModal fences the
+// invalid-private_metadata path. The submit must close the modal
+// cleanly rather than 500 or leave it stuck.
+func TestSetAliasRebindSubmit_MalformedMetadata_ClearsModal(t *testing.T) {
+	admin := stubAdminBackend(t, true)
+	resmock := newResourceMock(t, nil)
+	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
+
+	body := submitInteractionBody(t, "{not-json")
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path: pathSlackInteract, HTTPMethod: methodPost, Body: body, Headers: signSlackBody(t, body),
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	assertResponseActionClear(t, resp)
+	if len(resmock.requests) != 0 {
+		t.Errorf("malformed metadata triggered %d backend calls, expected 0", len(resmock.requests))
+	}
+}
+
+// TestSetAliasRebindSubmit_MissingFields_ClearsModal fences the
+// "private_metadata parsed but missing alias/target" path.
+func TestSetAliasRebindSubmit_MissingFields_ClearsModal(t *testing.T) {
+	admin := stubAdminBackend(t, true)
+	resmock := newResourceMock(t, nil)
+	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
+
+	pm, _ := json.Marshal(rebindPrivateMetadata{Alias: "", Target: ""})
+	body := submitInteractionBody(t, string(pm))
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path: pathSlackInteract, HTTPMethod: methodPost, Body: body, Headers: signSlackBody(t, body),
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	assertResponseActionClear(t, resp)
+}
+
+// TestSetAliasRebindSubmit_ResourceAPIFails_ClearsModal fences the
+// PATCH-failure path. A 409 from the resource API on the rebind
+// PATCH must close the modal cleanly — the operator-side log carries
+// the friendly message for diagnostics.
+func TestSetAliasRebindSubmit_ResourceAPIFails_ClearsModal(t *testing.T) {
+	admin := stubAdminBackend(t, true)
+	resmock := newResourceMock(t, []resourceMockResponse{
+		{matchVerb: http.MethodPatch, matchPath: "/v1/resources/r_old", status: http.StatusConflict, body: `{"error":{"code":"alias_in_use","status":409,"title":"Conflict"}}`},
+	})
+	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
+
+	pm, _ := json.Marshal(rebindPrivateMetadata{
+		Alias:      testAliasProdDB,
+		Target:     "https://new.example",
+		ResourceID: "r_old",
+	})
+	body := submitInteractionBody(t, string(pm))
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path: pathSlackInteract, HTTPMethod: methodPost, Body: body, Headers: signSlackBody(t, body),
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	assertResponseActionClear(t, resp)
+}
+
+// TestSetAliasRebindSubmit_ResourceIDTarget fences the rebindAlias
+// resource_id-target branch (only the URL-target branch was covered
+// before). When the user picked an `r_…` target, the handler must
+// emit two PATCHes: clear-alias on the old resource, set-alias on
+// the new resource id.
+func TestSetAliasRebindSubmit_ResourceIDTarget(t *testing.T) {
+	admin := stubAdminBackend(t, true)
+	resmock := newResourceMock(t, []resourceMockResponse{
+		{matchVerb: http.MethodPatch, matchPath: "/v1/resources/r_old", status: http.StatusOK, body: `{"data":{"resource_id":"r_old"}}`},
+		{matchVerb: http.MethodPatch, matchPath: "/v1/resources/r_new", status: http.StatusOK, body: `{"data":{"resource_id":"r_new","alias":"prod-db"}}`},
+	})
+	h := newSetAliasTestHandler(t, admin.URL, resmock.srv.URL, nil, nil)
+
+	pm, _ := json.Marshal(rebindPrivateMetadata{
+		Alias:      testAliasProdDB,
+		Target:     "r_new",
+		ResourceID: "r_old",
+	})
+	body := submitInteractionBody(t, string(pm))
+	resp, err := h.Handle(context.Background(), &events.APIGatewayProxyRequest{
+		Path: pathSlackInteract, HTTPMethod: methodPost, Body: body, Headers: signSlackBody(t, body),
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if resp.Body != "" {
+		t.Errorf("body = %q, want empty (modal close on happy path)", resp.Body)
+	}
+	// Must see PATCH-clear on r_old and PATCH-set-alias on r_new.
+	var sawClear, sawSet bool
+	for _, r := range resmock.requests {
+		if r.Method != http.MethodPatch {
+			continue
+		}
+		if strings.Contains(r.Path, "/v1/resources/r_old") && strings.Contains(r.Body, `"clear_alias":true`) {
+			sawClear = true
+		}
+		if strings.Contains(r.Path, "/v1/resources/r_new") && strings.Contains(r.Body, `"alias":"prod-db"`) {
+			sawSet = true
+		}
+	}
+	if !sawClear || !sawSet {
+		t.Errorf("expected PATCH(clear) on r_old and PATCH(set-alias) on r_new; requests=%+v", resmock.requests)
+	}
+}
