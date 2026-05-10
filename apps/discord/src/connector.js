@@ -207,8 +207,13 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
     throw new Error('Connector upload returned no resource_id');
   }
 
+  // md5_prefix (not full hash): full MD5 + WM_SECRET reconstructs a fileviewer
+  // viewer URL (handler.go validateWatermarkSig signs md5|wm|ts), so anyone with
+  // logs:GetLogEvents on this CloudWatch group could exfiltrate user uploads.
+  // 8 hex chars (32 bits) is enough for cross-system correlation; the connector
+  // still logs the full hash to journald (SSM-only access).
   logger.info('Uploaded to connector', {
-    hash: result.hash,
+    md5_prefix: result.hash?.slice(0, 8),
     resource_id: result.resource_id,
   });
 
@@ -249,7 +254,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
   }
 
   logger.info('Re-uploaded to connector (new resource)', {
-    hash: result.hash,
+    md5_prefix: result.hash?.slice(0, 8),
     resource_id: result.resource_id,
   });
 
@@ -364,7 +369,7 @@ async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
   }
 
   logger.info('Uploaded JSON to connector', {
-    hash: result.hash,
+    md5_prefix: result.hash?.slice(0, 8),
     resource_id: result.resource_id,
   });
 
