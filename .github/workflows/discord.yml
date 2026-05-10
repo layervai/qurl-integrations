@@ -116,7 +116,7 @@ jobs:
     # The reusable authenticates via App secrets; the caller's GITHUB_TOKEN
     # isn't read by any step, so deny everything.
     permissions: {}
-    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@86d4de84b95cf923bfdd11e3384a1f0deecfbef0 # v0.5.0
+    uses: layervai/ops-routines-workflows/.github/workflows/dispatch-deploy.yml@4edea7408d64f424780e08f68a54000308817a08 # v0.6.1
     with:
       target_repo: qurl-integrations-infra
       # `event_type` must match the receiver's `repository_dispatch.types` at
