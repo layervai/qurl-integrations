@@ -55,10 +55,13 @@ const { COLORS } = require('../constants');
 
 const router = express.Router();
 
-// 5-minute replay window — same value the OAuth/webhook routes use.
-// The runner-to-bot path is synchronous and shouldn't see clock skew
-// above a few seconds; matching the established window keeps the
-// timestamp-tolerance contract uniform across timestamped routes.
+// 5-minute replay window — matches the qurl-service / NHP standard
+// for token-resolution time, so an operator inspecting both layers
+// sees the same number. The runner-to-bot path is synchronous and
+// shouldn't see clock skew above a few seconds; the wider window
+// absorbs Lambda cold-start + qURL mint + resolve overhead without
+// forcing a tighter bound that would reject legit traffic during
+// NHP slowness.
 //
 // Replay-trade note: a captured valid request CAN be replayed within
 // the 5-min window (each replay mints a new connector resource +
@@ -83,17 +86,21 @@ const VALID_TESTS = new Set(['send_file', 'send_location']);
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 
 function verifyCanaryTimestamp(req, res, next) {
+  const startedAt = Date.now();
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {
-    return res.status(401).json({ ok: false, error: 'missing_timestamp' });
+    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp', has_header: false });
+    return res.status(401).json({ ok: false, error: 'missing_timestamp', latency_ms: Date.now() - startedAt });
   }
   const tsInt = parseInt(ts, 10);
   if (!Number.isFinite(tsInt)) {
-    return res.status(401).json({ ok: false, error: 'bad_timestamp' });
+    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp', has_header: true });
+    return res.status(401).json({ ok: false, error: 'bad_timestamp', latency_ms: Date.now() - startedAt });
   }
-  const drift = Math.abs(Math.floor(Date.now() / 1000) - tsInt);
-  if (drift > TIMESTAMP_TOLERANCE_SECONDS) {
-    return res.status(401).json({ ok: false, error: 'expired_timestamp' });
+  const drift = Math.floor(Date.now() / 1000) - tsInt;
+  if (Math.abs(drift) > TIMESTAMP_TOLERANCE_SECONDS) {
+    logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift });
+    return res.status(401).json({ ok: false, error: 'expired_timestamp', latency_ms: Date.now() - startedAt });
   }
   next();
 }
@@ -297,9 +304,12 @@ router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
   }
 
   // Legacy back-end-only path. Empty body falls through here —
-  // exercises connector + mint without DM. Kept for back-compat
-  // with any pre-extension Lambda or operator-manual probe
-  // (`curl ... /canary/exec` with no body).
+  // exercises connector + mint without DM. Reachable now only by a
+  // qURL/NHP-knocked caller that posts an empty body (no operator
+  // can curl this directly anymore — the route requires a recently-
+  // resolved qURL). Kept for back-compat with any pre-extension
+  // Lambda still in flight; once every fielded Lambda sends the
+  // differentiated body, the next reader can drop this branch.
   //
   // Synthetic resource: a tiny location payload. Picked location
   // (not file) because it doesn't touch the Discord CDN download

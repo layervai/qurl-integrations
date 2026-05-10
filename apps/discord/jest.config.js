@@ -28,6 +28,18 @@ module.exports = {
       functions: 78,
       lines: 78,
     },
+    // Per-file floor on the canary route — it's the bot's only
+    // qURL/NHP-gated endpoint, and a regression here would otherwise
+    // be diluted past invisibility by ~50 other src files in the
+    // global average. Current coverage measured at 95+/95+/100/95+;
+    // floor sits a few points below to absorb a small refactor without
+    // forcing a CI break.
+    './src/routes/canary.js': {
+      statements: 90,
+      branches: 85,
+      functions: 90,
+      lines: 90,
+    },
   },
   verbose: true,
 };

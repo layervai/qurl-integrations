@@ -71,7 +71,10 @@ function makeApp() {
   return app;
 }
 
-const VALID_BODY = { probe: 'canary-test' };
+// Empty body — the legacy back-end-only path, mirrors what an
+// operator would post (or a pre-extension Lambda). Differentiated-
+// path tests use their own scenario-shaped bodies.
+const VALID_BODY = {};
 
 function tsHeaders(ts = Math.floor(Date.now() / 1000)) {
   return { 'X-Canary-Timestamp': String(ts) };
@@ -90,10 +93,28 @@ beforeEach(() => {
 });
 
 describe('/canary/exec — timestamp replay-window', () => {
-  it('returns 401 missing_timestamp when X-Canary-Timestamp header is absent', async () => {
+  it('returns 401 missing_timestamp when X-Canary-Timestamp header is absent (and warns for triage)', async () => {
+    const logger = require('../src/logger');
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(VALID_BODY);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('missing_timestamp');
+    expect(typeof res.body.latency_ms).toBe('number');
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Canary timestamp rejected',
+      expect.objectContaining({ reason: 'missing_timestamp' }),
+    );
+  });
+
+  it('returns 401 missing_timestamp when X-Canary-Timestamp is empty string', async () => {
+    // Empty header is falsy and falls into the missing_timestamp
+    // branch — pin it so a future refactor that swaps `if (!ts)` for
+    // a stricter `if (ts === undefined)` doesn't silently accept it.
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set('X-Canary-Timestamp', '');
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('missing_timestamp');
   });
@@ -105,9 +126,10 @@ describe('/canary/exec — timestamp replay-window', () => {
       .set('X-Canary-Timestamp', 'tomorrow');
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('bad_timestamp');
+    expect(typeof res.body.latency_ms).toBe('number');
   });
 
-  it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes', async () => {
+  it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (past)', async () => {
     const tooOld = Math.floor(Date.now() / 1000) - 301;
     const res = await request(makeApp())
       .post('/canary/exec')
@@ -115,6 +137,34 @@ describe('/canary/exec — timestamp replay-window', () => {
       .set(tsHeaders(tooOld));
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('expired_timestamp');
+    expect(typeof res.body.latency_ms).toBe('number');
+  });
+
+  it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (future-skewed)', async () => {
+    // The middleware's drift check is symmetric (Math.abs); a
+    // far-future timestamp must reject too — pins the symmetry so
+    // a refactor that drops Math.abs is caught.
+    const tooNew = Math.floor(Date.now() / 1000) + 400;
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(tsHeaders(tooNew));
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('expired_timestamp');
+  });
+
+  it('accepts timestamp just inside the 5-minute window (drift ~299s)', async () => {
+    // Bracket the rejection boundary from below. Combined with the
+    // 301s-past test above and the +400s-future test, this pins the
+    // window at "just under 5 min OK, more than 5 min reject" without
+    // the second-boundary flake risk a `drift === 300` exact-match
+    // assertion would carry.
+    const justInside = Math.floor(Date.now() / 1000) - 299;
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(VALID_BODY)
+      .set(tsHeaders(justInside));
+    expect(res.status).toBe(200);
   });
 });
 

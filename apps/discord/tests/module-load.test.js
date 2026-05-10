@@ -15,6 +15,7 @@ describe('module load smoke', () => {
     ['../src/qurl'],
     ['../src/connector'],
     ['../src/revoke-render'],
+    ['../src/routes/canary'],
   ])('%s loads without ReferenceError', (modulePath) => {
     expect(() => require(modulePath)).not.toThrow();
   });
