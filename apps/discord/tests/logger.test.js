@@ -558,6 +558,53 @@ describe('logger', () => {
       }
     });
 
+    // Reverse drift guard: every entry in AUDIT_SECRET_KEYS should also
+    // be redacted by the regular pathway — either via REDACT_EXACT_KEYS
+    // exact-match OR via REDACT_SUBSTRINGS substring. Catches the case
+    // where a future audit-only entry (e.g. `etag`) lands without either
+    // a redact mirror or a substring match. #221 will eliminate this risk
+    // via consolidation.
+    it('every AUDIT_SECRET_KEYS entry is also redacted by info()', () => {
+      const { __testExports } = require('../src/logger');
+      logger = require('../src/logger');
+
+      for (const k of __testExports.AUDIT_SECRET_KEYS) {
+        consoleSpy.log.mockClear();
+        process.env.LOG_LEVEL = 'info';
+        logger.info('uploaded', { [k]: 'real-secret-value' });
+        const line = consoleSpy.log.mock.calls[0][0];
+        expect(line).toContain(`"${k}":"[REDACTED]"`);
+      }
+    });
+
+    // Pin the asymmetry between redact() and redactAuditSecrets()
+    // recursion semantics: redact() uses substring (so `myToken` under
+    // a matched key gets blanked), audit() uses exact-match (so `myToken`
+    // SURVIVES). This is intentional — audit dimensions like `tokens_minted`
+    // / `token_count` must not be blanked. A future refactor that unifies
+    // the two functions and silently tightens audit semantics would break
+    // those dimensions in production dashboards; this test surfaces the
+    // change in CI instead.
+    it('redact() and audit() recursion semantics differ — substring vs exact-match', () => {
+      logger = require('../src/logger');
+
+      // audit() pathway: exact-match does NOT catch `myToken` under `hash`,
+      // so the inner value survives.
+      logger.audit('upload_success', { send_id: 's1', hash: { myToken: 'audit-survives' } });
+      const auditParsed = JSON.parse(consoleSpy.log.mock.calls[0][0]);
+      expect(auditParsed.audit.hash.myToken).toBe('audit-survives');
+
+      consoleSpy.log.mockClear();
+
+      // redact() pathway: substring catches `myToken` (contains `token`),
+      // so the inner value is blanked.
+      process.env.LOG_LEVEL = 'info';
+      logger.info('uploaded', { hash: { myToken: 'redact-blanks' } });
+      const infoLine = consoleSpy.log.mock.calls[0][0];
+      expect(infoLine).toContain('"myToken":"[REDACTED]"');
+      expect(infoLine).not.toContain('redact-blanks');
+    });
+
     it('audit() recurses into matched-key objects', () => {
       logger = require('../src/logger');
 

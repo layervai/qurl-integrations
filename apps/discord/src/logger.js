@@ -24,19 +24,26 @@ const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];
 
-// Exact-match keys (not substring): content-derived hash names that are
-// sensitive in our broader infrastructure. The connector's md5 of uploaded
-// content is the original motivator (per-call-site truncation goes through
-// md5Prefix() in connector.js); the rest are forward-looking guards so a
-// future caller using a different canonical name doesn't slip through.
-// Exact-match so legitimate names like `commitHash` / `commit_hash` /
-// `webhookHash` / `md5_prefix` don't trip. Mirrored in AUDIT_SECRET_KEYS
-// below — the two sets are kept in sync by hand today (see #221).
+// Exact-match keys (not substring): names that need explicit coverage
+// because substring matching would either over-catch or under-catch them.
+// Two categories live here today:
+//   1. Content-derived hash names (`hash`, `md5`, `sha*`, `digest`,
+//      `checksum`, `content_hash`, `body_hash`). The connector's md5 of
+//      uploaded content is the original motivator (per-call-site
+//      truncation via md5Prefix() in connector.js); the rest are
+//      forward-looking guards. Substring on `hash` would blank
+//      `commitHash` / `webhookHash` / `md5_prefix`.
+//   2. Substring-uncovered audit-secret-key entries. `private_key` is
+//      in AUDIT_SECRET_KEYS but doesn't match any REDACT_SUBSTRINGS rule
+//      (no `private_` / `_key` substring is broad-safe). Pinned here so
+//      both pathways treat it identically.
+// Mirrored in AUDIT_SECRET_KEYS below — sets kept in sync by hand (#221).
 const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',
   'digest', 'checksum',
   'content_hash', 'body_hash',
+  'private_key',
 ]);
 
 // Internal: callers must pass strings. Only invoked from Object.entries()
@@ -280,5 +287,9 @@ const logger = {
 module.exports = logger;
 // Test-only: exposes the redact constants so a drift-guard test can iterate
 // the live set rather than duplicate it. Not part of the public API; do
-// not consume from production code.
-module.exports.__testExports = { REDACT_EXACT_KEYS, AUDIT_SECRET_KEYS };
+// not consume from production code. Defensive copies — a buggy test must
+// not be able to mutate the live Sets and corrupt subsequent log calls.
+module.exports.__testExports = {
+  REDACT_EXACT_KEYS: new Set(REDACT_EXACT_KEYS),
+  AUDIT_SECRET_KEYS: new Set(AUDIT_SECRET_KEYS),
+};
