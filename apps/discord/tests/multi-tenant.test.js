@@ -500,6 +500,32 @@ describe('multi-tenant mode — server.js route mounting', () => {
       .set('X-Canary-Timestamp', String(Math.floor(Date.now() / 1000)));
     expect(res.status).toBe(404);
   });
+
+  it('single-tenant + opennhp: POST /canary/exec is mounted (returns 401, not 404)', async () => {
+    // Mirror of the unmount test above — pins that the route IS
+    // mounted when isOpenNHPActive is true. Without this, a refactor
+    // that drops the `app.use('/canary', canaryRouter)` line would
+    // ship a silently-disabled canary; both the unmount-when-off and
+    // mount-when-on cases need to fail CI on regression.
+    //
+    // Asserts 401 missing_timestamp (no ts header sent) instead of a
+    // 200 happy-path — keeps the test's surface narrow to "route is
+    // mounted and the timestamp middleware ran" without needing to
+    // mock the connector + mint + DM chain.
+    process.env.GUILD_ID = '123456789012345678';
+    process.env.ENABLE_OPENNHP_FEATURES = 'true';
+    jest.resetModules();
+    jest.doMock('../src/discord', () => ({ sendDM: jest.fn() }));
+    jest.doMock('../src/database', () => ({
+      getStats: jest.fn(() => ({ linkedUsers: 0, totalContributions: 0, uniqueContributors: 0, byRepo: [] })),
+    }));
+    const request = require('supertest');
+    const { app } = require('../src/server');
+    const res = await request(app).post('/canary/exec').send({});
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('missing_timestamp');
+    delete process.env.ENABLE_OPENNHP_FEATURES;
+  });
 });
 
 // Note: discord.js's `refreshCache()` early-return is covered indirectly by

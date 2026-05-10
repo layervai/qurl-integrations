@@ -87,19 +87,18 @@ if (config.isOpenNHPActive) {
   }));
 }
 
+// Single shared constant for the /canary/* parser AND router gates
+// below. Two `if (config.isOpenNHPActive)` blocks invite drift — one
+// gate getting refactored without the other reverts the 4 KB body
+// cap to the global 1 MB parser. Hoisting to one constant makes the
+// coupling structural, not comment-bound.
+const canaryEnabled = config.isOpenNHPActive;
+
 // /canary/* uses a 4 KB JSON cap — canary payloads are tiny (a probe
 // envelope of a few hundred bytes), so the small cap rejects
 // malformed/oversized requests early on a route reachable from any
-// caller that completes the qURL/NHP knock. Gated on isOpenNHPActive
-// for symmetry with the router mount below; without NHP gating the
-// network layer, the route would be unauthenticated.
-//
-// IMPORTANT: this gate must stay in lockstep with the canaryRouter
-// mount further down (search "/canary mounts" below). If they drift
-// — e.g. the router mounts unconditionally while the parser stays
-// gated — the global 1 MB JSON parser would apply and the 4 KB cap
-// silently disappears.
-if (config.isOpenNHPActive) {
+// caller that completes the qURL/NHP knock.
+if (canaryEnabled) {
   app.use('/canary', express.json({ limit: '4kb' }));
 }
 
@@ -266,14 +265,13 @@ if (!config.isDiscordInstallConfigured) {
 // infra (qurl-bot-discord/terraform/cert.tf + ALB chain). Tracked
 // for replacement with a dedicated CANARY_ENDPOINT_ENABLED env in
 // layervai/qurl-integrations#216.
-// (The /canary/* JSON-parser gate above MUST stay paired with this
-// router gate. Drifting one without the other reverts the 4 KB cap.)
-//
-// Replacing this isOpenNHPActive coupling with a dedicated
-// CANARY_ENDPOINT_ENABLED env is tracked in #216 — the flag here was
-// designed for OpenNHP feature gating, not "is NHP at the network
-// layer in front of this process."
-if (config.isOpenNHPActive) {
+// Mounts use the shared `canaryEnabled` constant from above so the
+// parser and router gates can't drift. Replacing the
+// isOpenNHPActive coupling with a dedicated CANARY_ENDPOINT_ENABLED
+// env is tracked in #216 — the flag here was designed for OpenNHP
+// feature gating, not "is NHP at the network layer in front of this
+// process."
+if (canaryEnabled) {
   app.use('/canary', canaryRouter);
   logger.info('Canary endpoint mounted at /canary/exec (qURL/NHP-authenticated)');
   if (!config.QURL_API_KEY) {

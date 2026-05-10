@@ -100,11 +100,11 @@ function verifyCanaryTimestamp(req, res, next) {
   // is the on-call signal.) Tests pin the absence so a future refactor
   // that surfaces a middleware-level startedAt and "uniformly" adds
   // latency_ms to these branches gets caught.
-  // ip is logged on every reject so on-call can correlate. Under NHP
-  // fronting it'll be the Lambda egress (validates "yes this is the
-  // canary runner, not random internet"); on a misconfigured non-NHP
-  // mount, surfaced 401 traffic from arbitrary IPs is the first
-  // signal something is wrong.
+  // ip is observe-only (logged for triage, never gates) — the bad-
+  // sig-throttle that used to rate-limit per-IP went away with HMAC.
+  // Under NHP fronting the IP validates "yes this is the canary
+  // runner, not random internet"; on a misconfigured non-NHP mount
+  // a stream of 401s from arbitrary IPs is the first triage signal.
   const ip = req.ip || 'unknown';
   const ts = req.header('X-Canary-Timestamp');
   if (!ts) {

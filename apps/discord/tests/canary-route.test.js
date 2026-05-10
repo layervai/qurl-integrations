@@ -160,10 +160,11 @@ describe('/canary/exec — timestamp replay-window', () => {
   });
 
   it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (future-skewed)', async () => {
-    // The middleware's drift check is symmetric (Math.abs); a
-    // far-future timestamp must reject too — pins the symmetry so
-    // a refactor that drops Math.abs is caught.
-    const tooNew = Math.floor(Date.now() / 1000) + 400;
+    // True mirror of the -301s past-side test: the middleware's
+    // drift check is symmetric (Math.abs), so the future-side
+    // boundary should reject at the same offset. A refactor that
+    // drops Math.abs would let +301 pass while -301 still rejects.
+    const tooNew = Math.floor(Date.now() / 1000) + 301;
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(VALID_BODY)
@@ -172,13 +173,14 @@ describe('/canary/exec — timestamp replay-window', () => {
     expect(res.body.error).toBe('expired_timestamp');
   });
 
-  it('accepts timestamp well inside the 5-minute window (drift ~290s)', async () => {
+  it('accepts timestamp well inside the 5-minute window (drift ~200s)', async () => {
     // Bracket the rejection boundary from below. Combined with the
-    // 301s-past test above and the +400s-future test, this pins the
-    // window at "well under 5 min OK, more than 5 min reject" without
-    // the second-boundary flake risk a `drift === 300` exact-match
-    // assertion would carry. ~10s of CI-lag headroom.
-    const inside = Math.floor(Date.now() / 1000) - 290;
+    // ±301s reject tests, this pins "well under 5 min OK, more than
+    // 5 min reject" without the second-boundary flake risk a
+    // `drift === 300` exact-match assertion would carry. ~100s of
+    // CI-lag headroom — slow shared runners with cold module cache
+    // can chew through 10s of slack.
+    const inside = Math.floor(Date.now() / 1000) - 200;
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(VALID_BODY)
