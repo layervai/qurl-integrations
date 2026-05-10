@@ -44,6 +44,8 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
 		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
+		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
+		{name: "single-digit alias accepted", text: "get $1", wantSub: SubcmdGet, wantAlias: "1", wantFlags: map[string]string{}},
 	}
 
 	for _, tc := range cases {
@@ -116,6 +118,9 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "admin revoke with extra trailing arg rejected", text: "admin revoke $alias extra", wantErr: ErrUnexpectedArgument},
 		{name: "admin allow with duplicate channel rejected", text: "admin allow <#C1|a> <#C2|b> $alias", wantErr: ErrUnexpectedArgument},
 		{name: "admin allow with duplicate alias rejected", text: "admin allow <#C1|a> $foo $bar", wantErr: ErrUnexpectedArgument},
+		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
+		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
+		{name: "alias with double trailing hyphens rejected", text: "get $foo--", wantErr: ErrInvalidAlias},
 	}
 
 	for _, tc := range cases {

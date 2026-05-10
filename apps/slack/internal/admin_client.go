@@ -389,8 +389,16 @@ func (ac *AdminClient) do(ctx context.Context, method, path string, body, out an
 		return fmt.Errorf("unmarshal envelope: %w", err)
 	}
 	if env.Error != nil {
+		// Prefer the HTTP status code over `env.Error.Status` so the
+		// surfaced status is consistent with [parseAdminError]
+		// (which uses the HTTP status verbatim). If the body's
+		// status disagrees with the HTTP status, the wire-level
+		// HTTP code is the authoritative one. The body's status
+		// field is otherwise unused — we keep it as part of the
+		// envelope shape only because it mirrors what
+		// shared/client emits for customer-facing errors.
 		return &AdminError{
-			StatusCode: env.Error.Status,
+			StatusCode: resp.StatusCode,
 			Code:       env.Error.Code,
 			Title:      env.Error.Title,
 			Detail:     env.Error.Detail,
