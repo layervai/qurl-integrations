@@ -280,7 +280,6 @@ describe('Connector client — no API key (requireApiKey guard)', () => {
   });
 });
 
-// MD5 hash truncation in upload logs.
 // Full MD5 + WM_SECRET reconstructs a fileviewer URL (handler.go
 // validateWatermarkSig signs md5|wm|ts), so the bot must never log the full
 // value to its CloudWatch group. These tests guard against a future caller

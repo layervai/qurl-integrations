@@ -208,7 +208,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
   }
 
   // md5_prefix (not full hash): full MD5 + WM_SECRET reconstructs a fileviewer
-  // viewer URL (handler.go validateWatermarkSig signs md5|wm|ts), so anyone with
+  // URL (handler.go validateWatermarkSig signs md5|wm|ts), so anyone with
   // logs:GetLogEvents on this CloudWatch group could exfiltrate user uploads.
   // 8 hex chars (32 bits) is enough for cross-system correlation; the connector
   // still logs the full hash to journald (SSM-only access).
