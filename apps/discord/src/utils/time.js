@@ -29,4 +29,137 @@ function expiryToMs(expiresIn) {
   return ms === null ? DEFAULT_EXPIRY_MS : ms;
 }
 
-module.exports = { expiryToISO, expiryToMs };
+// Self-destruct timer presets — the 7 durations exposed in the /qurl send
+// modal. Discord modals are TextInput-only, so we surface the choices in
+// the placeholder and accept either the friendly label or the seconds
+// value below. The set is intentionally narrow so creators don't ship a
+// 0.7s viewer that hits the 500ms-floor edge case in the connector by
+// accident — every preset is a value we'd recommend out loud.
+//
+// The wire field forwarded to the connector is `viewer_ttl_seconds`
+// (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
+// so every preset here is in range; clamping is unreachable.
+const SELF_DESTRUCT_PRESETS = Object.freeze([
+  Object.freeze({ seconds: 0.5, label: '1/2 second' }),
+  Object.freeze({ seconds: 1, label: '1 second' }),
+  Object.freeze({ seconds: 5, label: '5 seconds' }),
+  Object.freeze({ seconds: 30, label: '30 seconds' }),
+  Object.freeze({ seconds: 300, label: '5 minutes' }),
+  Object.freeze({ seconds: 1800, label: '30 minutes' }),
+  Object.freeze({ seconds: 3600, label: '1 hour' }),
+]);
+
+const SELF_DESTRUCT_MIN_SECONDS = SELF_DESTRUCT_PRESETS[0].seconds;
+const SELF_DESTRUCT_MAX_SECONDS = SELF_DESTRUCT_PRESETS[SELF_DESTRUCT_PRESETS.length - 1].seconds;
+
+const SELF_DESTRUCT_OPTIONS_TEXT = SELF_DESTRUCT_PRESETS.map((p) => p.label).join(', ');
+
+// Single source of truth for the modal's setMaxLength + the parser's
+// length cap — both bound the input the same way so the parser never
+// has to defend against strings the modal would have rejected.
+const SELF_DESTRUCT_INPUT_MAX_LENGTH = 32;
+
+// Strict decimal-seconds shape — gates the numeric branch of the parser
+// so hex (`0x1`, `0x1e`) and scientific notation (`5e-1`) can't coerce
+// through Number() into a preset value. Bare digits + optional fractional
+// part. No leading sign: every preset is positive, the placeholder reads
+// "0.5" not "+0.5", and a "-" prefix is meaningfully an error (the user
+// asked for a negative duration). See parseSelfDestructSeconds for the
+// full rationale.
+const DECIMAL_SECONDS_RE = /^\d+(\.\d+)?$/;
+
+function canonicalize(s) {
+  return String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Pre-canonicalized preset labels so findPresetByLabel doesn't re-canonicalize
+// constant strings on every parse. Same length and order as
+// SELF_DESTRUCT_PRESETS (parallel arrays).
+const SELF_DESTRUCT_CANONICAL_LABELS = SELF_DESTRUCT_PRESETS.map((p) => canonicalize(p.label));
+
+function findPresetByLabel(canonical) {
+  const idx = SELF_DESTRUCT_CANONICAL_LABELS.indexOf(canonical);
+  return idx === -1 ? null : SELF_DESTRUCT_PRESETS[idx];
+}
+
+function findPresetBySeconds(n) {
+  // No explicit isFinite guard — NaN is never === anything, so the loop
+  // returns null naturally for it. ±Infinity also fails the equality
+  // check against every (finite) preset. formatSelfDestructLabel does
+  // its own non-finite handling for the "(invalid)" fallback.
+  for (const preset of SELF_DESTRUCT_PRESETS) {
+    if (n === preset.seconds) return preset;
+  }
+  return null;
+}
+
+// parseSelfDestructSeconds — strict preset matcher used by the modal handler
+// in /qurl send. Empty / whitespace-only input means "no timer" (returns
+// {seconds: null, error: null}). Any other input that does not match one
+// of the 7 presets returns an error string with the full option list so
+// the modal handler renders an inline retry, not a hard rejection.
+//
+// Accepted forms (case-insensitive, internal whitespace tolerated):
+//   - the friendly label: "1/2 second", "5 minutes", "1 hour", ...
+//   - the raw seconds value: "0.5", "30", "300", ...
+function parseSelfDestructSeconds(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (trimmed === '') return { seconds: null, error: null };
+  // Length cap bounds CPU on hostile input before any parse. The modal
+  // already enforces SELF_DESTRUCT_INPUT_MAX_LENGTH via setMaxLength, so
+  // a string longer than this is either an upstream caller misuse or a
+  // forged interaction — fail loud, but include the limit so anyone
+  // looking at the rendered warning has the constraint in front of them.
+  if (trimmed.length > SELF_DESTRUCT_INPUT_MAX_LENGTH) {
+    return {
+      seconds: null,
+      error: `is too long (max ${SELF_DESTRUCT_INPUT_MAX_LENGTH} characters).`,
+    };
+  }
+
+  const canonical = canonicalize(trimmed);
+
+  const labelMatch = findPresetByLabel(canonical);
+  if (labelMatch) return { seconds: labelMatch.seconds, error: null };
+
+  // Strict decimal notation only — Number() also accepts hex integers
+  // (`0x1` → 1, `0x1e` → 30, `0x12c` → 300) and scientific notation
+  // (`5e-1` → 0.5), all of which would silently coerce into preset
+  // values and bypass the user-visible label set. The placeholder
+  // advertises decimal seconds; honor that exactly.
+  if (DECIMAL_SECONDS_RE.test(canonical)) {
+    const numericMatch = findPresetBySeconds(Number(canonical));
+    if (numericMatch) return { seconds: numericMatch.seconds, error: null };
+  }
+
+  return {
+    seconds: null,
+    error: `must be one of: ${SELF_DESTRUCT_OPTIONS_TEXT}.`,
+  };
+}
+
+// formatSelfDestructLabel — renders a stored seconds value as the matching
+// preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
+// echo what the user picked. Falls back to a compact "Ns" rendering for
+// any finite off-preset value (unreachable through the modal today but
+// defends against a backfilled config). Non-finite (NaN/Infinity) returns
+// "(invalid)" so a corrupted DB row doesn't surface as the literal string
+// "NaNs" / "Infinitys" in the button label or modal prefill.
+function formatSelfDestructLabel(seconds) {
+  const match = findPresetBySeconds(seconds);
+  if (match) return match.label;
+  if (!Number.isFinite(seconds)) return '(invalid)';
+  return `${seconds}s`;
+}
+
+module.exports = {
+  expiryToISO,
+  expiryToMs,
+  parseSelfDestructSeconds,
+  formatSelfDestructLabel,
+  SELF_DESTRUCT_PRESETS,
+  SELF_DESTRUCT_MIN_SECONDS,
+  SELF_DESTRUCT_MAX_SECONDS,
+  SELF_DESTRUCT_OPTIONS_TEXT,
+  SELF_DESTRUCT_INPUT_MAX_LENGTH,
+};

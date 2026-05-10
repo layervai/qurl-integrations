@@ -113,6 +113,106 @@ describe('Connector client — coverage boost', () => {
     });
   });
 
+  describe('viewer_ttl_seconds field forwarding', () => {
+    // Each upload entry-point must thread viewerTtlSeconds onto the
+    // multipart body when the caller passes a positive number, and
+    // omit the field entirely otherwise. Pinning all four paths so a
+    // future entry-point that forgets `appendViewerTtl` gets caught.
+    function captureUploadFormFields() {
+      globalThis.fetch = jest.fn()
+        .mockResolvedValueOnce({ // CDN download (only used by file paths)
+          ok: true,
+          headers: { get: jest.fn(() => '5') },
+          arrayBuffer: async () => new ArrayBuffer(5),
+        })
+        .mockResolvedValueOnce({ // connector /api/upload
+          ok: true,
+          json: async () => ({ success: true, hash: 'h1', resource_id: 'r1' }),
+        })
+        // Second fetch call for the no-CDN paths (re-upload, JSON) lands here.
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true, hash: 'h2', resource_id: 'r2' }),
+        });
+      // Hook the FormData append so we can see exactly what the helper sent.
+      const originalAppend = globalThis.FormData.prototype.append;
+      const appended = [];
+      globalThis.FormData.prototype.append = function (...args) {
+        appended.push({ name: args[0], valueType: typeof args[1], filename: args[2] });
+        return originalAppend.apply(this, args);
+      };
+      const restore = () => { globalThis.FormData.prototype.append = originalAppend; };
+      return { appended, restore };
+    }
+
+    it('uploadToConnector appends viewer_ttl_seconds when provided', async () => {
+      const { appended, restore } = captureUploadFormFields();
+      try {
+        await connector.uploadToConnector('https://cdn.discordapp.com/x.png', 'x.png', 'image/png', undefined, 30);
+      } finally { restore(); }
+      expect(appended.find(f => f.name === 'viewer_ttl_seconds')).toMatchObject({ name: 'viewer_ttl_seconds' });
+    });
+
+    it('uploadToConnector omits viewer_ttl_seconds when null/undefined', async () => {
+      const { appended, restore } = captureUploadFormFields();
+      try {
+        await connector.uploadToConnector('https://cdn.discordapp.com/x.png', 'x.png', 'image/png', undefined, null);
+      } finally { restore(); }
+      expect(appended.find(f => f.name === 'viewer_ttl_seconds')).toBeUndefined();
+    });
+
+    it('reUploadBuffer appends viewer_ttl_seconds when provided', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: 'h', resource_id: 'r' }),
+      });
+      const originalAppend = globalThis.FormData.prototype.append;
+      const appended = [];
+      globalThis.FormData.prototype.append = function (...args) { appended.push({ name: args[0] }); return originalAppend.apply(this, args); };
+      try {
+        await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain', undefined, 0.5);
+      } finally { globalThis.FormData.prototype.append = originalAppend; }
+      expect(appended.find(f => f.name === 'viewer_ttl_seconds')).toBeDefined();
+    });
+
+    it('uploadJsonToConnector appends viewer_ttl_seconds when provided', async () => {
+      globalThis.fetch = jest.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, hash: 'h', resource_id: 'r' }),
+      });
+      const originalAppend = globalThis.FormData.prototype.append;
+      const appended = [];
+      globalThis.FormData.prototype.append = function (...args) { appended.push({ name: args[0], value: args[1] }); return originalAppend.apply(this, args); };
+      try {
+        await connector.uploadJsonToConnector({ type: 'google-map' }, 'loc.json', undefined, 60);
+      } finally { globalThis.FormData.prototype.append = originalAppend; }
+      const ttlField = appended.find(f => f.name === 'viewer_ttl_seconds');
+      expect(ttlField).toBeDefined();
+      expect(ttlField.value).toBe('60');
+    });
+
+    it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
+      // Defensive: an upstream caller passing 0, NaN, or a string by
+      // mistake shouldn't cause the field to land on the form. The
+      // parser layer (parseSelfDestructSeconds) is the contract; the
+      // append helper is belt-and-suspenders.
+      const cases = [0, -1, NaN, Infinity, '30', null, undefined, {}];
+      for (const v of cases) {
+        globalThis.fetch = jest.fn().mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true, hash: 'h', resource_id: 'r' }),
+        });
+        const originalAppend = globalThis.FormData.prototype.append;
+        const appended = [];
+        globalThis.FormData.prototype.append = function (...args) { appended.push({ name: args[0] }); return originalAppend.apply(this, args); };
+        try {
+          await connector.reUploadBuffer(Buffer.from('hi'), 'x.txt', 'text/plain', undefined, v);
+        } finally { globalThis.FormData.prototype.append = originalAppend; }
+        expect(appended.find(f => f.name === 'viewer_ttl_seconds')).toBeUndefined();
+      }
+    });
+  });
+
   describe('throwConnectorError — quota_exceeded tagging', () => {
     // The connector wraps upstream qURL API errors as
     //   { success: false, error: "QURL API error (403): quota exceeded: token limit per QURL reached (12/10)", links: [] }

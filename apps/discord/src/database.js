@@ -124,6 +124,7 @@ db.exec(`
     attachment_name TEXT,
     attachment_content_type TEXT,
     attachment_url TEXT,
+    self_destruct_seconds REAL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -161,6 +162,13 @@ const SAFE_ALTERS = {
   // revocable. Used to hide already-revoked sends from the /qurl revoke
   // dropdown so users don't re-select a no-op and see "0/0 links revoked".
   revoked_at: 'ALTER TABLE qurl_send_configs ADD COLUMN revoked_at TEXT',
+  // Self-destruct timer (seconds) — one of the SELF_DESTRUCT_PRESETS the
+  // user picked in the /qurl send modal, forwarded to the connector as
+  // `viewer_ttl_seconds` so the rendered viewer page wipes content after
+  // N seconds. REAL because the smallest preset is 0.5. NULL ⇒ no timer
+  // (default). Persisted so the Add Recipients flow inherits the timer
+  // the original send chose.
+  self_destruct_seconds: 'ALTER TABLE qurl_send_configs ADD COLUMN self_destruct_seconds REAL',
 };
 for (const [col, sql] of Object.entries(SAFE_ALTERS)) {
   try {
@@ -778,16 +786,16 @@ const dbModule = {
     insertStmt.run(sendId, senderDiscordId, legacy.resource_type, legacy.expires_in || '24h');
   },
 
-  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType, attachmentUrl }) {
+  saveSendConfig({ sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType, attachmentUrl, selfDestructSeconds }) {
     const stmt = db.prepare(`
-      INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name, attachment_content_type, attachment_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO qurl_send_configs (send_id, sender_discord_id, resource_type, connector_resource_id, actual_url, expires_in, personal_message, location_name, attachment_name, attachment_content_type, attachment_url, self_destruct_seconds)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     // Encrypt the Discord CDN URL at rest for consistency with the other
     // secrets in this table. Discord signs these URLs with a short TTL, but
     // an EFS leak inside the window could still be used to re-fetch the file.
     const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
-    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType ?? null, encryptedUrl);
+    stmt.run(sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl, expiresIn, personalMessage, locationName, attachmentName, attachmentContentType ?? null, encryptedUrl, selfDestructSeconds ?? null);
   },
 
   getSendConfig(sendId, senderDiscordId) {

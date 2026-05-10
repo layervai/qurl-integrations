@@ -156,6 +156,20 @@ function connectorAuthHeaders(apiKey) {
   return headers;
 }
 
+// Append `viewer_ttl_seconds` to the multipart form when a positive value
+// is provided. Centralized so all four upload paths (file initial,
+// re-upload, file via Discord CDN download, JSON) thread the same wire
+// field name. The connector validates the value (PR #477); we forward
+// it as a string and let the connector own the contract.
+function appendViewerTtl(form, viewerTtlSeconds) {
+  // Number.isFinite already filters non-numbers (Number.isFinite('30') is
+  // false), so the typeof guard would be redundant. Strict positive-finite
+  // is the same invariant the modal-prefill setValue uses.
+  if (Number.isFinite(viewerTtlSeconds) && viewerTtlSeconds > 0) {
+    form.append('viewer_ttl_seconds', String(viewerTtlSeconds));
+  }
+}
+
 /**
  * Upload a file to the qurl-s3-connector. Downloads from Discord CDN, then
  * uploads to the connector.
@@ -166,7 +180,7 @@ function connectorAuthHeaders(apiKey) {
  * tests/connector-coverage.test.js and tests/qurl-send.test.js, and those
  * cases would lose coverage if it were removed.
  */
-async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
+async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!isAllowedSourceUrl(sourceUrl)) {
@@ -195,6 +209,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
 
   const form = new FormData();
   form.append('file', blob, filename);
+  appendViewerTtl(form, viewerTtlSeconds);
 
   const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
@@ -231,13 +246,14 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey) {
  * re-downloading from Discord CDN. Used when the per-resource token
  * quota (10) is exhausted and more recipients need links.
  */
-async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
+async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
   const form = new FormData();
   form.append('file', blob, filename);
+  appendViewerTtl(form, viewerTtlSeconds);
 
   const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',
@@ -270,7 +286,7 @@ async function reUploadBuffer(fileBuffer, filename, contentType, apiKey) {
  * Download a file from Discord CDN and return the buffer + upload result.
  * The buffer is cached so subsequent re-uploads don't re-download.
  */
-async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
+async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
@@ -294,7 +310,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey) {
   }
 
   const fileBuffer = await readBodyWithCap(downloadResponse, MAX_FILE_SIZE);
-  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey);
+  const result = await reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds);
   return { ...result, fileBuffer };
 }
 
@@ -346,13 +362,14 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
  * Upload a JSON object to the connector as a file.
  * Used for structured payloads like location data.
  */
-async function uploadJsonToConnector(jsonPayload, filename, apiKey) {
+async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
 
   const blob = new Blob([JSON.stringify(jsonPayload)], { type: 'application/json' });
   const form = new FormData();
   form.append('file', blob, filename);
+  appendViewerTtl(form, viewerTtlSeconds);
 
   const uploadResponse = await fetch(`${config.CONNECTOR_URL}/api/upload`, {
     method: 'POST',

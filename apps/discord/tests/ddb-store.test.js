@@ -966,6 +966,27 @@ describe('qurl sends', () => {
     expect(item.attachment_name).toBe('doc.pdf');
   });
 
+  test('saveSendConfig: persists self_destruct_seconds across the preset range', async () => {
+    // Mirror of the sqlite roundtrip in database-module.test.js — pins
+    // the DDB writer for the same three cases (sub-second 0.5, integer
+    // 30, omitted-as-null) so a future refactor that drops the field
+    // from the Item silently regresses both stores in one signal.
+    ddbMock.on(PutCommand).resolves({});
+    const base = {
+      senderDiscordId: 'sender', resourceType: 'file',
+      connectorResourceId: 'conn', actualUrl: null,
+      expiresIn: '24h', personalMessage: null, locationName: null,
+      attachmentName: null, attachmentContentType: null, attachmentUrl: null,
+    };
+    await store.saveSendConfig({ ...base, sendId: 'destruct-half', selfDestructSeconds: 0.5 });
+    await store.saveSendConfig({ ...base, sendId: 'destruct-int', selfDestructSeconds: 30 });
+    await store.saveSendConfig({ ...base, sendId: 'destruct-none' /* omitted */ });
+    const items = ddbMock.commandCalls(PutCommand).map((c) => c.args[0].input.Item);
+    expect(items[0].self_destruct_seconds).toBe(0.5);
+    expect(items[1].self_destruct_seconds).toBe(30);
+    expect(items[2].self_destruct_seconds).toBeNull();
+  });
+
   test('getSendConfig: decrypts attachment_url + ownership check', async () => {
     const encryptedUrl = `enc:v1:IV:TAG:${Buffer.from('https://cdn.example/attachment').toString('hex')}`;
     ddbMock.on(GetCommand).resolves({

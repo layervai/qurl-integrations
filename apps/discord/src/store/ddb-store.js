@@ -1245,7 +1245,7 @@ async function markSendRevoked(sendId, senderDiscordId) {
 async function saveSendConfig({
   sendId, senderDiscordId, resourceType, connectorResourceId, actualUrl,
   expiresIn, personalMessage, locationName, attachmentName,
-  attachmentContentType, attachmentUrl,
+  attachmentContentType, attachmentUrl, selfDestructSeconds,
 }) {
   const encryptedUrl = attachmentUrl ? encrypt(attachmentUrl) : null;
   await ddb.send(new PutCommand({
@@ -1262,6 +1262,7 @@ async function saveSendConfig({
       attachment_name: attachmentName,
       attachment_content_type: attachmentContentType ?? null,
       attachment_url: encryptedUrl,
+      self_destruct_seconds: selfDestructSeconds ?? null,
       created_at: nowIso(),
     },
   }));
