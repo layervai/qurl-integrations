@@ -24,20 +24,10 @@ const REDACT_SUBSTRINGS = [
   'token', 'secret', 'password', 'authorization', 'apikey', 'api_key',
 ];
 
-// Exact-match keys (not substring): names that need explicit coverage
-// because substring matching would either over-catch or under-catch them.
-// Two categories live here today:
-//   1. Content-derived hash names (`hash`, `md5`, `sha*`, `digest`,
-//      `checksum`, `content_hash`, `body_hash`). The connector's md5 of
-//      uploaded content is the original motivator (per-call-site
-//      truncation via md5Prefix() in connector.js); the rest are
-//      forward-looking guards. Substring on `hash` would blank
-//      `commitHash` / `webhookHash` / `md5_prefix`.
-//   2. Substring-uncovered audit-secret-key entries. `private_key` is
-//      in AUDIT_SECRET_KEYS but doesn't match any REDACT_SUBSTRINGS rule
-//      (no `private_` / `_key` substring is broad-safe). Pinned here so
-//      both pathways treat it identically.
-// Mirrored in AUDIT_SECRET_KEYS below — sets kept in sync by hand (#221).
+// Exact-match keys (not substring) — content-hash names where substring
+// would catch `commitHash` / `md5_prefix`, plus `private_key` which has
+// no broad-safe substring rule. Mirrored in AUDIT_SECRET_KEYS below;
+// drift-guarded by tests, consolidation tracked in #221.
 const REDACT_EXACT_KEYS = new Set([
   'hash',
   'md5', 'sha1', 'sha256', 'sha512',
@@ -104,19 +94,10 @@ function redactAuditSecrets(value, depth = 0, secretKeys = []) {
   for (const [k, v] of Object.entries(value)) {
     if (isAuditSecretKey(k)) {
       // Blank non-empty strings; recurse into non-null objects/arrays so a
-      // `{ auth_token: { ... nested auth_token ... } }` accident still has
-      // its inner sensitive keys examined. Other primitives (numbers, null,
-      // undefined) pass through — they can't carry a usable secret and
-      // zero-string-replace would lose type info.
-      //
-      // Recursion uses isAuditSecretKey (exact-match), NOT the wider
-      // shouldRedact (substring) rule, so legit dimensions like
-      // `tokens_minted` survive in the audit pathway. The asymmetry is
-      // intentional and pinned by a dedicated test.
-      //
-      // Push outer key BEFORE recursing so secretKeys order is parent-first
-      // (intuitive: the warn line reads "hash, auth_token" not the post-
-      // order "auth_token, hash" for `{ hash: { auth_token: ... } }`).
+      // `{ auth_token: { ... } }` accident still has its inner sensitive
+      // keys examined. Recursion uses exact-match — legit audit dimensions
+      // like `tokens_minted` survive (pinned by test). Push outer key
+      // BEFORE recursing for parent-first warn-line order.
       if (!secretKeys.includes(k)) secretKeys.push(k);
       if (typeof v === 'string' && v.length > 0) {
         out[k] = '[REDACTED]';
