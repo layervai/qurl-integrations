@@ -73,55 +73,55 @@ var ErrIdempotencyKeyInvalid = errors.New("idempotency key contains invalid byte
 
 // ErrCreateRequiresTarget is returned by Create when both TargetURL and
 // ResourceID are empty — the qURL has no target to bind to.
-var ErrCreateRequiresTarget = errors.New("Create requires TargetURL or ResourceID")
+var ErrCreateRequiresTarget = errors.New("create: target_url or resource_id required")
 
 // ErrCreateTargetResourceExclusive is returned by Create when both TargetURL
 // and ResourceID are populated. The server-side `mutually_exclusive_fields`
 // rule rejects this combination; the client fails fast for a typed error.
-var ErrCreateTargetResourceExclusive = errors.New("Create TargetURL and ResourceID are mutually exclusive")
+var ErrCreateTargetResourceExclusive = errors.New("create: target_url and resource_id are mutually exclusive")
 
 // ErrCreateResourceNilInput is returned by CreateResource when input is nil.
-var ErrCreateResourceNilInput = errors.New("CreateResource input is nil")
+var ErrCreateResourceNilInput = errors.New("create resource: input is nil")
 
 // ErrCreateResourceRequiresTargetURL is returned by CreateResource when
 // CreateResourceInput.TargetURL is empty — without it the server can't
 // compute the `(owner_id, target_url_hash)` idempotency key.
-var ErrCreateResourceRequiresTargetURL = errors.New("CreateResource requires TargetURL")
+var ErrCreateResourceRequiresTargetURL = errors.New("create resource: target_url required")
 
 // ErrCreateResourceTunnelRejectsTargetURL is returned by CreateResource
 // when Type is "tunnel" but TargetURL is non-empty. The server ignores
 // TargetURL on tunnel creates, but a non-empty value is almost always
 // a stale field from copy-pasted CreateResourceInput literals — fail
 // fast for a clearer error than a silent server discard.
-var ErrCreateResourceTunnelRejectsTargetURL = errors.New("CreateResource Type=tunnel must not set TargetURL (server ignores it)")
+var ErrCreateResourceTunnelRejectsTargetURL = errors.New("create resource: type=tunnel must not set target_url (server ignores it)")
 
 // ErrUpdateResourceEmptyID is returned by UpdateResource when resourceID
 // is the empty string.
-var ErrUpdateResourceEmptyID = errors.New("UpdateResource resourceID is empty")
+var ErrUpdateResourceEmptyID = errors.New("update resource: resource_id is empty")
 
 // ErrUpdateResourceNilInput is returned by UpdateResource when input is nil.
-var ErrUpdateResourceNilInput = errors.New("UpdateResource input is nil")
+var ErrUpdateResourceNilInput = errors.New("update resource: input is nil")
 
 // ErrUpdateResourceAliasEmpty is returned by UpdateResource when
 // UpdateResourceInput.Alias is a pointer to the empty string. The empty
 // string is reserved as a footgun guard — the server's
 // `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` regex rejects it; use ClearAlias=true.
-var ErrUpdateResourceAliasEmpty = errors.New("UpdateResource Alias must not be a pointer to empty string; use ClearAlias=true to clear")
+var ErrUpdateResourceAliasEmpty = errors.New("update resource: alias must not be a pointer to empty string; use ClearAlias=true to clear")
 
 // ErrUpdateResourceAliasClearExclusive is returned by UpdateResource when
 // both Alias != nil and ClearAlias=true. Server-side returns 400; client
 // fails fast for a typed error.
-var ErrUpdateResourceAliasClearExclusive = errors.New("UpdateResource Alias and ClearAlias are mutually exclusive")
+var ErrUpdateResourceAliasClearExclusive = errors.New("update resource: alias and clear_alias are mutually exclusive")
 
 // ErrUpdateResourceNoFieldsSet is returned by UpdateResource when input
 // is non-nil but has no fields populated — the request would PATCH `{}`
 // and either no-op or 400 server-side. Symmetric with the no-target
 // guard on Create.
-var ErrUpdateResourceNoFieldsSet = errors.New("UpdateResource input has no fields set")
+var ErrUpdateResourceNoFieldsSet = errors.New("update resource: input has no fields set")
 
 // ErrGetResourceByAliasEmpty is returned by GetResourceByAlias when alias
 // is the empty string.
-var ErrGetResourceByAliasEmpty = errors.New("GetResourceByAlias alias is empty")
+var ErrGetResourceByAliasEmpty = errors.New("get resource by alias: alias is empty")
 
 // StatusActive indicates the qURL is live and accepting access requests.
 const StatusActive = "active"
@@ -540,8 +540,9 @@ type Resource struct {
 	Alias        string `json:"alias,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	Description  string `json:"description,omitempty"`
-	// Status is one of "active" or "revoked" per the live ResourceData
-	// schema (qurl-service/api/openapi.yaml:2546). Tag matches QURL.Status.
+	// Status is one of [StatusActive] or [StatusRevoked] per the live
+	// ResourceData schema (qurl-service/api/openapi.yaml:2546). Tag
+	// matches QURL.Status.
 	Status string `json:"status"`
 	// CreatedAt has no `omitempty` because encoding/json's omitempty does
 	// not honor the time.Time zero value (it would still serialize as
@@ -568,7 +569,13 @@ type CreateResourceInput struct {
 	// or "tunnel". When type=tunnel, TargetURL is ignored server-side.
 	// Mirrors the `ResourceType` enum at
 	// qurl-service/api/openapi.yaml:2468-2474.
-	Type         string        `json:"type,omitempty"`
+	Type string `json:"type,omitempty"`
+	// Alias: empty string elides via `omitempty` and yields a resource
+	// with no alias. Server validates non-empty values against
+	// `^[a-z][a-z0-9-]{1,62}[a-z0-9]$`. If a caller passes an empty
+	// string from upstream input intending an alias, they'll silently
+	// get a no-alias create — pre-validate at the caller if that's a
+	// concern.
 	Alias        string        `json:"alias,omitempty"`
 	CustomDomain string        `json:"custom_domain,omitempty"`
 	Description  string        `json:"description,omitempty"`
@@ -688,10 +695,14 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // access policy, etc.). resourceID must be a `r_…` ID; alias-keyed updates
 // must first resolve via GetResourceByAlias.
 //
-// Idempotency-Key plumbing for resource mutations is tracked at #148 — until
-// it lands, callers needing at-least-once retry safety should dedupe on the
-// server's `(owner_id, resource_id)` model and accept that PATCH retries
-// re-execute on the server.
+// Retry semantics: do() retries 5xx/429 with the buffered body, so a
+// successfully-applied PATCH that returns 502 will be re-applied on retry.
+// All currently-supported PATCH fields (alias, description, custom_domain,
+// access_policy) are field-idempotent — the second apply is a no-op.
+// Adding a non-idempotent field (a counter, an append, etc.) would break
+// this contract; callers should plumb Idempotency-Key (tracked at #148)
+// before that happens. Until #148 lands, callers needing at-least-once
+// retry safety should dedupe on `(owner_id, resource_id)` server-side.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
 	if resourceID == "" {
 		return nil, ErrUpdateResourceEmptyID

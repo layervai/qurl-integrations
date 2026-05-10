@@ -19,6 +19,7 @@ const (
 	testAlias       = "dev-dashboard"
 	testAliasAlt    = "prod-grafana"
 	testResourceID  = "r_existing01"
+	testTargetURL   = "https://internal.example.com"
 )
 
 // testClient creates a client with retries disabled for fast unit tests.
@@ -966,7 +967,7 @@ func TestCreateResource(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if input.TargetURL != "https://internal.example.com" {
+		if input.TargetURL != testTargetURL {
 			t.Errorf("got TargetURL %q", input.TargetURL)
 		}
 		if input.Alias != testAlias {
@@ -974,17 +975,18 @@ func TestCreateResource(t *testing.T) {
 		}
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": "r_dev_dash01",
-			"target_url":  "https://internal.example.com",
+			"target_url":  testTargetURL,
 			"alias":       testAlias,
-			"type":        "url",
+			"type":        ResourceTypeURL,
 			"status":      StatusActive,
+			"updated_at":  "2026-05-10T07:30:00Z",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
 	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
-		TargetURL: "https://internal.example.com",
+		TargetURL: testTargetURL,
 		Alias:     testAlias,
 	})
 	if err != nil {
@@ -1000,6 +1002,85 @@ func TestCreateResource(t *testing.T) {
 	// qurl-service/api/openapi.yaml ResourceData.status round-trips.
 	if got.Status != StatusActive {
 		t.Errorf("got Status %q, want %q", got.Status, StatusActive)
+	}
+	// Pin UpdatedAt decoding — *time.Time round-trip with explicit
+	// timezone offset. nil-vs-zero distinction matters for "field
+	// present on response" semantics.
+	if got.UpdatedAt == nil {
+		t.Fatal("UpdatedAt should be populated when present on the wire")
+	}
+	if got.UpdatedAt.Year() != 2026 || got.UpdatedAt.Month() != 5 {
+		t.Errorf("UpdatedAt: got %v, want 2026-05-...", got.UpdatedAt)
+	}
+}
+
+// TestCreateResourceURLTypeExplicit pins the explicit Type=ResourceTypeURL
+// branch of the validator switch. The empty-Type and Type=tunnel branches
+// have dedicated tests; this fills the middle case.
+func TestCreateResourceURLTypeExplicit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Type != ResourceTypeURL {
+			t.Errorf("got Type %q, want %q", input.Type, ResourceTypeURL)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_url_explicit",
+			"target_url":  testTargetURL,
+			"type":        ResourceTypeURL,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type:      ResourceTypeURL,
+		TargetURL: testTargetURL,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.Type != ResourceTypeURL {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeURL)
+	}
+}
+
+// TestCreateResourceUnknownTypePassesThrough pins the forward-compat
+// default branch in the TargetURL validator: an unknown Type value
+// should pass through to the server, which is the authority on type
+// validation. Keeps the client release-independent of new ResourceType
+// values added to the qurl-service OpenAPI surface.
+func TestCreateResourceUnknownTypePassesThrough(t *testing.T) {
+	const futureType = "webhook"
+	var sawRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Type != futureType {
+			t.Errorf("got Type %q, want %q", input.Type, futureType)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_future",
+			"type":        futureType,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	if _, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type: futureType,
+	}); err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if !sawRequest {
+		t.Fatal("server should have seen the request (unknown type must pass through)")
 	}
 }
 
@@ -1071,7 +1152,7 @@ func TestCreateResourceTunnelTypeRejectsTargetURL(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
 		Type:      ResourceTypeTunnel,
-		TargetURL: "https://internal.example.com",
+		TargetURL: testTargetURL,
 	})
 	if !errors.Is(err, ErrCreateResourceTunnelRejectsTargetURL) {
 		t.Fatalf("expected ErrCreateResourceTunnelRejectsTargetURL, got %v", err)
@@ -1099,7 +1180,7 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 		}
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": "r_policy01",
-			"target_url":  "https://internal.example.com",
+			"target_url":  testTargetURL,
 			"status":      StatusActive,
 			"access_policy": map[string]any{
 				"ip_allowlist": []string{"10.0.0.0/8", "192.168.0.0/16"},
@@ -1111,7 +1192,7 @@ func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
-		TargetURL: "https://internal.example.com",
+		TargetURL: testTargetURL,
 		AccessPolicy: &AccessPolicy{
 			IPAllowlist: []string{"10.0.0.0/8", "192.168.0.0/16"},
 			GeoDenylist: []string{"CN"},
@@ -1341,7 +1422,7 @@ func TestGetResourceByAlias(t *testing.T) {
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": "r_dev_dash01",
 			"alias":       testAlias,
-			"target_url":  "https://internal.example.com",
+			"target_url":  testTargetURL,
 		})
 	}))
 	defer srv.Close()
@@ -1452,7 +1533,7 @@ func TestCreateResourceAliasInUse(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	_, err := c.CreateResource(context.Background(), &CreateResourceInput{
-		TargetURL: "https://internal.example.com",
+		TargetURL: testTargetURL,
 		Alias:     testAlias,
 	})
 	if err == nil {
