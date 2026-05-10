@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -633,6 +634,11 @@ type UpdateResourceInput struct {
 // hasAnyFieldSet reports whether the input has at least one mutable
 // field populated. Used by UpdateResource to fail fast on the no-op
 // PATCH `{}` case.
+//
+// Keep in sync with [UpdateResourceInput] fields — adding a new
+// mutable field without updating this method silently allows a no-op
+// PATCH that exercises only the new field. (No reflection: the
+// 5-field surface doesn't justify it.)
 func (in *UpdateResourceInput) hasAnyFieldSet() bool {
 	return in.Description != nil ||
 		in.Alias != nil ||
@@ -707,7 +713,10 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 // TODO(#148): plumb Idempotency-Key on this method before any
 // non-idempotent PATCH field lands.
 func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *UpdateResourceInput) (*Resource, error) {
-	if resourceID == "" {
+	// TrimSpace catches whitespace-only inputs that would otherwise hit
+	// the wire as `/v1/resources/%20%20` and 400 server-side; the
+	// client error stays actionable.
+	if strings.TrimSpace(resourceID) == "" {
 		return nil, ErrUpdateResourceEmptyID
 	}
 	if input == nil {
@@ -750,7 +759,9 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 // surfaces — pass the bare alias string. Returns a typed APIError with
 // 404 status if the alias is not registered for the caller's owner.
 func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
-	if alias == "" {
+	// TrimSpace catches whitespace-only inputs that would otherwise
+	// hit the wire and 400; client error stays actionable.
+	if strings.TrimSpace(alias) == "" {
 		return nil, ErrGetResourceByAliasEmpty
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)

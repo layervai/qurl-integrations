@@ -953,6 +953,25 @@ func TestCreateNeitherTargetURLNorResourceIDRejected(t *testing.T) {
 	}
 }
 
+// TestCreateNoTargetBeatsInvalidIdempotencyKey pins the validation
+// order in Create: target presence (a structural error) is checked
+// before the idempotency-key bytes (a request-decoration error). A
+// caller missing both should learn about the missing target first;
+// the error is the more actionable of the two. Symmetric with
+// TestUpdateResourceEmptyAliasPlusClearAliasReportsExclusivityFirst.
+func TestCreateNoTargetBeatsInvalidIdempotencyKey(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		// No TargetURL, no ResourceID, AND a key with a control byte
+		// (would also fail validateIdempotencyKey). Target check runs
+		// first.
+		IdempotencyKey: "bad\nkey",
+	})
+	if !errors.Is(err, ErrCreateRequiresTarget) {
+		t.Fatalf("expected ErrCreateRequiresTarget (target-presence beats idempotency), got %v", err)
+	}
+}
+
 // --- Resource methods ---
 
 func TestCreateResource(t *testing.T) {
@@ -1457,6 +1476,18 @@ func TestUpdateResourceEmptyIDRejected(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceWhitespaceIDRejected pins the strings.TrimSpace
+// guard — a whitespace-only resource ID would otherwise hit the wire
+// as `/v1/resources/%20%20` and 400 server-side. The client error
+// stays actionable.
+func TestUpdateResourceWhitespaceIDRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), "   ", &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceEmptyID) {
+		t.Fatalf("expected ErrUpdateResourceEmptyID on whitespace ID, got %v", err)
+	}
+}
+
 func TestUpdateResourceNilInputRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.UpdateResource(context.Background(), "r_x", nil)
@@ -1520,11 +1551,50 @@ func TestGetResourceByAliasEscapesPathSegment(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceEscapesIDPathSegment is the symmetric path-escape
+// pin for UpdateResource (mirror of TestGetResourceByAliasEscapesPathSegment).
+// Server-side resource_id format is `^r_[a-z0-9_-]{11}$` so reserved
+// bytes won't reach this method via normal flows; the test is
+// defensive for direct programmatic callers and keeps a future
+// `url.PathEscape` removal from tripping silently.
+func TestUpdateResourceEscapesIDPathSegment(t *testing.T) {
+	var gotEscapedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		apiEnvelope(t, w, map[string]any{"resource_id": "r_x"})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	desc := testDescription
+	if _, err := c.UpdateResource(context.Background(), "weird/id", &UpdateResourceInput{
+		Description: &desc,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	const want = "/v1/resources/weird%2Fid"
+	if gotEscapedPath != want {
+		t.Errorf("resourceID path-escape: got %q, want %q", gotEscapedPath, want)
+	}
+}
+
 func TestGetResourceByAliasEmptyRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.GetResourceByAlias(context.Background(), "")
 	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
 		t.Fatalf("expected ErrGetResourceByAliasEmpty, got %v", err)
+	}
+}
+
+// TestGetResourceByAliasWhitespaceRejected pins the strings.TrimSpace
+// guard — a whitespace-only alias would hit the wire as
+// `/v1/resources/by-alias/%20%20` and 400 server-side. Companion to
+// TestGetResourceByAliasEmptyRejected.
+func TestGetResourceByAliasWhitespaceRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.GetResourceByAlias(context.Background(), "   ")
+	if !errors.Is(err, ErrGetResourceByAliasEmpty) {
+		t.Fatalf("expected ErrGetResourceByAliasEmpty on whitespace, got %v", err)
 	}
 }
 
