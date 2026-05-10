@@ -187,7 +187,7 @@ func AdminClaimModal() ([]byte, error) {
 // plan); false for direct slash-command response bodies.
 func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 	payload := map[string]any{
-		"response_type":    "ephemeral",
+		"response_type":    responseTypeEphemeral,
 		"replace_original": replaceOriginal,
 		"text":             ":warning: " + message,
 	}
