@@ -18,6 +18,7 @@ const (
 	testDescription = "updated"
 	testAlias       = "dev-dashboard"
 	testAliasAlt    = "prod-grafana"
+	testResourceID  = "r_existing01"
 )
 
 // testClient creates a client with retries disabled for fast unit tests.
@@ -922,6 +923,26 @@ func TestCreateTargetURLOnlyOmitsResourceID(t *testing.T) {
 	}
 }
 
+// TestCreateTargetURLAndResourceIDMutuallyExclusive pins the client-side
+// fail-fast for the both-populated case. Mirror of the symmetric guard in
+// UpdateResource for (Alias, ClearAlias). Closes the third leg of the
+// omitempty + exclusivity contract — the two valid shapes are pinned by
+// TestCreateResourceIDFlow / TestCreateTargetURLOnlyOmitsResourceID, and
+// this test pins the invalid combination.
+func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.Create(context.Background(), CreateInput{
+		TargetURL:  "https://example.com",
+		ResourceID: "r_existing",
+	})
+	if err == nil {
+		t.Fatal("expected error when both TargetURL and ResourceID are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error should mention mutual exclusivity; got %q", err.Error())
+	}
+}
+
 // --- Resource methods ---
 
 func TestCreateResource(t *testing.T) {
@@ -980,8 +1001,9 @@ func TestUpdateResourceSetAlias(t *testing.T) {
 		if r.Method != http.MethodPatch {
 			t.Errorf("expected PATCH, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/resources/r_existing01" {
-			t.Errorf("expected /v1/resources/r_existing01, got %s", r.URL.Path)
+		wantPath := "/v1/resources/" + testResourceID
+		if r.URL.Path != wantPath {
+			t.Errorf("expected %s, got %s", wantPath, r.URL.Path)
 		}
 		var err error
 		gotBody, err = io.ReadAll(r.Body)
@@ -989,7 +1011,7 @@ func TestUpdateResourceSetAlias(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_existing01",
+			"resource_id": testResourceID,
 			"alias":       testAliasAlt,
 		})
 	}))
@@ -997,7 +1019,7 @@ func TestUpdateResourceSetAlias(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	alias := testAliasAlt
-	got, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+	got, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		Alias: &alias,
 	})
 	if err != nil {
@@ -1033,13 +1055,13 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_existing01",
+			"resource_id": testResourceID,
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		ClearAlias: true,
 	}); err != nil {
 		t.Fatalf("UpdateResource: %v", err)
@@ -1215,6 +1237,8 @@ func TestCreateResourceAliasInUse(t *testing.T) {
 
 // TestUpdateResourceInvalidAlias pins the typed *APIError shape on a 400
 // `invalid_alias` path — symmetric coverage with the other two new methods.
+// Also pins the InvalidFields decoding so a regression in either parseError
+// or the test fixture would surface here.
 func TestUpdateResourceInvalidAlias(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
@@ -1225,6 +1249,9 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 				"status": 400,
 				"detail": "alias must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
 				"code":   "invalid_alias",
+				"invalid_fields": map[string]string{
+					"alias": "must match ^[a-z][a-z0-9-]{1,62}[a-z0-9]$",
+				},
 			},
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -1235,7 +1262,7 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 
 	c := testClient(srv.URL, "test-key")
 	alias := "Bad-Alias!"
-	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		Alias: &alias,
 	})
 	if err == nil {
@@ -1251,6 +1278,9 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 	if apiErr.Code != "invalid_alias" {
 		t.Errorf("got code %q, want invalid_alias", apiErr.Code)
 	}
+	if got, ok := apiErr.InvalidFields["alias"]; !ok || got == "" {
+		t.Errorf("InvalidFields[\"alias\"] should be populated; got %v (ok=%v)", got, ok)
+	}
 }
 
 // TestUpdateResourceEmptyAliasPointerRejected pins the client-side
@@ -1261,7 +1291,7 @@ func TestUpdateResourceInvalidAlias(t *testing.T) {
 func TestUpdateResourceEmptyAliasPointerRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	empty := ""
-	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		Alias: &empty,
 	})
 	if err == nil {
@@ -1279,7 +1309,7 @@ func TestUpdateResourceEmptyAliasPointerRejected(t *testing.T) {
 func TestUpdateResourceAliasAndClearAliasMutuallyExclusive(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	alias := testAlias
-	_, err := c.UpdateResource(context.Background(), "r_existing01", &UpdateResourceInput{
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		Alias:      &alias,
 		ClearAlias: true,
 	})

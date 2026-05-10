@@ -255,15 +255,18 @@ func validateIdempotencyKey(key string) error {
 
 // Create creates a new qURL.
 //
-// Either input.TargetURL or input.ResourceID must be set, never both — see
-// [CreateInput] for the rationale. The function does not enforce the
-// exclusivity itself; the server returns 400 `mutually_exclusive_fields`
-// if both are populated. The client only ensures that empty fields elide
-// from the wire payload (via `omitempty`) so a ResourceID-only call
-// doesn't accidentally trip the rule.
+// Exactly one of input.TargetURL or input.ResourceID must be set. The client
+// fails fast on the both-populated case (saves a round-trip and yields a
+// Go-typed error rather than a deserialized *APIError); the server-side
+// `mutually_exclusive_fields` rule is the enforcement of last resort. Empty
+// fields elide from the wire payload via `omitempty`, so a ResourceID-only
+// call doesn't accidentally trip the rule.
 //
 //nolint:gocritic // hugeParam: CreateInput is 104 bytes; *CreateInput migration tracked at #146.
 func (c *Client) Create(ctx context.Context, input CreateInput) (*CreateOutput, error) {
+	if input.TargetURL != "" && input.ResourceID != "" {
+		return nil, errors.New("client: Create TargetURL and ResourceID are mutually exclusive")
+	}
 	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
 		return nil, err
 	}
@@ -457,13 +460,17 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 // the live ResourceData schema doesn't expose it (it's derived from auth);
 // add it here only if/when the server starts returning it.
 type Resource struct {
-	ResourceID   string        `json:"resource_id"`
-	TargetURL    string        `json:"target_url,omitempty"`
-	Type         string        `json:"type,omitempty"`
-	Alias        string        `json:"alias,omitempty"`
-	CustomDomain string        `json:"custom_domain,omitempty"`
-	Description  string        `json:"description,omitempty"`
-	CreatedAt    time.Time     `json:"created_at,omitempty"`
+	ResourceID   string `json:"resource_id"`
+	TargetURL    string `json:"target_url,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Alias        string `json:"alias,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	Description  string `json:"description,omitempty"`
+	// CreatedAt has no `omitempty` because encoding/json's omitempty does
+	// not honor the time.Time zero value (it would still serialize as
+	// "0001-01-01T00:00:00Z"). Matches the QURL type's `created_at` tag.
+	// Once the repo is on Go 1.24+, switching to `omitzero` would honor it.
+	CreatedAt    time.Time     `json:"created_at"`
 	UpdatedAt    *time.Time    `json:"updated_at,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
 }
