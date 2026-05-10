@@ -106,6 +106,12 @@ var ErrUpdateResourceAliasEmpty = errors.New("client: UpdateResource Alias must 
 // fails fast for a typed error.
 var ErrUpdateResourceAliasClearExclusive = errors.New("client: UpdateResource Alias and ClearAlias are mutually exclusive")
 
+// ErrUpdateResourceNoFieldsSet is returned by UpdateResource when input
+// is non-nil but has no fields populated — the request would PATCH `{}`
+// and either no-op or 400 server-side. Symmetric with the no-target
+// guard on Create.
+var ErrUpdateResourceNoFieldsSet = errors.New("client: UpdateResource input has no fields set")
+
 // ErrGetResourceByAliasEmpty is returned by GetResourceByAlias when alias
 // is the empty string.
 var ErrGetResourceByAliasEmpty = errors.New("client: GetResourceByAlias alias is empty")
@@ -529,8 +535,10 @@ type Resource struct {
 	Description  string `json:"description,omitempty"`
 	// Status is one of "active" or "revoked" per the live ResourceData
 	// schema (qurl-service/api/openapi.yaml:2546). Mirrors QURL.Status
-	// — keeping the two types' status surface in sync.
-	Status string `json:"status,omitempty"`
+	// — keeping the two types' status surface in sync. No `omitempty`
+	// because Status is a discriminator field; eliding it on a
+	// zero-value response would mask a malformed server response.
+	Status string `json:"status"`
 	// CreatedAt has no `omitempty` because encoding/json's omitempty does
 	// not honor the time.Time zero value (it would still serialize as
 	// "0001-01-01T00:00:00Z"). Matches the QURL type's `created_at` tag.
@@ -547,6 +555,10 @@ type Resource struct {
 // `alias_in_use`; callers must use UpdateResource to set alias on an
 // already-existing resource.
 type CreateResourceInput struct {
+	// TargetURL is required when Type is empty or "url"; the client
+	// fails fast with ErrCreateResourceRequiresTargetURL otherwise.
+	// `omitempty` is load-bearing for the type=tunnel branch where
+	// TargetURL is legitimately empty.
 	TargetURL string `json:"target_url,omitempty"`
 	// Type is one of "url" (default; required for target-URL proxies)
 	// or "tunnel". When type=tunnel, TargetURL is ignored server-side.
@@ -572,9 +584,15 @@ type CreateResourceInput struct {
 //     `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` rejects `""`, so the empty-string
 //     pointer is reserved as a footgun guard ([Client.UpdateResource]
 //     fails fast with [ErrUpdateResourceAliasEmpty]).
+//   - AccessPolicy — pass `&AccessPolicy{}` (all zero subfields) to
+//     clear; pass nil to leave unchanged. There is no sentinel-clear
+//     because AccessPolicy is a struct, not a scalar.
 //
 // Setting Alias and ClearAlias together is invalid and rejected
-// client-side ([ErrUpdateResourceAliasClearExclusive]).
+// client-side ([ErrUpdateResourceAliasClearExclusive]). An entirely
+// empty input (no fields populated) is also rejected
+// ([ErrUpdateResourceNoFieldsSet]) — symmetric with Create's
+// no-target guard.
 type UpdateResourceInput struct {
 	// Description: pass `&""` to clear the field server-side (no
 	// `ClearDescription` sentinel — the empty string is the clear
@@ -594,8 +612,22 @@ type UpdateResourceInput struct {
 	ClearAlias bool `json:"clear_alias,omitempty"`
 	// CustomDomain: pass `&""` to clear the custom domain mapping (same
 	// convention as Description). Pass nil to leave unchanged.
-	CustomDomain *string       `json:"custom_domain,omitempty"`
+	CustomDomain *string `json:"custom_domain,omitempty"`
+	// AccessPolicy: pass a non-nil pointer to update the policy in
+	// place. The server treats `&AccessPolicy{}` (all zero subfields)
+	// as a clear; pass nil to leave the existing policy unchanged.
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+}
+
+// hasAnyFieldSet reports whether the input has at least one mutable
+// field populated. Used by UpdateResource to fail fast on the no-op
+// PATCH `{}` case.
+func (in *UpdateResourceInput) hasAnyFieldSet() bool {
+	return in.Description != nil ||
+		in.Alias != nil ||
+		in.ClearAlias ||
+		in.CustomDomain != nil ||
+		in.AccessPolicy != nil
 }
 
 // CreateResource creates a (or returns the existing) qURL resource.
@@ -609,11 +641,12 @@ func (c *Client) CreateResource(ctx context.Context, input *CreateResourceInput)
 	if input == nil {
 		return nil, ErrCreateResourceNilInput
 	}
-	// TargetURL is the field that uniquely identifies a resource on the
-	// server's `(owner_id, target_url_hash)` idempotency key — without it
-	// the request can't succeed. Server returns 400 either way; failing
-	// fast saves a round-trip on a programmer error.
-	if input.TargetURL == "" {
+	// TargetURL is required for type=url (the default and the field used
+	// to compute the server's `(owner_id, target_url_hash)` idempotency
+	// key). For type=tunnel the server ignores TargetURL — don't reject
+	// the request just because it's empty. Server returns 400 either way
+	// for the type=url branch; failing fast saves a round-trip.
+	if input.Type != ResourceTypeTunnel && input.TargetURL == "" {
 		return nil, ErrCreateResourceRequiresTargetURL
 	}
 	body, err := json.Marshal(input)
@@ -647,6 +680,9 @@ func (c *Client) UpdateResource(ctx context.Context, resourceID string, input *U
 	}
 	if input == nil {
 		return nil, ErrUpdateResourceNilInput
+	}
+	if !input.hasAnyFieldSet() {
+		return nil, ErrUpdateResourceNoFieldsSet
 	}
 	if input.Alias != nil && *input.Alias == "" {
 		return nil, ErrUpdateResourceAliasEmpty

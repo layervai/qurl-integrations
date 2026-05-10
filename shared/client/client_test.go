@@ -868,14 +868,14 @@ func TestCreateResourceIDFlow(t *testing.T) {
 			t.Fatalf("read body: %v", err)
 		}
 		apiEnvelope(t, w, map[string]any{
-			"resource_id": "r_existing",
+			"resource_id": testResourceID,
 			"qurl_link":   "https://qurl.link/at_existing",
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.Create(context.Background(), CreateInput{ResourceID: "r_existing"}); err != nil {
+	if _, err := c.Create(context.Background(), CreateInput{ResourceID: testResourceID}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -884,8 +884,8 @@ func TestCreateResourceIDFlow(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &raw); err != nil {
 		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
 	}
-	if got := raw["resource_id"]; got != "r_existing" {
-		t.Errorf("resource_id: got %v, want \"r_existing\"", got)
+	if got := raw["resource_id"]; got != testResourceID {
+		t.Errorf("resource_id: got %v, want %q", got, testResourceID)
 	}
 	if _, hasTargetURL := raw["target_url"]; hasTargetURL {
 		t.Errorf("target_url must be omitted when empty (server-side mutually_exclusive_fields rule); body=%s", gotBody)
@@ -933,7 +933,7 @@ func TestCreateTargetURLAndResourceIDMutuallyExclusive(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.Create(context.Background(), CreateInput{
 		TargetURL:  "https://example.com",
-		ResourceID: "r_existing",
+		ResourceID: testResourceID,
 	})
 	if !errors.Is(err, ErrCreateTargetResourceExclusive) {
 		t.Fatalf("expected ErrCreateTargetResourceExclusive, got %v", err)
@@ -1025,6 +1025,107 @@ func TestCreateResourceEmptyTargetURLRejected(t *testing.T) {
 	}
 }
 
+// TestCreateResourceTunnelTypeAcceptsEmptyTargetURL pins the tunnel
+// branch of the TargetURL validator. The doc on
+// CreateResourceInput.Type says TargetURL is ignored when type=tunnel;
+// this test ensures the client doesn't reject the request before it
+// reaches the server.
+func TestCreateResourceTunnelTypeAcceptsEmptyTargetURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.Type != ResourceTypeTunnel {
+			t.Errorf("got Type %q, want %q", input.Type, ResourceTypeTunnel)
+		}
+		if input.TargetURL != "" {
+			t.Errorf("got TargetURL %q, want empty", input.TargetURL)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_tunnel01",
+			"type":        ResourceTypeTunnel,
+			"status":      StatusActive,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		Type: ResourceTypeTunnel,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.Type != ResourceTypeTunnel {
+		t.Errorf("got Type %q, want %q", got.Type, ResourceTypeTunnel)
+	}
+}
+
+// TestCreateResourceAccessPolicyRoundTrip pins the AccessPolicy decoding
+// path — if the server schema renames a subfield (ip_allowlist →
+// ip_allow, etc.) the round-trip would silently drop it without this
+// test.
+func TestCreateResourceAccessPolicyRoundTrip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input CreateResourceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if input.AccessPolicy == nil {
+			t.Fatal("AccessPolicy should not be nil on the wire")
+		}
+		if len(input.AccessPolicy.IPAllowlist) != 2 {
+			t.Errorf("IPAllowlist: got %v", input.AccessPolicy.IPAllowlist)
+		}
+		if len(input.AccessPolicy.GeoDenylist) != 1 {
+			t.Errorf("GeoDenylist: got %v", input.AccessPolicy.GeoDenylist)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": "r_policy01",
+			"target_url":  "https://internal.example.com",
+			"status":      StatusActive,
+			"access_policy": map[string]any{
+				"ip_allowlist": []string{"10.0.0.0/8", "192.168.0.0/16"},
+				"geo_denylist": []string{"CN"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	got, err := c.CreateResource(context.Background(), &CreateResourceInput{
+		TargetURL: "https://internal.example.com",
+		AccessPolicy: &AccessPolicy{
+			IPAllowlist: []string{"10.0.0.0/8", "192.168.0.0/16"},
+			GeoDenylist: []string{"CN"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource: %v", err)
+	}
+	if got.AccessPolicy == nil {
+		t.Fatal("response AccessPolicy should not be nil")
+	}
+	if len(got.AccessPolicy.IPAllowlist) != 2 {
+		t.Errorf("response IPAllowlist: got %v", got.AccessPolicy.IPAllowlist)
+	}
+	if len(got.AccessPolicy.GeoDenylist) != 1 {
+		t.Errorf("response GeoDenylist: got %v", got.AccessPolicy.GeoDenylist)
+	}
+}
+
+// TestUpdateResourceNoFieldsSetRejected pins the client-side fail-fast
+// for the all-nil-pointers, ClearAlias=false case. Symmetric with
+// Create's no-target guard — saves a round-trip on a no-op PATCH.
+func TestUpdateResourceNoFieldsSetRejected(t *testing.T) {
+	c := testClient("http://example.invalid", "test-key")
+	_, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{})
+	if !errors.Is(err, ErrUpdateResourceNoFieldsSet) {
+		t.Fatalf("expected ErrUpdateResourceNoFieldsSet, got %v", err)
+	}
+}
+
 func TestUpdateResourceSetAlias(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1084,17 +1185,25 @@ func TestUpdateResourceClearAlias(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
+		// Server responds with the cleared resource — alias absent on
+		// the wire, decoding to Resource.Alias == "".
 		apiEnvelope(t, w, map[string]any{
 			"resource_id": testResourceID,
+			"status":      StatusActive,
 		})
 	}))
 	defer srv.Close()
 
 	c := testClient(srv.URL, "test-key")
-	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+	got, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
 		ClearAlias: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("UpdateResource: %v", err)
+	}
+	// Confirm the cleared alias decodes correctly on the response side.
+	if got.Alias != "" {
+		t.Errorf("cleared alias should decode as empty string; got %q", got.Alias)
 	}
 
 	var raw map[string]any
