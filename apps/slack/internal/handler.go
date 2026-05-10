@@ -36,10 +36,17 @@ const (
 
 // Config holds the Slack handler configuration.
 type Config struct {
-	QURLEndpoint       string
-	AuthProvider       auth.Provider
+	QURLEndpoint string
+	AuthProvider auth.Provider
+	// SlackSigningSecret is the workspace-app signing secret used to
+	// HMAC-verify every inbound request. Empty = open deployment
+	// (the handler refuses to verify; cmd/main.go refuses to boot).
 	SlackSigningSecret string
-	NewClient          func(apiKey string) *client.Client
+	// InternalServiceToken authenticates the slack bot's internal-API
+	// calls (admin gates, policy resolution). Distinct from the
+	// per-workspace customer API key.
+	InternalServiceToken string
+	NewClient            func(apiKey string) *client.Client
 }
 
 // Handler processes Slack events and commands.
@@ -48,7 +55,16 @@ type Handler struct {
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
+	// deps is the indirection seam for setalias/unsetalias unit tests.
+	// Zero value means production wiring (h.setAliasDeps() builds from
+	// h.cfg). Tests inject a populated struct via SetDeps.
+	deps setAliasDeps
 }
+
+// SetDeps overrides the setalias/unsetalias dependency wiring. Tests
+// inject httptest-backed stubs here; production callers leave it
+// untouched.
+func (h *Handler) SetDeps(d setAliasDeps) { h.deps = d }
 
 // NewHandler creates a new Slack handler.
 func NewHandler(cfg Config) *Handler {
@@ -74,7 +90,7 @@ func (h *Handler) Handle(ctx context.Context, req *events.APIGatewayProxyRequest
 		if err := h.prepareAndVerifySlackRequest(req); err != nil {
 			return respond(http.StatusUnauthorized, map[string]string{"error": sigFailureResponse})
 		}
-		return h.handleInteraction(req)
+		return h.handleInteraction(ctx, req)
 	case req.Path == "/health":
 		return respond(http.StatusOK, map[string]string{"status": "ok"})
 	default:
@@ -175,24 +191,52 @@ func headerValue(headers map[string]string, multi map[string][]string, name stri
 	return ""
 }
 
+// Form field names lifted to constants so the parser-dispatch path
+// and the per-subcommand handlers reference the same Slack-spec keys.
+// Slack's slash-command POST encodes everything as application/
+// x-www-form-urlencoded; the field names are stable per the Slack
+// docs and reused across all 4 incoming surfaces (commands, events,
+// interactions, options).
+const (
+	formFieldTeamID      = "team_id"
+	formFieldChannelID   = "channel_id"
+	formFieldUserID      = "user_id"
+	formFieldTriggerID   = "trigger_id"
+	formFieldResponseURL = "response_url"
+	formFieldText        = "text"
+	formFieldCommand     = "command"
+)
+
 func (h *Handler) handleSlashCommand(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	values, err := url.ParseQuery(req.Body)
 	if err != nil {
 		return respond(http.StatusBadRequest, map[string]string{"error": "invalid form body"})
 	}
 
-	command := values.Get("command")
-	text := strings.TrimSpace(values.Get("text"))
+	command := values.Get(formFieldCommand)
+	text := strings.TrimSpace(values.Get(formFieldText))
 
 	slog.Info("slash command", "command", command, "text", text)
 
-	switch {
-	case text == "" || text == "help":
+	cmd, parseErr := Parse(text)
+	if parseErr != nil {
+		return ephemeralWarn(parseErr.Error())
+	}
+	switch cmd.Subcommand {
+	case SubcmdHelp:
 		return respondSlack(helpMessage())
-	case strings.HasPrefix(text, "create "):
+	case SubcmdSetAlias:
+		return h.handleSetAlias(ctx, cmd, values)
+	case SubcmdUnsetAlias:
+		return h.handleUnsetAlias(ctx, cmd, values)
+	case SubcmdCreate:
 		return h.handleCreate(ctx, values)
-	case strings.HasPrefix(text, "list"):
+	case SubcmdList:
 		return h.handleList(ctx, values)
+	case SubcmdGet, SubcmdAliases, SubcmdAdmin:
+		// Implemented in PR-3c.3 / PR-3c.5; surface a friendly stub
+		// for now rather than 404'ing the user.
+		return respondSlack(fmt.Sprintf("`/qurl %s` is not yet available. Try `/qurl help`.", cmd.Subcommand))
 	default:
 		return respondSlack(fmt.Sprintf("Unknown subcommand: `%s`. Try `/qurl help`.", text))
 	}
@@ -276,9 +320,29 @@ func (h *Handler) handleEvent(req *events.APIGatewayProxyRequest) (events.APIGat
 	return respond(http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func (h *Handler) handleInteraction(req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// TODO: Handle interactive components (buttons, modals).
+func (h *Handler) handleInteraction(ctx context.Context, req *events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	slog.Info("interaction received", "body_length", len(req.Body))
+	payload, err := parseInteractionPayload(req.Body)
+	if err != nil {
+		// Malformed payloads return 200 with an empty body — Slack
+		// requires a 200 to dismiss the modal even when we can't
+		// process it; the structured slog line is the operator
+		// signal.
+		slog.Warn("interaction payload parse failed", "error", err)
+		return respond(http.StatusOK, map[string]string{"ok": "true"})
+	}
+
+	if payload.Type == modalSubmissionType {
+		switch payload.View.CallbackID {
+		case callbackIDSetAliasRebind:
+			return h.handleSetAliasSubmit(ctx, payload)
+		case callbackIDAdminClaim:
+			// PR-3c.3 territory; ack so Slack closes the modal.
+			return respond(http.StatusOK, map[string]string{"ok": "true"})
+		}
+	}
+
+	// Unknown interaction type. Ack to satisfy Slack's contract.
 	return respond(http.StatusOK, map[string]string{"ok": "true"})
 }
 
