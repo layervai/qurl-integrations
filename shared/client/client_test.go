@@ -1275,6 +1275,44 @@ func TestUpdateResourceClearDescriptionByEmptyString(t *testing.T) {
 	}
 }
 
+// TestUpdateResourceClearCustomDomainByEmptyString pins the same `&""`
+// clear convention on CustomDomain — symmetric with
+// TestUpdateResourceClearDescriptionByEmptyString. Both fields share
+// the convention but only one direction was pinned.
+func TestUpdateResourceClearCustomDomainByEmptyString(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		apiEnvelope(t, w, map[string]any{
+			"resource_id": testResourceID,
+		})
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL, "test-key")
+	empty := ""
+	if _, err := c.UpdateResource(context.Background(), testResourceID, &UpdateResourceInput{
+		CustomDomain: &empty,
+	}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotBody, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	got, ok := raw["custom_domain"]
+	if !ok {
+		t.Fatalf("custom_domain must be present (the &\"\" clear semantic); body=%s", gotBody)
+	}
+	if got != "" {
+		t.Errorf("custom_domain: got %v, want \"\"", got)
+	}
+}
+
 func TestUpdateResourceEmptyIDRejected(t *testing.T) {
 	c := testClient("http://example.invalid", "test-key")
 	_, err := c.UpdateResource(context.Background(), "", &UpdateResourceInput{})
