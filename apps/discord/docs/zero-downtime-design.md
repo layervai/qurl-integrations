@@ -366,14 +366,19 @@ problem warrants for an in-VPC reachability surface. The secret is named
 `/qurl-bot-discord/GATEWAY_HANDOFF_HMAC`, generated via
 `openssl rand -hex 32`.
 
-**HMAC payload includes a nonce + timestamp** to defeat replay. The
-signed body is `{active_instance_id, expected_version, nonce, ts}`
+**HMAC payload includes a nonce + timestamp + recipient** to defeat
+replay. The signed body is
+`{active_instance_id, peer_instance_id, expected_version, nonce, ts}`
 where `nonce` is `crypto.randomBytes(16).toString('hex')` and `ts` is
 the active's monotonic epoch-ms at send time. The standby:
 
 1. Rejects requests with `|ts - now| > 5_000ms` (clock-skew tolerant
    replay-window cap).
-2. Maintains a small in-memory LRU of seen nonces (~1k entries,
+2. Rejects requests where `peer_instance_id != self.instance_id`
+   (the body must be addressed to *this* standby). This binds
+   intra-cluster — at sharding inflection, a body captured from
+   shard 0's handoff can't be replayed against shard 5's standby.
+3. Maintains a small in-memory LRU of seen nonces (~1k entries,
    eviction on size), rejects duplicates.
 
 Without these, the `expected_version` value in a captured body could

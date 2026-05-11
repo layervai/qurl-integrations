@@ -187,39 +187,65 @@ async function runPhase1(token) {
     console.error('[phase1] shard error:', error.message);
   });
 
-  // SIGINT handler: persist whatever sequence we've captured so far before
-  // exiting. Without this, Ctrl+C between connect and the post-idle persist
-  // call leaves /tmp/spike-session.json absent, and the user runs phase2
-  // and gets a confusing "no persisted session" error rather than "session
-  // captured up to seq N, ready for phase2." Mirrors the production
-  // SIGTERM handler shape (persist final state before exit).
+  // Signal handlers: persist whatever sequence we've captured so far
+  // before exiting. Without this, Ctrl+C or kill <pid> between connect
+  // and the post-idle persist call leaves /tmp/spike-session.json
+  // absent, and the user runs phase2 and gets a confusing "no persisted
+  // session" error rather than "session captured up to seq N, ready
+  // for phase2." Mirrors the production SIGTERM handler shape (persist
+  // final state before exit).
   //
-  // `exiting` guard: if SIGINT arrives DURING the main flow's
-  // persistSession() call below, we'd otherwise call persistSession twice
-  // concurrently — both use the same .tmp path, so the second writeFileSync
-  // could clobber the first's tmp file mid-rename. Single boolean closes
-  // the race; the second SIGINT exits immediately.
+  // Both SIGINT (Ctrl+C) and SIGTERM (kill <pid>) are wired to the same
+  // handler — the spike's a CLI tool that can be invoked from either
+  // an interactive shell or a parent process / cron / tmux session
+  // that prefers SIGTERM. The production gateway will only see SIGTERM
+  // from ECS, but the spike serves both interactive and scripted
+  // usage.
+  //
+  // `exiting` guard: persistSession is synchronous, so two handler
+  // invocations can't interleave the write itself. The guard's job is
+  // to debounce a second signal that arrives AFTER the first handler
+  // returns from persistSession but BEFORE process.exit() actually
+  // terminates the loop — without it, the second handler would re-
+  // persist (cheap, just redundant), log a duplicate line (noisy), or
+  // in the case of a SIGINT-then-SIGTERM pair, log both messages
+  // confusingly. The guard collapses repeats into one exit.
   let exiting = false;
-  process.on('SIGINT', () => {
+  const persistAndExit = (signal) => {
     if (exiting) return;
     exiting = true;
     if (latestSessionInfo) {
       persistSession(latestSessionInfo);
-      console.log('[phase1] SIGINT: persisted partial session before exit');
+      console.log(`[phase1] ${signal}: persisted partial session before exit`);
     } else {
-      console.log('[phase1] SIGINT: nothing to persist (READY not yet received)');
+      console.log(`[phase1] ${signal}: nothing to persist (READY not yet received)`);
     }
-    process.exit(130); // 128 + SIGINT(2), standard shell convention
-  });
+    // SIGINT → 130 (128 + 2), SIGTERM → 143 (128 + 15). Standard shell
+    // convention so a calling script can distinguish "user cancelled"
+    // from "external termination" via the exit code.
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', () => persistAndExit('SIGINT'));
+  process.on('SIGTERM', () => persistAndExit('SIGTERM'));
 
   // Race manager.connect() against a 30s timeout so a Discord-side rate
   // limit or network blip doesn't hang the spike forever.
+  // .unref() on the timer so it doesn't pin the event loop alive past
+  // a successful connect — without unref, a connect that resolves at
+  // second 5 leaves the 30s timer holding the loop open until exit.
+  // Benign in practice because we process.exit anyway, but unref is
+  // the future-proof shape if someone restructures phase1 to not
+  // always exit synchronously.
   const CONNECT_TIMEOUT_MS = 30_000;
   await Promise.race([
     manager.connect(),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`connect() timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS)
-    ),
+    new Promise((_, reject) => {
+      const t = setTimeout(
+        () => reject(new Error(`connect() timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+        CONNECT_TIMEOUT_MS,
+      );
+      t.unref();
+    }),
   ]);
   console.log('[phase1] connected; idling for', PHASE1_LIFETIME_MS, 'ms to accumulate sequence');
   await new Promise((resolve) => setTimeout(resolve, PHASE1_LIFETIME_MS));
@@ -305,17 +331,27 @@ async function runPhase2(token) {
         console.log(`[phase2] retrieveSessionInfo(${shardId}) -> stored session (will RESUME)`);
         return currentSession;
       }
+      // Short-circuit on prior budget exhaustion so the counter doesn't
+      // overrun MAX in subsequent callback invocations and the log line
+      // doesn't print "attempt 3/1 / 4/1 / ..." misleadingly. The
+      // outer flow already surfaces exit-3 from the budgetExhausted
+      // flag; we just want subsequent callbacks to re-throw cleanly.
+      if (budgetExhausted) {
+        const err = new Error(`IDENTIFY budget exhausted (post-throw callback)`);
+        err.code = 'SPIKE_IDENTIFY_BUDGET';
+        throw err;
+      }
       identifyAttempts += 1;
       console.log(`[phase2] retrieveSessionInfo(${shardId}) -> null (will IDENTIFY, attempt ${identifyAttempts}/${MAX_IDENTIFY_ATTEMPTS})`);
       if (identifyAttempts > MAX_IDENTIFY_ATTEMPTS) {
         // We've already burned our budget. The library will call back here
         // again on its own reconnect logic — returning null again would just
-        // keep IDENTIFYing. Setting a flag (instead of throwing) lets the
-        // outer flow surface a clean budget-exhausted result. A thrown
-        // error would propagate up through connect()'s catch handler and
-        // get logged but not classified — the budget-exhausted exit code
-        // (3) below wouldn't fire because the resumed/identified branches
-        // run first; this flag is checked alongside them.
+        // keep IDENTIFYing. Setting a flag (instead of just throwing) lets
+        // the outer flow surface a clean budget-exhausted result. A thrown
+        // error alone would propagate up through connect()'s catch handler
+        // and get logged but not classified — the budget-exhausted exit
+        // code (3) below wouldn't fire because the resumed/identified
+        // branches run first; this flag is checked alongside them.
         budgetExhausted = true;
         const err = new Error(`IDENTIFY budget exhausted (${identifyAttempts} attempts)`);
         err.code = 'SPIKE_IDENTIFY_BUDGET';

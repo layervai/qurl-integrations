@@ -25,6 +25,20 @@ function tempPath(name) {
   return path.join(os.tmpdir(), `spike-test-${process.pid}-${Date.now()}-${name}.json`);
 }
 
+// File-scope spy restoration — applies to every describe in this file
+// (not just the outer one). The earlier per-describe afterEach only
+// covered the session-store-helpers describe; spy leaks under the
+// classifyResult / file-perms describes would silently survive even
+// though those describes don't currently use spies. Hoisting closes
+// the future-foot-gun.
+//
+// NOT set globally in jest.config.js because other test files rely on
+// jest.spyOn persistence within their own describes — see the comment
+// on `restoreMocks` in jest.config.js.
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
 describe('gateway-resume-spike — session store helpers', () => {
   let testFile;
 
@@ -35,10 +49,9 @@ describe('gateway-resume-spike — session store helpers', () => {
   afterEach(() => {
     try { fs.unlinkSync(testFile); } catch (_) { /* ok */ }
     try { fs.unlinkSync(`${path.resolve(testFile)}.tmp`); } catch (_) { /* ok */ }
-    // Restore any jest.spyOn mocks set by individual tests so they don't
-    // leak into the next test. Safer than per-test cleanup because
-    // assertion failures don't skip this.
-    jest.restoreAllMocks();
+    // jest.config.js sets `restoreMocks: true` repo-wide so spies are
+    // restored automatically between every test — no per-describe
+    // afterEach hook needed.
   });
 
   describe('persistSession + loadSession round-trip', () => {
@@ -332,6 +345,26 @@ describe('gateway-resume-spike — classifyResult', () => {
     expect(r.exitCode).toBe(2);
     expect(r.severity).toBe('error');
     expect(r.lines.join('\n')).toMatch(/UNCLEAR/);
+  });
+
+  test('budgetExhausted alone (RESUME hung, no READY, retrieveSessionInfo threw)', () => {
+    // The exact bug pattern the reorder fix targets in a different
+    // shape: RESUME never completed (resumed=false), Discord never
+    // delivered a READY (identified=false), library didn't clear the
+    // session (postResumeSessionCleared=false), but our budget guard
+    // tripped because retrieveSessionInfo kept being called and
+    // eventually crossed MAX. Today this hits exit-3 via the budget
+    // branch; pin it so a future reorder that moves budgetExhausted
+    // below the resumed/identified branches regresses here.
+    const r = classifyResult({
+      resumed: false,
+      budgetExhausted: true,
+      identified: false,
+      postResumeSessionCleared: false,
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.severity).toBe('error');
+    expect(r.lines.join('\n')).toMatch(/IDENTIFY-budget-exhausted/);
   });
 
   test('postResumeSessionCleared alone (without identified) is still UNCLEAR', () => {
