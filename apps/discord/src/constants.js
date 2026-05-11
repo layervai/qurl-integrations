@@ -282,6 +282,18 @@ const AUDIT_EVENTS = {
   //                   bump the deadline?" without re-reading the
   //                   row. Not currently used as a metric filter
   //                   dimension.
+  //   - `version`:    integer. On success: the row's NEW version
+  //                   after the OCC bump. On non-success (conflict,
+  //                   not_found, error): the version the caller
+  //                   expected (i.e., `expectedVersion`). Lets a
+  //                   forensic query correlate retries by attempt
+  //                   identity ("which attempt won version 5?")
+  //                   without needing the live row — important
+  //                   because already-deleted flows can't be
+  //                   JOINed against the live table. LOW-cardinality
+  //                   per-flow (bounded by transitions-per-flow,
+  //                   ~10 in practice); NOT a metric dimension —
+  //                   forensic-only field.
   //   - `flow_id`:    HIGH-cardinality. Forensic-query ONLY — same
   //                   posture as FLOW_CREATED.
   FLOW_TRANSITION: 'flow_transition',

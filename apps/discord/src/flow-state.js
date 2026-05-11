@@ -101,6 +101,12 @@ if (!AWS_REGION) {
 
 const TABLE_NAME = `${TABLE_PREFIX}flow-state`;
 
+// Test escape hatch: `DDB_TEST_ENDPOINT=http://localhost:8000`
+// points the client at DynamoDB Local (or any HTTP-compatible
+// emulator). Not used in production. The unit tests in
+// `tests/flow-state.test.js` use `aws-sdk-client-mock` to
+// intercept at the SDK layer instead — this env var is for
+// integration tests against a real local DDB instance.
 const rawClient = new DynamoDBClient({
   region: AWS_REGION,
   ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
@@ -421,6 +427,13 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   if (typeof terminal !== 'boolean') {
     throw new TypeError(`flow-state.transitionFlow: terminal must be a boolean (got ${typeof terminal})`);
   }
+  // "Strictly in the future" is enforced at call time, NOT at the
+  // DDB-write time. A caller passing `set_expires_at: now + 1` can
+  // validate clean, then have the row's expires_at land in the past
+  // by the time DDB sees the UpdateCommand (the pre-read network
+  // round-trip is between the two). Non-fatal — the row is just
+  // born expired, same shape as the createFlow foot-gun — but with
+  // sane TTLs (minutes-to-hours) the window is irrelevant.
   if (set_expires_at !== undefined) assertExpiresAt(set_expires_at);
 
   // Read stage_from for the audit emission. The Update below is
@@ -458,6 +471,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         result: 'not_found',
         terminal: false,
         extended,
+        version: expectedVersion,
       });
       return { result: 'not_found', version: null };
     }
@@ -471,6 +485,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       result: 'error',
       terminal: false,
       extended,
+      version: expectedVersion,
     });
     throw err;
   }
@@ -516,13 +531,17 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       result: 'success',
       terminal,
       extended,
+      version: newVersion,
     });
     return { result: 'success', version: newVersion };
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
       // The OCC gate. Could be (a) row disappeared between pre-read
       // and Update (TTL reap or concurrent delete) → not_found, or
-      // (b) version mismatch (concurrent transition) → conflict.
+      // (b) row is logically expired but DDB hasn't reaped yet →
+      // not_found (same retry semantics as physical absence — a
+      // caller retrying conflict on an expired row is wasted work),
+      // or (c) version mismatch (concurrent transition) → conflict.
       // Distinguish with a second Get so the caller can pick the
       // right retry strategy.
       let result = 'conflict';
@@ -530,10 +549,20 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         const recheck = await ddb.send(new GetCommand({
           TableName: TABLE_NAME,
           Key: { flow_id },
-          ProjectionExpression: 'flow_id',
+          ProjectionExpression: 'flow_id, expires_at',
           ConsistentRead: true,
         }));
-        if (!recheck?.Item) result = 'not_found';
+        if (!recheck?.Item) {
+          result = 'not_found';
+        } else {
+          // Apply the same logical-expiry filter as loadFlow — a row
+          // present in DDB but already past expires_at should report
+          // not_found, not conflict. Symmetric with the reader.
+          const exp = recheck.Item.expires_at;
+          if (typeof exp === 'number' && Number.isFinite(exp) && Math.floor(exp) === exp && nowEpochSeconds() > exp) {
+            result = 'not_found';
+          }
+        }
       } catch (recheckErr) {
         // Recheck failure — stay conservative and report conflict
         // (the original Update failed due to a conditional check,
@@ -552,6 +581,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         result,
         terminal: false,
         extended,
+        version: expectedVersion,
       });
       return { result, version: null };
     }
@@ -563,6 +593,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       result: 'error',
       terminal: false,
       extended,
+      version: expectedVersion,
     });
     throw err;
   }

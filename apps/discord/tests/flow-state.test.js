@@ -421,7 +421,52 @@ describe('flow-state.transitionFlow', () => {
       result: 'success',
       terminal: true,
       extended: false,
+      version: 5,
     });
+  });
+
+  test('success with terminal: false stays false (negative-control vs forced-false)', async () => {
+    // Companion to the terminal-force-to-false tests on non-success
+    // paths: confirm that a legitimate terminal=false on a SUCCESSFUL
+    // transition is preserved, not overwritten. Pins symmetry.
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 3 } });
+
+    await flowState.transitionFlow('id', 2, {
+      stage_to: 'b',
+      terminal: false,
+    });
+
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
+      flow_id: 'id',
+      stage_from: 'a',
+      stage_to: 'b',
+      result: 'success',
+      terminal: false,
+      extended: false,
+      version: 3,
+    });
+  });
+
+  test('payload: null clears existing payload (asymmetric with createFlow)', async () => {
+    // Documented in the module docstring — `payload: undefined`
+    // preserves existing, `payload: null` clears. This test locks
+    // in the asymmetry so a future refactor doesn't accidentally
+    // collapse them.
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+
+    await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      payload: null,
+      terminal: false,
+    });
+
+    const upd = ddbMock.commandCalls(UpdateCommand)[0];
+    // The clause IS present (vs undefined, which omits it)…
+    expect(upd.args[0].input.UpdateExpression).toMatch(/#p = :payload/);
+    // …and writes null to clear the existing payload.
+    expect(upd.args[0].input.ExpressionAttributeValues[':payload']).toBeNull();
   });
 
   test('skips payload encrypt when payload is omitted', async () => {
@@ -458,6 +503,7 @@ describe('flow-state.transitionFlow', () => {
       result: 'success',
       terminal: false,
       extended: true,
+      version: 2,
     });
   });
 
@@ -495,6 +541,7 @@ describe('flow-state.transitionFlow', () => {
       result: 'not_found',
       terminal: false,
       extended: false,
+      version: 1,
     });
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
@@ -517,6 +564,7 @@ describe('flow-state.transitionFlow', () => {
       result: 'conflict',
       terminal: false,
       extended: false,
+      version: 1,
     });
   });
 
@@ -544,6 +592,39 @@ describe('flow-state.transitionFlow', () => {
       result: 'not_found',
       terminal: false,
       extended: false,
+      version: 1,
+    });
+  });
+
+  test('post-CCFE recheck reports not_found when row is present but logically expired', async () => {
+    // A row whose expires_at slipped into the past between pre-read
+    // and Update will still be returned by GetCommand (DDB TTL reap
+    // is async, up to ~48h delay). The recheck must apply the same
+    // logical-expiry filter as loadFlow — otherwise the caller gets
+    // result=conflict on an expired row and wastes a retry.
+    const pastExpiry = Math.floor(Date.now() / 1000) - 30;
+    let getCalls = 0;
+    ddbMock.on(GetCommand).callsFake(() => {
+      getCalls += 1;
+      if (getCalls === 1) return { Item: { stage: 'a' } };
+      // Recheck returns the row but it's logically expired.
+      return { Item: { flow_id: 'id', expires_at: pastExpiry } };
+    });
+    ddbMock.on(UpdateCommand).rejects(ccfe());
+
+    const res = await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+    });
+    expect(res).toEqual({ result: 'not_found', version: null });
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
+      flow_id: 'id',
+      stage_from: 'a',
+      stage_to: 'b',
+      result: 'not_found',
+      terminal: false,
+      extended: false,
+      version: 1,
     });
   });
 
@@ -588,6 +669,7 @@ describe('flow-state.transitionFlow', () => {
       result: 'error',
       terminal: false,
       extended: false,
+      version: 1,
     });
   });
 
@@ -606,6 +688,7 @@ describe('flow-state.transitionFlow', () => {
       result: 'error',
       terminal: false,
       extended: false,
+      version: 1,
     });
   });
 
