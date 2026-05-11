@@ -1363,9 +1363,13 @@ async function handleSend(interaction, apiKey) {
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.selfDestructSelect)
-        .setPlaceholder('💥 Self-destruct timer (optional)')
+        // Placeholder is a defensive fallback only — the No-timer option
+        // ships defaulted, so the dropdown header always reflects the
+        // current state (matching how expirySelect always shows the
+        // current expiry, never its placeholder).
+        .setPlaceholder('\u{1F4A5} Self-destruct timer (optional)')
         .addOptions(
-          { label: 'No timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, description: 'Content stays visible until tab closes', default: !hasTimer },
+          { label: 'No timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasTimer },
           ...SELF_DESTRUCT_PRESETS.map((p) => ({
             label: p.label,
             value: String(p.seconds),
