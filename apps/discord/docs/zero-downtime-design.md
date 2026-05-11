@@ -209,6 +209,27 @@ falls back to `IDENTIFY` automatically — and `updateSessionInfo(shardId, null)
 fires so we know the resume failed. Operationally we count both paths
 separately as SLIs.
 
+**Contract gotcha: `retrieveSessionInfo` MUST respect the null clear.** When
+`updateSessionInfo(shardId, null)` fires, future `retrieveSessionInfo` calls
+for that shard must return `null` until a new `READY` produces a fresh
+session. Returning the (now-dead) session again produces an infinite
+RESUME-reject loop: Discord rejects, library clears, we hand the same
+session back, Discord rejects again, every ~200 ms. The first run of
+`scripts/gateway-resume-spike.js` against the sandbox token surfaced this
+exact loop because the spike returned a captured-at-startup value
+unconditionally. Production code maintains a mirror of the
+@discordjs/ws-visible session state that updateSessionInfo writes into;
+retrieveSessionInfo reads from the mirror, not from the original DDB
+read. The mirror is hydrated from DDB once at boot, then updated by the
+callback.
+
+A second related guard: cap consecutive failed `IDENTIFY` attempts. Discord's
+per-bot identify budget is 1000 per 24 h; an unexpected churn loop (e.g.,
+another process contending for the same token) can blow through it. The
+production code aborts the shard after N consecutive identifies without a
+successful READY and falls back to a controlled process exit + ECS
+restart — same shape as the spike's `MAX_IDENTIFY_ATTEMPTS` guard.
+
 ### Pillar 3 — Hot-standby with direct push-handoff
 
 Two gateway replicas. A DDB-conditional-write lock primitive (table

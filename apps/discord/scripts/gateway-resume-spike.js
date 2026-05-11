@@ -214,25 +214,56 @@ async function runPhase2(token) {
   let identified = false;
   let postResumeSessionCleared = false;
 
+  // Mirror of @discordjs/ws's session view: starts as the loaded session,
+  // gets cleared to null when the library tells us via updateSessionInfo.
+  // CRITICAL: retrieveSessionInfo MUST honor this clear. Returning the
+  // loaded session unconditionally produces an infinite RESUME-reject loop —
+  // Discord rejects, lib clears, we hand back the (now-dead) session again,
+  // Discord rejects again. The spike's first real-world run against the
+  // sandbox token surfaced this exact loop. Production DDB-backed code has
+  // the same contract: respect the null clear or loop forever.
+  let currentSession = stored;
+  // Defensive cap: bound IDENTIFY attempts in case of unexpected churn
+  // (e.g. another process is contending for the same token). On Fargate
+  // these would burn Discord's 1000/24h IDENTIFY budget; same idea here.
+  let identifyAttempts = 0;
+  const MAX_IDENTIFY_ATTEMPTS = 2; // 1 RESUME, then at most 1 IDENTIFY
+
   const manager = new WebSocketManager({
     token,
     intents: INTENTS,
     rest,
     retrieveSessionInfo: (shardId) => {
-      console.log(`[phase2] retrieveSessionInfo(${shardId}) -> stored session`);
-      // Return the persisted info. @discordjs/ws will issue op 6 RESUME
-      // with these values instead of op 2 IDENTIFY.
-      return stored;
+      if (currentSession) {
+        console.log(`[phase2] retrieveSessionInfo(${shardId}) -> stored session (will RESUME)`);
+        return currentSession;
+      }
+      identifyAttempts += 1;
+      console.log(`[phase2] retrieveSessionInfo(${shardId}) -> null (will IDENTIFY, attempt ${identifyAttempts}/${MAX_IDENTIFY_ATTEMPTS})`);
+      if (identifyAttempts > MAX_IDENTIFY_ATTEMPTS) {
+        // We've already burned our budget. The library will call back here
+        // again on its own reconnect logic — returning null again would just
+        // keep IDENTIFYing. Throwing here aborts the shard and lets the
+        // outer code report a clear failure instead of looping silently.
+        const err = new Error(`IDENTIFY budget exhausted (${identifyAttempts} attempts)`);
+        err.code = 'SPIKE_IDENTIFY_BUDGET';
+        throw err;
+      }
+      return null;
     },
     updateSessionInfo: (shardId, info) => {
       if (info === null) {
         // Discord rejected the resume (most commonly: session aged out
-        // past the ~60s window, or version skew). @discordjs/ws clears
-        // session info and will issue a fresh IDENTIFY next.
-        console.log(`[phase2] updateSessionInfo(${shardId}) -> null (RESUME REJECTED — falling back to IDENTIFY)`);
+        // past the ~60s window, version skew, or another process
+        // IDENTIFY'd on the same token and invalidated this session).
+        // @discordjs/ws clears session info and will issue a fresh
+        // IDENTIFY next — so we clear our mirror too.
+        console.log(`[phase2] updateSessionInfo(${shardId}) -> null (RESUME REJECTED — clearing local mirror)`);
         postResumeSessionCleared = true;
+        currentSession = null;
       } else {
         console.log(`[phase2] updateSessionInfo(${shardId}) seq=${info.sequence} session=${info.sessionId.slice(0, 8)}…`);
+        currentSession = info;
       }
     },
   });
@@ -253,12 +284,30 @@ async function runPhase2(token) {
     console.error('[phase2] shard error:', error.message);
   });
 
-  await manager.connect();
+  // manager.connect() resolves once the underlying @discordjs/ws layer
+  // considers the shard "available." That signal can lag a clean RESUME —
+  // the WS is open and dispatching events before connect() resolves.
+  // Race it against a global timeout so the spike doesn't hang on
+  // unexpected library timing. The Dispatch handler will set resumed /
+  // identified regardless of whether connect() has resolved yet.
+  const GLOBAL_TIMEOUT_MS = 15_000;
+  const connectPromise = manager.connect().catch((err) => {
+    // SPIKE_IDENTIFY_BUDGET errors come from our retrieveSessionInfo guard
+    // and are an intentional abort — surface them but don't crash the
+    // outer flow, so we can still report cleanly.
+    console.error(`[phase2] connect() threw: ${err.code || ''} ${err.message}`);
+  });
+  await Promise.race([
+    connectPromise,
+    new Promise((resolve) => setTimeout(resolve, GLOBAL_TIMEOUT_MS)),
+  ]);
 
-  // Wait long enough for either RESUMED or READY to fire.
-  await new Promise((resolve) => setTimeout(resolve, 8000));
+  // Give the gateway a small window after connect resolves (or after we
+  // gave up waiting on it) to deliver the RESUMED/READY dispatch. 3s is
+  // more than enough — both events fire within a second on the happy path.
+  await new Promise((resolve) => setTimeout(resolve, 3000));
 
-  await manager.destroy({ code: 1000 });
+  await manager.destroy({ code: 1000 }).catch(() => { /* shutting down anyway */ });
 
   if (resumed) {
     console.log('[phase2] RESULT: RESUME-OK (Pillar 2 mechanism validated)');
@@ -266,12 +315,19 @@ async function runPhase2(token) {
   }
   if (identified && postResumeSessionCleared) {
     console.log('[phase2] RESULT: RESUME-FAIL → IDENTIFY-fallback (graceful)');
-    console.log('[phase2] Cause is usually session-aged-out (>60s since phase1) or version skew.');
-    console.log('[phase2] The mechanism still works in production — the design treats this as');
-    console.log('[phase2] a counted SLI (resume success rate) with IDENTIFY as a safety net.');
+    console.log('[phase2] Cause is usually session-aged-out (>60s since phase1), version skew,');
+    console.log('[phase2] or another process IDENTIFYing on the same token. The mechanism still');
+    console.log('[phase2] works in production — design treats this as a counted SLI (resume');
+    console.log('[phase2] success rate) with IDENTIFY as a safety net.');
     process.exit(0);
   }
-  console.error('[phase2] RESULT: UNCLEAR — neither RESUMED nor READY observed within 8s');
+  if (postResumeSessionCleared && identifyAttempts >= MAX_IDENTIFY_ATTEMPTS) {
+    console.error('[phase2] RESULT: RESUME-FAIL + IDENTIFY also failed (budget exhausted).');
+    console.error('[phase2] This usually means token contention — another process is IDENTIFYing');
+    console.error('[phase2] on the same token. Check that no other gateway task is running.');
+    process.exit(3);
+  }
+  console.error('[phase2] RESULT: UNCLEAR — neither RESUMED nor READY observed within timeout');
   process.exit(2);
 }
 
