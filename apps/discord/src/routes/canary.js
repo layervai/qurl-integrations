@@ -32,11 +32,17 @@ const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 // is gated to non-production). Embed shape doesn't need to match
 // `/qurl send` — recipients know this is a probe.
 function buildCanaryDmPayload({ test, qurlLink, resourceId, expiresAt }) {
-  const expiresUnix = Math.floor(new Date(expiresAt).getTime() / 1000);
+  // Guard against `expiresAt` being undefined/garbage from a future
+  // caller-shape change — `Math.floor(NaN)` would render `<t:NaN:R>`
+  // in the embed otherwise. `null` makes Discord drop the relative
+  // timestamp gracefully.
+  const t = new Date(expiresAt).getTime();
+  const expiresUnix = Number.isFinite(t) ? Math.floor(t / 1000) : null;
+  const expiresFragment = expiresUnix === null ? '' : `, expires <t:${expiresUnix}:R>`;
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
     .setTitle(`[Canary probe] ${test}`)
-    .setDescription(`Synthetic test from the canary-exec probe — confirms the qURL pipeline (connector upload → mint → DM) is healthy.\n\n[qURL link](${qurlLink}) (resource_id: \`${resourceId}\`, expires <t:${expiresUnix}:R>)`)
+    .setDescription(`Synthetic test from the canary-exec probe — confirms the qURL pipeline (connector upload → mint → DM) is healthy.\n\n[qURL link](${qurlLink}) (resource_id: \`${resourceId}\`${expiresFragment})`)
     .setTimestamp();
   return { embeds: [embed] };
 }
@@ -68,9 +74,10 @@ async function runScenario({ test, recipientUserId, apiKey }) {
       // Explicit default catches the "added to VALID_TESTS, forgot
       // to wire runScenario" refactor — fail fast with a named
       // error instead of silently falling through to the location
-      // path.
+      // path. step: null because no upload was attempted — keeps
+      // the Lambda's per-step metric attribution honest.
       return {
-        ok: false, step: 'upload', error: 'unhandled_test',
+        ok: false, step: null, error: 'unhandled_test',
         latency_ms: Date.now() - startedAt,
       };
     }

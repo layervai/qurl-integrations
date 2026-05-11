@@ -191,6 +191,20 @@ describe('/canary/exec — differentiated scenario path', () => {
     expect(res.body.error).toBe('invalid_test');
   });
 
+  it('happy-path response does NOT carry reason/apiCode (redaction contract holds on success)', async () => {
+    // Today `runScenario` doesn't attach reason/apiCode on success,
+    // so this is vacuous now — but pins the contract against a
+    // refactor that started attaching upstream metadata to the ok
+    // path. Keeps the redaction story symmetric with the failure
+    // tests above.
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('reason');
+    expect(res.body).not.toHaveProperty('apiCode');
+  });
+
   it('send_file: uploads via reUploadBuffer (NOT uploadJsonToConnector), mints, DMs', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
