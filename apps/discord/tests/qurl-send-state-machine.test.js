@@ -1026,17 +1026,21 @@ describe('handleSend — Step 3: final form', () => {
     );
   });
 
-  it('self-destruct dropdown: empty values array falls back to no-timer (defense)', async () => {
-    // Discord's setMinValues=1 means an empty values array shouldn't
-    // happen in normal traffic, but a forged component interaction
-    // could send `values: []`. compInt.values[0] is then undefined,
-    // which selfDestructSelectValueToSeconds returns null for. Pin
-    // the path explicitly so a future refactor doesn't regress it.
+  it.each([
+    ['empty values array', []],
+    // Discord's setMinValues(1) means values is always populated, but
+    // a forged interaction could omit the field entirely. The
+    // optional chaining (`compInt.values?.[0]`) defends both cases —
+    // the empty-array path was covered before; this it.each variant
+    // also pins the truly-missing-field path so a refactor that
+    // dropped the `?.` would fire here.
+    ['missing values field', undefined],
+  ])('self-destruct dropdown: %s falls back to no-timer (defense)', async (_label, valuesField) => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
       users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
     });
-    const destructEmpty = makeCompInt(ids.selfDestructSelect, { values: [] });
+    const destructEmpty = makeCompInt(ids.selfDestructSelect, { values: valuesField });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
       awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructEmpty, sendBtn],

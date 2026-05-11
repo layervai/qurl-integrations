@@ -1360,6 +1360,17 @@ async function handleSend(interaction, apiKey) {
     // isFinite + > 0 invariant the form preview uses — a corrupted DDB
     // row carrying Infinity is truthy and would otherwise mark a wrong
     // option default.
+    // hasTimer is the `default` predicate for both the no-timer option
+    // (negated) and each preset (with an equality check). An off-preset
+    // finite value (only reachable today via a hypothetical backfilled
+    // sendConfig.self_destruct_seconds outside the preset set) leaves
+    // every option un-defaulted; Discord then renders the first option
+    // ('No self-destruct timer') in the collapsed header while the
+    // formContent preview line still echoes the off-preset value via
+    // formatSelfDestructLabel's `${seconds}s` fallback. The mismatch is
+    // visible but harmless (the wire still carries the value); a more
+    // defensive choice would be `default: !hasTimer || !findPresetBySeconds(...)`,
+    // skipped here because the path is exotic and the asymmetry honest.
     const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
     // No setPlaceholder — the No-timer option ships default-true when
     // !hasTimer, so the dropdown header always reflects the current
