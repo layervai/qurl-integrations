@@ -265,6 +265,19 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
+  // Comma-separated allowlist of Discord user-IDs the canary's
+  // differentiated path may DM. Defense-in-depth: if the NHP
+  // network-layer auth is ever bypassed, an attacker could
+  // otherwise force the bot to DM arbitrary user-IDs they supply.
+  // Mirrors the recipient list terraform passes into the canary
+  // Lambda's RECIPIENT_USER_IDS_JSON env. Empty allowlist disables
+  // the differentiated path (route returns 503
+  // canary_recipients_unconfigured).
+  CANARY_RECIPIENT_USER_IDS: (process.env.CANARY_RECIPIENT_USER_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+
   // /qurl send limits — both must be > 0. A cooldown of 0 would silently
   // disable the rate limit; a recipients cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
