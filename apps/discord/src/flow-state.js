@@ -203,6 +203,13 @@ function decryptPayload(ciphertext) {
 // `{ created: false }` and can short-circuit. Successful create
 // returns `{ created: true, version: 1 }`.
 //
+// The `{ created: false }` return carries no `version`. A caller
+// that needs the existing row's version after a redelivery
+// short-circuit must follow up with `loadFlow(flow_id)` — the
+// version that would have been "1" for a fresh create is not
+// the version of the in-table row, which may have already
+// advanced via transitionFlow.
+//
 // Why caller-supplied `expires_at` rather than computing it here:
 // different flow types have different lifecycle bounds (a
 // `/qurl setup` modal has a 15-minute window; a `/qurl send`
@@ -549,7 +556,9 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         const recheck = await ddb.send(new GetCommand({
           TableName: TABLE_NAME,
           Key: { flow_id },
-          ProjectionExpression: 'flow_id, expires_at',
+          // Partition key is always returned by GetCommand, so we
+          // only project `expires_at` explicitly.
+          ProjectionExpression: 'expires_at',
           ConsistentRead: true,
         }));
         if (!recheck?.Item) {

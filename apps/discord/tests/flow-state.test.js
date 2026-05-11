@@ -262,14 +262,14 @@ describe('flow-state.createFlow', () => {
 
 describe('flow-state.loadFlow', () => {
   test('returns the row with payload decrypted on happy path', async () => {
-    const futureExpiry = Math.floor(Date.now() / 1000) + 600;
+    const expiresAt = futureExpiry();
     ddbMock.on(GetCommand).resolves({
       Item: {
         flow_id: 'id',
         stage: 's',
         version: 3,
         payload: `enc:v1:IV:TAG:${Buffer.from('{"k":"v"}').toString('hex')}`,
-        expires_at: futureExpiry,
+        expires_at: expiresAt,
         created_at: 1000,
         updated_at: 1100,
       },
@@ -281,7 +281,7 @@ describe('flow-state.loadFlow', () => {
       stage: 's',
       version: 3,
       payload: { k: 'v' },
-      expires_at: futureExpiry,
+      expires_at: expiresAt,
       created_at: 1000,
       updated_at: 1100,
     });
@@ -467,6 +467,24 @@ describe('flow-state.transitionFlow', () => {
     expect(upd.args[0].input.UpdateExpression).toMatch(/#p = :payload/);
     // …and writes null to clear the existing payload.
     expect(upd.args[0].input.ExpressionAttributeValues[':payload']).toBeNull();
+  });
+
+  test('created_at is never written by transitionFlow (preserves row birth time)', async () => {
+    // Regression guard: DDB preserves attributes not mentioned in
+    // UpdateExpression. If a future refactor accidentally added
+    // `#c = :created_at` to the SET list, the row would lose its
+    // original birth time on every transition. Lock it down.
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+
+    await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+    });
+
+    const upd = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(upd.args[0].input.UpdateExpression).not.toMatch(/created_at/);
+    expect(upd.args[0].input.ExpressionAttributeNames).not.toMatchObject({ '#c': 'created_at' });
   });
 
   test('skips payload encrypt when payload is omitted', async () => {
