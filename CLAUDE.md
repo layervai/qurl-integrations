@@ -10,10 +10,11 @@
 
 Polyglot monorepo for qURL integrations. SDKs live in separate repos: [qurl-python](https://github.com/layervai/qurl-python), [qurl-typescript](https://github.com/layervai/qurl-typescript).
 
-- `apps/slack/`, `apps/teams/`, `apps/cli/`, `apps/zapier/` — Go (`cmd/` + `internal/`)
-- `apps/discord/` — Node.js / TypeScript
+- `apps/slack/`, `apps/cli/` — Go (`cmd/` + `internal/`)
+- `apps/discord/` — Node.js (CommonJS, `src/*.js`)
+- `apps/teams/`, `apps/zapier/` — placeholder dirs, no implementation yet
 - `shared/` — Go packages consumed by every Go app; changes here affect all of them
-- `e2e/` — TypeScript end-to-end tests
+- `e2e/` — TypeScript end-to-end tests (Jest)
 - Per-app release tracks via Release Please monorepo mode (`release-please-config.json`)
 
 ## Commit format
