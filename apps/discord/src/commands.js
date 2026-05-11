@@ -864,15 +864,15 @@ async function handleSend(interaction, apiKey) {
     // exposure. If the user invoked /qurl send already in a DM with
     // the bot, just await in the same channel — no pivot needed.
     let captureChannel;
-    // Tracks the bot's "Ready! Drop your file here" message in the DM
-    // so we can delete it after capture. Only set in the DM-pivot path
-    // (the DM-already path uses initBtn.update which is the ephemeral
-    // interaction reply — no separate DM bot message to clean up).
+    // Tracks the bot's file-prompt message in the DM so we can delete
+    // it after capture. Only set in the DM-pivot path (the DM-already
+    // path uses initBtn.update which is the ephemeral interaction
+    // reply — no separate DM bot message to clean up).
     let dmPromptMessage = null;
     if (interaction.channel.type === ChannelType.DM) {
       captureChannel = interaction.channel;
       await initBtn.update({
-        content: '\u{1F4C1} **Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.',
+        content: '\u{1F4C1} **Attach a file** — tap **+** to upload (or drag-drop on desktop). I\'ll wait 60 seconds.',
         components: [],
       });
     } else {
@@ -884,7 +884,7 @@ async function handleSend(interaction, apiKey) {
       let dm;
       try {
         dm = await interaction.user.createDM();
-        dmPromptMessage = await dm.send('\u{1F4C1} **Ready! Drop your file here** (drag-drop or use the `+` icon). I\'ll wait 60 seconds.');
+        dmPromptMessage = await dm.send('\u{1F4C1} **Ready!** Tap **+** to attach a file (or drag-drop on desktop). I\'ll wait 60 seconds.');
       } catch (err) {
         const dmsBlocked = err && (err.code === 50007 || err.code === '50007');
         if (!dmsBlocked) {
@@ -902,7 +902,7 @@ async function handleSend(interaction, apiKey) {
       }
       captureChannel = dm;
       await initBtn.update({
-        content: '\u{1F4EC} **I sent you a DM — drop your file there and come back here to send it.** I\'ll wait 60 seconds.',
+        content: '\u{1F4EC} **I sent you a DM — attach your file there and come back here to send it.** I\'ll wait 60 seconds.',
         components: [],
       });
     }
@@ -932,12 +932,9 @@ async function handleSend(interaction, apiKey) {
           sendNonce, userId: interaction.user.id, error: err?.message,
         });
       }
-      // Tear down the DM prompt before returning. Without this the user
-      // is left with a stale "Ready! Drop your file here. I'll wait 60
-      // seconds." sitting in their DM thread forever — bots can't go
-      // back and delete the prompt later, and the user sees no feedback
-      // that the timeout happened on the bot side. Cleanup is fire-and-
-      // forget so a delete failure doesn't mask the user-facing message.
+      // Tear down the DM prompt — bots can't delete it later, so a
+      // leftover orphans in the user's DM forever. Fire-and-forget
+      // so a delete failure doesn't mask the user-facing message.
       if (dmPromptMessage) {
         dmPromptMessage.delete().catch((dErr) => logger.warn('Failed to delete stale DM prompt after capture timeout/error', {
           sendNonce, userId: interaction.user.id, error: dErr?.message,
@@ -1025,16 +1022,10 @@ async function handleSend(interaction, apiKey) {
 
     attachment = fileMessage.attachments.first();
 
-    // No fileMessage.delete() here — bots can't delete user messages
-    // in DMs (Manage Messages doesn't apply outside guild channels), and
-    // even if we could, the file is in a 1:1 DM with no other viewers.
-    //
-    // We CAN delete the bot-authored DM messages once capture is done,
-    // and that's worth doing for visual cleanup. Send a brief "Got your
-    // file" confirmation, then delete BOTH that confirmation and the
-    // earlier "Ready! Drop your file here" prompt. The user's drop-
-    // message stays — they can delete it themselves after Send if they
-    // want a fully clean DM thread.
+    // No fileMessage.delete() — bots can't delete user messages in
+    // DMs, and the file's in a 1:1 thread anyway. We DO delete the
+    // bot-authored prompt + "Got your file" confirmation for visual
+    // cleanup; the user can clear their own attachment message.
     if (dmPromptMessage) {
       const cleanup = async () => {
         // Build a Link button back to the channel where /qurl send was
@@ -3709,7 +3700,7 @@ const commands = [
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
             '\t1. Run `/qurl send` and pick **Send File** or **Send Location**\n' +
-            '  2. (Files only) I\'ll DM you privately — drop the file there, not in the public channel\n' +
+            '  2. (Files only) I\'ll DM you privately — attach the file there, not in the public channel\n' +
             '  3. Choose recipient(s), expiry, and optionally a personal message — then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +

@@ -429,7 +429,7 @@ describe('handleSend — Step 2: file path', () => {
     const interaction = makeInteraction({ awaitQueue: [fileInit] });
     await cmd.execute(interaction);
     expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
-    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Tap **+** to attach a file'));
     expect(fileInit.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('I sent you a DM'),
     }));
@@ -473,14 +473,15 @@ describe('handleSend — Step 2: file path', () => {
     });
     await cmd.execute(interaction);
     expect(interaction.user.createDM).toHaveBeenCalledTimes(1);
-    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Ready! Drop your file here'));
+    expect(interaction._dmChannel.send).toHaveBeenCalledWith(expect.stringContaining('Tap **+** to attach a file'));
   });
 
   it('keeps file capture in-channel when /qurl send is invoked already in a DM', async () => {
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
     const channelAwaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const fileInit = fileInitBtn();
     const interaction = makeInteraction({
-      awaitQueue: [fileInitBtn()],
+      awaitQueue: [fileInit],
       // Override channel to be a DM (type:1). The file capture should
       // run on this channel directly, no createDM pivot.
       channel: {
@@ -491,6 +492,12 @@ describe('handleSend — Step 2: file path', () => {
     await cmd.execute(interaction);
     expect(interaction.user.createDM).not.toHaveBeenCalled();
     expect(channelAwaitMessages).toHaveBeenCalled();
+    // Pin the DM-already prompt wording so a regression that revives
+    // desktop-only "drag-drop" language on this branch (parallel to
+    // the dm-pivot branch tested above) fails CI.
+    expect(fileInit.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('tap **+** to upload'),
+    }));
   });
 
 
@@ -734,13 +741,13 @@ describe('handleSend — Step 2: file path', () => {
     expect(lateDropGenerations.has('user-1')).toBe(false);
   });
 
-  it('deletes the stale DM "Ready!" prompt when capture times out (no orphan in DM thread)', async () => {
+  it('deletes the stale DM file-attach prompt when capture times out (no orphan in DM thread)', async () => {
     // Regression guard: without the cleanup in the awaitMessages catch
-    // path, a timeout would leave the bot's "Ready! Drop your file
-    // here. I'll wait 60 seconds." sitting in the user's DM forever —
-    // bots can't go back and delete prompts later, and the user has
-    // no way to clean it up themselves (only message authors can
-    // delete in DMs).
+    // path, a timeout would leave the bot's "I'll wait 60 seconds"
+    // file-attach prompt sitting in the user's DM forever — bots
+    // can't go back and delete prompts later, and the user has no
+    // way to clean it up themselves (only message authors can delete
+    // in DMs).
     const dmPromptDelete = jest.fn().mockResolvedValue(undefined);
     const dmPromptMessage = { delete: dmPromptDelete };
     const dmSend = jest.fn().mockResolvedValue(dmPromptMessage);
