@@ -87,12 +87,15 @@ if (config.isOpenNHPActive) {
   }));
 }
 
-// Canary parser cap — 4 KB matches the route body shape (small JSON
-// with test + recipient_user_id). MUST be registered before the
-// global express.json() below so /canary inherits the tight cap.
-// Single constant shared with the router mount further down so a
-// future refactor touching one gate doesn't silently revert the
-// other to the 1 MB global parser.
+// Canary mount — parser, scoped error handler, router, and boot
+// warns colocated. MUST be registered before the global
+// express.json() below so /canary inherits the 4 KB cap (route
+// body shape is small JSON; 1 MB would silently widen the surface).
+// LOAD-BEARING: canaryEnabled (= config.isOpenNHPActive) trusts
+// that NHP is actually fronting the process at the network layer —
+// the route does no app-layer auth (NHP's per-knock OpenTime IS
+// the auth). If a future env flips this flag without NHP in front
+// of the listener, /canary/exec is unauthenticated. Tracked in #216.
 const canaryEnabled = config.isOpenNHPActive;
 
 if (canaryEnabled) {
@@ -111,6 +114,14 @@ if (canaryEnabled) {
     }
     return next(err);
   });
+  app.use('/canary', canaryRouter);
+  logger.info('Canary endpoint mounted at /canary/exec (NHP-knock authenticated)');
+  if (!config.QURL_API_KEY) {
+    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
+  }
+  if (!Array.isArray(config.CANARY_RECIPIENT_USER_IDS) || config.CANARY_RECIPIENT_USER_IDS.length === 0) {
+    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — all requests will return 503 canary_recipients_unconfigured.');
+  }
 }
 
 app.use(express.json({ limit: '1mb' }));
@@ -260,22 +271,6 @@ if (!config.isQurlOAuthConfigured) {
 app.use('/oauth/discord', noStoreHeaders, discordInstallRouter);
 if (!config.isDiscordInstallConfigured) {
   logger.info('Discord install callback mounted in not-configured mode (DISCORD_CLIENT_SECRET or AUTH0_* env vars unset).');
-}
-
-// LOAD-BEARING: canaryEnabled (= config.isOpenNHPActive) trusts that
-// NHP is actually fronting the process at the network layer — the
-// route does no app-layer auth (NHP's per-knock OpenTime IS the
-// auth). If a future env enables the flag without NHP in front of
-// the listener, /canary/exec is unauthenticated. Tracked in #216.
-if (canaryEnabled) {
-  app.use('/canary', canaryRouter);
-  logger.info('Canary endpoint mounted at /canary/exec (NHP-knock authenticated)');
-  if (!config.QURL_API_KEY) {
-    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
-  }
-  if (!Array.isArray(config.CANARY_RECIPIENT_USER_IDS) || config.CANARY_RECIPIENT_USER_IDS.length === 0) {
-    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — all requests will return 503 canary_recipients_unconfigured.');
-  }
 }
 
 // Error handler (Express requires the 4-arg signature; `next` unused)

@@ -352,6 +352,20 @@ describe('/canary/exec — differentiated scenario path', () => {
     );
   });
 
+  it('falls back to link_host="invalid-url" when mintLinks returns a non-URL string', async () => {
+    // Pins the `try { new URL(link).host } catch { 'invalid-url' }`
+    // fallback in canary.js. Without this test, an upstream contract
+    // regression that returned a malformed link would dump garbage
+    // into the metric label silently — covered today by the catch
+    // but not exercised.
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'not a url' }]);
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.link_host).toBe('invalid-url');
+  });
+
   it('returns 400 invalid_recipient_user_id when only `test` is supplied (no recipient)', async () => {
     // Symmetric to the only-recipient case above. Pins that the
     // route validates both fields independently — a refactor that
