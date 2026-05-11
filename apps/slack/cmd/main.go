@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -87,7 +88,24 @@ func run() error {
 		return errors.New("SLACK_SIGNING_SECRET is required")
 	}
 
-	authProvider := auth.EnvProvider{EnvVar: "QURL_API_KEY"}
+	// Per-workspace OAuth runtime: DDBProvider reads the workspace_state
+	// table populated by /oauth/qurl/callback. The bot can't function
+	// before the table is provisioned (qurl-integrations-infra TF
+	// feat/slack-oauth-wireup), so a missing WORKSPACE_STATE_TABLE
+	// fails startup distinctly from an empty table. The legacy
+	// QURL_API_KEY env var is read once below as a per-workspace
+	// override for the breakglass / sandbox-test posture — see comment.
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	ddbProvider, err := auth.NewDDBProvider(signalCtx,
+		auth.WithTableName(os.Getenv("WORKSPACE_STATE_TABLE")),
+		auth.WithKMSKeyARN(os.Getenv("WORKSPACE_STATE_KMS_KEY_ARN")),
+	)
+	if err != nil {
+		return fmt.Errorf("DDBProvider init: %w", err)
+	}
+	var authProvider auth.Provider = ddbProvider
 	userAgent := "qurl-slack/" + version
 
 	// Optional pool-cap override. Empty env is "use default" silently;
@@ -114,18 +132,17 @@ func run() error {
 		}
 	}
 
-	// signalCtx feeds two seams: the main goroutine (to detect
-	// SIGTERM and trigger srv.Shutdown) and Handler.BaseContext (so
-	// async slash-command workers observe cancellation through the
-	// same signal). Threading the same ctx into both keeps the
-	// shutdown story coherent — a worker mid-POST to response_url
-	// receives ctx.Canceled at the same instant Shutdown starts
-	// refusing new connections.
-	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
+	// signalCtx is hoisted above so the DDB-provider constructor can
+	// observe shutdown during AWS config load. It feeds two seams: the
+	// main goroutine (to detect SIGTERM and trigger srv.Shutdown) and
+	// Handler.BaseContext (so async slash-command workers observe
+	// cancellation through the same signal). Threading the same ctx
+	// into both keeps the shutdown story coherent — a worker mid-POST
+	// to response_url receives ctx.Canceled at the same instant
+	// Shutdown starts refusing new connections.
 
 	handler := internal.NewHandler(internal.Config{
-		AuthProvider:       &authProvider,
+		AuthProvider:       authProvider,
 		SlackSigningSecret: slackSigningSecret,
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
@@ -141,11 +158,24 @@ func run() error {
 		},
 	})
 
+	// Compose the top-level mux: existing Slack-bot routes (handled
+	// by the internal.Handler.ServeHTTP fall-through) + new OAuth
+	// routes wired into a sibling ServeMux. The mux is what serves;
+	// the internal handler stays unchanged.
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/", handler)
+	if oauthCfg, ok := buildOAuthConfig(ddbProvider); ok {
+		oauth.RegisterRoutes(rootMux, oauthCfg)
+		slog.Info("registered /oauth/qurl/{start,callback} routes")
+	} else {
+		slog.Warn("OAuth routes NOT registered — required env vars unset (AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE, SLACK_BASE_URL, OAUTH_STATE_SECRET)")
+	}
+
 	srv := &http.Server{
 		// Addr intentionally omitted: srv.Serve(ln) ignores it, and we
 		// bind via net.ListenConfig below. Setting it would mislead a
 		// future reader into thinking it controls the bind.
-		Handler:           handler,
+		Handler:           rootMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -206,4 +236,55 @@ func run() error {
 	}
 	slog.Info("server stopped cleanly")
 	return nil
+}
+
+// buildOAuthConfig assembles the oauth.Config from env. Returns
+// (cfg, false) when any required env var is missing — the caller logs
+// and skips route registration so a sandbox boot with no Auth0
+// configured still serves the existing Slack surface.
+//
+// Required env vars:
+//
+//	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
+//	SLACK_BASE_URL, OAUTH_STATE_SECRET
+func buildOAuthConfig(provider *auth.DDBProvider) (oauth.Config, bool) {
+	domain := os.Getenv("AUTH0_DOMAIN")
+	clientID := os.Getenv("AUTH0_CLIENT_ID")
+	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
+	audience := os.Getenv("AUTH0_AUDIENCE")
+	baseURL := os.Getenv("SLACK_BASE_URL")
+	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
+	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
+
+	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
+		baseURL == "" || stateSecret == "" {
+		return oauth.Config{}, false
+	}
+
+	// JWKS verifier is initialized lazily (NewJWKSVerifier opens the
+	// network for the initial JWKS fetch). If it fails, the callback
+	// proceeds without email-claim verification — the qURL key still
+	// gets minted; only the success-page email line is missing.
+	var verifier oauth.IDTokenVerifier
+	issuer := "https://" + domain + "/"
+	if v, err := oauth.NewJWKSVerifier(context.Background(), issuer, clientID); err != nil {
+		slog.Warn("JWKS verifier init failed — id_token email will not be displayed", "error", err)
+	} else {
+		verifier = v
+	}
+
+	return oauth.Config{
+		Auth0Domain:       domain,
+		Auth0ClientID:     clientID,
+		Auth0ClientSecret: clientSecret,
+		Auth0Audience:     audience,
+		SlackBaseURL:      baseURL,
+		OAuthStateSecret:  []byte(stateSecret),
+		Provider:          provider,
+		IDTokenVerifier:   verifier,
+		Minter:            &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
+		// SlackClient left nil for now — DM-after-success is the
+		// `TODO(claude-followup)` Slack-API wiring; the success-page
+		// HTML still renders and the user gets confirmation.
+	}, true
 }
