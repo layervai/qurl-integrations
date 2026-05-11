@@ -183,13 +183,26 @@ async function runPhase1(token) {
 
   persistSession(latestSessionInfo);
   console.log('[phase1] persisted session state to', SESSION_FILE);
-  console.log('[phase1] closing WS with code 1000 (clean — session stays resumable)');
 
-  // destroy with code 1000 (Normal Closure) preserves the session on
-  // Discord's side for the resume buffer window (~60s). Any other close
-  // code (4xxx INVALID_SESSION etc) invalidates the session immediately.
-  await manager.destroy({ code: 1000 });
-  console.log('[phase1] done. Run phase2 within ~60s to resume.');
+  // DO NOT call manager.destroy() here. Reading @discordjs/ws's destroy
+  // implementation (dist/index.js around line 733): destroy() unconditionally
+  // calls updateSessionInfo(shardId, null) unless `recover: Resume` is set,
+  // AND sends a WS close-1000 frame. Both signals invalidate the session
+  // from Discord's perspective — phase2's RESUME would then hit a deleted
+  // session and fall back to IDENTIFY. The library's `recover: Resume`
+  // path uses code 4200 (which Discord treats as resumable) but ALSO
+  // triggers internalConnect() in the same process, which would resume
+  // back into phase1 instead of leaving the session for phase2.
+  //
+  // The production equivalent is ECS SIGTERMing the task: persist state,
+  // then exit. TCP connection drops without a clean close frame; Discord
+  // sees a network-level disconnect and preserves the session for the
+  // resume buffer window (~60s) — exactly the shape we need for cross-
+  // process handoff. The spike emulates this: persist + exit, no clean
+  // close.
+  console.log('[phase1] exiting without close-frame (TCP-drop emulates ECS SIGTERM);');
+  console.log('[phase1] session stays resumable on Discord for ~60s.');
+  console.log('[phase1] Run phase2 within ~60s.');
   process.exit(0);
 }
 

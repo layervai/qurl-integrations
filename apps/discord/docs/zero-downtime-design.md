@@ -230,6 +230,32 @@ production code aborts the shard after N consecutive identifies without a
 successful READY and falls back to a controlled process exit + ECS
 restart — same shape as the spike's `MAX_IDENTIFY_ATTEMPTS` guard.
 
+**Contract gotcha: don't call `manager.destroy()` if you want the session to
+survive into the next process.** Reading `@discordjs/ws@1.2.3`'s `destroy()`
+implementation (`dist/index.js` around line 733): unless you pass
+`recover: Resume`, it calls `updateSessionInfo(shardId, null)` AND sends a
+close-1000 frame, both of which invalidate the session. The `recover: Resume`
+path sends close-4200 (which Discord treats as resumable) but also triggers
+`internalConnect()` to resume *back into the same process* — not what we
+want for cross-process handoff.
+
+The right shape for the production gateway's SIGTERM handler is therefore:
+
+1. Persist final sequence to the DDB session row.
+2. Push "you're up" to the standby's control channel; await ACK.
+3. **Exit without closing the WS.** TCP drops without a close frame; Discord
+   treats it as an unexpected network disconnect and preserves the session
+   in its resume buffer for ~60 s.
+4. The standby's `retrieveSessionInfo` returns the persisted row, the
+   library issues `RESUME` on the resume URL, Discord replays buffered
+   events, no event loss.
+
+The spike's phase1 validates this exact sequence: persist + `process.exit(0)`
+without a `destroy()` call → phase2 in a fresh process picks up the session
+and gets `RESUMED dispatch received`. Validated 2026-05-10 against the
+sandbox bot token (with the contending ECS task scaled to zero for the
+duration).
+
 ### Pillar 3 — Hot-standby with direct push-handoff
 
 Two gateway replicas. A DDB-conditional-write lock primitive (table
