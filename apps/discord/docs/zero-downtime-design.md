@@ -429,9 +429,16 @@ boot-time loads. Rotation procedure is therefore a rolling redeploy:
    parameter.
 2. Trigger a rolling redeploy of `bot_gateway`. With
    `gateway_desired_count=2` and the deployment invariant that
-   serializes replacements, the standby restarts first and starts
-   accepting both values; once it ACKs healthy, the active is
-   replaced and starts signing with `<new>`.
+   serializes replacements (PR 14 pins
+   `minimumHealthyPercent=50 / maximumPercent=100`), the **standby
+   is always replaced first** — ECS stops the standby, which has no
+   active WS to disrupt, then waits for the new standby to be
+   healthy before moving on to the active. The new standby boots
+   with both `<new>` and `<old>` in memory and accepts either. Only
+   then does ECS replace the active, which boots with both and
+   starts signing with `<new>`. There is no window where the active
+   signs with `<new>` while a standby only knows `<old>` —
+   verified by the serial-replacement invariant.
 3. After at least 24 h of stable operation (drains any in-flight
    handoff messages signed under `<old>`), write
    `{"current": "<new>", "previous": "<new>"}` (or scrub

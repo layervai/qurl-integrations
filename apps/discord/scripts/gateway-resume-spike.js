@@ -41,14 +41,15 @@
  *
  *   # Phase 1 — first process captures session state.
  *   # Connects, waits 10s for READY + a few heartbeats, persists state
- *   # to /tmp/spike-session.json, closes cleanly with code 1000.
+ *   # to $TMPDIR/qurl-spike-$UID/spike-session.json (owner-only dir +
+ *   # owner-only file), closes cleanly with code 1000.
  *   DISCORD_TOKEN=<sandbox bot token> \
  *     node scripts/gateway-resume-spike.js phase1
  *
  *   # Phase 2 — second process resumes from the persisted state.
- *   # Loads /tmp/spike-session.json, configures retrieveSessionInfo to
- *   # return it, opens a fresh connection. Logs the Discord op-code so
- *   # you can verify it was RESUME (op 6 reply, no IDENTIFY).
+ *   # Loads the same path, configures retrieveSessionInfo to return it,
+ *   # opens a fresh connection. Logs the Discord op-code so you can
+ *   # verify it was RESUME (op 6 reply, no IDENTIFY).
  *   DISCORD_TOKEN=<same sandbox bot token> \
  *     node scripts/gateway-resume-spike.js phase2
  *
@@ -69,15 +70,56 @@
  * Use a SANDBOX bot token. Running against prod would briefly knock the
  * prod gateway offline (a second IDENTIFY on the same token kicks the
  * first session).
+ *
+ * Exit codes
+ * ----------
+ *
+ *   0 — Success. Either RESUME-OK (phase2 saw RESUMED dispatch) or
+ *       graceful RESUME-FAIL → IDENTIFY-fallback (phase2 saw READY
+ *       after Discord cleared the session). Both indicate the mechanism
+ *       is working; the resume-success SLI is what differs.
+ *   1 — Internal error. Bad token, missing persisted session in phase2,
+ *       persistSession threw from a signal handler. See stderr for the
+ *       specific failure.
+ *   2 — UNCLEAR. Phase2 connected (or attempted to) but neither RESUMED
+ *       nor READY observed within the timeout. Usually a Discord-side
+ *       issue or a connect() hang the global timeout didn't catch.
+ *   3 — Token contention. RESUME rejected AND IDENTIFY budget exhausted.
+ *       Almost always means another process is IDENTIFYing on the same
+ *       token; scale that process down before re-running the spike.
+ *   130 — phase1 SIGINT (user Ctrl+C). Partial session was persisted if
+ *         READY had already fired; otherwise nothing to persist.
+ *   143 — phase1 SIGTERM (kill <pid>). Same behaviour as 130, distinct
+ *         code so a wrapping script can tell user-cancel from external
+ *         termination.
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { WebSocketManager, WebSocketShardEvents } = require('@discordjs/ws');
 const { REST } = require('@discordjs/rest');
 const { GatewayIntentBits } = require('discord-api-types/v10');
 
-const SESSION_FILE = process.env.SPIKE_SESSION_FILE || '/tmp/spike-session.json';
+// Per-user, owner-only directory under tmpdir for the session file.
+// Plain /tmp/spike-session.json was exploitable in a narrow but real
+// way: between persistSession's unlinkSync(tmp) and the subsequent
+// writeFileSync, anyone with write access to /tmp could create the
+// path as a symlink to an arbitrary target — writeFileSync follows
+// symlinks, so the secret would land at the attacker's target under
+// 0o600. Locating the file inside a 0o700 directory owned by the
+// invoking user closes that vector at the directory layer.
+//
+// Resolved at module load (cheap; idempotent). The mkdirSync is
+// safe to call when the directory already exists (`recursive: true`).
+const SPIKE_DIR = path.join(os.tmpdir(), `qurl-spike-${os.userInfo().uid}`);
+fs.mkdirSync(SPIKE_DIR, { recursive: true, mode: 0o700 });
+// chmodSync as belt-and-suspenders against a pre-existing directory
+// that was created with looser perms (mkdirSync's `mode` is ignored
+// if the directory already exists).
+fs.chmodSync(SPIKE_DIR, 0o700);
+
+const SESSION_FILE = process.env.SPIKE_SESSION_FILE || path.join(SPIKE_DIR, 'spike-session.json');
 const PHASE1_LIFETIME_MS = 10_000;
 
 // Minimum viable intents — Guilds only. The spike isn't exercising the
@@ -398,15 +440,26 @@ async function runPhase2(token) {
     // outer flow, so we can still report cleanly.
     console.error(`[phase2] connect() threw: ${err.code || ''} ${err.message}`);
   });
+  // .unref() on both timers below so they don't pin the event loop past
+  // a successful connect — matches phase1's pattern. Today phase2 always
+  // process.exit's so the leak is benign, but if anyone restructures
+  // phase2 to not always exit synchronously, .unref() is what keeps the
+  // dangling timer from leaking. Phase1 had this; phase2 didn't.
   await Promise.race([
     connectPromise,
-    new Promise((resolve) => setTimeout(resolve, GLOBAL_TIMEOUT_MS)),
+    new Promise((resolve) => {
+      const t = setTimeout(resolve, GLOBAL_TIMEOUT_MS);
+      t.unref();
+    }),
   ]);
 
   // Give the gateway a small window after connect resolves (or after we
   // gave up waiting on it) to deliver the RESUMED/READY dispatch. 3s is
   // more than enough — both events fire within a second on the happy path.
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await new Promise((resolve) => {
+    const t = setTimeout(resolve, 3000);
+    t.unref();
+  });
 
   await manager.destroy({ code: 1000 }).catch(() => { /* shutting down anyway */ });
 
