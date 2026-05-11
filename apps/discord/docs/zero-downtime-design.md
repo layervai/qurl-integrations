@@ -332,11 +332,24 @@ take it while the legitimate holder is still heartbeating: their
 write hits an `ConditionalCheckFailedException`, they back off, and
 re-evaluate on the next renewal. The TTL is best-effort recovery for
 the case where the legitimate holder has genuinely died; `version` is
-the safety net everywhere else. Engineering target: ±1 s of clock
-skew has zero impact (heartbeat 2 s gives 1 missed-renewal margin
-before TTL fires). Beyond ±1 s the `version` check absorbs it. We
-don't engineer for >±5 s — chrony failure on Fargate is a much larger
-incident than a brief double-IDENTIFY would be.
+the safety net everywhere else.
+
+The HMAC freshness window (5 s) caps skew tolerance on the handoff
+path: a peer with > ±2 s of skew may have its HMAC body rejected
+as stale even though the lock-side `version` check would absorb the
+underlying take-over attempt. We therefore split skew into three
+tiers:
+
+- **≤ ±1 s**: zero impact. Heartbeat (2 s) ≫ skew; HMAC freshness
+  window (5 s) ≫ skew. Engineering target.
+- **±1 s to ±2 s**: degraded. Handoff HMAC bodies near the freshness
+  edge may be rejected and re-sent (active retries the POST); lock
+  `version` keeps the take-over invariant safe regardless.
+- **> ±2 s**: incident. Both the freshness window and the
+  heartbeat-vs-TTL margin start failing. Treated as a chrony
+  failure — paging on `clock_skew_seconds` metric in the gateway-
+  health canary (PR 13's observability hooks). Recovery is
+  operational (replace the task), not application-side.
 
 **Why no per-replica polling.** The lock primitive alone doesn't tell the
 standby *when* to act; the standby only needs the lock when it's
@@ -379,7 +392,13 @@ the active's monotonic epoch-ms at send time. The standby:
    intra-cluster — at sharding inflection, a body captured from
    shard 0's handoff can't be replayed against shard 5's standby.
 3. Maintains a small in-memory LRU of seen nonces (~1k entries,
-   eviction on size), rejects duplicates.
+   eviction on size), rejects duplicates. LRU correctness is tied
+   to the freshness cap, not the size: at 5 s freshness, a 1k-entry
+   LRU absorbs up to ~200 handoffs/sec before still-fresh nonces
+   start evicting (which would allow replay within the 5 s window).
+   Real-world handoff rate is one-per-deploy, so the size is
+   ~3 orders of magnitude over-provisioned; revisit the size if
+   freshness or handoff rate changes.
 
 Without these, the `expected_version` value in a captured body could
 be replayed — OCC on `transferLock` would catch the *second* replay
@@ -454,10 +473,18 @@ shape.
 **If step 4 returns no peer** (standby still booting, or just-died), the
 deploy falls back to the cold-start path: standby acquires the lock when
 its own next heartbeat fires (within 2 s) AND the TTL has elapsed
-(within 6 s of the active's last heartbeat). Worst-case no-peer floor
-is ~6 s lock-TTL wait + ~1 s RESUME RTT ≈ **~7 s**, not the original
-~15 s. Still degraded vs the push-handoff sub-second path, but bounded
-and known.
+(within 6 s of the active's last heartbeat). Floor math:
+
+- **Best case ~7 s**: standby's heartbeat fires immediately after the
+  active dies. 6 s TTL wait + ~1 s RESUME RTT.
+- **Worst case ~9 s**: standby just renewed its own heartbeat row
+  before the active died, so it discovers the dead-active state up
+  to ~2 s later (one full heartbeat cycle later). 2 s heartbeat wait
+  + 6 s TTL wait + ~1 s RESUME RTT.
+
+Both are well below the original ~15 s+ ceiling and bound the
+degraded-mode window. Still degraded vs the push-handoff sub-second
+path, but predictable.
 
 **Standby on `POST /control/yours`:**
 

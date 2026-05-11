@@ -195,11 +195,21 @@ async function runPhase1(token) {
   const persistAndExit = (signal) => {
     if (exiting) return; // debounce: second signal after persist-but-before-exit
     exiting = true;
-    if (latestSessionInfo) {
-      persistSession(latestSessionInfo);
-      console.log(`[phase1] ${signal}: persisted partial session before exit`);
-    } else {
-      console.log(`[phase1] ${signal}: nothing to persist (READY not yet received)`);
+    // try/catch so persistSession throwing (disk-full, chmodSync EACCES,
+    // ENOENT on rename) doesn't strand us in the signal handler. Once
+    // `exiting=true`, our registered handler eats subsequent signals, and
+    // a thrown error would skip process.exit entirely — leaving phase1
+    // running with no obvious way to kill it short of SIGKILL.
+    try {
+      if (latestSessionInfo) {
+        persistSession(latestSessionInfo);
+        console.log(`[phase1] ${signal}: persisted partial session before exit`);
+      } else {
+        console.log(`[phase1] ${signal}: nothing to persist (READY not yet received)`);
+      }
+    } catch (err) {
+      console.error(`[phase1] ${signal}: persistSession threw, exiting anyway`, err.message);
+      process.exit(1);
     }
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
@@ -314,21 +324,18 @@ async function runPhase2(token) {
         throw err;
       }
       identifyAttempts += 1;
-      console.log(`[phase2] retrieveSessionInfo(${shardId}) -> null (will IDENTIFY, attempt ${identifyAttempts}/${MAX_IDENTIFY_ATTEMPTS})`);
       if (identifyAttempts > MAX_IDENTIFY_ATTEMPTS) {
-        // We've already burned our budget. The library will call back here
-        // again on its own reconnect logic — returning null again would just
-        // keep IDENTIFYing. Setting a flag (instead of just throwing) lets
-        // the outer flow surface a clean budget-exhausted result. A thrown
-        // error alone would propagate up through connect()'s catch handler
-        // and get logged but not classified — the budget-exhausted exit
-        // code (3) below wouldn't fire because the resumed/identified
-        // branches run first; this flag is checked alongside them.
+        // Budget burned. Setting a flag (alongside the throw) so the
+        // outer flow can classify exit-3 cleanly — a thrown error
+        // alone would route through connect()'s catch and not reach
+        // the dispatch classifier.
         budgetExhausted = true;
+        console.log(`[phase2] retrieveSessionInfo(${shardId}) -> null (BUDGET EXHAUSTED after ${MAX_IDENTIFY_ATTEMPTS} attempt(s), aborting)`);
         const err = new Error(`IDENTIFY budget exhausted (${identifyAttempts} attempts)`);
         err.code = 'SPIKE_IDENTIFY_BUDGET';
         throw err;
       }
+      console.log(`[phase2] retrieveSessionInfo(${shardId}) -> null (will IDENTIFY, attempt ${identifyAttempts}/${MAX_IDENTIFY_ATTEMPTS})`);
       return null;
     },
     updateSessionInfo: (shardId, info) => {
