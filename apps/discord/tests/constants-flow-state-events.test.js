@@ -35,16 +35,28 @@ describe('AUDIT_EVENTS — event-shipper Pillar 1 (flow_state)', () => {
     expect(Object.isFrozen(AUDIT_EVENTS)).toBe(true);
   });
 
-  test('FLOW_* literals match the snake_case-lower convention used by all other audit events', () => {
-    // Convention check: every audit event literal is lower_snake_case
-    // (no uppercase, no hyphens, no spaces). CloudWatch metric filter
-    // patterns happen to be case-sensitive AND the rest of the
-    // codebase's filters at qurl-integrations-infra assume
-    // lower_snake_case. A capital letter slipping into a new event
-    // name would silently miss every filter.
-    for (const key of ['FLOW_CREATED', 'FLOW_TRANSITION', 'FLOW_DELETED']) {
-      const literal = AUDIT_EVENTS[key];
+  test('every AUDIT_EVENTS literal follows the lower_snake_case convention', () => {
+    // Convention check across the WHOLE object, not just the FLOW_*
+    // entries this PR adds — turns this test into a regression guard
+    // for every current and future event name. Convention: every
+    // audit event literal is lower_snake_case (no uppercase, no
+    // hyphens, no spaces). CloudWatch metric filter patterns are
+    // case-sensitive AND the rest of the codebase's filters at
+    // qurl-integrations-infra assume lower_snake_case. A capital
+    // letter slipping into any new event name would silently miss
+    // every filter that targets it.
+    for (const [key, literal] of Object.entries(AUDIT_EVENTS)) {
       expect(literal).toMatch(/^[a-z][a-z0-9_]*$/);
+      // Pin a sane upper bound on the literal length too — CloudWatch
+      // metric filter pattern length is bounded, and a runaway literal
+      // would silently misbehave at the filter layer. 80 chars is well
+      // above every current literal (longest today is
+      // `gateway_heartbeat_unhealthy` at 26).
+      expect(literal.length).toBeLessThanOrEqual(80);
+      // Sanity: key must be UPPER_SNAKE_CASE per file convention.
+      // Catches a future contributor adding `flowCreated: 'flow_created'`
+      // which would still pass the literal-shape check.
+      expect(key).toMatch(/^[A-Z][A-Z0-9_]*$/);
     }
   });
 });

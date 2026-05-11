@@ -199,12 +199,13 @@ const AUDIT_EVENTS = {
 
   // ── Event-shipper Pillar 1: flow_state observability ──
   //
-  // Names reserved by this PR (event-shipper observability Phase 1.0);
-  // emissions wired by PR 4's state-machine harness in
+  // Names reserved by the event-shipper observability Phase 1.0 PR;
+  // emissions wired by the state-machine harness PR in
   // apps/discord/src/flow-state.js. The paired CloudWatch metric filters
-  // land in qurl-integrations-infra (separate PR) once PR 4 is producing
-  // events in sandbox. Three-stage rollout — names reserved → emissions
-  // wired → metric filters lit — keeps each layer reviewable in isolation.
+  // land in qurl-integrations-infra (separate PR) once the harness is
+  // producing events in sandbox. Three-stage rollout — names reserved →
+  // emissions wired → metric filters lit — keeps each layer reviewable
+  // in isolation.
   //
   // The "flow_state" table is created by qurl-integrations-infra#504; the
   // SLI these events feed is "Flow continuity" (design doc § SLI / SLO
@@ -243,8 +244,9 @@ const AUDIT_EVENTS = {
 
   // Emitted on every transitionFlow() call — the workhorse event for
   // the state machine's observability. The paired CloudWatch metric
-  // filter materializes `qurl_bot_flow_transition_total{stage_from,
-  // stage_to,result}` (design doc § Pillar 1).
+  // filter materializes
+  // `qurl_bot_flow_transition_total{stage_from,stage_to,result,terminal}`
+  // (design doc § Pillar 1).
   // Payload fields:
   //   - `stage_from`: stage the flow was in before the transition.
   //                   LOW-cardinality — safe to dimension on.
@@ -265,7 +267,8 @@ const AUDIT_EVENTS = {
   //                   terminal stage in the filter (terminal set
   //                   varies per flow type — revoke is shorter than
   //                   send). LOW-cardinality (boolean) — safe to
-  //                   dimension on.
+  //                   dimension on AND included in the materialized
+  //                   metric's dimension list above.
   //   - `flow_id`:    HIGH-cardinality. Forensic-query ONLY — same
   //                   posture as FLOW_CREATED.
   FLOW_TRANSITION: 'flow_transition',

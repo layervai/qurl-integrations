@@ -125,7 +125,10 @@ sharding lands later).
 The state-machine harness `apps/discord/src/flow-state.js` (PR 4) provides
 `createFlow`, `loadFlow`, `transitionFlow` (DDB conditional `UpdateItem` with
 `version = :expected` for OCC), and `deleteFlow`. Every transition emits a
-metric `qurl_bot_flow_transition_total{stage_from,stage_to,result}` (PR 3).
+metric `qurl_bot_flow_transition_total{stage_from,stage_to,result,terminal}`
+(materialized by the event-shipper observability Phase 1.0 PR's audit-event
+reservation plus the matching CloudWatch metric filter in
+`qurl-integrations-infra`).
 
 **Application-level concurrency rule:** a user with an existing non-expired
 flow row in a given `(channel_id)` cannot start a second flow there. The second
@@ -656,11 +659,12 @@ by design, because DDB TTL deletion is asynchronous and a synchronous
 captures every unclean drop: process crash mid-flow, worker hang, TTL reap
 of an abandoned flow.
 
-PR 3 (event-shipper observability, Phase 1.0) reserves the
+The event-shipper observability Phase 1.0 PR reserves the
 `FLOW_CREATED` / `FLOW_TRANSITION` / `FLOW_DELETED` audit-event names in
-`apps/discord/src/constants.js`. PR 4 wires the emissions in the
-state-machine harness. The paired CloudWatch metric filters land in
-`qurl-integrations-infra` once PR 4 is producing events in sandbox.
+`apps/discord/src/constants.js`. The state-machine harness PR wires the
+emissions. The paired CloudWatch metric filters land in
+`qurl-integrations-infra` once the harness is producing events in
+sandbox.
 
 If a future change adds a "delete-on-TTL-reap" sweeper, it MUST emit a
 distinct event (e.g. `FLOW_REAPED`) — not `FLOW_DELETED` — to preserve
