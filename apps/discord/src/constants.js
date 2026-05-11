@@ -268,7 +268,39 @@ const AUDIT_EVENTS = {
   //                   varies per flow type — revoke is shorter than
   //                   send). LOW-cardinality (boolean) — safe to
   //                   dimension on AND included in the materialized
-  //                   metric's dimension list above.
+  //                   metric's dimension list above. FORCED TO false
+  //                   on non-success results (not_found, conflict,
+  //                   error) — the transition didn't advance, so
+  //                   nothing terminal happened, so the audit is
+  //                   honest by construction. Consumers can still
+  //                   slice `count_by(terminal=true)` safely.
+  //   - `extended`:   bool. True iff the transition GENUINELY
+  //                   extended the row's expires_at (the new value
+  //                   is strictly greater than the prior). A
+  //                   set_expires_at that shortens, equals, or
+  //                   leaves the value untouched emits false —
+  //                   so `count_by(extended=true)` is a faithful
+  //                   "this transition bumped the deadline forward"
+  //                   count and not a "set_expires_at was passed"
+  //                   count. Also false on non-success transitions
+  //                   (nothing extended) and on rows whose prior
+  //                   expires_at was missing/corrupted (no honest
+  //                   baseline to extend FROM). LOW-cardinality
+  //                   (boolean) — safe to dimension on. Forensic-
+  //                   only today; not currently used as a metric
+  //                   filter dimension.
+  //   - `version`:    integer. On success: the row's NEW version
+  //                   after the OCC bump. On non-success (conflict,
+  //                   not_found, error): the version the caller
+  //                   expected (i.e., `expectedVersion`). Lets a
+  //                   forensic query correlate retries by attempt
+  //                   identity ("which attempt won version 5?")
+  //                   without needing the live row — important
+  //                   because already-deleted flows can't be
+  //                   JOINed against the live table. LOW-cardinality
+  //                   per-flow (bounded by transitions-per-flow,
+  //                   ~10 in practice); NOT a metric dimension —
+  //                   forensic-only field.
   //   - `flow_id`:    HIGH-cardinality. Forensic-query ONLY — same
   //                   posture as FLOW_CREATED.
   FLOW_TRANSITION: 'flow_transition',
