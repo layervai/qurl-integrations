@@ -1360,18 +1360,18 @@ async function handleSend(interaction, apiKey) {
     // row carrying Infinity is truthy and would otherwise mark a wrong
     // option default.
     const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
+    // No setPlaceholder — the No-timer option ships default-true when
+    // !hasTimer, so the dropdown header always reflects the current
+    // state and the placeholder would never render. Same convention
+    // expirySelect uses (no placeholder; the current expiry is always
+    // the default-true option).
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.selfDestructSelect)
-        // Placeholder is a defensive fallback only — the No-timer option
-        // ships defaulted, so the dropdown header always reflects the
-        // current state (matching how expirySelect always shows the
-        // current expiry, never its placeholder).
-        .setPlaceholder('\u{1F4A5} Self-destruct timer (optional)')
         .addOptions(
-          { label: 'No timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasTimer },
+          { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasTimer },
           ...SELF_DESTRUCT_PRESETS.map((p) => ({
-            label: p.label,
+            label: `\u{1F4A5} ${p.label}`,
             value: String(p.seconds),
             default: hasTimer && selfDestructSeconds === p.seconds,
           }))
@@ -1390,10 +1390,10 @@ async function handleSend(interaction, apiKey) {
     const recipientsResolved = (target === 'user' && recipients.length === 1)
       || (target === 'channel' && recipients.length > 0);
     // Bottom row packs the optional-note button + send + cancel. Discord
-    // allows up to 5 buttons per ActionRow; 3 fits comfortably. Order
-    // matters: the optional-edit affordance sits leftmost so a user
-    // scanning the form left-to-right encounters it before Send,
-    // reducing the chance of sending without noticing the note option.
+    // allows up to 5 buttons per ActionRow; 3 fits comfortably. Left-
+    // to-right reading order puts the optional affordance before the
+    // commit action, which matches how the rest of the form is laid out
+    // (target → user → optional bits → submit).
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.messageBtn)
@@ -1587,7 +1587,10 @@ async function handleSend(interaction, apiKey) {
       // selfDestructSelectValueToSeconds owns the conversion and falls
       // back to null (no timer) for any unexpected value (forged
       // interaction / option-list drift), which is the safe default.
-      selfDestructSeconds = selfDestructSelectValueToSeconds(compInt.values[0]);
+      // Optional chaining defends a malformed interaction that omitted
+      // the `values` array entirely — discord.js normalizes empty to
+      // [] but a forged payload could skip the field.
+      selfDestructSeconds = selfDestructSelectValueToSeconds(compInt.values?.[0]);
       await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
