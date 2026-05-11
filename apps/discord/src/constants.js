@@ -274,14 +274,21 @@ const AUDIT_EVENTS = {
   //                   nothing terminal happened, so the audit is
   //                   honest by construction. Consumers can still
   //                   slice `count_by(terminal=true)` safely.
-  //   - `extended`:   bool. True if the transition extended/reset
-  //                   the row's expires_at (via the `set_expires_at`
-  //                   option). LOW-cardinality (boolean) — safe to
-  //                   dimension on. Forensic-only today; lets an
-  //                   incident query answer "did this transition
-  //                   bump the deadline?" without re-reading the
-  //                   row. Not currently used as a metric filter
-  //                   dimension.
+  //   - `extended`:   bool. True iff the transition GENUINELY
+  //                   extended the row's expires_at (the new value
+  //                   is strictly greater than the prior). A
+  //                   set_expires_at that shortens, equals, or
+  //                   leaves the value untouched emits false —
+  //                   so `count_by(extended=true)` is a faithful
+  //                   "this transition bumped the deadline forward"
+  //                   count and not a "set_expires_at was passed"
+  //                   count. Also false on non-success transitions
+  //                   (nothing extended) and on rows whose prior
+  //                   expires_at was missing/corrupted (no honest
+  //                   baseline to extend FROM). LOW-cardinality
+  //                   (boolean) — safe to dimension on. Forensic-
+  //                   only today; not currently used as a metric
+  //                   filter dimension.
   //   - `version`:    integer. On success: the row's NEW version
   //                   after the OCC bump. On non-success (conflict,
   //                   not_found, error): the version the caller

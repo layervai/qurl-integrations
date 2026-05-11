@@ -532,10 +532,11 @@ describe('flow-state.transitionFlow', () => {
     expect(upd.args[0].input.UpdateExpression).not.toMatch(/payload/);
   });
 
-  test('set_expires_at writes the new expiry, is type-checked, and emits extended=true', async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
+  test('set_expires_at writes new expiry; extended=true when new > prior', async () => {
+    const priorExpires = futureExpiry(600);
+    const newExpiry = futureExpiry(1800);
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: priorExpires } });
     ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
-    const newExpiry = futureExpiry(1200);
 
     await flowState.transitionFlow('id', 1, {
       stage_to: 'b',
@@ -554,6 +555,72 @@ describe('flow-state.transitionFlow', () => {
       extended: true,
       version: 2,
     });
+  });
+
+  test('set_expires_at that SHORTENS the lifetime emits extended=false (honest forensics)', async () => {
+    // The audit field name reads as "the deadline was extended" —
+    // a caller passing a value EARLIER than the current expires_at
+    // is shortening, not extending. Forensic queries like
+    // `count_by(extended=true)` must not over-count.
+    const priorExpires = futureExpiry(3600);
+    const shorterExpiry = futureExpiry(600);
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: priorExpires } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+
+    await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+      set_expires_at: shorterExpiry,
+    });
+
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION, {
+      flow_id: 'id',
+      stage_from: 'a',
+      stage_to: 'b',
+      result: 'success',
+      terminal: false,
+      extended: false,
+      version: 2,
+    });
+  });
+
+  test('set_expires_at equal to prior emits extended=false (strict > semantics)', async () => {
+    // Reading `extended: true` should mean "the deadline genuinely
+    // moved forward". A no-op rewrite (same value) isn't an
+    // extension and shouldn't trip the forensic flag.
+    const sameExpiry = futureExpiry(600);
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', expires_at: sameExpiry } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+
+    await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+      set_expires_at: sameExpiry,
+    });
+
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
+      expect.objectContaining({ extended: false }),
+    );
+  });
+
+  test('set_expires_at on a row with missing prior expires_at emits extended=false (no honest baseline)', async () => {
+    // A corrupted row with no prior expires_at can't be "extended"
+    // in any meaningful sense (there's no prior baseline to extend
+    // FROM). Emit false rather than true-by-default — downstream
+    // forensic queries will pick up the corruption signal via the
+    // recheck warn path anyway.
+    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a' } });
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { version: 2 } });
+
+    await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+      set_expires_at: futureExpiry(600),
+    });
+
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_TRANSITION,
+      expect.objectContaining({ extended: false }),
+    );
   });
 
   test('set_expires_at rejects non-integer', async () => {

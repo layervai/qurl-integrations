@@ -137,6 +137,15 @@ function assertExpiresAt(expiresAt) {
   // can't straddle a second boundary and produce a `now` in the
   // message that contradicts the failed comparison.
   const now = nowEpochSeconds();
+  // Note on `==` boundary: this writer rejects `expires_at == now`
+  // (strict `<=`), while loadFlow and the transitionFlow recheck
+  // treat `expires_at == now` as alive (their `now > exp` checks
+  // are strict, and the Update condition is `#e >= :now`). The
+  // writer is intentionally STRICTER — a row whose TTL is exactly
+  // now would race the next-second boundary into expired territory
+  // before the first loadFlow could hit it. A future reader who
+  // tries to "fix" this asymmetry by relaxing the writer side
+  // would re-open the foot-gun.
   if (expiresAt <= now) {
     throw new RangeError(`flow-state: expires_at must be strictly in the future (got ${expiresAt}; now is ${now}). A row whose TTL is in the past is born expired — it passes the Put, fires FLOW_CREATED, but loadFlow returns null forever after, silently inflating the SLI's silently_dropped numerator. Most often this is a forgotten '+ ttl_seconds' on the caller side.`);
   }
@@ -415,6 +424,18 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
 // a stricter ConditionExpression (which would complicate the
 // not_found/conflict discrimination).
 //
+// **`set_expires_at` cannot revive an expired row.** The
+// `ConditionExpression: #e >= :now` guard means a row whose
+// `expires_at` already slipped into the past will fail the
+// transition with `result: 'not_found'` — even if the caller
+// passes a fresh `set_expires_at` deep into the future.
+// Intentional: a logically-expired row should be treated as
+// dropped, not resurrected (otherwise the SLI's `silently_dropped`
+// math would inflate on every "we noticed it expired, let's
+// extend it" save). Callers that legitimately need to start
+// a fresh lifecycle after expiry should `createFlow` again with
+// a new (or fresh-TTL'd) flow_id.
+//
 // **Audit-emit-on-rethrow contract.** On `result: 'error'` paths
 // the FLOW_TRANSITION audit fires BEFORE the rethrow. A caller
 // that retries a transient `NetworkingError` will produce N
@@ -464,12 +485,19 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // re-checking needs strong consistency. Same rationale as
   // loadFlow's ConsistentRead choice.
   let stage_from = null;
-  const extended = set_expires_at !== undefined;
+  // `extended` is computed against the row's PRIOR `expires_at`, not
+  // just "did the caller pass `set_expires_at`". The name reads as
+  // "the deadline was extended", and a forensic `count_by(extended=
+  // true)` should answer that question honestly — a caller passing
+  // a value EARLIER than the current expires_at (shortening the
+  // row's lifetime) must NOT count as extended. The pre-read
+  // projects `stage, expires_at` to give us the prior value.
+  let extended = false;
   try {
     const got = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ProjectionExpression: 'stage',
+      ProjectionExpression: 'stage, expires_at',
       ConsistentRead: true,
     }));
     if (!got?.Item) {
@@ -479,12 +507,25 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         stage_to,
         result: 'not_found',
         terminal: false,
-        extended,
+        // `extended` is meaningless when there's no row to extend.
+        // Stay false (the boolean default) rather than emitting a
+        // mixed-type `null` for a dimensionable-style field.
+        extended: false,
         version: expectedVersion,
       });
       return { result: 'not_found', version: null };
     }
     stage_from = got.Item.stage ?? null;
+    if (set_expires_at !== undefined) {
+      const priorExpires = got.Item.expires_at;
+      // Strict comparison `>`: set_expires_at == priorExpires is a
+      // no-op rewrite, not an extension. Corrupted/missing prior
+      // expires_at can't be compared meaningfully — emit
+      // extended=false (a row with a missing expires_at can't be
+      // "extended" in any honest sense; downstream forensic queries
+      // would surface the corruption via the recheck warn anyway).
+      extended = typeof priorExpires === 'number' && Number.isFinite(priorExpires) && set_expires_at > priorExpires;
+    }
   } catch (err) {
     logger.error('flow-state.transitionFlow: pre-read failed', { flow_id, reason: err && err.message });
     logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
