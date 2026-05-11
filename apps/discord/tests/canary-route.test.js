@@ -72,10 +72,14 @@ function makeApp() {
   return app;
 }
 
-// Empty body — the legacy back-end-only path, mirrors what an
-// operator would post (or a pre-extension Lambda). Differentiated-
-// path tests use their own scenario-shaped bodies.
-const VALID_BODY = {};
+// Every request must carry both `test` and `recipient_user_id` —
+// the legacy empty-body path was dropped before this PR landed
+// (consolidation PR for the canary surface). Tests use these two
+// shared bodies for the happy paths; failure-mode tests build
+// their own.
+const VALID_USER_ID = '1483661063835750551';
+const SEND_FILE_BODY     = { test: 'send_file',     recipient_user_id: VALID_USER_ID };
+const SEND_LOCATION_BODY = { test: 'send_location', recipient_user_id: VALID_USER_ID };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -89,119 +93,27 @@ beforeEach(() => {
   mockSendDM.mockResolvedValue(true);
 });
 
-describe('/canary/exec — dispatch', () => {
+// Early gates — config-level rejections that run before any
+// upload/mint/dm work. Body shape is the same as the differentiated
+// path below.
+describe('/canary/exec — early gates', () => {
   it('returns 503 no_api_key when QURL_API_KEY is unset', async () => {
     mockConfig.QURL_API_KEY = undefined;
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY);
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(503);
     expect(res.body.ok).toBe(false);
     expect(res.body.error).toBe('no_api_key');
     expect(typeof res.body.latency_ms).toBe('number');
     expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
-  });
-
-  it('returns 200 ok with link_host on the happy path', async () => {
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.link_host).toBe('q.test');
-    expect(res.body.resource_id).toBe('res-canary-1');
-    expect(typeof res.body.latency_ms).toBe('number');
-    // Did NOT echo the actual link in the response — link is single-use
-    // and mustn't end up in CloudWatch logs.
-    expect(JSON.stringify(res.body)).not.toContain('canary-token-abc');
-  });
-
-  it('passes a synthetic location payload + 60s expiry to the connector + mintLinks', async () => {
-    await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'google-map',
-        url: expect.stringContaining('canary'),
-        name: 'canary',
-      }),
-      'canary.json',
-      'test-api-key',
-    );
-    expect(mockMintLinks).toHaveBeenCalledWith(
-      'res-canary-1',
-      expect.any(String),
-      1,
-      'test-api-key',
-    );
-    // expiresAt is ~60s in the future — verify it's an ISO date within
-    // a generous window (the network call shape is what matters).
-    const expiresAt = new Date(mockMintLinks.mock.calls[0][1]);
-    const drift = expiresAt.getTime() - Date.now();
-    expect(drift).toBeGreaterThan(30_000);
-    expect(drift).toBeLessThanOrEqual(60_000);
-  });
-
-  it('returns 500 upload_no_resource_id when uploadJsonToConnector resolves without resource_id', async () => {
-    mockUploadJsonToConnector.mockResolvedValueOnce({ /* no resource_id */ });
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('upload_no_resource_id');
-    expect(mockMintLinks).not.toHaveBeenCalled();
-  });
-
-  it('returns 500 no_link_in_mint_response when mintLinks returns an empty array', async () => {
-    mockMintLinks.mockResolvedValueOnce([]);
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('no_link_in_mint_response');
-  });
-
-  it('returns 500 exec_failed with the upstream reason when uploadJsonToConnector throws', async () => {
-    const err = Object.assign(new Error('connector down'), { apiCode: 'connector_unreachable' });
-    mockUploadJsonToConnector.mockRejectedValueOnce(err);
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('exec_failed');
-    expect(res.body.reason).toBe('connector down');
-    expect(res.body.apiCode).toBe('connector_unreachable');
-  });
-
-  it('returns 500 exec_failed when mintLinks throws (e.g., qURL API down)', async () => {
-    mockMintLinks.mockRejectedValueOnce(new Error('mint API 503'));
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('exec_failed');
-    expect(res.body.reason).toBe('mint API 503');
-  });
-
-  it('exec_failed responses include latency_ms (operators triage by it)', async () => {
-    mockUploadJsonToConnector.mockRejectedValueOnce(new Error('network slow'));
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.body.latency_ms).toBeDefined();
-    expect(typeof res.body.latency_ms).toBe('number');
-    expect(res.body.latency_ms).toBeGreaterThanOrEqual(0);
+    expect(mockReUploadBuffer).not.toHaveBeenCalled();
   });
 });
 
 // Differentiated path — Lambda canary sends {test, recipient_user_id}
 // in the body. Each test = upload (file or location) → mint → DM.
 describe('/canary/exec — differentiated scenario path', () => {
-  const VALID_USER_ID = '1483661063835750551';
-  const SEND_FILE_BODY      = { test: 'send_file',     recipient_user_id: VALID_USER_ID };
-  const SEND_LOCATION_BODY  = { test: 'send_location', recipient_user_id: VALID_USER_ID };
-
   it('returns 400 invalid_test for an unrecognized test value', async () => {
     const body = { test: 'send_carrier_pigeon', recipient_user_id: VALID_USER_ID };
     const res = await request(makeApp())
@@ -345,5 +257,75 @@ describe('/canary/exec — differentiated scenario path', () => {
         error: 'dm_failed',
       })
     );
+  });
+
+  it('attributes failure to step="mint" with apiCode propagated to logs when mintLinks rejects', async () => {
+    // Differentiated-path mint-threw branch (canary.js:81-87) —
+    // covers the apiCode-propagation contract on-call relies on for
+    // alarm attribution. Symmetric to the upload-threw test above
+    // which asserts the same on the upload step.
+    const logger = require('../src/logger');
+    const err = Object.assign(new Error('mint API 503'), { apiCode: 'qurl_unreachable' });
+    mockMintLinks.mockRejectedValueOnce(err);
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY);
+    expect(res.status).toBe(500);
+    expect(res.body.step).toBe('mint');
+    expect(res.body.error).toBe('mint_threw');
+    // reason + apiCode MUST NOT appear in the response body — they
+    // live in logs only. The route strips them via destructuring;
+    // pin the contract here.
+    expect(res.body.reason).toBeUndefined();
+    expect(res.body.apiCode).toBeUndefined();
+    // … but they MUST appear in the structured log so on-call can
+    // attribute alarms to a specific upstream failure mode.
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Canary scenario failed',
+      expect.objectContaining({
+        step: 'mint',
+        error: 'mint_threw',
+        reason: 'mint API 503',
+        apiCode: 'qurl_unreachable',
+      })
+    );
+  });
+
+  it('returns 500 scenario_threw when runScenario itself throws (sendDM rejects)', async () => {
+    // The outer try/catch in canary.js:69-79 catches throws that
+    // escape runScenario's inner per-step catches. sendDM swallows
+    // its own errors and returns boolean today; a future refactor
+    // that bubbles a throw must not silently break the synthesized-
+    // failure path. Pin the contract.
+    const logger = require('../src/logger');
+    mockSendDM.mockRejectedValueOnce(new Error('discord client crash'));
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY);
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBe('scenario_threw');
+    expect(res.body.step).toBeNull();
+    expect(res.body.reason).toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Canary scenario threw',
+      expect.objectContaining({
+        test: 'send_file',
+        recipient_user_id: VALID_USER_ID,
+        error: 'discord client crash',
+      })
+    );
+  });
+
+  it('returns 400 invalid_recipient_user_id when only `test` is supplied (no recipient)', async () => {
+    // Symmetric to the only-recipient case above. Pins that the
+    // route validates both fields independently — a refactor that
+    // collapses the checks into a single combined-presence guard
+    // would regress this.
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send({ test: 'send_file' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_recipient_user_id');
   });
 });

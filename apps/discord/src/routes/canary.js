@@ -1,9 +1,19 @@
 // Canary exec endpoint — synthetic-monitor probe driven by the
-// EventBridge Lambda in qurl-integrations-infra. Auth is the NHP
-// knock at the network layer (Lambda calls /nhp/internal/knock
+// EventBridge Lambda in qurl-integrations-infra#493. Auth is the
+// NHP knock at the network layer (Lambda calls /nhp/internal/knock
 // directly; AC opens iptables hole for the Lambda's egress IP
-// within OpenTime). No HMAC or timestamp check at this layer —
-// NHP's per-knock OpenTime window subsumes replay defense.
+// within OpenTime). No HMAC or timestamp at this layer — NHP's
+// per-knock OpenTime subsumes replay defense.
+//
+// Body shape: `{test, recipient_user_id}` required. Upload → mint
+// → DM the recipient with a "[Canary probe]" embed. Step-level
+// status returned so the Lambda's per-test metric attributes
+// failures to the right subsystem (upload | mint | dm).
+//
+// Upstream error detail (reason, apiCode) stays in logs only —
+// never echoed in HTTP responses, since reflecting upstream
+// internals to an arbitrary caller would leak connector internals
+// if NHP ever fails open.
 
 const express = require('express');
 const { EmbedBuilder } = require('discord.js');
@@ -126,135 +136,73 @@ router.post('/exec', async (req, res) => {
   const startedAt = Date.now();
   const apiKey = config.QURL_API_KEY;
   if (!apiKey) {
-    // Multi-tenant deployments don't set a global QURL_API_KEY — the
-    // canary is meaningful only on single-tenant prod where the bot
-    // has its own key. Fail closed.
+    // Multi-tenant deployments don't set a global QURL_API_KEY —
+    // canary is single-tenant-prod-only. Fail closed.
     return res.status(503).json({ ok: false, error: 'no_api_key', latency_ms: Date.now() - startedAt });
   }
 
-  // Body is JSON-parsed by express.json() in server.js. req.body is
-  // {} when the request body is empty or non-JSON.
   const body = req.body || {};
   const test = typeof body.test === 'string' ? body.test : null;
   const recipientUserId = typeof body.recipient_user_id === 'string' ? body.recipient_user_id : null;
 
-  // Differentiated path: scenario + recipient → upload → mint → DM.
-  if (test || recipientUserId) {
-    if (!test || !VALID_TESTS.has(test)) {
-      return res.status(400).json({
-        ok: false, error: 'invalid_test',
-        valid: Array.from(VALID_TESTS),
-        latency_ms: Date.now() - startedAt,
-      });
-    }
-    if (!recipientUserId || !SNOWFLAKE_RE.test(recipientUserId)) {
-      return res.status(400).json({
-        ok: false, error: 'invalid_recipient_user_id',
-        latency_ms: Date.now() - startedAt,
-      });
-    }
-    // Allowlist is the last DM-blast defense if the qURL/NHP gate
-    // is ever bypassed. Empty list → 503 (server config); mismatch
-    // → 403 (auth OK, principal not authorized).
-    const allowlist = config.CANARY_RECIPIENT_USER_IDS;
-    if (!Array.isArray(allowlist) || allowlist.length === 0) {
-      return res.status(503).json({
-        ok: false, error: 'canary_recipients_unconfigured',
-        latency_ms: Date.now() - startedAt,
-      });
-    }
-    if (!allowlist.includes(recipientUserId)) {
-      return res.status(403).json({
-        ok: false, error: 'recipient_not_allowed',
-        latency_ms: Date.now() - startedAt,
-      });
-    }
-
-    try {
-      const result = await runScenario({ test, recipientUserId, apiKey });
-      // Step-level metrics emit even when runScenario doesn't throw —
-      // log so on-call has a correlatable entry per CloudWatch alarm.
-      if (!result.ok) {
-        logger.warn('Canary scenario failed', {
-          test, recipient_user_id: recipientUserId,
-          step: result.step, error: result.error,
-          reason: result.reason, apiCode: result.apiCode,
-          latency_ms: result.latency_ms,
-        });
-      }
-      const status = result.ok ? 200 : 500;
-      return res.status(status).json({ ...result, test, recipient_user_id: recipientUserId });
-    } catch (err) {
-      logger.warn('Canary scenario threw', {
-        test, recipient_user_id: recipientUserId,
-        error: err?.message,
-        latency_ms: Date.now() - startedAt,
-      });
-      return res.status(500).json({
-        ok: false, step: null, error: 'scenario_threw',
-        reason: err?.message,
-        latency_ms: Date.now() - startedAt,
-        test, recipient_user_id: recipientUserId,
-      });
-    }
+  if (!test || !VALID_TESTS.has(test)) {
+    return res.status(400).json({
+      ok: false, error: 'invalid_test',
+      valid: Array.from(VALID_TESTS),
+      latency_ms: Date.now() - startedAt,
+    });
+  }
+  if (!recipientUserId || !SNOWFLAKE_RE.test(recipientUserId)) {
+    return res.status(400).json({
+      ok: false, error: 'invalid_recipient_user_id',
+      latency_ms: Date.now() - startedAt,
+    });
+  }
+  // Allowlist is the last DM-blast defense if the NHP gate is ever
+  // bypassed. Empty list → 503 (server config); mismatch → 403.
+  const allowlist = config.CANARY_RECIPIENT_USER_IDS;
+  if (!Array.isArray(allowlist) || allowlist.length === 0) {
+    return res.status(503).json({
+      ok: false, error: 'canary_recipients_unconfigured',
+      latency_ms: Date.now() - startedAt,
+    });
+  }
+  if (!allowlist.includes(recipientUserId)) {
+    return res.status(403).json({
+      ok: false, error: 'recipient_not_allowed',
+      latency_ms: Date.now() - startedAt,
+    });
   }
 
-  // Legacy empty-body path — connector + mint, no DM. Pre-extension
-  // Lambdas still hit this; drop once every fielded Lambda sends the
-  // differentiated body. Location payload (not file) keeps this off
-  // the Discord CDN download path so the canary isolates the
-  // bot↔qURL hop.
-  const probePayload = {
-    type: 'google-map',
-    url: 'https://maps.app.goo.gl/canary-probe',
-    name: 'canary',
-  };
-
   try {
-    const upload = await uploadJsonToConnector(probePayload, 'canary.json', apiKey);
-    if (!upload?.resource_id) {
-      return res.status(500).json({
-        ok: false, error: 'upload_no_resource_id',
-        latency_ms: Date.now() - startedAt,
+    const result = await runScenario({ test, recipientUserId, apiKey });
+    if (!result.ok) {
+      // Upstream reason + apiCode go to logs only — never echoed in
+      // the response body. The Lambda is internal, but if NHP ever
+      // fails open, reflecting upstream error detail to an arbitrary
+      // caller would leak connector internals.
+      logger.warn('Canary scenario failed', {
+        test, recipient_user_id: recipientUserId,
+        step: result.step, error: result.error,
+        reason: result.reason, apiCode: result.apiCode,
+        latency_ms: result.latency_ms,
       });
     }
-
-    // 60-second TTL on the canary link.
-    const expiresAt = new Date(Date.now() + 60_000).toISOString();
-    const minted = await mintLinks(upload.resource_id, expiresAt, 1, apiKey);
-
-    const link = minted?.[0]?.qurl_link;
-    if (!link) {
-      return res.status(500).json({
-        ok: false, error: 'no_link_in_mint_response',
-        latency_ms: Date.now() - startedAt,
-      });
-    }
-
-    let linkHost;
-    try { linkHost = new URL(link).host; } catch { linkHost = 'invalid-url'; }
-
-    return res.json({
-      ok: true,
-      latency_ms: Date.now() - startedAt,
-      // Single-use credential — host only, never the full link.
-      link_host: linkHost,
-      resource_id: upload.resource_id,
-    });
+    // Strip reason + apiCode before responding — same rationale.
+    const { reason: _r, apiCode: _a, ...safe } = result;
+    void _r; void _a;
+    const status = result.ok ? 200 : 500;
+    return res.status(status).json({ ...safe, test, recipient_user_id: recipientUserId });
   } catch (err) {
-    // warn not error — expected during outages; don't pollute the
-    // error log alongside whatever's already firing.
-    logger.warn('Canary exec failed', {
+    logger.warn('Canary scenario threw', {
+      test, recipient_user_id: recipientUserId,
       error: err?.message,
-      apiCode: err?.apiCode,
       latency_ms: Date.now() - startedAt,
     });
     return res.status(500).json({
-      ok: false,
-      error: 'exec_failed',
-      reason: err?.message,
-      apiCode: err?.apiCode,
+      ok: false, step: null, error: 'scenario_threw',
       latency_ms: Date.now() - startedAt,
+      test, recipient_user_id: recipientUserId,
     });
   }
 });
