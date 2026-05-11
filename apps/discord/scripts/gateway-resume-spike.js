@@ -123,9 +123,18 @@ function persistSession(info, filePath = SESSION_FILE) {
   // on a personal dev machine, world-readable in /tmp is sloppy hygiene
   // for a token-adjacent secret. The umask alone isn't reliable
   // protection (defaults vary) so the mode is explicit.
+  //
+  // Belt-and-suspenders: Node's writeFileSync `mode` option is only
+  // honored when the file is CREATED. If `.tmp` already exists from a
+  // crashed previous run (precisely the scenario the atomic-write
+  // pattern exists for), `mode` is silently ignored and the existing
+  // perms are preserved — which could be 0o644 or worse. chmodSync
+  // unconditionally after the write guarantees the file lands at
+  // 0o600 regardless of whether it was created or overwritten.
   const abs = path.resolve(filePath);
   const tmp = `${abs}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, abs);
 }
 
@@ -184,7 +193,16 @@ async function runPhase1(token) {
   // and gets a confusing "no persisted session" error rather than "session
   // captured up to seq N, ready for phase2." Mirrors the production
   // SIGTERM handler shape (persist final state before exit).
+  //
+  // `exiting` guard: if SIGINT arrives DURING the main flow's
+  // persistSession() call below, we'd otherwise call persistSession twice
+  // concurrently — both use the same .tmp path, so the second writeFileSync
+  // could clobber the first's tmp file mid-rename. Single boolean closes
+  // the race; the second SIGINT exits immediately.
+  let exiting = false;
   process.on('SIGINT', () => {
+    if (exiting) return;
+    exiting = true;
     if (latestSessionInfo) {
       persistSession(latestSessionInfo);
       console.log('[phase1] SIGINT: persisted partial session before exit');
@@ -363,33 +381,77 @@ async function runPhase2(token) {
 
   await manager.destroy({ code: 1000 }).catch(() => { /* shutting down anyway */ });
 
-  // Result classification — order matters. The most-specific failure mode
-  // (budget exhausted) is checked BEFORE the more-general identified-without-
-  // budget case, otherwise the order falls through to the wrong branch.
-  // Earlier version had this order backwards; the budget-exhausted exit was
-  // unreachable because `identified && postResumeSessionCleared` would match
-  // first (READY fires before the second retrieveSessionInfo throws).
+  const classification = classifyResult({ resumed, budgetExhausted, identified, postResumeSessionCleared });
+  if (classification.severity === 'error') {
+    for (const line of classification.lines) console.error(line);
+  } else {
+    for (const line of classification.lines) console.log(line);
+  }
+  process.exit(classification.exitCode);
+}
+
+/**
+ * Pure result-classification over the four observed booleans from phase2.
+ * Extracted so unit tests can pin the dispatch order without needing a
+ * live Discord connection. Order is load-bearing: budgetExhausted must be
+ * checked BEFORE identified-without-budget because READY fires before the
+ * second retrieveSessionInfo throws, so the booleans `identified` and
+ * `budgetExhausted` can both be true on the same run — and the budget-
+ * exhausted classification is the more-specific signal (it tells the
+ * operator "token contention is the problem" rather than the generic
+ * "RESUME failed but IDENTIFY worked").
+ *
+ * Exit codes:
+ *   0 — RESUME-OK or RESUME-FAIL-with-graceful-IDENTIFY-fallback. Both
+ *       indicate the mechanism is working; SLI is just the success rate.
+ *   2 — UNCLEAR. Neither RESUMED nor READY observed within timeout —
+ *       most often a Discord-side problem or a connect() hang we didn't
+ *       race against.
+ *   3 — RESUME-FAIL + IDENTIFY-budget-exhausted. Almost always means
+ *       token contention; the operator's fix is to scale the contending
+ *       process down before re-running.
+ *
+ * @param {{ resumed: boolean, budgetExhausted: boolean, identified: boolean, postResumeSessionCleared: boolean }} flags
+ * @returns {{ exitCode: number, severity: 'log' | 'error', lines: string[] }}
+ */
+function classifyResult({ resumed, budgetExhausted, identified, postResumeSessionCleared }) {
   if (resumed) {
-    console.log('[phase2] RESULT: RESUME-OK (Pillar 2 mechanism validated)');
-    process.exit(0);
+    return {
+      exitCode: 0,
+      severity: 'log',
+      lines: ['[phase2] RESULT: RESUME-OK (Pillar 2 mechanism validated)'],
+    };
   }
   if (budgetExhausted) {
-    console.error('[phase2] RESULT: RESUME-FAIL + IDENTIFY-budget-exhausted.');
-    console.error('[phase2] This usually means token contention — another process is IDENTIFYing');
-    console.error('[phase2] on the same token. Check that no other gateway task is running');
-    console.error('[phase2] (scale bot_gateway to desired_count=0 before re-running the spike).');
-    process.exit(3);
+    return {
+      exitCode: 3,
+      severity: 'error',
+      lines: [
+        '[phase2] RESULT: RESUME-FAIL + IDENTIFY-budget-exhausted.',
+        '[phase2] This usually means token contention — another process is IDENTIFYing',
+        '[phase2] on the same token. Check that no other gateway task is running',
+        '[phase2] (scale bot_gateway to desired_count=0 before re-running the spike).',
+      ],
+    };
   }
   if (identified && postResumeSessionCleared) {
-    console.log('[phase2] RESULT: RESUME-FAIL → IDENTIFY-fallback (graceful)');
-    console.log('[phase2] Cause is usually session-aged-out (>60s since phase1), version skew,');
-    console.log('[phase2] or another process IDENTIFYing on the same token. The mechanism still');
-    console.log('[phase2] works in production — design treats this as a counted SLI (resume');
-    console.log('[phase2] success rate) with IDENTIFY as a safety net.');
-    process.exit(0);
+    return {
+      exitCode: 0,
+      severity: 'log',
+      lines: [
+        '[phase2] RESULT: RESUME-FAIL → IDENTIFY-fallback (graceful)',
+        '[phase2] Cause is usually session-aged-out (>60s since phase1), version skew,',
+        '[phase2] or another process IDENTIFYing on the same token. The mechanism still',
+        '[phase2] works in production — design treats this as a counted SLI (resume',
+        '[phase2] success rate) with IDENTIFY as a safety net.',
+      ],
+    };
   }
-  console.error('[phase2] RESULT: UNCLEAR — neither RESUMED nor READY observed within timeout');
-  process.exit(2);
+  return {
+    exitCode: 2,
+    severity: 'error',
+    lines: ['[phase2] RESULT: UNCLEAR — neither RESUMED nor READY observed within timeout'],
+  };
 }
 
 async function main() {
@@ -421,6 +483,7 @@ module.exports = {
   loadSession,
   persistSession,
   clearSession,
+  classifyResult,
   // Re-exported so tests can pin the default. Not load-bearing; just
   // saves a require in the test file.
   SESSION_FILE,

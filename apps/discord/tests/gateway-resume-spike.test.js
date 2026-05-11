@@ -19,7 +19,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { loadSession, persistSession, clearSession } = require('../scripts/gateway-resume-spike');
+const { loadSession, persistSession, clearSession, classifyResult } = require('../scripts/gateway-resume-spike');
 
 function tempPath(name) {
   return path.join(os.tmpdir(), `spike-test-${process.pid}-${Date.now()}-${name}.json`);
@@ -221,7 +221,7 @@ describe('gateway-resume-spike — persisted file permissions', () => {
   // Skipped on non-Unix where mode bits don't map cleanly.
   const isUnix = process.platform !== 'win32';
 
-  (isUnix ? test : test.skip)('persistSession writes file with mode 0o600', () => {
+  (isUnix ? test : test.skip)('persistSession writes file with mode 0o600 on fresh create', () => {
     const filePath = tempPath('mode-check');
     try {
       persistSession({ sessionId: 'x', resumeURL: 'wss://x/', sequence: 1 }, filePath);
@@ -230,5 +230,123 @@ describe('gateway-resume-spike — persisted file permissions', () => {
     } finally {
       try { fs.unlinkSync(filePath); } catch (_) { /* ok */ }
     }
+  });
+
+  (isUnix ? test : test.skip)('persistSession enforces mode 0o600 even when .tmp already exists', () => {
+    // Node's fs.writeFileSync `mode` option is only honored on file
+    // CREATION. If a previous crashed phase1 left a `.tmp` behind, the
+    // writeFileSync would silently preserve whatever perms the existing
+    // .tmp had. The chmodSync call after writeFileSync covers this; the
+    // test pre-seeds a world-readable .tmp and asserts the post-rename
+    // file lands at 0o600 regardless.
+    const filePath = tempPath('mode-overwrite');
+    const tmpPath = `${path.resolve(filePath)}.tmp`;
+    try {
+      // Pre-seed the .tmp with permissive perms — simulates a crashed
+      // previous run that left a stale .tmp around.
+      fs.writeFileSync(tmpPath, 'stale-data', { mode: 0o644 });
+      fs.chmodSync(tmpPath, 0o644); // belt-and-suspenders since umask can shift mode
+
+      persistSession({ sessionId: 'y', resumeURL: 'wss://y/', sequence: 2 }, filePath);
+
+      const mode = fs.statSync(filePath).mode & 0o777;
+      expect(mode).toBe(0o600);
+    } finally {
+      try { fs.unlinkSync(filePath); } catch (_) { /* ok */ }
+      try { fs.unlinkSync(tmpPath); } catch (_) { /* ok */ }
+    }
+  });
+});
+
+describe('gateway-resume-spike — classifyResult', () => {
+  // Pure logic over four booleans. Order is load-bearing: budgetExhausted
+  // must be checked BEFORE identified-without-budget because READY fires
+  // before the second retrieveSessionInfo throws, so both `identified`
+  // and `budgetExhausted` can be true on the same run. The earlier
+  // (in-place) classification block had this order reversed and the
+  // budget-exhausted exit-code 3 was unreachable. These tests pin the
+  // current order against future regressions.
+
+  test('resumed wins over everything (exit 0, "RESUME-OK")', () => {
+    const r = classifyResult({
+      resumed: true,
+      budgetExhausted: false,
+      identified: false,
+      postResumeSessionCleared: false,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.severity).toBe('log');
+    expect(r.lines.join('\n')).toMatch(/RESUME-OK/);
+  });
+
+  test('resumed wins even if budgetExhausted also set (shouldn\'t happen but pin the precedence)', () => {
+    // Defensive: a future code path that sets both shouldn't downgrade
+    // the success classification.
+    const r = classifyResult({
+      resumed: true,
+      budgetExhausted: true,
+      identified: true,
+      postResumeSessionCleared: true,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.lines.join('\n')).toMatch(/RESUME-OK/);
+  });
+
+  test('budgetExhausted reachable when identified+postResumeSessionCleared also set', () => {
+    // This is the exact bug the reorder fixed: in the real spike run
+    // against a contending sandbox bot, READY fires (→ identified=true,
+    // postResumeSessionCleared=true) BEFORE the second retrieveSessionInfo
+    // throws (→ budgetExhausted=true). The old order matched
+    // identified-fallback first and exit 3 was unreachable.
+    const r = classifyResult({
+      resumed: false,
+      budgetExhausted: true,
+      identified: true,
+      postResumeSessionCleared: true,
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.severity).toBe('error');
+    expect(r.lines.join('\n')).toMatch(/IDENTIFY-budget-exhausted/);
+    expect(r.lines.join('\n')).toMatch(/token contention/);
+  });
+
+  test('graceful IDENTIFY-fallback when RESUME rejected but IDENTIFY succeeds', () => {
+    const r = classifyResult({
+      resumed: false,
+      budgetExhausted: false,
+      identified: true,
+      postResumeSessionCleared: true,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.severity).toBe('log');
+    expect(r.lines.join('\n')).toMatch(/IDENTIFY-fallback/);
+  });
+
+  test('unclear when no signal fires within timeout', () => {
+    const r = classifyResult({
+      resumed: false,
+      budgetExhausted: false,
+      identified: false,
+      postResumeSessionCleared: false,
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.severity).toBe('error');
+    expect(r.lines.join('\n')).toMatch(/UNCLEAR/);
+  });
+
+  test('postResumeSessionCleared alone (without identified) is still UNCLEAR', () => {
+    // postResumeSessionCleared without identified means: Discord
+    // rejected RESUME but no fresh IDENTIFY's READY arrived either.
+    // The graceful-fallback branch requires BOTH flags; without the
+    // identified flag we don't know if IDENTIFY worked, so the result
+    // is genuinely unclear.
+    const r = classifyResult({
+      resumed: false,
+      budgetExhausted: false,
+      identified: false,
+      postResumeSessionCleared: true,
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.lines.join('\n')).toMatch(/UNCLEAR/);
   });
 });

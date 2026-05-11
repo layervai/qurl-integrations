@@ -315,24 +315,28 @@ The original numbers were paced for low-frequency lock churn — but the
 *recovery floor* matters here: the no-peer SIGTERM path means standby
 must wait for the lock TTL to expire before it can acquire. At 2 s / 6 s
 the worst-case no-peer cold-fallback floor is ~6 s + RESUME RTT
-(~1 s) ≈ 7 s, not the original ~15 s. The cost is 5× more DDB writes (one
-heartbeat every 2 s instead of every 5 s); at one item per shard and DDB
-on-demand pricing this is ~$1 per shard per month — trivially worth the
-tighter recovery floor.
+(~1 s) ≈ 7 s, not the original ~15 s. The cost is **2.5× more DDB
+writes** (0.2/s → 0.5/s, one heartbeat per shard per 2 s instead of
+per 5 s). At DDB on-demand write pricing (~$1.25/M), one shard runs
+~$1.62/month total for the heartbeat — trivially worth the tighter
+recovery floor.
 
 **Clock skew on `expires_at < :now`.** The `:now` parameter is evaluated
 on the caller's wall clock. Fargate task clocks are normally fine
-(chrony-equivalent via the host) but the dependency is load-bearing. Two
-mitigations: (a) heartbeat cadence (2 s) is 3× shorter than TTL (6 s) so
-clock skew up to ±2 s within the cluster doesn't trigger spurious
-takeovers; (b) the `version` attribute on `transferLock` and `renewLock`
-provides causal ordering — a clock-skewed peer can't take a lock that
-another peer is actively heartbeating because the `version` check fails
-the conditional write. Beyond ±2 s of skew there's a window where both
-peers might believe they hold the lock; the `version` check on next-
-renewal forces one to back off. Documented but not engineered for —
-chrony failure on Fargate is a much larger incident than a brief
-double-IDENTIFY.
+(chrony-equivalent via the host) but the dependency is load-bearing.
+The real correctness primitive isn't the timing math — it's the
+`version` attribute on `transferLock` and `renewLock`. The conditional
+write fails if `version` doesn't match the expected value, so even a
+clock-skewed peer that *thinks* the lock has expired cannot actually
+take it while the legitimate holder is still heartbeating: their
+write hits an `ConditionalCheckFailedException`, they back off, and
+re-evaluate on the next renewal. The TTL is best-effort recovery for
+the case where the legitimate holder has genuinely died; `version` is
+the safety net everywhere else. Engineering target: ±1 s of clock
+skew has zero impact (heartbeat 2 s gives 1 missed-renewal margin
+before TTL fires). Beyond ±1 s the `version` check absorbs it. We
+don't engineer for >±5 s — chrony failure on Fargate is a much larger
+incident than a brief double-IDENTIFY would be.
 
 **Why no per-replica polling.** The lock primitive alone doesn't tell the
 standby *when* to act; the standby only needs the lock when it's
@@ -359,8 +363,32 @@ shared via the existing SSM-`SecureString`-via-task-def pattern is
 sufficient — same trust class as `DISCORD_TOKEN`. mTLS was considered
 and rejected because the cert-rotation pipeline is more infra than the
 problem warrants for an in-VPC reachability surface. The secret is named
-`/qurl-bot-discord/GATEWAY_HANDOFF_HMAC`, rotated annually, generated
-via `openssl rand -hex 32`.
+`/qurl-bot-discord/GATEWAY_HANDOFF_HMAC`, generated via
+`openssl rand -hex 32`.
+
+**HMAC payload includes a nonce + timestamp** to defeat replay. The
+signed body is `{active_instance_id, expected_version, nonce, ts}`
+where `nonce` is `crypto.randomBytes(16).toString('hex')` and `ts` is
+the active's monotonic epoch-ms at send time. The standby:
+
+1. Rejects requests with `|ts - now| > 5_000ms` (clock-skew tolerant
+   replay-window cap).
+2. Maintains a small in-memory LRU of seen nonces (~1k entries,
+   eviction on size), rejects duplicates.
+
+Without these, the `expected_version` value in a captured body could
+be replayed — OCC on `transferLock` would catch the *second* replay
+(version moved) but the *first* replay during a real handoff could
+move the lock at an unfortunate moment.
+
+**Secret rotation:** dual-secret-accept window. SSM rotation isn't
+atomic across both pods (one pod pulls the new value sooner than the
+other), so the standby accepts either of `current` or `previous`
+HMAC values during a 24 h rotation window. The active always signs
+with `current`. Implementation: the SSM parameter holds a JSON object
+`{"current": "...", "previous": "..."}` rather than a raw secret, and
+the bot's boot-time loader reads both. Rotation cadence: annually, or
+on suspected compromise.
 
 **SIGTERM handoff sequence on the active replica:**
 
@@ -400,7 +428,8 @@ and known.
 **Standby on `POST /control/yours`:**
 
 ```
-1. Verify HMAC signature on the request body
+1. Verify HMAC signature on the request body (+ ts freshness + nonce
+   not-seen)
 2. Verify body.active_instance_id matches a known peer (avoids accidental
    takeovers from a stale stopped task)
 3. transferLock(body.active_instance_id → self_instance_id)
@@ -409,6 +438,41 @@ and known.
    ← @discordjs/ws calls retrieveSessionInfo, finds the row, sends RESUME
 5. ACK control request (only after connect() resolves; ACK = "I'm live")
 ```
+
+**What if step 3 succeeds but step 4 fails** (Discord rate limit,
+network blip, RESUME rejection requiring fresh IDENTIFY which is then
+also rejected, etc.)? The standby now holds the lock but isn't
+connected to Discord. Without recovery the active will time out on
+ACK after 200 ms and exit; the standby will sit lock-held-but-no-WS
+indefinitely.
+
+The standby runs a **connection-watchdog** loop separately from the
+POST handler that closes this gap:
+
+```
+every 1 s, if heldLock && !manager.isConnected:
+  attempts += 1
+  try { await manager.connect() }
+  catch (err) {
+    if (attempts >= 5):                   ← bounded retry
+      releaseLock()                       ← give it back; ECS may replace us
+      log.error('connect retries exhausted, releasing lock')
+      process.exit(1)
+    backoff: sleep(min(2^attempts * 100ms, 5s))
+  }
+```
+
+The watchdog runs unconditionally — it covers both the "succeeded
+transferLock but failed connect" path here *and* the cold-start
+no-peer path (where standby acquires the lock via its own heartbeat
+after TTL expires, and then needs to connect). PR 13's chaos suite
+exercises both paths.
+
+If step 4 fails *inside* the POST handler, the standby returns a
+non-2xx response to the active. The active observes the error and
+exits anyway (it has nothing better to do — SIGTERM is in flight),
+falling through to the cold-start path on the standby's side. The
+~7 s cold-fallback floor applies.
 
 **Why direct push beats short-polling:** polling at 100 ms costs 10 reads/s
 per standby per shard. At one shard that's negligible, but doesn't compose to
