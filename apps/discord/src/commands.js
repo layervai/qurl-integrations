@@ -1360,18 +1360,18 @@ async function handleSend(interaction, apiKey) {
     // isFinite + > 0 invariant the form preview uses — a corrupted DDB
     // row carrying Infinity is truthy and would otherwise mark a wrong
     // option default.
-    // hasTimer is the `default` predicate for both the no-timer option
-    // (negated) and each preset (with an equality check). An off-preset
-    // finite value (only reachable today via a hypothetical backfilled
-    // sendConfig.self_destruct_seconds outside the preset set) leaves
-    // every option un-defaulted; Discord then renders the first option
-    // ('No self-destruct timer') in the collapsed header while the
-    // formContent preview line still echoes the off-preset value via
-    // formatSelfDestructLabel's `${seconds}s` fallback. The mismatch is
-    // visible but harmless (the wire still carries the value); a more
-    // defensive choice would be `default: !hasTimer || !findPresetBySeconds(...)`,
-    // skipped here because the path is exotic and the asymmetry honest.
+    // hasTimer = current state has a positive-finite seconds value.
+    // hasMatchingPreset = that value matches one of the 7 presets.
+    // The two diverge only for off-preset finite values (only reachable
+    // today via a hypothetical backfilled sendConfig.self_destruct_seconds
+    // outside the preset set). Defaulting the no-timer option on
+    // `!hasMatchingPreset` keeps the dropdown header sensible — without
+    // it, every option is un-defaulted and Discord falls back to
+    // rendering the first option's label in the collapsed header,
+    // which would conflict with the formContent preview line that
+    // echoes the off-preset value via formatSelfDestructLabel.
     const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
+    const hasMatchingPreset = hasTimer && SELF_DESTRUCT_PRESETS.some((p) => p.seconds === selfDestructSeconds);
     // No setPlaceholder — the No-timer option ships default-true when
     // !hasTimer, so the dropdown header always reflects the current
     // state and a placeholder would never render. Same default-true
@@ -1385,11 +1385,11 @@ async function handleSend(interaction, apiKey) {
         .setMinValues(1)
         .setMaxValues(1)
         .addOptions(
-          { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasTimer },
+          { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasMatchingPreset },
           ...SELF_DESTRUCT_PRESETS.map((p) => ({
             label: `\u{1F4A5} ${p.label}`,
             value: String(p.seconds),
-            default: hasTimer && selfDestructSeconds === p.seconds,
+            default: hasMatchingPreset && selfDestructSeconds === p.seconds,
           }))
         )
     ));
@@ -1413,7 +1413,7 @@ async function handleSend(interaction, apiKey) {
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(ids.messageBtn)
-        .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note')
+        .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note (optional)')
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId(ids.sendBtn)
@@ -1603,9 +1603,10 @@ async function handleSend(interaction, apiKey) {
       // selfDestructSelectValueToSeconds owns the conversion and falls
       // back to null (no timer) for any unexpected value (forged
       // interaction / option-list drift), which is the safe default.
-      // Optional chaining defends a malformed interaction that omitted
-      // the `values` array entirely — discord.js normalizes empty to
-      // [] but a forged payload could skip the field.
+      // Optional chaining is defense-in-depth — discord.js normalizes
+      // the gateway payload to `values: []` for String selects, so
+      // missing `values` is only reachable via a constructed-by-hand
+      // compInt (test path or forged event). The `?.` is still cheap.
       selfDestructSeconds = selfDestructSelectValueToSeconds(compInt.values?.[0]);
       await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
