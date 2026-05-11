@@ -18,8 +18,6 @@ const {
   formatSelfDestructLabel,
   selfDestructSelectValueToSeconds,
   SELF_DESTRUCT_PRESETS,
-  SELF_DESTRUCT_MIN_SECONDS,
-  SELF_DESTRUCT_MAX_SECONDS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('../src/utils/time');
 
@@ -65,11 +63,6 @@ describe('utils/time', () => {
       for (let i = 1; i < seconds.length; i++) {
         expect(seconds[i]).toBeGreaterThan(seconds[i - 1]);
       }
-    });
-
-    it('MIN/MAX track the first and last preset', () => {
-      expect(SELF_DESTRUCT_MIN_SECONDS).toBe(0.5);
-      expect(SELF_DESTRUCT_MAX_SECONDS).toBe(3600);
     });
 
     it('SELF_DESTRUCT_NO_TIMER_VALUE is distinct from any preset value', () => {

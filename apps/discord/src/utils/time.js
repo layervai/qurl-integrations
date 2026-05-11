@@ -47,9 +47,6 @@ const SELF_DESTRUCT_PRESETS = Object.freeze([
   Object.freeze({ seconds: 3600, label: '1 hour' }),
 ]);
 
-const SELF_DESTRUCT_MIN_SECONDS = SELF_DESTRUCT_PRESETS[0].seconds;
-const SELF_DESTRUCT_MAX_SECONDS = SELF_DESTRUCT_PRESETS[SELF_DESTRUCT_PRESETS.length - 1].seconds;
-
 // Sentinel value for the "No timer" dropdown option. Distinct from any
 // stringified preset seconds so a Number() coercion can't accidentally
 // match a preset and set a timer instead of clearing it.
@@ -102,7 +99,5 @@ module.exports = {
   formatSelfDestructLabel,
   selfDestructSelectValueToSeconds,
   SELF_DESTRUCT_PRESETS,
-  SELF_DESTRUCT_MIN_SECONDS,
-  SELF_DESTRUCT_MAX_SECONDS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 };

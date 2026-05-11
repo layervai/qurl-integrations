@@ -1368,6 +1368,11 @@ async function handleSend(interaction, apiKey) {
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.selfDestructSelect)
+        // Explicit min/max=1 (Discord's default, matches userSelect's
+        // explicit settings on this form). The empty-values defense in
+        // the handler stays as belt-and-suspenders for forged payloads.
+        .setMinValues(1)
+        .setMaxValues(1)
         .addOptions(
           { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasTimer },
           ...SELF_DESTRUCT_PRESETS.map((p) => ({
