@@ -1,6 +1,13 @@
 module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/tests/**/*.test.js'],
+  // Note: `restoreMocks` is NOT set globally — qurl-send-state-machine.test.js
+  // and others rely on jest.spyOn results persisting across tests within a
+  // describe (the spies are set up in module-level scope and tests assert
+  // against accumulated call counts). Spike-style tests that want spy
+  // restoration use an explicit `afterEach(() => jest.restoreAllMocks())`
+  // at the top of the test file — see gateway-resume-spike.test.js for the
+  // pattern.
   collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
   coverageDirectory: 'coverage',
   coverageThreshold: {
