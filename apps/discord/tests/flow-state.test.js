@@ -438,8 +438,13 @@ describe('flow-state.transitionFlow', () => {
     expect(updCall.args[0].input.TableName).toBe(EXPECTED_TABLE);
     expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected AND #e >= :now');
     // `:now` is set by the harness at write time and passed alongside
-    // the rest of the expression values.
+    // the rest of the expression values. Pin `:now === :updated_at`
+    // as a regression guard for the cached `updateNow` — without
+    // the cache, a second-boundary straddle between the two reads
+    // would silently desync the condition and the SET clause.
     expect(typeof updCall.args[0].input.ExpressionAttributeValues[':now']).toBe('number');
+    expect(updCall.args[0].input.ExpressionAttributeValues[':now'])
+      .toBe(updCall.args[0].input.ExpressionAttributeValues[':updated_at']);
     expect(updCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(4);
     expect(updCall.args[0].input.ExpressionAttributeValues[':stage_to']).toBe('stage_b');
     // Payload was encrypted via encryptStrict

@@ -561,7 +561,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     '#v': 'version',
     '#u': 'updated_at',
     // `#e` is in the names map unconditionally — the ConditionExpression
-    // below uses `#e > :now` to gate writes on logical aliveness.
+    // below uses `#e >= :now` to gate writes on logical aliveness.
     // `set_expires_at` may also reference `#e` to rewrite the value.
     '#e': 'expires_at',
   };
@@ -587,7 +587,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       TableName: TABLE_NAME,
       Key: { flow_id },
       UpdateExpression: `SET ${updateExprParts.join(', ')}`,
-      // `#e > :now` closes the silent-SLI-inflation hole where a
+      // `#e >= :now` closes the silent-SLI-inflation hole where a
       // logically-expired row (DDB TTL reap is async, ~48h lag)
       // could pass attribute_exists + version-match and have its
       // stage rewritten — even though loadFlow would then return
