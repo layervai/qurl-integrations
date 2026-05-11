@@ -197,6 +197,103 @@ const AUDIT_EVENTS = {
   // Periodic gauge of `client.guilds.cache.size`. Emitted every 60 s.
   ACTIVE_GUILD_COUNT: 'active_guild_count',
 
+  // ── Event-shipper Pillar 1: flow_state observability ──
+  //
+  // Names reserved by the event-shipper observability Phase 1.0 PR;
+  // emissions wired by the state-machine harness PR in
+  // apps/discord/src/flow-state.js. The paired CloudWatch metric filters
+  // land in qurl-integrations-infra (separate PR) once the harness is
+  // producing events in sandbox. Three-stage rollout — names reserved →
+  // emissions wired → metric filters lit — keeps each layer reviewable
+  // in isolation.
+  //
+  // The "flow_state" table is created by qurl-integrations-infra#504; the
+  // SLI these events feed is "Flow continuity" (design doc § SLI / SLO
+  // definitions, target 99.99% over 1-day windows).
+  //
+  // SLI computation contract:
+  //   total_flows           = count(FLOW_CREATED)
+  //   completed_flows       = count(FLOW_DELETED)
+  //   silently_dropped_flows = total_flows - completed_flows
+  //                          = count(FLOW_CREATED) - count(FLOW_DELETED)
+  // Every FLOW_CREATED MUST be followed by either an explicit FLOW_DELETED
+  // (terminal stage, abort, etc.) OR a TTL reap. The reap path emits no
+  // event by design (DDB TTL is asynchronous, so a "deleted by TTL"
+  // signal would itself require a separate sweeper). Computing
+  // silently_dropped via "created minus deleted" sidesteps the async-reap
+  // problem AND captures all unclean drops (crashes, hangs, partial
+  // process restart between transitions).
+
+  // Single emission per createFlow() call. Marks the start of a flow's
+  // lifecycle for the "Flow continuity" SLI's denominator.
+  // Payload fields:
+  //   - `stage`:    initial stage the flow enters at (e.g.
+  //                 'awaiting_button'). LOW-cardinality — safe to
+  //                 dimension on. Bounded by the state-machine's
+  //                 stage enum.
+  //   - `shard_id`: e.g. '0:1' (single-shard today); generalizes to
+  //                 'k:n' post-sharding. LOW-cardinality — safe to
+  //                 dimension on.
+  //   - `flow_id`:  HIGH-cardinality (composite encoding of shard /
+  //                 guild / channel / user). Forensic-query field
+  //                 ONLY — same trap as `guild_id` / `path` above:
+  //                 do NOT promote to a CloudWatch metric dimension
+  //                 at the terraform-filter layer. Use Logs Insights
+  //                 for per-flow drilldown during an incident.
+  FLOW_CREATED: 'flow_created',
+
+  // Emitted on every transitionFlow() call — the workhorse event for
+  // the state machine's observability. The paired CloudWatch metric
+  // filter materializes
+  // `qurl_bot_flow_transition_total{stage_from,stage_to,result,terminal}`
+  // (design doc § Pillar 1).
+  // Payload fields:
+  //   - `stage_from`: stage the flow was in before the transition.
+  //                   LOW-cardinality — safe to dimension on.
+  //   - `stage_to`:   stage the flow advances to. LOW-cardinality —
+  //                   safe to dimension on.
+  //   - `result`:     'success' | 'conflict' | 'not_found' | 'error'.
+  //                   LOW-cardinality — safe to dimension on. The
+  //                   conflict bucket counts OCC-loser races (DDB
+  //                   ConditionalCheckFailedException) — the
+  //                   correctness primitive that gates concurrent
+  //                   worker advances. SUSTAINED conflict > 0 indicates
+  //                   spurious dispatch; conflict at low rate is the
+  //                   expected at-least-once-delivery behavior.
+  //   - `terminal`:   bool. When true, this transition ends the flow
+  //                   (the next call will be deleteFlow). Lets the
+  //                   metric math identify clean completions vs.
+  //                   mid-flow transitions without enumerating every
+  //                   terminal stage in the filter (terminal set
+  //                   varies per flow type — revoke is shorter than
+  //                   send). LOW-cardinality (boolean) — safe to
+  //                   dimension on AND included in the materialized
+  //                   metric's dimension list above.
+  //   - `flow_id`:    HIGH-cardinality. Forensic-query ONLY — same
+  //                   posture as FLOW_CREATED.
+  FLOW_TRANSITION: 'flow_transition',
+
+  // Emitted on every explicit deleteFlow() call — flow numerator for
+  // the "Flow continuity" SLI (completed_flows). TTL-reaped flows do
+  // NOT emit this event; the SLI math relies on that asymmetry to
+  // identify silent drops (FLOW_CREATED count minus FLOW_DELETED
+  // count). If a future change adds a "delete-on-TTL-reap" sweeper,
+  // it MUST emit a distinct event (e.g. FLOW_REAPED) — not
+  // FLOW_DELETED — to preserve the SLI math.
+  // Payload fields:
+  //   - `stage`:  stage the flow was in at deletion. LOW-cardinality
+  //               — safe to dimension on. For terminal completions,
+  //               equals the terminal stage; for aborts, equals
+  //               whatever the flow was awaiting when aborted.
+  //   - `reason`: 'terminal' | 'abort' | 'admin_cleanup'.
+  //               LOW-cardinality — safe to dimension on. Splits
+  //               clean completions ('terminal') from user/operator
+  //               aborts ('abort') from operator-driven cleanup
+  //               ('admin_cleanup'). 'terminal' should dominate; a
+  //               sustained 'abort' rate indicates a UX problem.
+  //   - `flow_id`: HIGH-cardinality. Forensic-query ONLY.
+  FLOW_DELETED: 'flow_deleted',
+
   // Emitted when a request to a dependency returns 401 or 403 — catches
   // rotation drift (qurl-service API key, GitHub App token, etc.) that
   // client.isReady() can't see.
