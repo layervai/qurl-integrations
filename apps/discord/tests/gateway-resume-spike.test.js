@@ -49,9 +49,6 @@ describe('gateway-resume-spike — session store helpers', () => {
   afterEach(() => {
     try { fs.unlinkSync(testFile); } catch (_) { /* ok */ }
     try { fs.unlinkSync(`${path.resolve(testFile)}.tmp`); } catch (_) { /* ok */ }
-    // jest.config.js sets `restoreMocks: true` repo-wide so spies are
-    // restored automatically between every test — no per-describe
-    // afterEach hook needed.
   });
 
   describe('persistSession + loadSession round-trip', () => {
@@ -292,9 +289,13 @@ describe('gateway-resume-spike — classifyResult', () => {
     expect(r.lines.join('\n')).toMatch(/RESUME-OK/);
   });
 
-  test('resumed wins even if budgetExhausted also set (shouldn\'t happen but pin the precedence)', () => {
-    // Defensive: a future code path that sets both shouldn't downgrade
-    // the success classification.
+  test('resumed wins even with all-flags-set input (defensive only, not reachable today)', () => {
+    // A successful RESUME implies no IDENTIFY was ever attempted, so
+    // `resumed && budgetExhausted` cannot co-occur on a real run.
+    // The test exists as a guardrail against future state-machine
+    // drift — e.g., a refactor that splits resume-tracking from the
+    // dispatch flow and accidentally lets both flags land true. If
+    // that happens, the success classification should win.
     const r = classifyResult({
       resumed: true,
       budgetExhausted: true,

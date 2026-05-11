@@ -187,32 +187,13 @@ async function runPhase1(token) {
     console.error('[phase1] shard error:', error.message);
   });
 
-  // Signal handlers: persist whatever sequence we've captured so far
-  // before exiting. Without this, Ctrl+C or kill <pid> between connect
-  // and the post-idle persist call leaves /tmp/spike-session.json
-  // absent, and the user runs phase2 and gets a confusing "no persisted
-  // session" error rather than "session captured up to seq N, ready
-  // for phase2." Mirrors the production SIGTERM handler shape (persist
-  // final state before exit).
-  //
-  // Both SIGINT (Ctrl+C) and SIGTERM (kill <pid>) are wired to the same
-  // handler — the spike's a CLI tool that can be invoked from either
-  // an interactive shell or a parent process / cron / tmux session
-  // that prefers SIGTERM. The production gateway will only see SIGTERM
-  // from ECS, but the spike serves both interactive and scripted
-  // usage.
-  //
-  // `exiting` guard: persistSession is synchronous, so two handler
-  // invocations can't interleave the write itself. The guard's job is
-  // to debounce a second signal that arrives AFTER the first handler
-  // returns from persistSession but BEFORE process.exit() actually
-  // terminates the loop — without it, the second handler would re-
-  // persist (cheap, just redundant), log a duplicate line (noisy), or
-  // in the case of a SIGINT-then-SIGTERM pair, log both messages
-  // confusingly. The guard collapses repeats into one exit.
+  // SIGINT and SIGTERM both persist captured state before exit so phase2
+  // has a session to RESUME against. Exit codes (130 / 143) follow shell
+  // convention so a calling script can distinguish user-cancel from
+  // external-term.
   let exiting = false;
   const persistAndExit = (signal) => {
-    if (exiting) return;
+    if (exiting) return; // debounce: second signal after persist-but-before-exit
     exiting = true;
     if (latestSessionInfo) {
       persistSession(latestSessionInfo);
@@ -220,22 +201,14 @@ async function runPhase1(token) {
     } else {
       console.log(`[phase1] ${signal}: nothing to persist (READY not yet received)`);
     }
-    // SIGINT → 130 (128 + 2), SIGTERM → 143 (128 + 15). Standard shell
-    // convention so a calling script can distinguish "user cancelled"
-    // from "external termination" via the exit code.
     process.exit(signal === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', () => persistAndExit('SIGINT'));
   process.on('SIGTERM', () => persistAndExit('SIGTERM'));
 
   // Race manager.connect() against a 30s timeout so a Discord-side rate
-  // limit or network blip doesn't hang the spike forever.
-  // .unref() on the timer so it doesn't pin the event loop alive past
-  // a successful connect — without unref, a connect that resolves at
-  // second 5 leaves the 30s timer holding the loop open until exit.
-  // Benign in practice because we process.exit anyway, but unref is
-  // the future-proof shape if someone restructures phase1 to not
-  // always exit synchronously.
+  // limit doesn't hang the spike forever. .unref() prevents the dangling
+  // timer from pinning the event loop past a successful connect.
   const CONNECT_TIMEOUT_MS = 30_000;
   await Promise.race([
     manager.connect(),
@@ -315,10 +288,9 @@ async function runPhase2(token) {
   // (e.g. another process is contending for the same token). On Fargate
   // these would burn Discord's 1000/24h IDENTIFY budget; same idea here.
   let identifyAttempts = 0;
-  // MAX = 1 means we'll let through exactly one IDENTIFY after RESUME
-  // rejection (the comment originally said "1 RESUME, then at most 1
-  // IDENTIFY" but the guard was `> 2`, which let through TWO IDENTIFYs).
-  // The current guard `>= MAX` matches the comment.
+  // MAX = 1 + guard `> MAX` lets through exactly one IDENTIFY after a
+  // RESUME rejection. The earlier guard was `> 2`, which let two
+  // through.
   const MAX_IDENTIFY_ATTEMPTS = 1;
   let budgetExhausted = false;
 

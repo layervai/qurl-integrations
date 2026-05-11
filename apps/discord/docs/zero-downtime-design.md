@@ -386,14 +386,43 @@ be replayed — OCC on `transferLock` would catch the *second* replay
 (version moved) but the *first* replay during a real handoff could
 move the lock at an unfortunate moment.
 
-**Secret rotation:** dual-secret-accept window. SSM rotation isn't
-atomic across both pods (one pod pulls the new value sooner than the
-other), so the standby accepts either of `current` or `previous`
-HMAC values during a 24 h rotation window. The active always signs
-with `current`. Implementation: the SSM parameter holds a JSON object
-`{"current": "...", "previous": "..."}` rather than a raw secret, and
-the bot's boot-time loader reads both. Rotation cadence: annually, or
-on suspected compromise.
+**Secret rotation:** dual-secret-accept window via rolling redeploy.
+The SSM parameter holds a JSON object
+`{"current": "...", "previous": "..."}` rather than a raw secret;
+both pods load it at boot. The active always signs with `current`;
+the standby accepts either.
+
+The bot does NOT hot-reload SSM at runtime — `current`/`previous` are
+captured at boot and held in process memory for the task lifetime.
+This matches every other SSM-backed secret on the bot
+(`DISCORD_TOKEN`, `KEY_ENCRYPTION_KEY`, etc.), all of which are
+boot-time loads. Rotation procedure is therefore a rolling redeploy:
+
+1. Write `{"current": "<new>", "previous": "<old>"}` to the SSM
+   parameter.
+2. Trigger a rolling redeploy of `bot_gateway`. With
+   `gateway_desired_count=2` and the deployment invariant that
+   serializes replacements, the standby restarts first and starts
+   accepting both values; once it ACKs healthy, the active is
+   replaced and starts signing with `<new>`.
+3. After at least 24 h of stable operation (drains any in-flight
+   handoff messages signed under `<old>`), write
+   `{"current": "<new>", "previous": "<new>"}` (or scrub
+   `previous` to `null`) and redeploy again to retire the old
+   secret.
+
+Cadence: annually, or on suspected compromise. Compromise rotation
+skips step 3's 24 h wait and writes `previous = null` immediately.
+
+This deliberately couples secret rotation to a deploy cadence. The
+alternative (hot-reloading SSM with a TTL cache, e.g., 60 s) was
+considered and rejected: the bot already gates SSM reads on the
+task-execution-role IAM grant evaluated once at task startup, so a
+hot-reload path would need new IAM scope, an explicit refresh loop,
+and a story for "what if the refresh fails mid-handoff." The rolling-
+redeploy path reuses existing infrastructure (ECS deployment
+machinery, the task-def secrets block) and matches the bot's
+existing operational shape.
 
 **SIGTERM handoff sequence on the active replica:**
 
@@ -470,8 +499,12 @@ every 1 s, if heldLock && !manager.isConnected:
 The watchdog runs unconditionally — it covers both the "succeeded
 transferLock but failed connect" path here *and* the cold-start
 no-peer path (where standby acquires the lock via its own heartbeat
-after TTL expires, and then needs to connect). PR 13's chaos suite
-exercises both paths.
+after TTL expires, and then needs to connect). PR 15's chaos suite
+explicitly exercises the retries-exhausted branch (kill the Discord
+gateway endpoint resolution on the standby, assert the watchdog
+gives up after 5 attempts, releases the lock, and exits 1 so ECS
+replaces the task). Without that test, the watchdog's failure
+ladder is "documented but never executed."
 
 If step 4 fails *inside* the POST handler, the standby returns a
 non-2xx response to the active. The active observes the error and
