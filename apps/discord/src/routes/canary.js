@@ -1,9 +1,9 @@
 // Canary exec endpoint — synthetic-monitor probe driven by the
-// EventBridge Lambda in qurl-integrations-infra. Auth is the
-// qURL/NHP knock; reaching the route means the caller already
-// resolved a valid qURL targeting `${BOT_URL}/canary/exec`, so the
-// firewall hole IS the auth. X-Canary-Timestamp + 5-min replay
-// window are belt-and-suspenders.
+// EventBridge Lambda in qurl-integrations-infra. Auth is the NHP
+// knock at the network layer (Lambda calls /nhp/internal/knock
+// directly; AC opens iptables hole for the Lambda's egress IP
+// within OpenTime). No HMAC or timestamp check at this layer —
+// NHP's per-knock OpenTime window subsumes replay defense.
 
 const express = require('express');
 const { EmbedBuilder } = require('discord.js');
@@ -15,43 +15,8 @@ const { COLORS } = require('../constants');
 
 const router = express.Router();
 
-// Matches qurl-service's NHP token-resolution window so operators
-// inspecting both layers see the same number. Replay defenses past
-// the window: qurl-service one-time-use (load-bearing — relaxing
-// that contract widens this window in practice), 4 KB body cap,
-// recipient allowlist.
-const TIMESTAMP_TOLERANCE_SECONDS = 300;
-
 const VALID_TESTS = new Set(['send_file', 'send_location']);
 const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
-
-function verifyCanaryTimestamp(req, res, next) {
-  // ip is observe-only (logged, never gated) — under NHP it confirms
-  // the runner; without NHP, a 401 stream from arbitrary IPs is the
-  // first triage signal of a misconfigured mount.
-  const ip = req.ip || 'unknown';
-  const ts = req.header('X-Canary-Timestamp');
-  if (!ts) {
-    logger.warn('Canary timestamp rejected', { reason: 'missing_timestamp', ip });
-    return res.status(401).json({ ok: false, error: 'missing_timestamp' });
-  }
-  // Strict shape — `parseInt('1234567890extra', 10)` returns
-  // `1234567890`, so a digit-prefixed garbage string would slip past
-  // a permissive isFinite check. Lock the contract to "10-digit Unix
-  // epoch seconds" (covers everything until ~year 2286) before
-  // trusting it for a drift comparison.
-  if (!/^[0-9]{10}$/.test(ts)) {
-    logger.warn('Canary timestamp rejected', { reason: 'bad_timestamp', ip });
-    return res.status(401).json({ ok: false, error: 'bad_timestamp' });
-  }
-  const tsInt = parseInt(ts, 10);
-  const drift = Math.floor(Date.now() / 1000) - tsInt;
-  if (Math.abs(drift) > TIMESTAMP_TOLERANCE_SECONDS) {
-    logger.warn('Canary timestamp rejected', { reason: 'expired_timestamp', drift_seconds: drift, ip });
-    return res.status(401).json({ ok: false, error: 'expired_timestamp' });
-  }
-  next();
-}
 
 // Standalone embed (not commands.js's `buildDeliveryPayload`, which
 // is gated to non-production). Embed shape doesn't need to match
@@ -157,7 +122,7 @@ async function runScenario({ test, recipientUserId, apiKey }) {
   };
 }
 
-router.post('/exec', verifyCanaryTimestamp, async (req, res) => {
+router.post('/exec', async (req, res) => {
   const startedAt = Date.now();
   const apiKey = config.QURL_API_KEY;
   if (!apiKey) {

@@ -1,12 +1,12 @@
 // Tests for the /canary/exec endpoint. Mounts the router on a test
 // express app with the same 4 KB JSON middleware that server.js uses,
-// then exercises every authn + dispatch branch via supertest. Connector
-// + qURL clients are mocked so the tests don't hit a real network.
+// then exercises every dispatch branch via supertest. Connector + qURL
+// clients are mocked so the tests don't hit a real network.
 //
-// Auth model: the qURL/NHP knock provides authentication at the
-// network layer (Lambda mints + resolves a qURL targeting the bot,
-// triggering the NHP knock for its egress IP). The route itself
-// only checks an X-Canary-Timestamp header to bound replay.
+// Auth model: NHP knock at the network layer. The Lambda calls
+// /nhp/internal/knock directly; AC opens the iptables hole for the
+// Lambda's egress IP within OpenTime. The route does no app-layer
+// auth — reaching it means the AC already authorized the caller.
 
 // --- mocks must be set up BEFORE requiring the router ---
 
@@ -63,7 +63,8 @@ const request = require('supertest');
 const canaryRouter = require('../src/routes/canary');
 
 // Mirror server.js's mount: 4 KB JSON parser. No raw-body capture
-// needed (no HMAC).
+// needed (NHP gates at the network layer; no app-layer signature
+// or timestamp).
 function makeApp() {
   const app = express();
   app.use('/canary', express.json({ limit: '4kb' }));
@@ -75,10 +76,6 @@ function makeApp() {
 // operator would post (or a pre-extension Lambda). Differentiated-
 // path tests use their own scenario-shaped bodies.
 const VALID_BODY = {};
-
-function tsHeaders(ts = Math.floor(Date.now() / 1000)) {
-  return { 'X-Canary-Timestamp': String(ts) };
-}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -92,110 +89,12 @@ beforeEach(() => {
   mockSendDM.mockResolvedValue(true);
 });
 
-describe('/canary/exec — timestamp replay-window', () => {
-  it('returns 401 missing_timestamp when X-Canary-Timestamp header is absent (and warns for triage)', async () => {
-    const logger = require('../src/logger');
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY);
-    expect(res.status).toBe(401);
-    expect(res.body).toEqual({ ok: false, error: 'missing_timestamp' });
-    // Pre-auth 401s deliberately omit latency_ms (no triage value
-    // pre-auth, no benefit to echoing timing info in unauthenticated
-    // responses). Pin the absence so a future "uniformity" refactor
-    // doesn't silently re-add it.
-    expect(res.body.latency_ms).toBeUndefined();
-    expect(logger.warn).toHaveBeenCalledWith(
-      'Canary timestamp rejected',
-      expect.objectContaining({ reason: 'missing_timestamp' }),
-    );
-  });
-
-  it('returns 401 missing_timestamp when X-Canary-Timestamp is empty string', async () => {
-    // Empty header is falsy and falls into the missing_timestamp
-    // branch — pin it so a future refactor that swaps `if (!ts)` for
-    // a stricter `if (ts === undefined)` doesn't silently accept it.
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set('X-Canary-Timestamp', '');
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('missing_timestamp');
-  });
-
-  it('returns 401 bad_timestamp when X-Canary-Timestamp is not numeric', async () => {
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set('X-Canary-Timestamp', 'tomorrow');
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('bad_timestamp');
-    expect(res.body.latency_ms).toBeUndefined();
-  });
-
-  it('returns 401 bad_timestamp when X-Canary-Timestamp is digit-prefixed garbage (parseInt would have accepted it)', async () => {
-    // Regression-pin for the strict-shape regex: parseInt('1234567890extra', 10)
-    // returns 1234567890 — a permissive isFinite check would have
-    // accepted the leading-digits and let the drift comparison handle
-    // it (which would still reject, but at the wrong layer). Stricter
-    // form: only digit-only strings of plausible epoch-seconds length
-    // ever reach the drift check.
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set('X-Canary-Timestamp', `${Math.floor(Date.now() / 1000)}extra`);
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('bad_timestamp');
-  });
-
-  it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (past)', async () => {
-    const tooOld = Math.floor(Date.now() / 1000) - 301;
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders(tooOld));
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('expired_timestamp');
-    expect(res.body.latency_ms).toBeUndefined();
-  });
-
-  it('returns 401 expired_timestamp when timestamp drift exceeds 5 minutes (future-skewed)', async () => {
-    // True mirror of the -301s past-side test: the middleware's
-    // drift check is symmetric (Math.abs), so the future-side
-    // boundary should reject at the same offset. A refactor that
-    // drops Math.abs would let +301 pass while -301 still rejects.
-    const tooNew = Math.floor(Date.now() / 1000) + 301;
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders(tooNew));
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('expired_timestamp');
-  });
-
-  it('accepts timestamp well inside the 5-minute window (drift ~200s)', async () => {
-    // Bracket the rejection boundary from below. Combined with the
-    // ±301s reject tests, this pins "well under 5 min OK, more than
-    // 5 min reject" without the second-boundary flake risk a
-    // `drift === 300` exact-match assertion would carry. ~100s of
-    // CI-lag headroom — slow shared runners with cold module cache
-    // can chew through 10s of slack.
-    const inside = Math.floor(Date.now() / 1000) - 200;
-    const res = await request(makeApp())
-      .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders(inside));
-    expect(res.status).toBe(200);
-  });
-});
-
 describe('/canary/exec — dispatch', () => {
   it('returns 503 no_api_key when QURL_API_KEY is unset', async () => {
     mockConfig.QURL_API_KEY = undefined;
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(503);
     expect(res.body.ok).toBe(false);
     expect(res.body.error).toBe('no_api_key');
@@ -206,8 +105,7 @@ describe('/canary/exec — dispatch', () => {
   it('returns 200 ok with link_host on the happy path', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.link_host).toBe('q.test');
@@ -221,8 +119,7 @@ describe('/canary/exec — dispatch', () => {
   it('passes a synthetic location payload + 60s expiry to the connector + mintLinks', async () => {
     await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'google-map',
@@ -250,8 +147,7 @@ describe('/canary/exec — dispatch', () => {
     mockUploadJsonToConnector.mockResolvedValueOnce({ /* no resource_id */ });
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('upload_no_resource_id');
     expect(mockMintLinks).not.toHaveBeenCalled();
@@ -261,8 +157,7 @@ describe('/canary/exec — dispatch', () => {
     mockMintLinks.mockResolvedValueOnce([]);
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('no_link_in_mint_response');
   });
@@ -272,8 +167,7 @@ describe('/canary/exec — dispatch', () => {
     mockUploadJsonToConnector.mockRejectedValueOnce(err);
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('exec_failed');
     expect(res.body.reason).toBe('connector down');
@@ -284,8 +178,7 @@ describe('/canary/exec — dispatch', () => {
     mockMintLinks.mockRejectedValueOnce(new Error('mint API 503'));
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('exec_failed');
     expect(res.body.reason).toBe('mint API 503');
@@ -295,8 +188,7 @@ describe('/canary/exec — dispatch', () => {
     mockUploadJsonToConnector.mockRejectedValueOnce(new Error('network slow'));
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(VALID_BODY)
-      .set(tsHeaders());
+      .send(VALID_BODY);
     expect(res.body.latency_ms).toBeDefined();
     expect(typeof res.body.latency_ms).toBe('number');
     expect(res.body.latency_ms).toBeGreaterThanOrEqual(0);
@@ -314,8 +206,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     const body = { test: 'send_carrier_pigeon', recipient_user_id: VALID_USER_ID };
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(body)
-      .set(tsHeaders());
+      .send(body);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_test');
     expect(res.body.valid).toEqual(expect.arrayContaining(['send_file', 'send_location']));
@@ -325,8 +216,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     const body = { test: 'send_file', recipient_user_id: 'not-a-snowflake' };
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(body)
-      .set(tsHeaders());
+      .send(body);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_recipient_user_id');
   });
@@ -337,8 +227,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     const body = { recipient_user_id: VALID_USER_ID };
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(body)
-      .set(tsHeaders());
+      .send(body);
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('invalid_test');
   });
@@ -346,8 +235,7 @@ describe('/canary/exec — differentiated scenario path', () => {
   it('send_file: uploads via reUploadBuffer (NOT uploadJsonToConnector), mints, DMs', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.test).toBe('send_file');
@@ -362,8 +250,7 @@ describe('/canary/exec — differentiated scenario path', () => {
   it('send_location: uploads via uploadJsonToConnector (NOT reUploadBuffer), mints, DMs', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_LOCATION_BODY)
-      .set(tsHeaders());
+      .send(SEND_LOCATION_BODY);
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.test).toBe('send_location');
@@ -377,8 +264,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockReUploadBuffer.mockRejectedValueOnce(new Error('connector 502'));
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(500);
     expect(res.body.ok).toBe(false);
     expect(res.body.step).toBe('upload');
@@ -392,8 +278,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockMintLinks.mockResolvedValueOnce([]);
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_LOCATION_BODY)
-      .set(tsHeaders());
+      .send(SEND_LOCATION_BODY);
     expect(res.status).toBe(500);
     expect(res.body.step).toBe('mint');
     expect(res.body.error).toBe('no_link_in_mint_response');
@@ -404,8 +289,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockSendDM.mockResolvedValueOnce(false);
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(500);
     expect(res.body.step).toBe('dm');
     expect(res.body.error).toBe('dm_failed');
@@ -417,8 +301,7 @@ describe('/canary/exec — differentiated scenario path', () => {
   it('echoes test + recipient_user_id back to the Lambda for unambiguous metric attribution', async () => {
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.body.test).toBe('send_file');
     expect(res.body.recipient_user_id).toBe(VALID_USER_ID);
   });
@@ -427,8 +310,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockConfig.CANARY_RECIPIENT_USER_IDS = [];
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(503);
     expect(res.body.error).toBe('canary_recipients_unconfigured');
     // No connector / DM side-effect when the allowlist gate fires
@@ -440,8 +322,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockConfig.CANARY_RECIPIENT_USER_IDS = ['9999999999999999999'];
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('recipient_not_allowed');
     expect(mockSendDM).not.toHaveBeenCalled();
@@ -452,8 +333,7 @@ describe('/canary/exec — differentiated scenario path', () => {
     mockSendDM.mockResolvedValueOnce(false);
     const res = await request(makeApp())
       .post('/canary/exec')
-      .send(SEND_FILE_BODY)
-      .set(tsHeaders());
+      .send(SEND_FILE_BODY);
     expect(res.status).toBe(500);
     expect(res.body.step).toBe('dm');
     expect(logger.warn).toHaveBeenCalledWith(
