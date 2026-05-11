@@ -918,7 +918,7 @@ describe('handleSend — Step 3: final form', () => {
     // last argument.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
     const sendBtn = makeCompInt(ids.sendBtn);
@@ -941,7 +941,7 @@ describe('handleSend — Step 3: final form', () => {
     // echo of their choice (parity with the personal-message preview).
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
     const cancel = makeCompInt(ids.cancelBtn);
@@ -977,7 +977,7 @@ describe('handleSend — Step 3: final form', () => {
       sendCooldowns.clear();
       const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
       const userSelect = makeCompInt(ids.userSelect, {
-        users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+        users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
       });
       const destructPick = makeCompInt(ids.selfDestructSelect, { values: [value] });
       const sendBtn = makeCompInt(ids.sendBtn);
@@ -1001,7 +1001,7 @@ describe('handleSend — Step 3: final form', () => {
     // initial state.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructSet = makeCompInt(ids.selfDestructSelect, { values: ['30'] });
     const destructClear = makeCompInt(ids.selfDestructSelect, { values: ['no-timer'] });
@@ -1045,7 +1045,7 @@ describe('handleSend — Step 3: final form', () => {
   ])('self-destruct dropdown: %s falls back to no-timer (defense)', async (_label, valuesField) => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructEmpty = makeCompInt(ids.selfDestructSelect, { values: valuesField });
     const sendBtn = makeCompInt(ids.sendBtn);
@@ -1068,7 +1068,7 @@ describe('handleSend — Step 3: final form', () => {
     // safe default ("no timer") wins over a half-set state.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructForged = makeCompInt(ids.selfDestructSelect, { values: ['7200'] });
     const sendBtn = makeCompInt(ids.sendBtn);
@@ -1479,7 +1479,7 @@ describe('handleSend — end-to-end happy paths', () => {
     const fileInit = makeCompInt(ids.initFile);
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const destructPick = makeCompInt(ids.selfDestructSelect, { values: ['300'] });
     const sendBtn = makeCompInt(ids.sendBtn);
