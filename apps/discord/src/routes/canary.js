@@ -56,14 +56,23 @@ async function runScenario({ test, recipientUserId, apiKey }) {
     if (test === 'send_file') {
       const fileBuffer = Buffer.from(`canary probe @ ${new Date().toISOString()}\n`, 'utf8');
       upload = await reUploadBuffer(fileBuffer, 'canary-probe.txt', 'text/plain', apiKey);
-    } else {
-      // send_location
+    } else if (test === 'send_location') {
       const probePayload = {
         type: 'google-map',
         url: 'https://maps.app.goo.gl/canary-probe',
         name: 'canary',
       };
       upload = await uploadJsonToConnector(probePayload, 'canary-location.json', apiKey);
+    } else {
+      // Defense in depth: VALID_TESTS upstream already gates this.
+      // Explicit default catches the "added to VALID_TESTS, forgot
+      // to wire runScenario" refactor — fail fast with a named
+      // error instead of silently falling through to the location
+      // path.
+      return {
+        ok: false, step: 'upload', error: 'unhandled_test',
+        latency_ms: Date.now() - startedAt,
+      };
     }
   } catch (err) {
     return {
@@ -189,8 +198,8 @@ router.post('/exec', async (req, res) => {
       });
     }
     // Strip reason + apiCode before responding — same rationale.
-    const { reason: _r, apiCode: _a, ...safe } = result;
-    void _r; void _a;
+    // eslint-disable-next-line no-unused-vars
+    const { reason, apiCode, ...safe } = result;
     const status = result.ok ? 200 : 500;
     return res.status(status).json({ ...safe, test, recipient_user_id: recipientUserId });
   } catch (err) {

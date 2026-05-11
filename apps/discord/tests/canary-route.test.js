@@ -117,11 +117,13 @@ describe('/canary/exec — early gates', () => {
     expect(mockReUploadBuffer).not.toHaveBeenCalled();
   });
 
-  it('returns 413 body_too_large when body exceeds the 4 KB cap', async () => {
-    // Pins the cap that the route comment marks load-bearing — a
-    // future refactor reordering mounts back to the 1 MB global
-    // parser would silently widen the surface.
-    const oversized = { test: 'send_file', recipient_user_id: VALID_USER_ID, _pad: 'x'.repeat(5000) };
+  it('returns 413 body_too_large when body exceeds the 4 KB cap (well above, locks mount-order)', async () => {
+    // 100 KB body — well above the 4 KB cap but below the global
+    // 1 MB parser. A future refactor that moves the global parser
+    // ahead of the /canary mount would still 200/400 this (the
+    // global parser would accept it). Pinning at this size catches
+    // mount-order regressions independent of which parser fires.
+    const oversized = { test: 'send_file', recipient_user_id: VALID_USER_ID, _pad: 'x'.repeat(100_000) };
     const res = await request(makeApp())
       .post('/canary/exec')
       .send(oversized);

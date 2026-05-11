@@ -274,7 +274,7 @@ if (canaryEnabled) {
     logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
   }
   if (!Array.isArray(config.CANARY_RECIPIENT_USER_IDS) || config.CANARY_RECIPIENT_USER_IDS.length === 0) {
-    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — differentiated-path requests will return 503 canary_recipients_unconfigured. Legacy empty-body path still works.');
+    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — all requests will return 503 canary_recipients_unconfigured.');
   }
 }
 
