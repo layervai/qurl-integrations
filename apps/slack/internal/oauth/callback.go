@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
+	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,10 +20,14 @@ const (
 	dmTimeout         = 5 * time.Second
 )
 
-// successHTML mirrors the Discord-side success page (apps/discord/src/
-// routes/qurl-oauth.js renderSuccess). Plain HTML with no external
-// assets so it renders in the strictest CSP / no-JS environments.
-const successHTML = `<!DOCTYPE html>
+// successPageTemplate mirrors the Discord-side success page
+// (apps/discord/src/routes/qurl-oauth.js renderSuccess). Plain HTML with
+// no external assets so it renders in the strictest CSP / no-JS
+// environments. html/template auto-escapes every {{.Field}} interpolation
+// — that's the entire XSS defense for the page, since teamID / keyPrefix
+// / email all flow from user-influenced inputs (state param, qurl-service
+// response, JWKS-verified id_token respectively).
+var successPageTemplate = template.Must(template.New("oauth-success").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -44,14 +48,22 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 <h1><span class="ok">&#10003;</span> qURL connected</h1>
 <p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl create</code> and <code>/qurl list</code>.</p>
 <div class="kv">
-<div>Slack workspace: <code>%s</code></div>
-%s
-%s
+<div>Slack workspace: <code>{{.TeamID}}</code></div>
+{{if .KeyPrefix}}<div>API key prefix: <code>{{.KeyPrefix}}</code></div>{{end}}
+{{if .Email}}<div>qURL account: <code>{{.Email}}</code></div>{{end}}
 </div>
 <p style="margin-top:1.5rem;font-size:.875rem;color:#6b7280">You can close this tab and return to Slack.</p>
 </div>
 </body>
-</html>`
+</html>`))
+
+// successPageData is the model passed to successPageTemplate. Field names
+// must match the template's {{.Field}} accessors.
+type successPageData struct {
+	TeamID    string
+	KeyPrefix string
+	Email     string
+}
 
 // auth0TokenResponse is the slice of Auth0's /oauth/token response we read.
 type auth0TokenResponse struct {
@@ -169,7 +181,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 		// Step 6: persist. On failure, best-effort revoke + 500 to user.
 		configuredBy := r.URL.Query().Get("admin_user") // optional hint; Slack OAuth provides via separate channel
 		if perr := cfg.Provider.SetAPIKey(r.Context(), teamID, apiKey, configuredBy); perr != nil {
-			slog.Error("oauth/callback persist failed — revoking minted key",
+			slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 				"error", perr, "team_id", teamID, "key_id", keyID)
 			// Fire-and-forget revoke. Using a fresh context (not r.Context())
 			// because the request context may be canceling by the time we
@@ -187,7 +199,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 			return
 		}
 
-		slog.Info("oauth/callback completed", "team_id", teamID, "key_prefix", keyPrefix)
+		slog.Info("oauth/callback completed", "team_id", teamID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 
 		// Step 7: DM the admin (fire-and-forget; failure non-fatal).
 		if cfg.SlackClient != nil && configuredBy != "" {
@@ -210,22 +222,18 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
-	// Defense-in-depth: teamID is teamIDPattern-validated, keyPrefix comes
-	// from qurl-service's JSON response, email is JWKS-verified. Still,
-	// every interpolation goes through html.EscapeString before reaching
-	// the success template — nothing user-influenced is concatenated raw.
-	keyLine := ""
-	if keyPrefix != "" {
-		keyLine = fmt.Sprintf("<div>API key prefix: <code>%s</code></div>", html.EscapeString(keyPrefix))
-	}
-	emailLine := ""
-	if email != "" {
-		emailLine = fmt.Sprintf("<div>qURL account: <code>%s</code></div>", html.EscapeString(email))
-	}
+	// html/template handles all escaping. teamID is also teamIDPattern-
+	// validated upstream, keyPrefix comes from qurl-service's JSON
+	// response, email is JWKS-verified — but the template's context-aware
+	// auto-escape is the load-bearing XSS defense here.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	if _, err := fmt.Fprintf(w, successHTML, html.EscapeString(teamID), keyLine, emailLine); err != nil {
+	if err := successPageTemplate.Execute(w, successPageData{
+		TeamID:    teamID,
+		KeyPrefix: keyPrefix,
+		Email:     email,
+	}); err != nil {
 		slog.Warn("oauth/callback success-page write failed", "error", err)
 	}
 }
