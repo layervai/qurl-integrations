@@ -1306,9 +1306,10 @@ async function handleSend(interaction, apiKey) {
       const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
       content += `\n\n_Personal message:_ "${preview}"`;
     }
-    // Same isFinite + > 0 invariant the modal prefill uses — a
-    // corrupted DDB row carrying Infinity is truthy and would otherwise
-    // surface as "_Self-destruct timer:_ (invalid)" in the form preview.
+    // Same isFinite + > 0 invariant the dropdown's `default` flag uses
+    // (see `hasTimer` in formRows below) — a corrupted DDB row carrying
+    // Infinity is truthy and would otherwise surface as
+    // "_Self-destruct timer:_ (invalid)" in the form preview.
     if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
       content += `\n\n_Self-destruct timer:_ ${formatSelfDestructLabel(selfDestructSeconds)}`;
     }
@@ -1362,9 +1363,8 @@ async function handleSend(interaction, apiKey) {
     const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
     // No setPlaceholder — the No-timer option ships default-true when
     // !hasTimer, so the dropdown header always reflects the current
-    // state and the placeholder would never render. Same convention
-    // expirySelect uses (no placeholder; the current expiry is always
-    // the default-true option).
+    // state and a placeholder would never render. Same default-true
+    // convention expirySelect uses for its current-value option.
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(ids.selfDestructSelect)
