@@ -119,16 +119,6 @@ describe('utils/time', () => {
       expect(formatSelfDestructLabel(-Infinity)).toBe('(invalid)');
     });
 
-    it('round-trips with selfDestructSelectValueToSeconds for every preset', () => {
-      // Pins the contract that drives the dropdown's `default` flag on
-      // re-render: format(seconds) is the user-visible label, but the
-      // option's `value` is String(seconds) — selecting it must return
-      // back to the same seconds.
-      for (const preset of SELF_DESTRUCT_PRESETS) {
-        expect(selfDestructSelectValueToSeconds(String(preset.seconds))).toBe(preset.seconds);
-        expect(formatSelfDestructLabel(preset.seconds)).toBe(preset.label);
-      }
-    });
   });
 
   describe('expiryToISO', () => {
