@@ -35,6 +35,10 @@ describe('gateway-resume-spike — session store helpers', () => {
   afterEach(() => {
     try { fs.unlinkSync(testFile); } catch (_) { /* ok */ }
     try { fs.unlinkSync(`${path.resolve(testFile)}.tmp`); } catch (_) { /* ok */ }
+    // Restore any jest.spyOn mocks set by individual tests so they don't
+    // leak into the next test. Safer than per-test cleanup because
+    // assertion failures don't skip this.
+    jest.restoreAllMocks();
   });
 
   describe('persistSession + loadSession round-trip', () => {
@@ -105,17 +109,18 @@ describe('gateway-resume-spike — session store helpers', () => {
       // the file, disk-level issue). The helper deliberately doesn't
       // swallow these — better to fail loud than silently fall back to
       // IDENTIFY and bury the underlying problem.
-      const original = fs.readFileSync;
-      fs.readFileSync = () => {
+      //
+      // jest.spyOn + mockImplementation + restoreAllMocks (afterEach) is
+      // safer than direct monkey-patching of fs.readFileSync: if the test
+      // body throws mid-assertion, jest's restoreAllMocks still runs.
+      // Direct monkey-patching leaks the patched fn to subsequent tests
+      // in the same file under that failure mode.
+      jest.spyOn(fs, 'readFileSync').mockImplementation(() => {
         const err = new Error('permission denied');
         err.code = 'EACCES';
         throw err;
-      };
-      try {
-        expect(() => loadSession(testFile)).toThrow(/permission denied/);
-      } finally {
-        fs.readFileSync = original;
-      }
+      });
+      expect(() => loadSession(testFile)).toThrow(/permission denied/);
     });
   });
 
@@ -179,10 +184,15 @@ describe('gateway-resume-spike — @discordjs/ws option contract', () => {
     expect(WebSocketShardEvents.Dispatch).toBeDefined();
   });
 
-  test('constructing WebSocketManager accepts retrieveSessionInfo + updateSessionInfo', () => {
+  test('constructing WebSocketManager accepts retrieveSessionInfo + updateSessionInfo', async () => {
     // We construct but DO NOT connect — no network call. The constructor
     // accepting our callback shape without throwing is what we want to
     // pin.
+    //
+    // destroy() at the end with try/finally: if @discordjs/ws ever opens
+    // an internal timer/keepalive at construction time, this prevents
+    // the test from leaking a handle. destroy() is a no-op when no
+    // connection exists, so it's safe even though we never connect.
     const { WebSocketManager } = require('@discordjs/ws');
     const { REST } = require('@discordjs/rest');
     const rest = new REST().setToken('not-a-real-token');
@@ -195,6 +205,30 @@ describe('gateway-resume-spike — @discordjs/ws option contract', () => {
       updateSessionInfo: () => {},
     });
 
-    expect(mgr).toBeDefined();
+    try {
+      expect(mgr).toBeDefined();
+    } finally {
+      await mgr.destroy({ code: 1000 }).catch(() => { /* no connection, harmless */ });
+    }
+  });
+});
+
+describe('gateway-resume-spike — persisted file permissions', () => {
+  // Pins that persistSession writes with mode 0o600 (owner-only). The
+  // file contains a live Discord session_id + resume_url; within the
+  // ~60s buffer window, an unauthorized reader could RESUME the bot
+  // session and impersonate it. Even on a dev machine this is sloppy.
+  // Skipped on non-Unix where mode bits don't map cleanly.
+  const isUnix = process.platform !== 'win32';
+
+  (isUnix ? test : test.skip)('persistSession writes file with mode 0o600', () => {
+    const filePath = tempPath('mode-check');
+    try {
+      persistSession({ sessionId: 'x', resumeURL: 'wss://x/', sequence: 1 }, filePath);
+      const mode = fs.statSync(filePath).mode & 0o777;
+      expect(mode).toBe(0o600);
+    } finally {
+      try { fs.unlinkSync(filePath); } catch (_) { /* ok */ }
+    }
   });
 });

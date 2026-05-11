@@ -116,9 +116,16 @@ function persistSession(info, filePath = SESSION_FILE) {
   // Atomic-write so a SIGKILL mid-write doesn't leave a half-written file
   // that the next phase parses as corrupt. Resolve the absolute path so
   // rename() doesn't fail across relative-cwd differences in tests.
+  //
+  // mode 0o600 (owner-only read/write): the persisted file contains a
+  // live Discord session_id + resume_url that, within the ~60s resume
+  // buffer window, anyone could use to RESUME the bot's WS session. Even
+  // on a personal dev machine, world-readable in /tmp is sloppy hygiene
+  // for a token-adjacent secret. The umask alone isn't reliable
+  // protection (defaults vary) so the mode is explicit.
   const abs = path.resolve(filePath);
   const tmp = `${abs}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(info, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, abs);
 }
 
@@ -171,7 +178,31 @@ async function runPhase1(token) {
     console.error('[phase1] shard error:', error.message);
   });
 
-  await manager.connect();
+  // SIGINT handler: persist whatever sequence we've captured so far before
+  // exiting. Without this, Ctrl+C between connect and the post-idle persist
+  // call leaves /tmp/spike-session.json absent, and the user runs phase2
+  // and gets a confusing "no persisted session" error rather than "session
+  // captured up to seq N, ready for phase2." Mirrors the production
+  // SIGTERM handler shape (persist final state before exit).
+  process.on('SIGINT', () => {
+    if (latestSessionInfo) {
+      persistSession(latestSessionInfo);
+      console.log('[phase1] SIGINT: persisted partial session before exit');
+    } else {
+      console.log('[phase1] SIGINT: nothing to persist (READY not yet received)');
+    }
+    process.exit(130); // 128 + SIGINT(2), standard shell convention
+  });
+
+  // Race manager.connect() against a 30s timeout so a Discord-side rate
+  // limit or network blip doesn't hang the spike forever.
+  const CONNECT_TIMEOUT_MS = 30_000;
+  await Promise.race([
+    manager.connect(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`connect() timed out after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS)
+    ),
+  ]);
   console.log('[phase1] connected; idling for', PHASE1_LIFETIME_MS, 'ms to accumulate sequence');
   await new Promise((resolve) => setTimeout(resolve, PHASE1_LIFETIME_MS));
 
@@ -240,7 +271,12 @@ async function runPhase2(token) {
   // (e.g. another process is contending for the same token). On Fargate
   // these would burn Discord's 1000/24h IDENTIFY budget; same idea here.
   let identifyAttempts = 0;
-  const MAX_IDENTIFY_ATTEMPTS = 2; // 1 RESUME, then at most 1 IDENTIFY
+  // MAX = 1 means we'll let through exactly one IDENTIFY after RESUME
+  // rejection (the comment originally said "1 RESUME, then at most 1
+  // IDENTIFY" but the guard was `> 2`, which let through TWO IDENTIFYs).
+  // The current guard `>= MAX` matches the comment.
+  const MAX_IDENTIFY_ATTEMPTS = 1;
+  let budgetExhausted = false;
 
   const manager = new WebSocketManager({
     token,
@@ -256,8 +292,13 @@ async function runPhase2(token) {
       if (identifyAttempts > MAX_IDENTIFY_ATTEMPTS) {
         // We've already burned our budget. The library will call back here
         // again on its own reconnect logic — returning null again would just
-        // keep IDENTIFYing. Throwing here aborts the shard and lets the
-        // outer code report a clear failure instead of looping silently.
+        // keep IDENTIFYing. Setting a flag (instead of throwing) lets the
+        // outer flow surface a clean budget-exhausted result. A thrown
+        // error would propagate up through connect()'s catch handler and
+        // get logged but not classified — the budget-exhausted exit code
+        // (3) below wouldn't fire because the resumed/identified branches
+        // run first; this flag is checked alongside them.
+        budgetExhausted = true;
         const err = new Error(`IDENTIFY budget exhausted (${identifyAttempts} attempts)`);
         err.code = 'SPIKE_IDENTIFY_BUDGET';
         throw err;
@@ -322,9 +363,22 @@ async function runPhase2(token) {
 
   await manager.destroy({ code: 1000 }).catch(() => { /* shutting down anyway */ });
 
+  // Result classification — order matters. The most-specific failure mode
+  // (budget exhausted) is checked BEFORE the more-general identified-without-
+  // budget case, otherwise the order falls through to the wrong branch.
+  // Earlier version had this order backwards; the budget-exhausted exit was
+  // unreachable because `identified && postResumeSessionCleared` would match
+  // first (READY fires before the second retrieveSessionInfo throws).
   if (resumed) {
     console.log('[phase2] RESULT: RESUME-OK (Pillar 2 mechanism validated)');
     process.exit(0);
+  }
+  if (budgetExhausted) {
+    console.error('[phase2] RESULT: RESUME-FAIL + IDENTIFY-budget-exhausted.');
+    console.error('[phase2] This usually means token contention — another process is IDENTIFYing');
+    console.error('[phase2] on the same token. Check that no other gateway task is running');
+    console.error('[phase2] (scale bot_gateway to desired_count=0 before re-running the spike).');
+    process.exit(3);
   }
   if (identified && postResumeSessionCleared) {
     console.log('[phase2] RESULT: RESUME-FAIL → IDENTIFY-fallback (graceful)');
@@ -333,12 +387,6 @@ async function runPhase2(token) {
     console.log('[phase2] works in production — design treats this as a counted SLI (resume');
     console.log('[phase2] success rate) with IDENTIFY as a safety net.');
     process.exit(0);
-  }
-  if (postResumeSessionCleared && identifyAttempts >= MAX_IDENTIFY_ATTEMPTS) {
-    console.error('[phase2] RESULT: RESUME-FAIL + IDENTIFY also failed (budget exhausted).');
-    console.error('[phase2] This usually means token contention — another process is IDENTIFYing');
-    console.error('[phase2] on the same token. Check that no other gateway task is running.');
-    process.exit(3);
   }
   console.error('[phase2] RESULT: UNCLEAR — neither RESUMED nor READY observed within timeout');
   process.exit(2);

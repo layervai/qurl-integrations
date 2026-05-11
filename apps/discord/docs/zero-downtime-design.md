@@ -67,9 +67,10 @@ Two tiers:
       │    version bumps, sharding changes)     │
       └────────────────┬────────────────────────┘
                        │
-              SQS FIFO Queue (per-guild
-              ordering, DLQ, autoscaling
-              signal for workers)
+              SQS Standard Queue (DLQ,
+              autoscaling signal for
+              workers; ordering enforced
+              at the DDB layer)
                        │
                        ▼
       ┌─────────────────────────────────────────┐
@@ -139,21 +140,53 @@ handler:
 
 1. Reads message metadata: `(channel_id, author_id, attachments)`.
 2. Constructs `flow_id` candidate keys from the metadata.
-3. Looks up the flow row in DDB. With ~thousands of guilds and ~tens of DMs/s
-   peak, this is a cheap lookup. To keep DDB reads off the per-message hot
-   path for non-flow DMs (the common case), we cache **positive** flow
-   memberships per worker: when worker A creates a flow for user X, A writes
-   to DDB and *also* publishes "user X is in flow Y" to a short-TTL in-memory
-   table on every worker (via the existing SQS dispatch — workers see flow-
-   create events too). Misses always re-read DDB. We **never** cache absence,
-   because a user dropping a file is a single irreversible action — a stale
-   "no flow" cache entry on the worker that gets the message would silently
-   drop the user's upload. Read-through on miss costs one DDB GetItem per
-   non-flow DM, which we accept; the optimization is for DMs *during* an
-   active flow, not against them.
+3. Looks up the flow row in DDB. **Every** `MESSAGE_CREATE` does a single
+   `GetItem` against the flow table by composite key. No in-process cache —
+   the earlier draft had a per-worker positive cache that would only have
+   been populated on whichever worker handled the matching flow-create
+   event, leaving every other worker with stale-no-flow assumptions. With
+   SQS Standard (at-most-once-per-consumer fanout) there's no natural
+   affinity between flow-create and the user's subsequent file-drop; a
+   coherent cache would require a separate broadcast channel (Redis pubsub
+   or DDB Streams), which is more infrastructure for marginal cost savings.
+   The volume math says the DDB cost is bounded: at ~thousands of guilds
+   and the bot's invite-only-beta DM patterns, GetItem-on-every-non-flow-
+   DM is tens-to-hundreds of reads per second, fully within DDB's
+   on-demand pricing without provisioned capacity tuning. Revisit only if
+   the volume crosses an order of magnitude.
 4. If matched, advances the flow via OCC. If two events race (e.g., user
    uploads twice quickly), one OCC retry path wins, the other gets a clear
    `"flow already advanced"` error.
+
+### Queue: SQS Standard + application-layer idempotency
+
+The queue between the gateway tier and the worker tier is SQS Standard, not
+FIFO. The rationale is that the ordering FIFO would enforce isn't load-
+bearing — the source of truth for "did this flow advance" is the DDB flow
+row, not the order in which events were processed — and FIFO's per-queue
+throughput ceiling (300 TPS, 3000 with high-throughput mode) is a real
+cliff at sharding scale that Standard doesn't have.
+
+Standard's at-least-once delivery means duplicate events. Application-layer
+idempotency covers it:
+
+- **`INTERACTION_CREATE` duplicates** are naturally idempotent at Discord:
+  `/callback` returns "Unknown interaction" on the second call because the
+  interaction token has already been ACK'd. The worker's only real cost on
+  a duplicate is a wasted REST call and a logged 4xx.
+- **`MESSAGE_CREATE` duplicates** are blocked by OCC at `transitionFlow`:
+  the second arrival reads the same `version`, attempts the same transition,
+  and the conditional `UpdateItem` fails with `ConditionalCheckFailedException`.
+  The handler treats this as "another worker already advanced this flow"
+  and exits without acting.
+- **`GUILD_CREATE` / `GUILD_DELETE` duplicates** are audit-only; duplicate
+  log lines are tolerable.
+
+Producer-side dedup hint: the gateway sets `MessageAttributes.event_id` from
+Discord's per-dispatch `s` (sequence) field as a defense-in-depth — workers
+log when they see a `event_id` they processed within the last 5 minutes
+(in-process LRU, ~10k entries) so a real-world dup rate can be quantified.
+The LRU is best-effort; OCC is the correctness primitive.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
@@ -262,60 +295,138 @@ Two gateway replicas. A DDB-conditional-write lock primitive (table
 `qurl_bot_gateway_lock` — PR 12) provides single-active enforcement:
 
 - Lock row: `PK = shard_id`, attrs `lock_holder`, `expires_at`, `instance_id`, `version`.
-- `acquireLock`: conditional `PutItem` where `lock_holder IS NULL OR expires_at < now`.
-- `renewLock`: heartbeat every 5 s (TTL 15 s), conditional on `instance_id = self`.
-- `releaseLock`: conditional delete on `instance_id = self`.
-- Only the lock holder calls `WebSocketManager.connect()`. The non-holder boots
-  fully (DDB clients open, control-channel listener bound, `/health` returning
-  200) but skips the gateway connection.
+- `acquireLock`: conditional `PutItem` where `attribute_not_exists(lock_holder)
+  OR expires_at < :now` (with `:now` from the caller's wall clock; see clock-
+  skew note below).
+- `renewLock`: heartbeat every **2 s** (TTL **6 s**), conditional on
+  `instance_id = self AND version = :expected`. Three missed renewals = lock
+  becomes acquirable by a peer.
+- `transferLock(self → peer_instance_id)`: atomic `UpdateItem` with condition
+  `instance_id = :self AND version = :expected` and set `instance_id =
+  :peer, expires_at = :now + ttl, version = :version + 1`. Used by the
+  SIGTERM handoff path so the active hands ownership over in one DDB op,
+  with no lock-released-but-not-acquired-yet window.
+- Only the current lock holder calls `WebSocketManager.connect()`. The non-
+  holder boots fully (DDB clients open, control-channel listener bound,
+  `/health` returning 200) but skips the gateway connection.
+
+**Heartbeat / TTL choice.** 2 s / 6 s instead of the original 5 s / 15 s.
+The original numbers were paced for low-frequency lock churn — but the
+*recovery floor* matters here: the no-peer SIGTERM path means standby
+must wait for the lock TTL to expire before it can acquire. At 2 s / 6 s
+the worst-case no-peer cold-fallback floor is ~6 s + RESUME RTT
+(~1 s) ≈ 7 s, not the original ~15 s. The cost is 5× more DDB writes (one
+heartbeat every 2 s instead of every 5 s); at one item per shard and DDB
+on-demand pricing this is ~$1 per shard per month — trivially worth the
+tighter recovery floor.
+
+**Clock skew on `expires_at < :now`.** The `:now` parameter is evaluated
+on the caller's wall clock. Fargate task clocks are normally fine
+(chrony-equivalent via the host) but the dependency is load-bearing. Two
+mitigations: (a) heartbeat cadence (2 s) is 3× shorter than TTL (6 s) so
+clock skew up to ±2 s within the cluster doesn't trigger spurious
+takeovers; (b) the `version` attribute on `transferLock` and `renewLock`
+provides causal ordering — a clock-skewed peer can't take a lock that
+another peer is actively heartbeating because the `version` check fails
+the conditional write. Beyond ±2 s of skew there's a window where both
+peers might believe they hold the lock; the `version` check on next-
+renewal forces one to back off. Documented but not engineered for —
+chrony failure on Fargate is a much larger incident than a brief
+double-IDENTIFY.
+
+**Why no per-replica polling.** The lock primitive alone doesn't tell the
+standby *when* to act; the standby only needs the lock when it's
+becoming active. The push-handoff (below) is the primary signaling
+mechanism. The standby reads the lock row only as a sanity check after
+`transferLock` returns success, and on the cold-start path (active died
+without push-handoff completing).
 
 **Standby discovery.** Each replica writes its container IP + control-channel
-port to its own row in a small DDB heartbeat table (PK = `instance_id`, TTL
-30 s, refreshed every 5 s alongside the leader-lock renewal). The active reads
-peer rows from that table — its own row excluded — and uses the freshest one
-as the handoff target. This avoids ECS Service Connect / Cloud Map, which
-resolves to *all* healthy gateway tasks (including the active itself) and
-would need a self-exclusion filter anyway.
+port to its own row in a small DDB heartbeat table (PK = `instance_id`,
+attrs include `updated_at`, refreshed every 2 s alongside the leader-lock
+renewal). When the active reads candidate peer rows, it filters by
+`updated_at > now - 6s` rather than relying on DDB TTL — DDB's TTL
+deletion is eventual (AWS-documented worst case up to 48 h), so a stale
+row past its TTL might still be visible. The freshness filter at read
+time is the correctness guarantee; TTL is hygiene.
+
+**Control-channel auth: shared HMAC secret.** The control channel listens
+on the container's task ENI inside the private subnet; it's reachable by
+anything in the VPC. Without auth, any compromised pod could push
+handoff messages and trigger a session takeover. The auth surface is
+narrow (one endpoint, fixed payload shape) so a 32-byte HMAC secret
+shared via the existing SSM-`SecureString`-via-task-def pattern is
+sufficient — same trust class as `DISCORD_TOKEN`. mTLS was considered
+and rejected because the cert-rotation pipeline is more infra than the
+problem warrants for an in-VPC reachability surface. The secret is named
+`/qurl-bot-discord/GATEWAY_HANDOFF_HMAC`, rotated annually, generated
+via `openssl rand -hex 32`.
 
 **SIGTERM handoff sequence on the active replica:**
 
 ```
 1. Receive SIGTERM
-2. Stop accepting new dispatches into the queue (drain)
-3. Persist final sequence to DDB session row
-4. Read peer-heartbeat row from DDB (excluding self) → get standby IP+port
-5. POST /control/yours to that IP
-6. Wait for ACK or 200 ms timeout
-7. releaseLock()
-8. WebSocketManager.destroy({ code: 1000 })  ← clean close, Discord buffers
-9. Exit
+2. Stop forwarding new dispatches to SQS (drain)
+3. Persist final sequence to the DDB session row
+4. Read peer-heartbeat row from DDB (excluding self, filtered by
+   updated_at > now - 6s) → get standby instance_id + IP + port
+5. If no peer: skip the push path; fall through to cold-start (step 9)
+6. POST /control/yours to peer with body {active_instance_id, expected_version}
+   signed with HMAC. Standby's handler runs transferLock atomically
+   (active → standby), then WebSocketManager.connect(); standby ACKs.
+7. Wait for ACK or 200 ms timeout. ACK means standby has IDENTIFY'd
+   or RESUMEd successfully (standby's handler doesn't ACK until
+   @discordjs/ws's connect() resolves).
+8. (No releaseLock — transferLock did it atomically in step 6.)
+9. Exit. TCP drops; Discord sees a network disconnect; if step 7 ACK'd
+   on time, standby's WS is already open and Discord's events flow there.
 ```
 
-If step 4 returns no peer (standby still booting, or just-died), step 5
-becomes a no-op and the deploy falls back to the cold-start path: standby
-acquires the lock when its own heartbeat starts, RESUMEs from DDB. The
-handoff window degrades from sub-second to a few seconds, but doesn't fail
-outright.
+**Why no `manager.destroy()` in step 9.** Per the Pillar 2 contract
+gotcha: `destroy()` invalidates the session at the @discordjs/ws layer
+and sends a Discord close frame that ends the session. We need the
+session to stay alive on Discord's side in case the standby's RESUME
+hasn't completed by the time the active exits — TCP drop is the safe
+shape.
+
+**If step 4 returns no peer** (standby still booting, or just-died), the
+deploy falls back to the cold-start path: standby acquires the lock when
+its own next heartbeat fires (within 2 s) AND the TTL has elapsed
+(within 6 s of the active's last heartbeat). Worst-case no-peer floor
+is ~6 s lock-TTL wait + ~1 s RESUME RTT ≈ **~7 s**, not the original
+~15 s. Still degraded vs the push-handoff sub-second path, but bounded
+and known.
 
 **Standby on `POST /control/yours`:**
 
 ```
-1. Verify origin (mTLS or shared HMAC secret)
-2. acquireLock()       ← should be immediate since active just released
-3. WebSocketManager.connect()   ← @discordjs/ws calls retrieveSessionInfo,
-                                  finds the row, sends RESUME
-4. ACK control request
+1. Verify HMAC signature on the request body
+2. Verify body.active_instance_id matches a known peer (avoids accidental
+   takeovers from a stale stopped task)
+3. transferLock(body.active_instance_id → self_instance_id)
+   ← atomic single-DDB-op; no acquireLock race
+4. WebSocketManager.connect()
+   ← @discordjs/ws calls retrieveSessionInfo, finds the row, sends RESUME
+5. ACK control request (only after connect() resolves; ACK = "I'm live")
 ```
-
-Sub-second handoff because both replicas are warm and the active *tells* the
-standby instead of the standby polling. We measure the actual distribution in
-the chaos suite (PR 15).
 
 **Why direct push beats short-polling:** polling at 100 ms costs 10 reads/s
 per standby per shard. At one shard that's negligible, but doesn't compose to
 the sharded future. Push-handoff is constant cost and lower latency. DDB
 Streams was considered and rejected — up to ~3 s replication lag, doesn't meet
 the sub-second target.
+
+**ECS deployment-strategy invariant.** The push-handoff design assumes
+exactly one replica is being replaced at a time. A simultaneous-both-
+replaced state defeats the whole hot-standby premise — no peer to push
+to, both new tasks cold-start, hit the ~7 s floor each, and the second
+one might race the first into IDENTIFY-collision. This must be enforced
+at the tfvars layer: `bot_gateway`'s deployment config must set
+`minimumHealthyPercent = 50` with `maximumPercent = 100` (forces serial
+replacement when desired_count = 2) OR use a deployment controller that
+serializes replacements explicitly. PR 14 implements this; the
+`deployment_circuit_breaker` block on `bot_gateway` in `greenfield.tf`
+stays.
 
 ## Why not other approaches
 
@@ -344,9 +455,22 @@ Each phase has an independent rollback path:
 | Phase | Rollback |
 |---|---|
 | Flow state | Revert command-file PRs. DDB flow rows expire on their TTL. |
-| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. Worker role's SQS consumer remains running but receives nothing. |
+| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. **Valid only through PR 10** — see cliff note below. |
 | Cross-process RESUME | App-side feature flag `ENABLE_GATEWAY_RESUME=false` falls back to in-memory session state (Discord IDENTIFY-only every boot). |
-| Hot-standby | Set `gateway_desired_count = 1` in tfvars. The lock primitive sees no peer and stays leader. |
+| Hot-standby | Set `gateway_desired_count = 1` in tfvars. The standby-discovery path sees no peer and the active becomes a single-replica gateway. |
+
+**Rollback cliff: `ENABLE_EVENT_SHIPPER`.** The flag-based rollback works
+only while PR 10 (gateway strip-down) is gated — i.e., the gateway role
+still has in-process command handlers wired to fall back to. The moment
+PR 10 lands without the flag (the dual-path scaffolding is removed),
+flipping `ENABLE_EVENT_SHIPPER=false` has nothing to fall back to and
+the gateway boots into a partially-wired state. After that point,
+rollback is `git revert` on PR 10 + emergency redeploy, not a flag flip.
+The cliff is a deliberate trade-off: keeping the dual-path scaffolding
+forever bloats the gateway image and obscures whose code path is live.
+PR 10's description must explicitly call out the soak window before
+removing the flag (recommendation: 1 week of clean prod traffic on the
+event-shipper path before deleting the in-process fallback).
 
 ## SLI / SLO definitions
 

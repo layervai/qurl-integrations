@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "register": "node src/register-commands.js",
-    "lint": "eslint src tests --max-warnings 0",
+    "lint": "eslint src tests scripts --max-warnings 0",
     "test": "jest --coverage"
   },
   "keywords": [
@@ -23,6 +23,8 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1036.0",
     "@aws-sdk/lib-dynamodb": "^3.1036.0",
+    "@discordjs/rest": "~2.6.0",
+    "@discordjs/ws": "~1.2.3",
     "better-sqlite3": "~12.8.0",
     "discord-api-types": "^0.38.33",
     "discord.js": "~14.25.1",
