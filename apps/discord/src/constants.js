@@ -268,7 +268,20 @@ const AUDIT_EVENTS = {
   //                   varies per flow type — revoke is shorter than
   //                   send). LOW-cardinality (boolean) — safe to
   //                   dimension on AND included in the materialized
-  //                   metric's dimension list above.
+  //                   metric's dimension list above. FORCED TO false
+  //                   on non-success results (not_found, conflict,
+  //                   error) — the transition didn't advance, so
+  //                   nothing terminal happened, so the audit is
+  //                   honest by construction. Consumers can still
+  //                   slice `count_by(terminal=true)` safely.
+  //   - `extended`:   bool. True if the transition extended/reset
+  //                   the row's expires_at (via the `set_expires_at`
+  //                   option). LOW-cardinality (boolean) — safe to
+  //                   dimension on. Forensic-only today; lets an
+  //                   incident query answer "did this transition
+  //                   bump the deadline?" without re-reading the
+  //                   row. Not currently used as a metric filter
+  //                   dimension.
   //   - `flow_id`:    HIGH-cardinality. Forensic-query ONLY — same
   //                   posture as FLOW_CREATED.
   FLOW_TRANSITION: 'flow_transition',

@@ -32,6 +32,16 @@
 //      `encryptStrict` fails closed if `KEY_ENCRYPTION_KEY` is
 //      unset, so a misconfigured deploy can't silently persist
 //      plaintext.
+//
+// flow_id contract: must be a parseable shard-aware composite key
+// as produced by `buildFlowId` in `src/flow-id.js`. `createFlow`
+// validates structure at entry (parseFlowId returns non-null);
+// transition/load/delete trust the caller — a malformed flow_id
+// passed to those methods will simply hit not_found. Callers
+// SHOULD route every flow_id through buildFlowId() rather than
+// hand-rolling the join — drift on the separator convention
+// between handler and worker is exactly the foot-gun flow-id.js
+// exists to close.
 
 const {
   DynamoDBClient,
@@ -57,6 +67,7 @@ function isConditionalCheckFailed(err) {
 const { encryptStrict, decrypt } = require('./utils/crypto');
 const logger = require('./logger');
 const { AUDIT_EVENTS } = require('./constants');
+const { parseFlowId } = require('./flow-id');
 
 // Module-load validations. Same fail-fast pattern as ddb-store.js
 // (DDB_TABLE_PREFIX + AWS_REGION). flow-state intentionally
@@ -103,9 +114,21 @@ const ddb = DynamoDBDocumentClient.from(rawClient, {
 // timestamps are the classic foot-gun (a `new Date().toISOString()`
 // looks correct but is type "S" and never reaps). Hard-fail here
 // rather than at GetItem-time when the orphan surfaces years later.
+//
+// We ALSO reject `expires_at <= now` — a forgotten `+ ttl_seconds`
+// (a classic miscompute, e.g. `expiresAt = nowEpochSeconds()` with
+// the addition forgotten) writes a row that's instantly expired:
+//   1. passes type check, succeeds Put, fires FLOW_CREATED
+//   2. every loadFlow returns null (now > expires_at)
+//   3. caller can never advance to deleteFlow → SLI numerator drops
+// ⇒ guaranteed contributor to `silently_dropped_flows`. Reject at
+// write time instead so the bad call site is named in the throw.
 function assertExpiresAt(expiresAt) {
   if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || Math.floor(expiresAt) !== expiresAt) {
     throw new TypeError(`flow-state: expires_at must be a finite integer epoch-seconds Number (got ${typeof expiresAt}: ${JSON.stringify(expiresAt)}). DDB TTL only reaps Number-typed attributes; a string or float would silently orphan the row.`);
+  }
+  if (expiresAt <= nowEpochSeconds()) {
+    throw new RangeError(`flow-state: expires_at must be strictly in the future (got ${expiresAt}; now is ${nowEpochSeconds()}). A row whose TTL is in the past is born expired — it passes the Put, fires FLOW_CREATED, but loadFlow returns null forever after, silently inflating the SLI's silently_dropped numerator. Most often this is a forgotten '+ ttl_seconds' on the caller side.`);
   }
 }
 
@@ -122,12 +145,22 @@ function nowEpochSeconds() {
 // predictable (always a single `payload` string column) regardless
 // of flow type.
 function encryptPayload(payload) {
+  // Load-bearing null guard: without it, payload=null would
+  // encryptStrict(JSON.stringify(null)) = ciphertext-of-"null"
+  // (the 4-byte string), storing a non-null DDB attribute that
+  // decrypts to the string "null", which JSON.parse correctly
+  // reverses but at the cost of a wasted encrypt call AND an
+  // inconsistent DDB attribute shape (string sometimes, null
+  // sometimes). Pass null through unchanged so the column is
+  // either a real ciphertext or a DDB null — never both.
   if (payload == null) return null;
   return encryptStrict(JSON.stringify(payload));
 }
 
 function decryptPayload(ciphertext) {
-  if (ciphertext == null) return null;
+  // No upfront null guard — `decrypt` passes null/undefined through
+  // unchanged, and the `plaintext == null` check below catches it.
+  // A single guard is clearer than two redundant ones.
   const plaintext = decrypt(ciphertext);
   if (plaintext == null) return null;
   try {
@@ -169,19 +202,30 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.createFlow: flow_id must be a non-empty string');
   }
+  // Entry-point structure validation. Once a malformed flow_id is in
+  // the table its later operations would silently succeed (transitions
+  // and deletes only look up by the literal key), and the audit
+  // forensic path would fail at `parseFlowId` time with no signal —
+  // the silent-drop foot-gun the reviewer flagged as "aspirational
+  // coupling". Reject malformed keys at the only place a new row
+  // can enter the table.
+  if (parseFlowId(flow_id) === null) {
+    throw new TypeError(`flow-state.createFlow: flow_id ${JSON.stringify(flow_id)} is not a parseable shard-aware composite key. Use buildFlowId({ shard_id, guild_id, channel_id, user_id }) from src/flow-id.js to construct it.`);
+  }
   if (typeof stage !== 'string' || stage.length === 0) {
     throw new TypeError('flow-state.createFlow: stage must be a non-empty string');
   }
   assertExpiresAt(expires_at);
 
+  const now = nowEpochSeconds();
   const item = {
     flow_id,
     stage,
     version: 1,
     payload: encryptPayload(payload),
     expires_at,
-    created_at: nowEpochSeconds(),
-    updated_at: nowEpochSeconds(),
+    created_at: now,
+    updated_at: now,
   };
 
   try {
@@ -194,6 +238,16 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
     if (isConditionalCheckFailed(err)) {
       // Existing row — idempotent no-op. Don't emit FLOW_CREATED;
       // the SLI denominator counts new flows, not redeliveries.
+      //
+      // Note: a payload mutation in the redelivered call is DISCARDED
+      // silently. The contract is "create-once for this flow_id"; if
+      // the caller's payload genuinely needs to evolve, the right
+      // primitive is transitionFlow (which gives an OCC handle on
+      // mutation) rather than re-trying createFlow with a different
+      // payload. We do not warn-log on payload divergence today —
+      // there's no cheap way to compare encrypted payloads without
+      // decrypting both, and the legitimate case (SQS exact-duplicate)
+      // would generate spurious warns.
       return { created: false };
     }
     throw err;
@@ -221,9 +275,25 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // Negative grace values are accepted (skews "expired" earlier);
 // no use case yet but cheaper to leave permissive than to gate
 // on a corner case a future caller might legitimately want.
+//
+// ConsistentRead: the read is strongly consistent. Canonical use
+// case is "I just transitioned this flow and want to re-verify"
+// or "I'm about to transition and want the current version" —
+// both need strong consistency. Eventually-consistent reads
+// would also double RCU efficiency, but the harness today has
+// no orthogonal-read callers (admin tooling, audit forensics)
+// to justify a parameter. Add `consistent_read: false` here if
+// such a caller arrives.
 async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.loadFlow: flow_id must be a non-empty string');
+  }
+  // Type-check grace_seconds. Without this, `grace_seconds:
+  // 'forever'` would evaluate `expires + 'forever'` → string
+  // concat → NaN → `now > NaN` is false → expired-as-alive. A
+  // caller passing untrusted config could surface stale flows.
+  if (typeof grace_seconds !== 'number' || !Number.isFinite(grace_seconds)) {
+    throw new TypeError(`flow-state.loadFlow: grace_seconds must be a finite number (got ${typeof grace_seconds}: ${JSON.stringify(grace_seconds)})`);
   }
   const res = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
@@ -289,6 +359,25 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
 // per flow — revoke has fewer stages than send). When `terminal`
 // is true the next call should be deleteFlow.
 //
+// **`terminal` is forced to `false` on non-success results.** If
+// the transition didn't actually advance the row (not_found,
+// conflict, error), then nothing terminal happened — emitting
+// the caller's `terminal: true` would let a forensic query like
+// `count_by(terminal=true)` over-count by including failed
+// transitions. The SLI math is unaffected (it splits on `result`
+// + `terminal`, never `terminal` alone), but the audit shape
+// should be honest.
+//
+// `set_expires_at` (optional): replaces the row's expires_at to
+// the given value. **Named "set", not "extend"** because the
+// harness does NOT enforce monotonicity — a caller passing a
+// value earlier than the row's current expires_at will shorten
+// the lifetime, not extend it. Callers wanting monotonic-only
+// extension should compare against `loadFlow().expires_at`
+// first; the harness can't enforce it without an extra Read or
+// a stricter ConditionExpression (which would complicate the
+// not_found/conflict discrimination).
+//
 // **Audit-emit-on-rethrow contract.** On `result: 'error'` paths
 // the FLOW_TRANSITION audit fires BEFORE the rethrow. A caller
 // that retries a transient `NetworkingError` will produce N
@@ -297,7 +386,7 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
 // retry storm should be visible in the metric), and the SLI math
 // `silently_dropped = count(FLOW_CREATED) - count(FLOW_DELETED)`
 // is unaffected because it doesn't read the `error` bucket.
-async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, extend_expires_at }) {
+async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, set_expires_at }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.transitionFlow: flow_id must be a non-empty string');
   }
@@ -310,7 +399,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   if (typeof terminal !== 'boolean') {
     throw new TypeError(`flow-state.transitionFlow: terminal must be a boolean (got ${typeof terminal})`);
   }
-  if (extend_expires_at !== undefined) assertExpiresAt(extend_expires_at);
+  if (set_expires_at !== undefined) assertExpiresAt(set_expires_at);
 
   // Read stage_from for the audit emission. The Update below is
   // the authoritative write — a concurrent transition between this
@@ -318,6 +407,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // the stale stage_from in the audit emission is acceptable
   // (forensic field, not used for SLI math).
   let stage_from = null;
+  const extended = set_expires_at !== undefined;
   try {
     const got = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
@@ -331,7 +421,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         stage_from: null,
         stage_to,
         result: 'not_found',
-        terminal,
+        terminal: false,
+        extended,
       });
       return { result: 'not_found', version: null };
     }
@@ -343,7 +434,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       stage_from: null,
       stage_to,
       result: 'error',
-      terminal,
+      terminal: false,
+      extended,
     });
     throw err;
   }
@@ -365,10 +457,10 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     exprNames['#p'] = 'payload';
     exprValues[':payload'] = encryptPayload(payload);
   }
-  if (extend_expires_at !== undefined) {
+  if (set_expires_at !== undefined) {
     updateExprParts.push('#e = :expires_at');
     exprNames['#e'] = 'expires_at';
-    exprValues[':expires_at'] = extend_expires_at;
+    exprValues[':expires_at'] = set_expires_at;
   }
 
   try {
@@ -388,6 +480,7 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       stage_to,
       result: 'success',
       terminal,
+      extended,
     });
     return { result: 'success', version: newVersion };
   } catch (err) {
@@ -422,7 +515,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         stage_from,
         stage_to,
         result,
-        terminal,
+        terminal: false,
+        extended,
       });
       return { result, version: null };
     }
@@ -432,7 +526,8 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       stage_from,
       stage_to,
       result: 'error',
-      terminal,
+      terminal: false,
+      extended,
     });
     throw err;
   }
