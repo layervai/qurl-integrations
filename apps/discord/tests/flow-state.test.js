@@ -135,6 +135,24 @@ describe('flow-state.createFlow', () => {
     });
   });
 
+  test('undefined payload persists as null (symmetric with explicit null)', async () => {
+    // Reviewer-flagged gap: the documented "null and undefined both
+    // persist as null DDB attribute" semantic is exercised
+    // transitively by other tests but never pinned for `undefined`
+    // explicitly. Lock it in so a future refactor doesn't quietly
+    // change the persisted shape for callers omitting the field.
+    ddbMock.on(PutCommand).resolves({});
+    await flowState.createFlow({
+      flow_id: FLOW_ID,
+      stage: 's',
+      // payload intentionally omitted
+      expires_at: futureExpiry(),
+    });
+    const call = ddbMock.commandCalls(PutCommand)[0];
+    expect(call.args[0].input.Item.payload).toBeNull();
+    expect(encryptStrict).not.toHaveBeenCalled();
+  });
+
   test('null payload persists as null (not encrypted, not silently coerced)', async () => {
     ddbMock.on(PutCommand).resolves({});
     await flowState.createFlow({
@@ -389,7 +407,17 @@ describe('flow-state.loadFlow', () => {
     ['object', {}],
   ])('rejects non-finite-number grace_seconds: %s', async (_label, badValue) => {
     await expect(flowState.loadFlow('id', { grace_seconds: badValue }))
-      .rejects.toThrow(/grace_seconds must be a finite number/);
+      .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
+  });
+
+  test('rejects negative grace_seconds (typo guard)', async () => {
+    // A `-3600` typo (instead of `3600`) would silently shorten flow
+    // lifetimes by an hour. Reject — symmetric with the rest of the
+    // module's type-check-tight posture.
+    await expect(flowState.loadFlow('id', { grace_seconds: -1 }))
+      .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
+    await expect(flowState.loadFlow('id', { grace_seconds: -3600 }))
+      .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
   });
 });
 
@@ -408,7 +436,10 @@ describe('flow-state.transitionFlow', () => {
 
     const updCall = ddbMock.commandCalls(UpdateCommand)[0];
     expect(updCall.args[0].input.TableName).toBe(EXPECTED_TABLE);
-    expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected');
+    expect(updCall.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id) AND #v = :expected AND #e >= :now');
+    // `:now` is set by the harness at write time and passed alongside
+    // the rest of the expression values.
+    expect(typeof updCall.args[0].input.ExpressionAttributeValues[':now']).toBe('number');
     expect(updCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(4);
     expect(updCall.args[0].input.ExpressionAttributeValues[':stage_to']).toBe('stage_b');
     // Payload was encrypted via encryptStrict
@@ -567,7 +598,12 @@ describe('flow-state.transitionFlow', () => {
   test('returns conflict when Update fails OCC and row still exists (forces terminal=false)', async () => {
     // Same terminal=true override semantics as the not_found case
     // above: a transition that didn't advance isn't terminal.
-    ddbMock.on(GetCommand).resolves({ Item: { stage: 'a', flow_id: 'id' } });
+    // Recheck must see a row that is still LOGICALLY ALIVE to
+    // distinguish conflict from not_found — include a future
+    // expires_at on the mocked item.
+    ddbMock.on(GetCommand).resolves({
+      Item: { stage: 'a', flow_id: 'id', expires_at: futureExpiry() },
+    });
     ddbMock.on(UpdateCommand).rejects(ccfe());
 
     const res = await flowState.transitionFlow('id', 1, {
@@ -644,6 +680,30 @@ describe('flow-state.transitionFlow', () => {
       extended: false,
       version: 1,
     });
+  });
+
+  test('post-CCFE recheck warns when row has corrupted expires_at and reports not_found', async () => {
+    // Symmetric with loadFlow's corruption-as-expired fail-safe.
+    // An operator greppping for "row has missing or non-numeric
+    // expires_at" should find the signal from both the read and
+    // the transition recheck paths.
+    let getCalls = 0;
+    ddbMock.on(GetCommand).callsFake(() => {
+      getCalls += 1;
+      if (getCalls === 1) return { Item: { stage: 'a' } };
+      return { Item: { flow_id: 'id', expires_at: 'not-a-number' } };
+    });
+    ddbMock.on(UpdateCommand).rejects(ccfe());
+
+    const res = await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+    });
+    expect(res).toEqual({ result: 'not_found', version: null });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/row has missing or non-numeric expires_at on recheck/),
+      expect.objectContaining({ flow_id: 'id' }),
+    );
   });
 
   test('post-CCFE recheck failure warns and conservatively reports conflict', async () => {

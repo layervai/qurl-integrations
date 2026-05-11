@@ -307,9 +307,9 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // skew window if they're reading on the back of a write they
 // just performed. Default 0 because the canonical use case is
 // "is this flow still alive?" and the answer should be honest.
-// Negative grace values are accepted (skews "expired" earlier);
-// no use case yet but cheaper to leave permissive than to gate
-// on a corner case a future caller might legitimately want.
+// Must be >= 0 — the rest of the module is uncompromising about
+// input types, and a negative `grace_seconds: -3600` typo would
+// silently shorten flow lifetimes by an hour. Tight by symmetry.
 //
 // ConsistentRead: the read is strongly consistent. Canonical use
 // case is "I just transitioned this flow and want to re-verify"
@@ -327,8 +327,10 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   // 'forever'` would evaluate `expires + 'forever'` → string
   // concat → NaN → `now > NaN` is false → expired-as-alive. A
   // caller passing untrusted config could surface stale flows.
-  if (typeof grace_seconds !== 'number' || !Number.isFinite(grace_seconds)) {
-    throw new TypeError(`flow-state.loadFlow: grace_seconds must be a finite number (got ${typeof grace_seconds}: ${JSON.stringify(grace_seconds)})`);
+  // Reject negatives too — a typo (`-3600` instead of `3600`)
+  // would silently shorten flow lifetimes by an hour.
+  if (typeof grace_seconds !== 'number' || !Number.isFinite(grace_seconds) || grace_seconds < 0) {
+    throw new TypeError(`flow-state.loadFlow: grace_seconds must be a non-negative finite number (got ${typeof grace_seconds}: ${JSON.stringify(grace_seconds)})`);
   }
   const res = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
@@ -497,17 +499,27 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
     throw err;
   }
 
+  // Cache `now` once: the same value gates the condition AND lands
+  // in `:updated_at`. Reading `nowEpochSeconds()` separately for
+  // each would let them straddle a second boundary.
+  const updateNow = nowEpochSeconds();
+
   const updateExprParts = ['#s = :stage_to', '#v = #v + :one', '#u = :updated_at'];
   const exprNames = {
     '#s': 'stage',
     '#v': 'version',
     '#u': 'updated_at',
+    // `#e` is in the names map unconditionally — the ConditionExpression
+    // below uses `#e > :now` to gate writes on logical aliveness.
+    // `set_expires_at` may also reference `#e` to rewrite the value.
+    '#e': 'expires_at',
   };
   const exprValues = {
     ':stage_to': stage_to,
     ':one': 1,
-    ':updated_at': nowEpochSeconds(),
+    ':updated_at': updateNow,
     ':expected': expectedVersion,
+    ':now': updateNow,
   };
   if (payload !== undefined) {
     updateExprParts.push('#p = :payload');
@@ -516,7 +528,6 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   }
   if (set_expires_at !== undefined) {
     updateExprParts.push('#e = :expires_at');
-    exprNames['#e'] = 'expires_at';
     exprValues[':expires_at'] = set_expires_at;
   }
 
@@ -525,7 +536,18 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
       TableName: TABLE_NAME,
       Key: { flow_id },
       UpdateExpression: `SET ${updateExprParts.join(', ')}`,
-      ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected',
+      // `#e > :now` closes the silent-SLI-inflation hole where a
+      // logically-expired row (DDB TTL reap is async, ~48h lag)
+      // could pass attribute_exists + version-match and have its
+      // stage rewritten — even though loadFlow would then return
+      // null for it. The next FLOW_DELETED would never fire and
+      // `silently_dropped = created - deleted` would inflate. The
+      // condition fires CCFE on expired rows, and the post-CCFE
+      // recheck below maps that to result='not_found' (symmetric
+      // with loadFlow's own expiry filter). A missing or non-
+      // numeric `expires_at` (corrupted row) also fails the
+      // comparison — fail-safe, matching loadFlow's treatment.
+      ConditionExpression: 'attribute_exists(flow_id) AND #v = :expected AND #e >= :now',
       ExpressionAttributeNames: exprNames,
       ExpressionAttributeValues: exprValues,
       ReturnValues: 'UPDATED_NEW',
@@ -567,8 +589,19 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
           // Apply the same logical-expiry filter as loadFlow — a row
           // present in DDB but already past expires_at should report
           // not_found, not conflict. Symmetric with the reader.
+          // Also treats missing/non-numeric `expires_at` as expired
+          // (the corrupted-row fail-safe — same posture as loadFlow).
           const exp = recheck.Item.expires_at;
-          if (typeof exp === 'number' && Number.isFinite(exp) && Math.floor(exp) === exp && nowEpochSeconds() > exp) {
+          const isValidExpires = typeof exp === 'number' && Number.isFinite(exp) && Math.floor(exp) === exp;
+          if (!isValidExpires) {
+            // Symmetric with loadFlow's warn — a corrupted row should
+            // be grepable from both the read and the transition path.
+            logger.warn('flow-state.transitionFlow: row has missing or non-numeric expires_at on recheck; treating as expired', {
+              flow_id,
+              expires_at_type: typeof exp,
+            });
+            result = 'not_found';
+          } else if (exp < nowEpochSeconds()) {
             result = 'not_found';
           }
         }
@@ -672,8 +705,11 @@ module.exports = {
   loadFlow,
   transitionFlow,
   deleteFlow,
-  // Exposed for tests + future modules that need the canonical
-  // table name (e.g. an admin CLI). Not for production code paths
-  // that should go through the four functions above.
+  // Test-only escape hatch (the `__` prefix signals: not part of
+  // the public API). Production code paths must go through the
+  // four functions above. A future admin CLI or third consumer
+  // should get its own real export when it arrives — the shape
+  // of "what does the API surface to non-test callers look like"
+  // is easier to design once that caller actually exists.
   __TABLE_NAME: TABLE_NAME,
 };
