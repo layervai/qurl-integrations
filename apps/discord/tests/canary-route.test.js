@@ -62,12 +62,20 @@ const express = require('express');
 const request = require('supertest');
 const canaryRouter = require('../src/routes/canary');
 
-// Mirror server.js's mount: 4 KB JSON parser. No raw-body capture
-// needed (NHP gates at the network layer; no app-layer signature
-// or timestamp).
+// Mirror server.js's mount: 4 KB JSON parser + scoped parse-error
+// handler that returns JSON instead of the global HTML error page.
 function makeApp() {
   const app = express();
   app.use('/canary', express.json({ limit: '4kb' }));
+  app.use('/canary', (err, req, res, next) => {
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ ok: false, error: 'invalid_json' });
+    }
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ ok: false, error: 'body_too_large' });
+    }
+    return next(err);
+  });
   app.use('/canary', canaryRouter);
   return app;
 }
@@ -94,8 +102,7 @@ beforeEach(() => {
 });
 
 // Early gates — config-level rejections that run before any
-// upload/mint/dm work. Body shape is the same as the differentiated
-// path below.
+// upload/mint/dm work, plus the scoped body-parser failure shapes.
 describe('/canary/exec — early gates', () => {
   it('returns 503 no_api_key when QURL_API_KEY is unset', async () => {
     mockConfig.QURL_API_KEY = undefined;
@@ -108,6 +115,32 @@ describe('/canary/exec — early gates', () => {
     expect(typeof res.body.latency_ms).toBe('number');
     expect(mockUploadJsonToConnector).not.toHaveBeenCalled();
     expect(mockReUploadBuffer).not.toHaveBeenCalled();
+  });
+
+  it('returns 413 body_too_large when body exceeds the 4 KB cap', async () => {
+    // Pins the cap that the route comment marks load-bearing — a
+    // future refactor reordering mounts back to the 1 MB global
+    // parser would silently widen the surface.
+    const oversized = { test: 'send_file', recipient_user_id: VALID_USER_ID, _pad: 'x'.repeat(5000) };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(oversized);
+    expect(res.status).toBe(413);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBe('body_too_large');
+  });
+
+  it('returns 400 invalid_json on malformed body (instead of the global HTML error page)', async () => {
+    // Scoped parser-error handler keeps the canary response shape
+    // uniform for the Lambda's CloudWatch parser — without it,
+    // express.json() failures fall to the 4-arg HTML error handler.
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .set('Content-Type', 'application/json')
+      .send('not-json{');
+    expect(res.status).toBe(400);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBe('invalid_json');
   });
 });
 

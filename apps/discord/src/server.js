@@ -97,6 +97,20 @@ const canaryEnabled = config.isOpenNHPActive;
 
 if (canaryEnabled) {
   app.use('/canary', express.json({ limit: '4kb' }));
+  // Scoped parser-error handler: parse failures + oversized bodies
+  // return JSON in the route's canonical envelope, not the HTML
+  // error page from the global 4-arg handler at the bottom of this
+  // file. Keeps the canary's response contract uniform for the
+  // Lambda's CloudWatch parser.
+  app.use('/canary', (err, req, res, next) => {
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ ok: false, error: 'invalid_json' });
+    }
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ ok: false, error: 'body_too_large' });
+    }
+    return next(err);
+  });
 }
 
 app.use(express.json({ limit: '1mb' }));
