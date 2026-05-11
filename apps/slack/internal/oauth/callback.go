@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -97,7 +98,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 		// Step 1: extract query params + Auth0-side error pass-through.
 		q := r.URL.Query()
 		if errParam := q.Get("error"); errParam != "" {
-			slog.Warn("oauth/callback Auth0 returned error",
+			slog.Warn("oauth/callback Auth0 returned error", //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 				"error", errParam,
 				"error_description", q.Get("error_description"))
 			http.Error(w, "authorization declined", http.StatusBadRequest)
@@ -127,7 +128,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 		// Step 2b: HMAC + expiry on the state token itself.
 		teamID, err := verifyState(cfg.OAuthStateSecret, stateParam, now())
 		if err != nil {
-			slog.Warn("oauth/callback rejected invalid state", "reason", err.Error())
+			slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 			http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
 			return
 		}
@@ -160,7 +161,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 		apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(r.Context(), accessToken,
 			keyName, []string{"qurl:read", "qurl:write"})
 		if err != nil {
-			slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID)
+			slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 			http.Error(w, "could not provision qURL key", http.StatusBadGateway)
 			return
 		}
@@ -174,7 +175,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 			// because the request context may be canceling by the time we
 			// get to write the error response; we still want the revoke to
 			// run to bound the orphan-key window.
-			go func() { //nolint:gosec // G118: intentional — request ctx is about to cancel; we want the revoke to outlive it within its own bounded budget.
+			go func() {
 				revokeCtx, cancel := context.WithTimeout(context.Background(), auth0TokenTimeout)
 				defer cancel()
 				if rerr := cfg.Minter.RevokeAPIKey(revokeCtx, accessToken, keyID); rerr != nil {
@@ -190,7 +191,7 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 
 		// Step 7: DM the admin (fire-and-forget; failure non-fatal).
 		if cfg.SlackClient != nil && configuredBy != "" {
-			go func() { //nolint:gosec // G118: intentional — DM should outlive the HTTP request's lifecycle within its own short budget.
+			go func() {
 				dmCtx, cancel := context.WithTimeout(context.Background(), dmTimeout)
 				defer cancel()
 				msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl create`."
@@ -209,39 +210,24 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
+	// Defense-in-depth: teamID is teamIDPattern-validated, keyPrefix comes
+	// from qurl-service's JSON response, email is JWKS-verified. Still,
+	// every interpolation goes through html.EscapeString before reaching
+	// the success template — nothing user-influenced is concatenated raw.
 	keyLine := ""
 	if keyPrefix != "" {
-		keyLine = fmt.Sprintf("<div>API key prefix: <code>%s</code></div>", htmlEscape(keyPrefix))
+		keyLine = fmt.Sprintf("<div>API key prefix: <code>%s</code></div>", html.EscapeString(keyPrefix))
 	}
 	emailLine := ""
 	if email != "" {
-		emailLine = fmt.Sprintf("<div>qURL account: <code>%s</code></div>", htmlEscape(email))
+		emailLine = fmt.Sprintf("<div>qURL account: <code>%s</code></div>", html.EscapeString(email))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	// keyLine / emailLine are already-escaped HTML fragments (htmlEscape
-	// applied at build time below); teamID gets escaped inline. The
-	// successHTML template only uses %s with these sanitized inputs.
-	if _, err := fmt.Fprintf(w, successHTML, htmlEscape(teamID), keyLine, emailLine); err != nil { //nolint:gosec // G705: all interpolations are htmlEscape'd by construction at the call sites.
+	if _, err := fmt.Fprintf(w, successHTML, html.EscapeString(teamID), keyLine, emailLine); err != nil {
 		slog.Warn("oauth/callback success-page write failed", "error", err)
 	}
-}
-
-// htmlEscape is a tiny shim — the values we pass come from validated
-// sources (teamID matches teamIDPattern, keyPrefix comes from qurl-
-// service's JSON response, email comes from a JWKS-verified id_token)
-// but defense-in-depth: nothing user-controlled reaches the page
-// without going through this.
-func htmlEscape(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&#39;",
-	)
-	return r.Replace(s)
 }
 
 // exchangeAuth0Code POSTs application/x-www-form-urlencoded to
@@ -252,7 +238,7 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", cfg.SlackBaseURL+"/oauth/qurl/callback")
+	form.Set("redirect_uri", cfg.SlackBaseURL+callbackPath)
 	form.Set("client_id", cfg.Auth0ClientID)
 	form.Set("client_secret", cfg.Auth0ClientSecret)
 

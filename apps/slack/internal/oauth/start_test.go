@@ -23,7 +23,7 @@ func newStartCfg() Config {
 func TestStartHappyPath(t *testing.T) {
 	cfg := newStartCfg()
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody) //nolint:noctx // test convention matches handler_test.go.
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 
@@ -94,7 +94,7 @@ func TestStartRejectsBadTeam(t *testing.T) {
 	for _, in := range []string{"", "foo", "t123abcdef", "T123", "X12345678"} {
 		cfg := newStartCfg()
 		h := Start(cfg)
-		req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team="+url.QueryEscape(in), http.NoBody) //nolint:noctx // test convention.
+		req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team="+url.QueryEscape(in), http.NoBody)
 		rec := httptest.NewRecorder()
 		h(rec, req)
 		if rec.Code != http.StatusBadRequest {
@@ -106,7 +106,7 @@ func TestStartRejectsBadTeam(t *testing.T) {
 func TestStartRejectsWrongMethod(t *testing.T) {
 	cfg := newStartCfg()
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodPost, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody) //nolint:noctx // test convention.
+	req := httptest.NewRequest(http.MethodPost, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -118,7 +118,7 @@ func TestStartRefusesWithoutSecret(t *testing.T) {
 	cfg := newStartCfg()
 	cfg.OAuthStateSecret = nil
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody) //nolint:noctx // test convention matches handler_test.go.
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {

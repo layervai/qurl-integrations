@@ -24,6 +24,15 @@ import (
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
+// Route paths exposed by RegisterRoutes. Kept here (not callback.go /
+// start.go) so a single import lists the public surface, and so the
+// redirect_uri assembled in callback.go / authorizeURL stays in lockstep
+// with the mux registration below.
+const (
+	startPath    = "/oauth/qurl/start"
+	callbackPath = "/oauth/qurl/callback"
+)
+
 // SlackClient is the slice of slack-API surface the callback uses to DM
 // the admin after a successful key mint. Interface so tests don't need
 // a live Slack token.
@@ -117,8 +126,8 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
-	mux.HandleFunc("/oauth/qurl/start", Start(cfg))
-	mux.HandleFunc("/oauth/qurl/callback", Callback(cfg))
+	mux.HandleFunc(startPath, Start(cfg))
+	mux.HandleFunc(callbackPath, Callback(cfg))
 }
 
 // authorizeURL composes the Auth0 /authorize redirect target.
@@ -138,7 +147,7 @@ func authorizeURL(cfg Config, state string) string {
 	// qurl:write + qurl:read for the API-key mint, openid + email for
 	// the id_token claim used in the success-page binding readout.
 	q.Set("scope", "qurl:write qurl:read openid email")
-	q.Set("redirect_uri", cfg.SlackBaseURL+"/oauth/qurl/callback")
+	q.Set("redirect_uri", cfg.SlackBaseURL+callbackPath)
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
 	return u.String()

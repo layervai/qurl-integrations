@@ -158,7 +158,7 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // test request — matches handler_test.go convention; ctx flows through h(rec, req).
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	rec := httptest.NewRecorder()
@@ -191,7 +191,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // test request — matches handler_test.go convention; ctx flows through h(rec, req).
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	// Cookie carries DIFFERENT state value — replay/leak scenario.
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: "tampered", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
@@ -212,7 +212,7 @@ func TestCallbackRejectsMissingCookie(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // test request — matches handler_test.go convention; ctx flows through h(rec, req).
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
@@ -229,7 +229,7 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	cfg.Now = func() time.Time { return oldNow.Add(10 * time.Minute) }
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // test request — matches handler_test.go convention; ctx flows through h(rec, req).
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	rec := httptest.NewRecorder()
@@ -245,7 +245,7 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // test request — matches handler_test.go convention; ctx flows through h(rec, req).
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	rec := httptest.NewRecorder()
@@ -270,7 +270,7 @@ func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 func TestCallbackRejectsMissingCode(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/callback?state=x", http.NoBody) //nolint:noctx // see other sites — test convention matches handler_test.go.
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/callback?state=x", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusBadRequest {
@@ -281,7 +281,7 @@ func TestCallbackRejectsMissingCode(t *testing.T) {
 func TestCallbackHandlesAuth0Error(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet, //nolint:noctx // see other sites — test convention.
+	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?error=access_denied&error_description=user+declined", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
