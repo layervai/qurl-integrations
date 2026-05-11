@@ -117,6 +117,18 @@ describe('/canary/exec — early gates', () => {
     expect(mockReUploadBuffer).not.toHaveBeenCalled();
   });
 
+  it('returns 413 body_too_large at the 4 KB boundary (5 KB body — just over cap)', async () => {
+    // Pins the actual 4 KB cap. The 100 KB test below catches
+    // mount-order regressions; this one catches "cap silently raised
+    // to e.g. 64 KB" refactors that the larger body wouldn't surface.
+    const justOverCap = { test: 'send_file', recipient_user_id: VALID_USER_ID, _pad: 'x'.repeat(5000) };
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(justOverCap);
+    expect(res.status).toBe(413);
+    expect(res.body.error).toBe('body_too_large');
+  });
+
   it('returns 413 body_too_large when body exceeds the 4 KB cap (well above, locks mount-order)', async () => {
     // 100 KB body — well above the 4 KB cap but below the global
     // 1 MB parser. A future refactor that moves the global parser
@@ -350,6 +362,22 @@ describe('/canary/exec — differentiated scenario path', () => {
         error: 'discord client crash',
       })
     );
+  });
+
+  it('returns step="upload" / upload_no_resource_id when reUploadBuffer resolves without a resource_id', async () => {
+    // Pins the defensive guard at canary.js:69-74. Unreachable
+    // today (connector.js throws on missing resource_id), but
+    // exercising it locks the return-shape contract — a future
+    // connector refactor that returns null instead of throwing
+    // would silently break failure attribution without this test.
+    mockReUploadBuffer.mockResolvedValueOnce({});
+    const res = await request(makeApp())
+      .post('/canary/exec')
+      .send(SEND_FILE_BODY);
+    expect(res.status).toBe(500);
+    expect(res.body.step).toBe('upload');
+    expect(res.body.error).toBe('upload_no_resource_id');
+    expect(mockMintLinks).not.toHaveBeenCalled();
   });
 
   it('falls back to link_host="invalid-url" when mintLinks returns a non-URL string', async () => {
