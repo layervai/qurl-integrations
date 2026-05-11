@@ -32,10 +32,7 @@ const SNOWFLAKE_RE = /^[0-9]{17,20}$/;
 // is gated to non-production). Embed shape doesn't need to match
 // `/qurl send` — recipients know this is a probe.
 function buildCanaryDmPayload({ test, qurlLink, resourceId, expiresAt }) {
-  // Guard against `expiresAt` being undefined/garbage from a future
-  // caller-shape change — `Math.floor(NaN)` would render `<t:NaN:R>`
-  // in the embed otherwise. `null` makes Discord drop the relative
-  // timestamp gracefully.
+  // Guard non-finite expiresAt; otherwise embed renders `<t:NaN:R>`.
   const t = new Date(expiresAt).getTime();
   const expiresUnix = Number.isFinite(t) ? Math.floor(t / 1000) : null;
   const expiresFragment = expiresUnix === null ? '' : `, expires <t:${expiresUnix}:R>`;
@@ -47,9 +44,8 @@ function buildCanaryDmPayload({ test, qurlLink, resourceId, expiresAt }) {
   return { embeds: [embed] };
 }
 
-// Run a single canary scenario end-to-end. Returns { ok, step, ... }
-// where `step` names the failure point (upload | mint | dm) so the
-// Lambda's metric attribution is specific.
+// Returns { ok, step, ... } — step names the failure point
+// (upload | mint | dm | null) for Lambda metric attribution.
 async function runScenario({ test, recipientUserId, apiKey }) {
   const startedAt = Date.now();
 
@@ -70,12 +66,10 @@ async function runScenario({ test, recipientUserId, apiKey }) {
       };
       upload = await uploadJsonToConnector(probePayload, 'canary-location.json', apiKey);
     } else {
-      // Defense in depth: VALID_TESTS upstream already gates this.
-      // Explicit default catches the "added to VALID_TESTS, forgot
-      // to wire runScenario" refactor — fail fast with a named
-      // error instead of silently falling through to the location
-      // path. step: null because no upload was attempted — keeps
-      // the Lambda's per-step metric attribution honest.
+      // Refactor-safety guard: VALID_TESTS already filters upstream,
+      // but a new test added to that set without a runScenario branch
+      // would silently route to the location path. step:null because
+      // no upload happened.
       return {
         ok: false, step: null, error: 'unhandled_test',
         latency_ms: Date.now() - startedAt,
