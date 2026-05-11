@@ -69,6 +69,13 @@ const { AUDIT_EVENTS } = require('./constants');
 // TODO(PR 12): consolidate DDB client init into a shared module
 // when the gateway-tier RESUME table arrives — three consumers
 // is the right break-even point for the extraction.
+//
+// Test authoring note: these throws fire at `require()` time, so a
+// new test file importing flow-state MUST set DDB_TABLE_PREFIX and
+// AWS_REGION on `process.env` BEFORE the require — see
+// tests/flow-state.test.js for the canonical pattern. Forgetting
+// gives a confusing module-load stack trace rather than a clean
+// test-setup error.
 const TABLE_PREFIX = (process.env.DDB_TABLE_PREFIX ?? '').trim();
 if (!TABLE_PREFIX) {
   throw new Error('DDB_TABLE_PREFIX is required to use the flow-state harness. Set it in the deployment template (e.g. `qurl-bot-discord-sandbox-`).');
@@ -148,6 +155,16 @@ function decryptPayload(ciphertext) {
 // `/qurl setup` modal has a 15-minute window; a `/qurl send`
 // confirmation can sit for hours). The caller knows; this module
 // just persists.
+//
+// Payload semantics: `null` and `undefined` both persist as a null
+// DDB attribute. This is symmetric with createFlow but ASYMMETRIC
+// with `transitionFlow` — there, `payload: undefined` means "leave
+// existing payload untouched" (no `#p = :payload` in the Update),
+// while `payload: null` means "clear the existing payload". On
+// create the row has no existing payload so the distinction is
+// moot, but callers porting code from create-then-transition
+// should be aware that the same value carries different meaning
+// across the two methods.
 async function createFlow({ flow_id, stage, payload, expires_at }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.createFlow: flow_id must be a non-empty string');
@@ -201,6 +218,9 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // skew window if they're reading on the back of a write they
 // just performed. Default 0 because the canonical use case is
 // "is this flow still alive?" and the answer should be honest.
+// Negative grace values are accepted (skews "expired" earlier);
+// no use case yet but cheaper to leave permissive than to gate
+// on a corner case a future caller might legitimately want.
 async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.loadFlow: flow_id must be a non-empty string');
@@ -213,7 +233,13 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   const item = res?.Item;
   if (!item) return null;
   const expires = item.expires_at;
-  if (typeof expires === 'number' && Number.isFinite(expires)) {
+  // Reader strictness must MATCH the writer's assertExpiresAt() —
+  // a row whose expires_at is a non-integer float would otherwise
+  // round-trip undetected (writer rejects, but a regression or
+  // manual console put could still produce one). Same set: finite
+  // integer Number. Anything else falls through to the warn+null
+  // branch below.
+  if (typeof expires === 'number' && Number.isFinite(expires) && Math.floor(expires) === expires) {
     if (nowEpochSeconds() > expires + grace_seconds) {
       // Logically expired but not yet reaped. Treat as absent.
       return null;
@@ -249,10 +275,28 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
 //   { result: 'not_found',  version: null }   — row absent
 //   { result: 'error',      version: null }   — unexpected DDB failure (rethrown after emit)
 //
+// **OCC gates on `version` only, not `stage`.** A caller passing
+// `expectedVersion: 5, stage_to: 'B'` succeeds if the row's current
+// version is 5, even if its current stage isn't what the caller
+// expected. This module is a generic harness — state-machine
+// semantics (which `stage_from` is a legal precursor to `stage_to`)
+// are the caller's responsibility. Callers wanting strict stage
+// transitions should assert `stage_from` against expectations
+// after a success result, or pre-check before calling.
+//
 // `terminal` is caller-supplied because flow-state cannot know
 // which transitions end which flow types (the terminal set varies
 // per flow — revoke has fewer stages than send). When `terminal`
 // is true the next call should be deleteFlow.
+//
+// **Audit-emit-on-rethrow contract.** On `result: 'error'` paths
+// the FLOW_TRANSITION audit fires BEFORE the rethrow. A caller
+// that retries a transient `NetworkingError` will produce N
+// `result: 'error'` events for one logical attempt — this is
+// intentional. The error count is interesting per-attempt (a
+// retry storm should be visible in the metric), and the SLI math
+// `silently_dropped = count(FLOW_CREATED) - count(FLOW_DELETED)`
+// is unaffected because it doesn't read the `error` bucket.
 async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, extend_expires_at }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.transitionFlow: flow_id must be a non-empty string');
@@ -362,10 +406,16 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
           ConsistentRead: true,
         }));
         if (!recheck?.Item) result = 'not_found';
-      } catch (_recheckErr) {
+      } catch (recheckErr) {
         // Recheck failure — stay conservative and report conflict
         // (the original Update failed due to a conditional check,
-        // not an availability issue).
+        // not an availability issue). Warn so a DDB availability
+        // blip masked by the conservative fallback still surfaces
+        // in CloudWatch — silent fallback would hide a real signal.
+        logger.warn('flow-state.transitionFlow: post-CCFE recheck failed; defaulting to result=conflict', {
+          flow_id,
+          reason: recheckErr && recheckErr.message,
+        });
       }
       logger.audit(AUDIT_EVENTS.FLOW_TRANSITION, {
         flow_id,

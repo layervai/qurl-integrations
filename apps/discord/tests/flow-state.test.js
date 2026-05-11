@@ -277,6 +277,23 @@ describe('flow-state.loadFlow', () => {
     );
   });
 
+  test('returns null and warns when expires_at is a non-integer float (writer/reader symmetry)', async () => {
+    // Writer's assertExpiresAt rejects floats (`Math.floor(x) !== x`);
+    // reader must match — a regression writer that puts a float
+    // should not round-trip undetected.
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        flow_id: 'id',
+        stage: 's',
+        version: 1,
+        payload: null,
+        expires_at: 1234567890.5,
+      },
+    });
+    expect(await flowState.loadFlow('id')).toBeNull();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
   test('returns null and warns when expires_at is a string (legacy/corrupt writer)', async () => {
     ddbMock.on(GetCommand).resolves({
       Item: {
@@ -405,12 +422,19 @@ describe('flow-state.transitionFlow', () => {
     // First GetCommand: pre-read sees the row.
     // Update fails (row reaped between pre-read and Update).
     // Second GetCommand (recheck): row gone.
-    let getCalls = 0;
-    ddbMock.on(GetCommand).callsFake(() => {
-      getCalls += 1;
-      if (getCalls === 1) return { Item: { stage: 'a' } };
-      return {};
-    });
+    //
+    // `getCalls` is intentionally scoped to this test — a previous
+    // pattern used a describe-block-local closure which would have
+    // bled state between tests. Test-local scope keeps the call
+    // counter trivially reset on each run.
+    {
+      let getCalls = 0;
+      ddbMock.on(GetCommand).callsFake(() => {
+        getCalls += 1;
+        if (getCalls === 1) return { Item: { stage: 'a' } };
+        return {};
+      });
+    }
     ddbMock.on(UpdateCommand).rejects(ccfe());
 
     const res = await flowState.transitionFlow('id', 1, {
@@ -425,6 +449,31 @@ describe('flow-state.transitionFlow', () => {
       result: 'not_found',
       terminal: false,
     });
+  });
+
+  test('post-CCFE recheck failure warns and conservatively reports conflict', async () => {
+    // Pre-read sees the row, Update fails OCC, recheck-Get itself
+    // throws (DDB availability blip). The harness must NOT silently
+    // swallow the recheck error — a warn keeps the signal visible
+    // in CloudWatch while still defaulting to the conservative
+    // result=conflict bucket.
+    let getCalls = 0;
+    ddbMock.on(GetCommand).callsFake(() => {
+      getCalls += 1;
+      if (getCalls === 1) return { Item: { stage: 'a' } };
+      throw new Error('NetworkingError');
+    });
+    ddbMock.on(UpdateCommand).rejects(ccfe());
+
+    const res = await flowState.transitionFlow('id', 1, {
+      stage_to: 'b',
+      terminal: false,
+    });
+    expect(res).toEqual({ result: 'conflict', version: null });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/post-CCFE recheck failed/),
+      expect.objectContaining({ flow_id: 'id' }),
+    );
   });
 
   test('result=error emits and rethrows on non-conditional Update failure', async () => {
