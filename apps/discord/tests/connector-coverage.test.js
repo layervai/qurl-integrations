@@ -194,8 +194,9 @@ describe('Connector client — coverage boost', () => {
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
       // Defensive: an upstream caller passing 0, NaN, or a string by
       // mistake shouldn't cause the field to land on the form. The
-      // parser layer (parseSelfDestructSeconds) is the contract; the
-      // append helper is belt-and-suspenders.
+      // /qurl send dropdown is the contract (only the 7 preset
+      // numeric values reach this layer); the append helper is
+      // belt-and-suspenders.
       const cases = [0, -1, NaN, Infinity, '30', null, undefined, {}];
       for (const v of cases) {
         globalThis.fetch = jest.fn().mockResolvedValueOnce({
