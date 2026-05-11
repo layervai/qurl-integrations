@@ -637,6 +637,35 @@ deploy story. It's not SLO'd because we don't control it (Discord does), but
 we alert if it drops below 99% over a 24 h window — that signals a Discord-side
 change or our session-state staleness, both of which need investigation.
 
+### Flow continuity — computation contract
+
+The `silently_dropped_flows` numerator is computed as a difference, not
+emitted as a direct event:
+
+```
+total_flows            = count(FLOW_CREATED)
+completed_flows        = count(FLOW_DELETED)
+silently_dropped_flows = total_flows - completed_flows
+```
+
+Every `createFlow()` emits `FLOW_CREATED`; every explicit `deleteFlow()`
+(terminal stage, abort, admin cleanup) emits `FLOW_DELETED`. TTL-reaped
+flows — the silent-drop case the SLI is designed to catch — emit no event
+by design, because DDB TTL deletion is asynchronous and a synchronous
+"reaped" signal would require a separate sweeper. Counting the difference
+captures every unclean drop: process crash mid-flow, worker hang, TTL reap
+of an abandoned flow.
+
+PR 3 (event-shipper observability, Phase 1.0) reserves the
+`FLOW_CREATED` / `FLOW_TRANSITION` / `FLOW_DELETED` audit-event names in
+`apps/discord/src/constants.js`. PR 4 wires the emissions in the
+state-machine harness. The paired CloudWatch metric filters land in
+`qurl-integrations-infra` once PR 4 is producing events in sandbox.
+
+If a future change adds a "delete-on-TTL-reap" sweeper, it MUST emit a
+distinct event (e.g. `FLOW_REAPED`) — not `FLOW_DELETED` — to preserve
+the asymmetry the SLI math relies on.
+
 ## Open questions, deliberately deferred
 
 These do not block the current design but should be revisited:
