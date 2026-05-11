@@ -233,7 +233,7 @@ function makeCompInt(customId, overrides = {}) {
     showModal: jest.fn().mockResolvedValue(undefined),
     awaitModalSubmit: jest.fn().mockRejectedValue(new Error('timeout')),
     values: [],
-    users: { first: jest.fn(() => null) },
+    users: { first: jest.fn(() => null), values: jest.fn(() => [][Symbol.iterator]()) },
     ...overrides,
   };
 }
@@ -1094,29 +1094,71 @@ describe('handleSend — Step 3: final form', () => {
     expect(sendCooldowns.has('user-1')).toBe(false);
   });
 
-  it('target=user picks a recipient, send button completes flow', async () => {
+  // Helper for the multi-pick mock — Discord's `compInt.users` is a
+  // Collection (Map subclass), so the route reads `users.values()`.
+  // Returning an array of users from .values() matches the iterator
+  // contract close enough for the spread `[...users.values()]`.
+  const mockUsers = (...users) => ({ values: jest.fn(() => users[Symbol.iterator]()) });
+
+  it('target=user picks a single recipient, send button completes flow', async () => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: mockUsers({ id: 'user-2', bot: false, username: 'Bob' }),
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
       awaitQueue: [locInitBtn(), targetUser, userSelect, sendBtn],
     });
     await cmd.execute(interaction);
-    // Send button update fires before the back-half kicks in.
     expect(sendBtn.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('Preparing send'),
     }));
-    // Back-half ran: mintLinks + sendDM
     expect(mockMintLinks).toHaveBeenCalled();
     expect(mockSendDM).toHaveBeenCalled();
   });
 
-  it('target=user rejects selecting a bot', async () => {
+  it('target=user picks MULTIPLE recipients, send fan-outs to all of them', async () => {
+    // Pin the multi-select regression fix: a single user-select
+    // interaction yielding N picks must produce N DMs (not just 1).
+    // Previous single-pick handler (`.users.first()`) silently dropped
+    // every pick beyond the first.
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/a' },
+      { qurl_link: 'https://q.test/b' },
+      { qurl_link: 'https://q.test/c' },
+    ]);
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: mockUsers(
+        { id: 'user-2', bot: false, username: 'Bob' },
+        { id: 'user-3', bot: false, username: 'Carol' },
+        { id: 'user-4', bot: false, username: 'Dave' },
+      ),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelect, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(sendBtn.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Preparing send'),
+    }));
+    // 3 picks → 3 DMs (one per recipient, each with their own qURL).
+    expect(mockSendDM).toHaveBeenCalledTimes(3);
+    expect(mockSendDM.mock.calls.map(c => c[0])).toEqual(
+      expect.arrayContaining(['user-2', 'user-3', 'user-4']),
+    );
+  });
+
+  it('target=user rejects the whole selection if ANY pick is a bot', async () => {
+    // Fail-loud over silent-drop — operator re-picks without the
+    // offender rather than the bot getting silently filtered out.
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelectBot = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'bot-1', bot: true, username: 'Botty' })) },
+      users: mockUsers(
+        { id: 'user-2', bot: false, username: 'Bob' },
+        { id: 'bot-1',  bot: true,  username: 'Botty' },
+      ),
     });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -1128,10 +1170,67 @@ describe('handleSend — Step 3: final form', () => {
     }));
   });
 
-  it('target=user rejects selecting yourself', async () => {
+  it('target=user re-picking REPLACES the previous set (matches Discord user-select edit semantic)', async () => {
+    // Pin REPLACE-vs-APPEND. User picks Bob first, then re-opens the
+    // dropdown and picks Carol+Dave (without Bob). Final recipients
+    // must be [Carol, Dave], not [Bob, Carol, Dave]. Discord shows
+    // the previously-picked set as the default and the user edits it
+    // — un-picking Bob and adding the others is an explicit removal.
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/c' },
+      { qurl_link: 'https://q.test/d' },
+    ]);
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect1 = makeCompInt(ids.userSelect, {
+      users: mockUsers({ id: 'user-2', bot: false, username: 'Bob' }),
+    });
+    const userSelect2 = makeCompInt(ids.userSelect, {
+      users: mockUsers(
+        { id: 'user-3', bot: false, username: 'Carol' },
+        { id: 'user-4', bot: false, username: 'Dave' },
+      ),
+    });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelect1, userSelect2, sendBtn],
+    });
+    await cmd.execute(interaction);
+    // 2 DMs (Carol + Dave) — Bob from the first pick is gone.
+    expect(mockSendDM).toHaveBeenCalledTimes(2);
+    const recipientIds = mockSendDM.mock.calls.map(c => c[0]);
+    expect(recipientIds).toEqual(expect.arrayContaining(['user-3', 'user-4']));
+    expect(recipientIds).not.toContain('user-2');
+  });
+
+  it('target=user picks at the cap (10 users) — all delivered', async () => {
+    // Pin the boundary at Math.min(USER_SELECT_PER_PICK_CAP, ...).
+    // Discord won't let setMaxValues exceed 25; bumping our cap above
+    // 10 silently here would risk drift — the test fails loud if a
+    // future change drops a recipient at the boundary.
+    const cap = 10;
+    const tenUsers = Array.from({ length: cap }, (_, i) => ({
+      id: `user-${i + 2}`, bot: false, username: `User${i + 2}`,
+    }));
+    mockMintLinks.mockResolvedValueOnce(
+      tenUsers.map((_, i) => ({ qurl_link: `https://q.test/u${i}` })),
+    );
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, { users: mockUsers(...tenUsers) });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(), targetUser, userSelect, sendBtn],
+    });
+    await cmd.execute(interaction);
+    expect(mockSendDM).toHaveBeenCalledTimes(cap);
+  });
+
+  it('target=user rejects the whole selection if ANY pick is the sender', async () => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelectSelf = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-1', bot: false, username: 'TestUser' })) },
+      users: mockUsers(
+        { id: 'user-2', bot: false, username: 'Bob' },
+        { id: 'user-1', bot: false, username: 'TestUser' }, // sender (interaction.user.id)
+      ),
     });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({
@@ -1351,7 +1450,7 @@ describe('handleSend — end-to-end happy paths', () => {
     const fileInit = makeCompInt(ids.initFile);
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
@@ -1407,7 +1506,7 @@ describe('handleSend — end-to-end happy paths', () => {
     });
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
@@ -1540,7 +1639,7 @@ describe('handleSend — audit emission', () => {
     const fileInit = makeCompInt(ids.initFile);
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
@@ -1767,7 +1866,7 @@ describe('handleSend — additional branch coverage', () => {
     const fileInit = fileInitBtn();
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelect = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
@@ -1851,12 +1950,12 @@ describe('handleSend — additional branch coverage', () => {
     mockGetChannelMembers.mockReturnValue([{ id: 'u3', username: 'Channeler' }]);
     const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userPick = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const target2 = makeCompInt(ids.targetSelect, { values: ['channel'] });
     const target3 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userPick2 = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-7', bot: false, username: 'Carol' })) },
+      users: { first: jest.fn(() => ({ id: 'user-7', bot: false, username: 'Carol' })), values: jest.fn(() => [{ id: 'user-7', bot: false, username: 'Carol' }][Symbol.iterator]()) },
     });
     const sendBtn = makeCompInt(ids.sendBtn);
     const interaction = makeInteraction({
@@ -1873,7 +1972,7 @@ describe('handleSend — additional branch coverage', () => {
   it('user re-select preserves the picked recipient (no recipients reset)', async () => {
     const target1 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userPick = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })), values: jest.fn(() => [{ id: 'user-2', bot: false, username: 'Bob' }][Symbol.iterator]()) },
     });
     const target2 = makeCompInt(ids.targetSelect, { values: ['user'] });
     const sendBtn = makeCompInt(ids.sendBtn);
@@ -1891,7 +1990,7 @@ describe('handleSend — additional branch coverage', () => {
   it('defers and continues when UserSelect resolves with no user', async () => {
     const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
     const userSelectEmpty = makeCompInt(ids.userSelect, {
-      users: { first: jest.fn(() => null) },
+      users: { first: jest.fn(() => null), values: jest.fn(() => [][Symbol.iterator]()) },
     });
     const cancel = makeCompInt(ids.cancelBtn);
     const interaction = makeInteraction({

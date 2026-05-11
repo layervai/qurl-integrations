@@ -372,6 +372,12 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
+// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
+// limit is 25; capping at 10 bounds the UX. Both the initial user-
+// target select AND the channel-target's "Add more recipients" flow
+// use this — keep them in lockstep so a future bump doesn't drift.
+const USER_SELECT_PER_PICK_CAP = 10;
+
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Same helper used at the channel
@@ -1325,7 +1331,7 @@ async function handleSend(interaction, apiKey) {
         .setCustomId(ids.targetSelect)
         .setPlaceholder('Recipient(s) — choose type')
         .addOptions(
-          { label: 'A specific user', value: 'user', description: 'Pick one user to send to', default: target === 'user' },
+          { label: 'A specific user', value: 'user', description: 'Pick one or more users to send to', default: target === 'user' },
           { label: channelOptionLabel, value: 'channel', description: channelOptionDescription, default: target === 'channel' },
         )
     ));
@@ -1334,9 +1340,9 @@ async function handleSend(interaction, apiKey) {
       rows.push(new ActionRowBuilder().addComponents(
         new UserSelectMenuBuilder()
           .setCustomId(ids.userSelect)
-          .setPlaceholder('Pick a user')
+          .setPlaceholder('Pick one or more users')
           .setMinValues(1)
-          .setMaxValues(1)
+          .setMaxValues(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
       ));
     }
 
@@ -1394,7 +1400,7 @@ async function handleSend(interaction, apiKey) {
         )
     ));
 
-    const recipientsResolved = (target === 'user' && recipients.length === 1)
+    const recipientsResolved = (target === 'user' && recipients.length >= 1)
       || (target === 'channel' && recipients.length > 0);
     // Bottom row packs the optional-note button + send + cancel. Discord
     // allows up to 5 buttons per ActionRow; 3 fits comfortably. Left-
@@ -1529,20 +1535,27 @@ async function handleSend(interaction, apiKey) {
     }
 
     if (compInt.customId === ids.userSelect) {
-      const selectedUser = compInt.users.first();
-      if (!selectedUser) {
+      // REPLACE semantic (not append): Discord's user-select shows
+      // the previously-picked set as the default and the user edits
+      // it; un-picking Bob and adding Carol must yield [Carol], not
+      // [Bob, Carol]. Use the channel-target's "Add more recipients"
+      // button for the additive path.
+      const selected = [...compInt.users.values()];
+      if (selected.length === 0) {
         await safeCompDefer(compInt);
         continue;
       }
-      if (selectedUser.bot) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Pick a different user.' }), components: formRows() });
+      // Fail-loud over silent-drop — operator re-picks without the
+      // offender. Matches the prior single-pick UX.
+      if (selected.some(u => u.bot)) {
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Re-pick without any bot users.' }), components: formRows() });
         continue;
       }
-      if (selectedUser.id === interaction.user.id) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Pick a different user.' }), components: formRows() });
+      if (selected.some(u => u.id === interaction.user.id)) {
+        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Re-pick without your own user.' }), components: formRows() });
         continue;
       }
-      recipients = [selectedUser];
+      recipients = selected;
       await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
       continue;
     }
@@ -2133,7 +2146,7 @@ async function handleSend(interaction, apiKey) {
           setCooldown(interaction.user.id);
 
           // Show user select menu — collect the response on the REPLY message
-          const maxSelect = Math.min(10, remaining);
+          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
           const userSelectRow = new ActionRowBuilder().addComponents(
             new UserSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
