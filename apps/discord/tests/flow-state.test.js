@@ -422,19 +422,12 @@ describe('flow-state.transitionFlow', () => {
     // First GetCommand: pre-read sees the row.
     // Update fails (row reaped between pre-read and Update).
     // Second GetCommand (recheck): row gone.
-    //
-    // `getCalls` is intentionally scoped to this test — a previous
-    // pattern used a describe-block-local closure which would have
-    // bled state between tests. Test-local scope keeps the call
-    // counter trivially reset on each run.
-    {
-      let getCalls = 0;
-      ddbMock.on(GetCommand).callsFake(() => {
-        getCalls += 1;
-        if (getCalls === 1) return { Item: { stage: 'a' } };
-        return {};
-      });
-    }
+    let getCalls = 0;
+    ddbMock.on(GetCommand).callsFake(() => {
+      getCalls += 1;
+      if (getCalls === 1) return { Item: { stage: 'a' } };
+      return {};
+    });
     ddbMock.on(UpdateCommand).rejects(ccfe());
 
     const res = await flowState.transitionFlow('id', 1, {
