@@ -117,22 +117,29 @@ function persistSession(info, filePath = SESSION_FILE) {
   // that the next phase parses as corrupt. Resolve the absolute path so
   // rename() doesn't fail across relative-cwd differences in tests.
   //
-  // mode 0o600 (owner-only read/write): the persisted file contains a
-  // live Discord session_id + resume_url that, within the ~60s resume
-  // buffer window, anyone could use to RESUME the bot's WS session. Even
-  // on a personal dev machine, world-readable in /tmp is sloppy hygiene
-  // for a token-adjacent secret. The umask alone isn't reliable
-  // protection (defaults vary) so the mode is explicit.
+  // Secret-on-disk shape: the persisted file contains a live Discord
+  // session_id + resume_url that, within the ~60s resume buffer window,
+  // anyone with read access could use to RESUME the bot's WS session.
+  // Even on a personal dev machine, world-readable in /tmp is sloppy
+  // hygiene. We close the secrets-at-rest window in three steps:
   //
-  // Belt-and-suspenders: Node's writeFileSync `mode` option is only
-  // honored when the file is CREATED. If `.tmp` already exists from a
-  // crashed previous run (precisely the scenario the atomic-write
-  // pattern exists for), `mode` is silently ignored and the existing
-  // perms are preserved — which could be 0o644 or worse. chmodSync
-  // unconditionally after the write guarantees the file lands at
-  // 0o600 regardless of whether it was created or overwritten.
+  //   1. Best-effort unlink of any pre-existing .tmp BEFORE writing.
+  //      This forces writeFileSync down the file-creation path, where
+  //      its `mode: 0o600` argument is actually honored. Without the
+  //      unlink, a stale .tmp from a crashed previous run takes the
+  //      open-existing path and writeFileSync silently ignores `mode`
+  //      — so the secret would briefly land on disk under whatever
+  //      mode the stale .tmp carried (commonly 0o644).
+  //   2. mode: 0o600 on the create. Owner-only read/write.
+  //   3. chmodSync(0o600) after the write as belt-and-suspenders for
+  //      the corner case where the unlink loses a race with another
+  //      process recreating .tmp between unlinkSync and writeFileSync.
+  //      (Vanishingly unlikely on a dev machine; cheap to keep.)
   const abs = path.resolve(filePath);
   const tmp = `${abs}.tmp`;
+  try { fs.unlinkSync(tmp); } catch (e) {
+    if (e.code !== 'ENOENT') throw e; // any non-missing-file error is a real problem
+  }
   fs.writeFileSync(tmp, JSON.stringify(info, null, 2), { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, abs);
@@ -219,17 +226,24 @@ async function runPhase1(token) {
   // Race manager.connect() against a 30s timeout so a Discord-side rate
   // limit doesn't hang the spike forever. .unref() prevents the dangling
   // timer from pinning the event loop past a successful connect.
+  // On timeout, destroy the manager before re-throwing so we don't leak
+  // an in-flight WS handle into process.exit's lap.
   const CONNECT_TIMEOUT_MS = 30_000;
-  await Promise.race([
-    manager.connect(),
-    new Promise((_, reject) => {
-      const t = setTimeout(
-        () => reject(new Error(`connect() timed out after ${CONNECT_TIMEOUT_MS}ms`)),
-        CONNECT_TIMEOUT_MS,
-      );
-      t.unref();
-    }),
-  ]);
+  try {
+    await Promise.race([
+      manager.connect(),
+      new Promise((_, reject) => {
+        const t = setTimeout(
+          () => reject(new Error(`connect() timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+          CONNECT_TIMEOUT_MS,
+        );
+        t.unref();
+      }),
+    ]);
+  } catch (err) {
+    await manager.destroy({ code: 1000 }).catch(() => { /* shutting down anyway */ });
+    throw err;
+  }
   console.log('[phase1] connected; idling for', PHASE1_LIFETIME_MS, 'ms to accumulate sequence');
   await new Promise((resolve) => setTimeout(resolve, PHASE1_LIFETIME_MS));
 

@@ -35,6 +35,14 @@ function tempPath(name) {
 // NOT set globally in jest.config.js because other test files rely on
 // jest.spyOn persistence within their own describes — see the comment
 // on `restoreMocks` in jest.config.js.
+//
+// Ordering note: Jest runs afterEach hooks innermost-first, so any
+// inner describe's afterEach (e.g., the fs.unlinkSync cleanup below)
+// runs BEFORE this restoreAllMocks. Today no test spies on fs.unlinkSync,
+// so this ordering is correct. If a future test ever does spy on
+// unlinkSync, the inner cleanup will run against the spy — at which
+// point either move the unlink cleanup to a later hook or restore the
+// specific spy explicitly.
 afterEach(() => {
   jest.restoreAllMocks();
 });

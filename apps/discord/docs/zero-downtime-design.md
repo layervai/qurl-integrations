@@ -145,10 +145,11 @@ handler:
    the earlier draft had a per-worker positive cache that would only have
    been populated on whichever worker handled the matching flow-create
    event, leaving every other worker with stale-no-flow assumptions. With
-   SQS Standard (at-most-once-per-consumer fanout) there's no natural
-   affinity between flow-create and the user's subsequent file-drop; a
-   coherent cache would require a separate broadcast channel (Redis pubsub
-   or DDB Streams), which is more infrastructure for marginal cost savings.
+   SQS Standard, each message is delivered to one worker; there's no
+   natural affinity between flow-create and the user's subsequent
+   file-drop landing on the same worker. A coherent cache would require
+   a separate broadcast channel (Redis pubsub or DDB Streams), which is
+   more infrastructure for marginal cost savings.
    The volume math says the DDB cost is bounded: at ~thousands of guilds
    and the bot's invite-only-beta DM patterns, GetItem-on-every-non-flow-
    DM is tens-to-hundreds of reads per second, fully within DDB's
@@ -182,11 +183,18 @@ idempotency covers it:
 - **`GUILD_CREATE` / `GUILD_DELETE` duplicates** are audit-only; duplicate
   log lines are tolerable.
 
-Producer-side dedup hint: the gateway sets `MessageAttributes.event_id` from
-Discord's per-dispatch `s` (sequence) field as a defense-in-depth — workers
-log when they see a `event_id` they processed within the last 5 minutes
-(in-process LRU, ~10k entries) so a real-world dup rate can be quantified.
-The LRU is best-effort; OCC is the correctness primitive.
+Producer-side dedup hint: the gateway sets `MessageAttributes.event_id`
+from Discord's per-dispatch `s` (sequence) field as a defense-in-depth —
+workers log when they see an `event_id` they processed within the last
+5 minutes (in-process LRU, ~10k entries) so a real-world dup rate can
+be quantified. The LRU is best-effort; OCC is the correctness primitive.
+
+Sharding caveat: Discord's `s` is **per-shard** monotonic, not global.
+At single-shard (today) it's a usable event_id. At the sharding
+inflection (~2,500 guilds), `s` alone will collide across shards and
+the LRU will incorrectly drop legitimate events from sibling shards.
+Migrate the producer-side `event_id` to `${shard_id}:${s}` in the
+sharding PR; the worker-side LRU shape doesn't change.
 
 ### Pillar 2 — Cross-process Gateway session resume
 
@@ -519,6 +527,11 @@ every 1 s, if heldLock && !manager.isConnected:
       releaseLock()                       ← give it back; ECS may replace us
       log.error('connect retries exhausted, releasing lock')
       process.exit(1)
+    // Exponential backoff: 200 ms, 400 ms, 800 ms, 1.6 s.
+    // (Max attempt count = 5 → max attempts before exhaustion = 4
+    // backoffs, so the 5 s ceiling is unreachable at this attempt
+    // cap — kept as dead code in case someone bumps MAX_ATTEMPTS
+    // and forgets to revisit the cap.)
     backoff: sleep(min(2^attempts * 100ms, 5s))
   }
 ```
