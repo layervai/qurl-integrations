@@ -444,6 +444,16 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
 // retry storm should be visible in the metric), and the SLI math
 // `silently_dropped = count(FLOW_CREATED) - count(FLOW_DELETED)`
 // is unaffected because it doesn't read the `error` bucket.
+//
+// On `result: 'error'` and `result: 'not_found'`, the `version`
+// field in the audit is the caller's `expectedVersion` — what
+// they INTENDED to advance from — not anything observed on the
+// row. Forensic queries correlating retries by attempt identity
+// should treat error/not_found `version` as intent, not
+// observation. (On `result: 'success'`, it's the post-bump
+// observed value; on `result: 'conflict'`, the caller's intent
+// is still the relevant correlator because the observed value
+// is what beat them.)
 async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, terminal, set_expires_at }) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.transitionFlow: flow_id must be a non-empty string');
@@ -619,8 +629,11 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
         const recheck = await ddb.send(new GetCommand({
           TableName: TABLE_NAME,
           Key: { flow_id },
-          // Partition key is always returned by GetCommand, so we
-          // only project `expires_at` explicitly.
+          // We only need expires_at — `flow_id` is the lookup key
+          // and we never read it back from the recheck result.
+          // (Note: with ProjectionExpression set, the v3 SDK does
+          // NOT auto-include the partition key, contrary to a
+          // common assumption.)
           ProjectionExpression: 'expires_at',
           ConsistentRead: true,
         }));
