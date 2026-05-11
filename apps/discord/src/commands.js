@@ -1389,10 +1389,16 @@ async function handleSend(interaction, apiKey) {
 
     const recipientsResolved = (target === 'user' && recipients.length === 1)
       || (target === 'channel' && recipients.length > 0);
-    // Bottom row packs send + cancel + the personal-note button.
-    // Discord allows up to 5 buttons per ActionRow; 3 fits comfortably
-    // and freeing the dedicated row for the dropdown is the trade.
+    // Bottom row packs the optional-note button + send + cancel. Discord
+    // allows up to 5 buttons per ActionRow; 3 fits comfortably. Order
+    // matters: the optional-edit affordance sits leftmost so a user
+    // scanning the form left-to-right encounters it before Send,
+    // reducing the chance of sending without noticing the note option.
     rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(ids.messageBtn)
+        .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note')
+        .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId(ids.sendBtn)
         .setLabel('\u{1F4E4} Send')
@@ -1401,11 +1407,7 @@ async function handleSend(interaction, apiKey) {
       new ButtonBuilder()
         .setCustomId(ids.cancelBtn)
         .setLabel('Cancel')
-        .setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder()
-        .setCustomId(ids.messageBtn)
-        .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note')
-        .setStyle(ButtonStyle.Primary)
+        .setStyle(ButtonStyle.Secondary)
     ));
 
     return rows;

@@ -953,11 +953,16 @@ describe('handleSend — Step 3: final form', () => {
     // and clear the cooldown between runs (cmd.execute sets it on each
     // run; the next call fast-bails on cooldown without invoking the
     // back-half).
+    // All 7 presets — the table is authoritative; a future preset
+    // addition that doesn't get appended here would silently regress the
+    // wire-contract coverage.
     const presetCases = [
       { value: '0.5', expected: 0.5 },
       { value: '1', expected: 1 },
       { value: '5', expected: 5 },
+      { value: '30', expected: 30 },
       { value: '300', expected: 300 },
+      { value: '1800', expected: 1800 },
       { value: '3600', expected: 3600 },
     ];
     for (const { value, expected } of presetCases) {
@@ -1013,6 +1018,30 @@ describe('handleSend — Step 3: final form', () => {
       content: expect.not.stringContaining('_Self-destruct timer:_'),
     }));
     // And the eventual upload carries null.
+    expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'google-map' }),
+      'location.json',
+      expect.any(String),
+      null,
+    );
+  });
+
+  it('self-destruct dropdown: empty values array falls back to no-timer (defense)', async () => {
+    // Discord's setMinValues=1 means an empty values array shouldn't
+    // happen in normal traffic, but a forged component interaction
+    // could send `values: []`. compInt.values[0] is then undefined,
+    // which selfDestructSelectValueToSeconds returns null for. Pin
+    // the path explicitly so a future refactor doesn't regress it.
+    const targetUser = makeCompInt(ids.targetSelect, { values: ['user'] });
+    const userSelect = makeCompInt(ids.userSelect, {
+      users: { first: jest.fn(() => ({ id: 'user-2', bot: false, username: 'Bob' })) },
+    });
+    const destructEmpty = makeCompInt(ids.selfDestructSelect, { values: [] });
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const interaction = makeInteraction({
+      awaitQueue: [locInitBtn(makeModalSubmit('https://maps.app.goo.gl/abc123')), targetUser, userSelect, destructEmpty, sendBtn],
+    });
+    await cmd.execute(interaction);
     expect(mockUploadJsonToConnector).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'google-map' }),
       'location.json',
