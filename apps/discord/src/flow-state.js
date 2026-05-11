@@ -127,8 +127,12 @@ function assertExpiresAt(expiresAt) {
   if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || Math.floor(expiresAt) !== expiresAt) {
     throw new TypeError(`flow-state: expires_at must be a finite integer epoch-seconds Number (got ${typeof expiresAt}: ${JSON.stringify(expiresAt)}). DDB TTL only reaps Number-typed attributes; a string or float would silently orphan the row.`);
   }
-  if (expiresAt <= nowEpochSeconds()) {
-    throw new RangeError(`flow-state: expires_at must be strictly in the future (got ${expiresAt}; now is ${nowEpochSeconds()}). A row whose TTL is in the past is born expired — it passes the Put, fires FLOW_CREATED, but loadFlow returns null forever after, silently inflating the SLI's silently_dropped numerator. Most often this is a forgotten '+ ttl_seconds' on the caller side.`);
+  // Cache the `now` read so the comparison and the error message
+  // can't straddle a second boundary and produce a `now` in the
+  // message that contradicts the failed comparison.
+  const now = nowEpochSeconds();
+  if (expiresAt <= now) {
+    throw new RangeError(`flow-state: expires_at must be strictly in the future (got ${expiresAt}; now is ${now}). A row whose TTL is in the past is born expired — it passes the Put, fires FLOW_CREATED, but loadFlow returns null forever after, silently inflating the SLI's silently_dropped numerator. Most often this is a forgotten '+ ttl_seconds' on the caller side.`);
   }
 }
 
@@ -161,6 +165,16 @@ function decryptPayload(ciphertext) {
   // No upfront null guard — `decrypt` passes null/undefined through
   // unchanged, and the `plaintext == null` check below catches it.
   // A single guard is clearer than two redundant ones.
+  //
+  // Decrypt-side throws (e.g. KEY_ENCRYPTION_KEY unset on a row
+  // written by a configured env, KEK rotation without the migration
+  // path in crypto.js) propagate intentionally — fail-loud on a
+  // KEK misconfig is the right shape. Do NOT add a try/catch here:
+  // it would silently degrade a config bug into payload: null and
+  // the caller would treat the flow as "no payload" rather than
+  // "we can't read the payload". The corruption path (JSON.parse
+  // failure) below is correctly soft — that's a row-level issue,
+  // not a deployment-wide one.
   const plaintext = decrypt(ciphertext);
   if (plaintext == null) return null;
   try {
@@ -248,6 +262,14 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
       // there's no cheap way to compare encrypted payloads without
       // decrypting both, and the legitimate case (SQS exact-duplicate)
       // would generate spurious warns.
+      //
+      // Debug log (not warn) on the redelivery branch so a "why is
+      // the user seeing stale data" triage has a breadcrumb at the
+      // first place a mutation would silently disappear. Debug level
+      // keeps it out of normal logs (the legitimate-redelivery rate
+      // would otherwise be noise) but surfaces under LOG_LEVEL=debug
+      // when an operator is actively investigating.
+      logger.debug('flow-state.createFlow: idempotent redelivery (row already exists)', { flow_id });
       return { created: false };
     }
     throw err;
@@ -406,6 +428,19 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
   // Get and the Update is detected by OCC and reported as conflict;
   // the stale stage_from in the audit emission is acceptable
   // (forensic field, not used for SLI math).
+  //
+  // TODO(#253): collapse this pre-read into the UpdateCommand via
+  // `ReturnValues: 'ALL_OLD'` (and `ReturnValuesOnConditionCheckFailure:
+  // 'ALL_OLD'` on the CCFE branch) to drop from 2 DDB calls → 1 on
+  // the happy path and 3 → 1 on the conflict path. Deliberately
+  // deferred from the harness's first ship — performance-only refactor,
+  // the simpler 2-call shape is correct and the optimization is the
+  // right scope for a focused follow-up.
+  //
+  // ConsistentRead doubles the RCU cost vs eventually-consistent,
+  // accepted here because a worker that just transitioned and is
+  // re-checking needs strong consistency. Same rationale as
+  // loadFlow's ConsistentRead choice.
   let stage_from = null;
   const extended = set_expires_at !== undefined;
   try {

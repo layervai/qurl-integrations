@@ -81,6 +81,7 @@ beforeEach(() => {
   logger.audit.mockReset();
   logger.error.mockReset();
   logger.warn.mockReset();
+  logger.debug.mockReset();
   encryptStrict.mockClear();
   decrypt.mockClear();
 });
@@ -169,6 +170,24 @@ describe('flow-state.createFlow', () => {
 
     expect(res).toEqual({ created: false });
     expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('redelivery emits a debug breadcrumb for triage', async () => {
+    // The legitimate-redelivery rate would be noise at warn level,
+    // but a debug breadcrumb gives an operator something to grep
+    // for when investigating "why is the user seeing stale data".
+    ddbMock.on(PutCommand).rejects(ccfe());
+
+    await flowState.createFlow({
+      flow_id: FLOW_ID,
+      stage: 's',
+      expires_at: futureExpiry(),
+    });
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/idempotent redelivery/),
+      expect.objectContaining({ flow_id: FLOW_ID }),
+    );
   });
 
   test('rethrows unexpected DDB errors', async () => {
@@ -671,6 +690,28 @@ describe('flow-state.deleteFlow', () => {
 });
 
 describe('flow-state — payload corruption resilience', () => {
+  test('loadFlow propagates decrypt-side throws (fail-loud on KEK misconfig)', async () => {
+    // A KEK-unset / KEK-rotated misconfig must fail loudly rather
+    // than silently degrade to payload=null — otherwise a config
+    // bug looks like "no payload" and the caller proceeds with
+    // wrong-shaped data. Symmetric to the harness's broader
+    // fail-closed posture on encryptStrict.
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        flow_id: 'id',
+        stage: 's',
+        version: 1,
+        payload: 'enc:v1:IV:TAG:cafef00d',
+        expires_at: Math.floor(Date.now() / 1000) + 600,
+      },
+    });
+    decrypt.mockImplementationOnce(() => {
+      throw new Error('KEY_ENCRYPTION_KEY is required to decrypt');
+    });
+
+    await expect(flowState.loadFlow('id')).rejects.toThrow(/KEY_ENCRYPTION_KEY is required/);
+  });
+
   test('loadFlow returns payload=null and logs error when payload JSON is corrupt', async () => {
     // Decrypt yields a non-JSON string → JSON.parse throws → row
     // surfaces with payload=null rather than blowing up the caller.
