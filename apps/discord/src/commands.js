@@ -1304,7 +1304,7 @@ async function handleSend(interaction, apiKey) {
     content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
     if (personalMessage) {
       const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
-      content += `\n\n_Personal message:_ "${preview}"`;
+      content += `\n\n_Note:_ "${preview}"`;
     }
     // Same isFinite + > 0 invariant the dropdown's `default` flag uses
     // (see `hasTimer` in formRows below) — a corrupted DDB row carrying
