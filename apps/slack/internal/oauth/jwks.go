@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
@@ -71,8 +72,15 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 	if err != nil {
 		return "", fmt.Errorf("get jwks: %w", err)
 	}
+	// WithRequireKid + WithInferAlgorithmFromKey: defense against an
+	// alg-confusion variant where a future Auth0 misconfig publishes a
+	// key without `alg`. jwx would otherwise infer from `kid` alone;
+	// pinning both ensures the token's header alg matches the key's
+	// declared alg, and that the token actually carries a kid header.
 	tok, err := jwt.Parse([]byte(idToken),
-		jwt.WithKeySet(set),
+		jwt.WithKeySet(set,
+			jws.WithRequireKid(true),
+			jws.WithInferAlgorithmFromKey(true)),
 		jwt.WithIssuer(v.Issuer),
 		jwt.WithAudience(v.Audience),
 		jwt.WithValidate(true),

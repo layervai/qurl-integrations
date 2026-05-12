@@ -50,9 +50,10 @@ const (
 // (apps/discord/src/routes/qurl-oauth.js renderSuccess). Plain HTML with
 // no external assets so it renders in the strictest CSP / no-JS
 // environments. html/template auto-escapes every {{.Field}} interpolation
-// — that's the entire XSS defense for the page, since teamID / keyPrefix
-// / email all flow from user-influenced inputs (state param, qurl-service
-// response, JWKS-verified id_token respectively).
+// — that's the load-bearing XSS defense for keyPrefix (qurl-service
+// JSON response) and email (JWKS-verified id_token). teamID is
+// HMAC-recovered from the signed state so it's already a trusted
+// input, but the same auto-escape applies uniformly.
 var successPageTemplate = template.Must(template.New("oauth-success").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -141,7 +142,10 @@ func Callback(cfg Config) http.HandlerFunc {
 			//nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
 			slog.Warn("oauth/callback Auth0 returned error",
 				"error", errParam,
-				"error_description", q.Get("error_description"))
+				// Auth0 enterprise SAML connections occasionally embed
+				// the rejected username in error_description. Truncate
+				// to bound PII exposure in operator logs.
+				"error_description", truncateForLog(q.Get("error_description"), 128))
 			http.Error(w, "authorization declined — run /qurl setup again to retry", http.StatusBadRequest)
 			return
 		}
@@ -344,6 +348,17 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 	}); err != nil {
 		slog.Warn("oauth/callback success-page write failed", "error", err)
 	}
+}
+
+// truncateForLog caps an arbitrary upstream string at max bytes for
+// operator-log inclusion, marking the truncation. Defense against PII
+// or noise leaks when surfacing third-party (Auth0/qurl-service)
+// strings in slog attributes.
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…[truncated]"
 }
 
 // exchangeAuth0Code POSTs application/x-www-form-urlencoded to

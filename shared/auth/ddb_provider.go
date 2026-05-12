@@ -382,6 +382,12 @@ const gcmNonceSize = 12
 // is rejected: the workspace_id binding is the entire point of this
 // surface and a Seal(...,nil) would burn a CMK quota for no posture.
 func (e *KMSEncryptor) Seal(ctx context.Context, plaintext, aad []byte) (ciphertext, wrappedKey []byte, err error) {
+	if len(plaintext) == 0 {
+		// Symmetric with APIKey's empty-plaintext guard: refuse to
+		// seal zero bytes so the contract lives at one layer rather
+		// than discovering the failure at decrypt time.
+		return nil, nil, errors.New("KMSEncryptor.Seal: empty plaintext")
+	}
 	if len(aad) == 0 {
 		return nil, nil, errors.New("KMSEncryptor.Seal: aad is required for workspace_id binding")
 	}
