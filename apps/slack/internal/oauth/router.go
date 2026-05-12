@@ -73,6 +73,7 @@ func callbackURL(slackBaseURL string) string {
 	if u, err := url.Parse(slackBaseURL); err == nil && u.Host != "" {
 		host = u.Host
 	}
+	//nolint:gosec // G706: slog escapes control bytes in attribute values, same posture as the request-path slog sites.
 	slog.Warn("callbackURL: url.JoinPath failed — falling back to concat",
 		"slack_base_host", host)
 	return slackBaseURL + callbackPath
