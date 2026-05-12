@@ -161,11 +161,14 @@ func run() error {
 	// the internal handler stays unchanged.
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/", handler)
-	if oauthCfg, ok := buildOAuthConfig(signalCtx, ddbProvider); ok {
-		// Route the callback's fire-and-forget goroutines through
-		// handler.wg so they fall inside the same shutdown drain
-		// budget as the slash-command async workers.
-		oauthCfg.AsyncTracker = handler
+	// Route the callback's fire-and-forget goroutines through handler.wg
+	// so they fall inside the same shutdown drain budget as the
+	// slash-command async workers.
+	oauthCfg, ok, err := buildOAuthConfig(signalCtx, ddbProvider, handler)
+	if err != nil {
+		return fmt.Errorf("OAuth config: %w", err)
+	}
+	if ok {
 		oauth.RegisterRoutes(rootMux, oauthCfg)
 		slog.Info("registered /oauth/qurl/{start,callback} routes")
 		handler.SetOAuthSetup(oauth.SetupConfig{
@@ -183,9 +186,18 @@ func run() error {
 		Handler:           rootMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    maxHeaderBytes,
+		// WriteTimeout is the *connection* deadline; http.TimeoutHandler
+		// only cancels the request context, it doesn't lift this. The
+		// /oauth/qurl/callback handler's worst-case sum (Auth0 token
+		// exchange + qurl-service mint + KMS GenerateDataKey + DDB
+		// PutItem) approaches 30s, so a 15s WriteTimeout would tear the
+		// connection down mid-write under unfavorable conditions. 60s
+		// gives the OAuth surface comfortable headroom; /slack/* and
+		// /health respond in milliseconds so the bump doesn't change
+		// their posture.
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: maxHeaderBytes,
 	}
 
 	// Bind first so a port-already-in-use failure returns before the
@@ -270,12 +282,25 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.
-func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Config, bool) {
+// errOAuthStateSecretTooShort is returned by buildOAuthConfig when the
+// operator's OAUTH_STATE_SECRET is set but below stateMinSecret. Bubbling
+// it up to run() turns a misconfiguration that previously degraded
+// silently into a fail-fast startup error.
+var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
+
+func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker) (oauth.Config, bool, error) {
 	// Strip trailing slashes from URL-shaped env vars at one chokepoint so
 	// downstream concatenations (redirect_uri, /oauth/token URL composition)
 	// can't produce //-path artifacts. Auth0 rejects redirect_uri mismatches
 	// strictly, so a single stray slash is a real failure surface.
-	domain := strings.TrimRight(os.Getenv("AUTH0_DOMAIN"), "/")
+	//
+	// AUTH0_DOMAIN is also stripped of any accidental scheme prefix —
+	// jwks.go composes "https://" + domain, so an operator setting
+	// "https://example.auth0.com" would silently yield
+	// "https://https://example.auth0.com/.well-known/...".
+	domain := strings.TrimPrefix(os.Getenv("AUTH0_DOMAIN"), "https://")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimRight(domain, "/")
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
@@ -285,13 +310,13 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Co
 
 	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
 		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {
-		return oauth.Config{}, false
+		return oauth.Config{}, false, nil
 	}
 	if len(stateSecret) < minStateSecretBytes {
-		//nolint:gosec // G706: integer attribute values are not a log-injection vector; slog's JSON handler escapes them.
-		slog.Error("OAUTH_STATE_SECRET is shorter than required minimum",
-			"min_bytes", minStateSecretBytes, "got_bytes", len(stateSecret))
-		return oauth.Config{}, false
+		// Fail-fast: the bot would silently disable OAuth and /qurl
+		// setup would reply "not configured" forever otherwise.
+		return oauth.Config{}, false, fmt.Errorf("%w: got %d bytes, want >= %d",
+			errOAuthStateSecretTooShort, len(stateSecret), minStateSecretBytes)
 	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch (bounded
@@ -320,7 +345,8 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Co
 		Provider:          provider,
 		IDTokenVerifier:   verifier,
 		Minter:            &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
+		AsyncTracker:      tracker,
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
-	}, true
+	}, true, nil
 }

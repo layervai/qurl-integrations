@@ -68,7 +68,10 @@ func stubJWKSVerifier(t *testing.T) {
 func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	stubJWKSVerifier(t)
 	applyEnv(t, validEnv())
-	cfg, ok := buildOAuthConfig(context.Background(), newFakeProvider())
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatalf("expected ok=true with all env vars set; cfg=%+v", cfg)
 	}
@@ -90,7 +93,10 @@ func TestBuildOAuthConfigMissingVar(t *testing.T) {
 			env := validEnv()
 			delete(env, missing)
 			applyEnv(t, env)
-			_, ok := buildOAuthConfig(context.Background(), newFakeProvider())
+			_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+			if err != nil {
+				t.Errorf("expected nil error on missing var; got %v", err)
+			}
 			if ok {
 				t.Errorf("expected ok=false when %s is missing", missing)
 			}
@@ -103,31 +109,39 @@ func TestBuildOAuthConfigShortSecret(t *testing.T) {
 	env := validEnv()
 	env["OAUTH_STATE_SECRET"] = strings.Repeat("a", 16) // half of the required minimum
 	applyEnv(t, env)
-	_, ok := buildOAuthConfig(context.Background(), newFakeProvider())
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
 	if ok {
 		t.Error("expected ok=false on short OAUTH_STATE_SECRET")
 	}
+	if !errors.Is(err, errOAuthStateSecretTooShort) {
+		t.Errorf("expected errOAuthStateSecretTooShort, got %v", err)
+	}
 }
 
-// TestBuildOAuthConfigStripsTrailingSlashes asserts SLACK_BASE_URL,
-// AUTH0_DOMAIN, and QURL_ENDPOINT are normalized at config-load. Auth0
-// rejects redirect_uri mismatches strictly, so a stray // in the
-// concatenated URL would silently break every install.
-func TestBuildOAuthConfigStripsTrailingSlashes(t *testing.T) {
+// TestBuildOAuthConfigNormalizesURLEnvVars asserts SLACK_BASE_URL,
+// AUTH0_DOMAIN, and QURL_ENDPOINT are normalized at config-load:
+//   - trailing slashes are stripped (Auth0 rejects redirect_uri mismatches)
+//   - AUTH0_DOMAIN's accidental scheme prefix is stripped (jwks.go
+//     composes "https://" + domain, so "https://example.auth0.com" would
+//     otherwise yield "https://https://example.auth0.com/...")
+func TestBuildOAuthConfigNormalizesURLEnvVars(t *testing.T) {
 	stubJWKSVerifier(t)
 	env := validEnv()
 	env["SLACK_BASE_URL"] = "https://slack-bot.example/"
-	env["AUTH0_DOMAIN"] = "example.auth0.com/"
+	env["AUTH0_DOMAIN"] = "https://example.auth0.com/"
 	env["QURL_ENDPOINT"] = "https://api.qurl.invalid/"
 	applyEnv(t, env)
-	cfg, ok := buildOAuthConfig(context.Background(), newFakeProvider())
+	cfg, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
-		t.Fatal("expected ok=true with trailing slashes — config should normalize them")
+		t.Fatal("expected ok=true with trailing slashes and scheme prefix — config should normalize them")
 	}
 	if cfg.SlackBaseURL != "https://slack-bot.example" {
 		t.Errorf("SlackBaseURL not trimmed: got %q", cfg.SlackBaseURL)
 	}
 	if cfg.Auth0Domain != "example.auth0.com" {
-		t.Errorf("Auth0Domain not trimmed: got %q", cfg.Auth0Domain)
+		t.Errorf("Auth0Domain not normalized (expect scheme + trailing slash stripped): got %q", cfg.Auth0Domain)
 	}
 }
