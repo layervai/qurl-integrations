@@ -35,6 +35,18 @@ func (f *fakeDDBClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInp
 	return &dynamodb.DeleteItemOutput{}, f.delErr
 }
 
+// emptyPlaintextEncryptor decrypts any ciphertext to zero bytes. Used
+// to exercise the "decrypted plaintext is empty" guard in APIKey
+// without touching the ciphertext-too-short DDB-side check.
+type emptyPlaintextEncryptor struct{}
+
+func (emptyPlaintextEncryptor) Seal(_ context.Context, _, _ []byte) (ciphertext, wrappedKey []byte, err error) {
+	return []byte("ct"), []byte(passthroughWrappedKey), nil
+}
+func (emptyPlaintextEncryptor) Open(_ context.Context, _, _, _ []byte) ([]byte, error) {
+	return []byte{}, nil
+}
+
 // passthroughEncryptor is a no-op FieldEncryptor for tests: ciphertext
 // equals plaintext, wrappedKey is a fixed marker so Open can verify it
 // was actually plumbed through.
@@ -137,6 +149,27 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		}
 		if errors.Is(err, ErrWorkspaceNotConfigured) {
 			t.Fatal("transport error should not be ErrWorkspaceNotConfigured")
+		}
+	})
+
+	t.Run("empty plaintext after decrypt", func(t *testing.T) {
+		// Corrupted row scenario: ciphertext is non-empty (passes the
+		// type/length check at the DDB read) but decrypts to zero bytes.
+		// APIKey must fail loud rather than hand the caller "" — qurl-
+		// service would otherwise surface an opaque 401.
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{
+				Item: map[string]ddbtypes.AttributeValue{
+					attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+					attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte("non-empty-ct")},
+					attrDataKeyCT:  &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				},
+			},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &emptyPlaintextEncryptor{}}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if err == nil {
+			t.Fatal("expected error on empty plaintext")
 		}
 	})
 

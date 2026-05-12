@@ -243,6 +243,13 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("DDBProvider.APIKey: decrypt: %w", err)
 	}
+	// Empty plaintext means the ciphertext decrypted but to zero bytes —
+	// corruption / truncate / unsigned-store-bypass. Fail loud here rather
+	// than handing the caller "" and watching qurl-service surface an
+	// opaque 401.
+	if len(pt) == 0 {
+		return "", errors.New("DDBProvider.APIKey: decrypted plaintext is empty")
+	}
 	return string(pt), nil
 }
 
@@ -424,7 +431,13 @@ func (e *KMSEncryptor) Open(ctx context.Context, ciphertext, wrappedKey, aad []b
 
 // zero wipes a buffer in place. Defense-in-depth: a goroutine stack /
 // heap dump immediately after a Seal/Open call shouldn't surface a
-// plaintext data key.
+// plaintext data key in the SDK-returned slice.
+//
+// Caveat: this scrubs only the AWS-SDK-returned buffer. aes.NewCipher
+// copies the key into the cipher's internal key schedule, and Go's
+// compiler may keep that copy alive past the defer — Go has no
+// guarantee on key-material zeroization. Treat this as best-effort,
+// not a hard secrecy boundary.
 func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
