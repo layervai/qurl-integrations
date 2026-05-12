@@ -424,6 +424,13 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 	if err != nil {
 		return "", "", fmt.Errorf("read body: %w", err)
 	}
+	// If we hit the cap exactly, the body was likely truncated; the
+	// subsequent json.Unmarshal would surface as "unexpected end of
+	// JSON input". Emit a distinct error so operator logs point at the
+	// real cause rather than a parse failure.
+	if len(body) == auth0TokenBodyLimit {
+		return "", "", fmt.Errorf("auth0 token response exceeded %d bytes", auth0TokenBodyLimit)
+	}
 	if resp.StatusCode != http.StatusOK {
 		// Don't surface the body to the browser — log only — could
 		// contain a sub claim or other ID.

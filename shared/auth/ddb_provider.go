@@ -434,6 +434,13 @@ func (e *KMSEncryptor) Open(ctx context.Context, ciphertext, wrappedKey, aad []b
 		return nil, fmt.Errorf("KMSEncryptor.Open: KMS Decrypt: %w", err)
 	}
 	defer zero(decOut.Plaintext)
+	// Explicit length check: aes.NewCipher will error on wrong-sized
+	// key (loud), but pinning the expected 32-byte (AES-256) size here
+	// catches a future regression — e.g., a misconfigured key spec
+	// that returned a 16-byte key — at a more useful stack frame.
+	if len(decOut.Plaintext) != 32 {
+		return nil, fmt.Errorf("KMSEncryptor.Open: data key has wrong size %d (want 32)", len(decOut.Plaintext))
+	}
 
 	block, err := aes.NewCipher(decOut.Plaintext)
 	if err != nil {

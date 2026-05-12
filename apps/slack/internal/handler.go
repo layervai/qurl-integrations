@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -244,10 +245,21 @@ var _ oauth.AsyncTracker = (*Handler)(nil)
 // fire-and-forget DM and orphan-key revoke goroutines flow through
 // here, putting them inside the same WaitTimeout budget as the
 // slash-command async workers.
+//
+// Panics in fn are recovered with a stack-trace log so a buggy Slack
+// client or qurl-service stub can't crash the bot. Mirrors the
+// recover discipline in runAsync.
 func (h *Handler) Go(fn func()) {
 	h.wg.Add(1)
 	go func() {
 		defer h.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in OAuth async goroutine",
+					"recover", r,
+					"stack", string(debug.Stack()))
+			}
+		}()
 		fn()
 	}()
 }

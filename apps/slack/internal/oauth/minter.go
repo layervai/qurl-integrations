@@ -106,6 +106,11 @@ func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name str
 	if err != nil {
 		return "", "", "", fmt.Errorf("read body: %w", err)
 	}
+	// Distinct error on truncation — see exchangeAuth0Code for the
+	// same pattern.
+	if len(rb) == minterBodyLimit {
+		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys returned %d", resp.StatusCode)
 	}
