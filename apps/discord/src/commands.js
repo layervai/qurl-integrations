@@ -2817,6 +2817,10 @@ const SETUP_MODAL_FIELD_API_KEY = 'api_key';
 const SETUP_BUTTON_TTL_SECONDS = 120;
 const SETUP_MODAL_TTL_SECONDS = 300;
 
+// TODO(upstream-rebrand): regex + setMaxLength below mirror the
+// upstream qurl-service key-format spec. A future rebrand or
+// JWT-shaped key format must update both in lockstep — grep with
+// `git grep TODO(upstream-rebrand)` lands every mirroring site.
 const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -2891,12 +2895,12 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(28)
-    // Defense-in-depth ceiling. The regex below is open-ended on
-    // the high side and Discord's default is 4000 chars; a stricter
-    // client-side cap clips pathological pastes before they hit
-    // the network. A real qURL API key is well under 64 chars
-    // today — align with upstream qurl-service key-format spec if
-    // longer formats (e.g. JWT-shaped) ever ship.
+    // TODO(upstream-rebrand): 64 mirrors upstream qurl-service's
+    // current key-format ceiling (see SETUP_API_KEY_REGEX above).
+    // Discord's default is 4000 chars; a stricter client-side cap
+    // clips pathological pastes before they hit the regex/network.
+    // A future JWT-shaped key format must update this in lockstep
+    // with the regex.
     .setMaxLength(64);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
 
@@ -2921,6 +2925,16 @@ async function handleSetupButton(interaction, { flow_id, row }) {
         flow_id, error: rollbackErr && rollbackErr.message,
       });
     });
+    // The "run /qurl setup again" guidance is accurate when the
+    // rollback succeeded (clean state, rerun works). If the rollback
+    // ALSO failed (rare double-DDB-failure logged just above), the
+    // rerun will hit the "you already have a modal open" branch
+    // until SETUP_MODAL_TTL_SECONDS elapses — the admin's recovery
+    // is just to wait. Distinguishing the two cases in the message
+    // would require reading the rollback outcome into a variable
+    // (the .catch swallows it), and the wait-vs-retry distinction
+    // is marginal UX in an already-rare error path; keep the
+    // simpler wording.
     await interaction.reply({
       content: 'Could not open the configuration form — please run `/qurl setup` again.',
       ephemeral: true,
@@ -3917,6 +3931,15 @@ const commands = [
           // either gets the recoverable "could not start" message
           // instead of falling through to handleCommand's generic
           // "error executing this command" wording.
+          //
+          // Race-edge: two same-user supersede calls from different
+          // clients within the deleteFlow round-trip can have the
+          // second deleteFlow stomp the first retry's fresh row
+          // (no OCC on deleteFlow). Worst case is "admin reruns,"
+          // and /qurl setup is admin-only + same-user so the window
+          // is vanishingly small — not worth an OCC primitive yet,
+          // but documented here so the next reader doesn't try to
+          // close it without weighing the cost.
           let setupRetry;
           try {
             await deleteFlow(setupFlowId, {

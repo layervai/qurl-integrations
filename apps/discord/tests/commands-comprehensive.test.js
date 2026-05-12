@@ -1687,6 +1687,16 @@ describe('handleSetupButton (dispatcher path)', () => {
     const nowSec = Math.floor(Date.now() / 1000);
     expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + 250);
     expect(transitionArgs[2].set_expires_at).toBeLessThanOrEqual(nowSec + 350);
+    // `extended: true` audit-flag pin: the new expires_at must
+    // exceed the original button-stage TTL window. flow-state.js
+    // computes `extended = set_expires_at > priorExpires`; the
+    // prior expires_at on a fresh row is at most
+    // `now + SETUP_BUTTON_TTL_SECONDS`, so any value strictly
+    // greater than that guarantees extended=true at the audit
+    // emission. Pins the "button → modal transitions extend the
+    // TTL" contract that's documented in the handler comment.
+    const SETUP_BUTTON_TTL_SECONDS = 120;
+    expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + SETUP_BUTTON_TTL_SECONDS);
     // Pin: button-stage transition must NOT write a payload. The
     // setup flow carries no encrypted state — the key itself
     // arrives in interaction.fields on the modal submit, not in
