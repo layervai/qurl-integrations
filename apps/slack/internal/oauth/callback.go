@@ -30,7 +30,7 @@ const (
 	persistTimeout = 15 * time.Second
 	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
 	// mintAndPersist. Same fresh-context rationale as persistTimeout:
-	// TimeoutHandler cancelling mid-mint would orphan a key the bot
+	// TimeoutHandler canceling mid-mint would orphan a key the bot
 	// can no longer revoke (no keyID to DELETE against).
 	mintTimeout         = 15 * time.Second
 	dmTimeout           = 5 * time.Second
