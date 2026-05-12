@@ -3667,9 +3667,10 @@ const commands = [
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         const operatorOwnsGlobalKey = !config.isMultiTenant;
         if (!guildApiKey && !(operatorOwnsGlobalKey && config.QURL_API_KEY)) {
-          logger.warn('qurl gate refused: no per-guild API key in multi-tenant mode', {
+          logger.warn('qurl gate refused: no usable API key', {
             sub,
             guildId: interaction.guildId || null,
+            userId: interaction.user.id,
             multiTenant: config.isMultiTenant,
             hasGlobalKey: !!config.QURL_API_KEY,
           });
