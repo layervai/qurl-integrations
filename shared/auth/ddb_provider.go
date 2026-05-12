@@ -269,14 +269,20 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 	//   2. Emit a warn line on overwrite so operator dashboards can
 	//      distinguish first-installs from rotation churn.
 	// The install path is invoked once per workspace, so doubling the RTT
-	// here is a non-issue.
-	existing, getErr := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+	// here is a non-issue. A transient transport error here is fail-fast:
+	// without the pre-flight read we'd silently destroy configured_at on
+	// rotation, which is the exact failure mode this branch exists to
+	// prevent. The caller retries via /qurl setup.
+	existing, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
 	})
-	overwriting := getErr == nil && existing != nil && len(existing.Item) > 0
+	if err != nil {
+		return fmt.Errorf("DDBProvider.SetAPIKey: pre-flight GetItem: %w", err)
+	}
+	overwriting := existing != nil && len(existing.Item) > 0
 
 	now := p.Now().UTC().Format(time.RFC3339)
 	configuredAt := now
@@ -349,8 +355,13 @@ const gcmNonceSize = 12
 // Seal returns (nonce||ciphertext, wrappedDataKey, nil). aad is fed as
 // AES-GCM additional-authenticated-data so a ciphertext stored under
 // the wrong workspaceID won't decrypt — defense against an attacker
-// with DDB write access swapping ciphertexts between rows.
+// with DDB write access swapping ciphertexts between rows. Empty aad
+// is rejected: the workspace_id binding is the entire point of this
+// surface and a Seal(...,nil) would burn a CMK quota for no posture.
 func (e *KMSEncryptor) Seal(ctx context.Context, plaintext, aad []byte) (ciphertext, wrappedKey []byte, err error) {
+	if len(aad) == 0 {
+		return nil, nil, errors.New("KMSEncryptor.Seal: aad is required for workspace_id binding")
+	}
 	dkOut, err := e.Client.GenerateDataKey(ctx, &kms.GenerateDataKeyInput{
 		KeyId:             aws.String(e.KeyID),
 		KeySpec:           kmstypes.DataKeySpecAes256,
@@ -379,6 +390,9 @@ func (e *KMSEncryptor) Seal(ctx context.Context, plaintext, aad []byte) (ciphert
 
 // Open undoes Seal. AAD must match the value passed at seal-time.
 func (e *KMSEncryptor) Open(ctx context.Context, ciphertext, wrappedKey, aad []byte) ([]byte, error) {
+	if len(aad) == 0 {
+		return nil, errors.New("KMSEncryptor.Open: aad is required for workspace_id binding")
+	}
 	if len(ciphertext) < gcmNonceSize {
 		return nil, errors.New("KMSEncryptor.Open: ciphertext shorter than nonce")
 	}

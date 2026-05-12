@@ -95,6 +95,20 @@ func TestVerifyStateRejectsShortSecret(t *testing.T) {
 	}
 }
 
+// TestMintStateRejectsSeparatorInIDs locks the wire-format invariant:
+// if an attacker (or a Slack spec change) ever embeds '|' in a team/
+// user ID, the token would split into more parts than VerifyState
+// expects, silently mismatching. We reject the mint instead.
+func TestMintStateRejectsSeparatorInIDs(t *testing.T) {
+	now := time.Now()
+	if _, err := MintState(testSecret, "T|EVIL", testStateUserID, now); !errors.Is(err, errStateIDHasSeparator) {
+		t.Errorf("teamID with separator: want errStateIDHasSeparator, got %v", err)
+	}
+	if _, err := MintState(testSecret, testStateTeamID, "U|EVIL", now); !errors.Is(err, errStateIDHasSeparator) {
+		t.Errorf("userID with separator: want errStateIDHasSeparator, got %v", err)
+	}
+}
+
 func TestMintStateRejectsEmptyInputs(t *testing.T) {
 	now := time.Now()
 	if _, err := MintState(testSecret, "", testStateUserID, now); !errors.Is(err, errStateEmptyTeam) {

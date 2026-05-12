@@ -101,6 +101,19 @@ type QURLAPIKeyMinter interface {
 	RevokeAPIKey(ctx context.Context, accessToken, keyID string) error
 }
 
+// AsyncTracker lets the OAuth callback spawn its fire-and-forget
+// goroutines (DM admin, revoke orphan key) under a parent's waitgroup
+// so a SIGTERM mid-callback waits for them to drain instead of
+// cutting them off mid-call. Wired in production from
+// internal.Handler; falls back to plain `go` when nil.
+//
+// The contract: Go must call fn in a goroutine and complete its bookkeeping
+// (waitgroup decrement) when fn returns. Callers may not assume fn runs
+// synchronously.
+type AsyncTracker interface {
+	Go(fn func())
+}
+
 // IDTokenVerifier verifies an Auth0 id_token JWT against Auth0's JWKS
 // and returns the email claim (the only field we actually consume).
 //
@@ -150,6 +163,13 @@ type Config struct {
 	// SlackClient sends the success-confirmation DM. Tests can inject
 	// a noop. Nil disables the DM (the success page still renders).
 	SlackClient SlackClient
+
+	// AsyncTracker scopes the fire-and-forget DM + orphan-key-revoke
+	// goroutines under a parent's waitgroup so SIGTERM during a
+	// callback waits for them to drain. Nil falls back to plain `go`
+	// — fine for tests, leaves a small orphan-key window during
+	// production shutdown.
+	AsyncTracker AsyncTracker
 
 	// HTTPClient is used for Auth0 token-exchange calls. Defaults to
 	// &http.Client{Timeout: 15s}.

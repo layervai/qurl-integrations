@@ -162,6 +162,10 @@ func run() error {
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/", handler)
 	if oauthCfg, ok := buildOAuthConfig(signalCtx, ddbProvider); ok {
+		// Route the callback's fire-and-forget goroutines through
+		// handler.wg so they fall inside the same shutdown drain
+		// budget as the slash-command async workers.
+		oauthCfg.AsyncTracker = handler
 		oauth.RegisterRoutes(rootMux, oauthCfg)
 		slog.Info("registered /oauth/qurl/{start,callback} routes")
 		handler.SetOAuthSetup(oauth.SetupConfig{

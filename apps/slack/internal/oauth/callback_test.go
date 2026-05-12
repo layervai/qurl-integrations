@@ -444,6 +444,52 @@ func TestCallbackAuth0EmptyAccessToken(t *testing.T) {
 	}
 }
 
+// countingTracker satisfies AsyncTracker by tracking how many fn
+// invocations passed through it. Used to assert that fire-and-forget
+// goroutines route through handler.wg (i.e. are drained by SIGTERM).
+type countingTracker struct {
+	mu   sync.Mutex
+	wg   sync.WaitGroup
+	used int
+}
+
+func (c *countingTracker) Go(fn func()) {
+	c.mu.Lock()
+	c.used++
+	c.mu.Unlock()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		fn()
+	}()
+}
+
+// TestCallbackAsyncTrackerRoutesGoroutines locks the SIGTERM-safety
+// contract: when an AsyncTracker is wired, the callback's fire-and-
+// forget DM (and the revoke path) flow through it instead of plain
+// `go`. Without this, a SIGTERM during a callback could cut the
+// orphan-key revoke off mid-call.
+func TestCallbackAsyncTrackerRoutesGoroutines(t *testing.T) {
+	cfg, _, _, _ := newCallbackCfg(t)
+	cfg.SlackClient = &fakeSlackClient{}
+	tracker := &countingTracker{}
+	cfg.AsyncTracker = tracker
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200", rec.Code)
+	}
+	tracker.wg.Wait()
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if tracker.used == 0 {
+		t.Error("AsyncTracker.Go must be called for the success-path DM goroutine")
+	}
+}
+
 // TestCallbackDMsConfiguredUser asserts that the success-path DM uses
 // the userID recovered from the verified state — and only that userID.
 func TestCallbackDMsConfiguredUser(t *testing.T) {

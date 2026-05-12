@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -33,8 +34,9 @@ const (
 	stateNonceLen    = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
 	StateMinSecret   = 32 // bytes — HMAC-SHA256 block-size floor; rejects ergonomically-weak operator secrets.
 	stateFutureSkew  = 30 * time.Second
-	stateSeparator   = "|"
-	stateSeparatorB  = byte('|')
+	stateSeparator     = "|"
+	stateSeparatorB    = byte('|')
+	stateSeparatorRune = '|'
 	stateUserIDIndex = 1
 	stateTeamIDIndex = 0
 	stateNonceIndex  = 2
@@ -46,13 +48,14 @@ const (
 // error strings. Kept un-exported because no caller outside this package
 // branches on them today — promote when one does.
 var (
-	errStateMalformed = errors.New("state: malformed")
-	errStateBadHMAC   = errors.New("state: HMAC mismatch")
-	errStateExpired   = errors.New("state: expired")
-	errStateFuture    = errors.New("state: timestamp in future")
-	errStateShortKey  = errors.New("state: secret too short")
-	errStateEmptyTeam = errors.New("state: empty teamID")
-	errStateEmptyUser = errors.New("state: empty userID")
+	errStateMalformed     = errors.New("state: malformed")
+	errStateBadHMAC       = errors.New("state: HMAC mismatch")
+	errStateExpired       = errors.New("state: expired")
+	errStateFuture        = errors.New("state: timestamp in future")
+	errStateShortKey      = errors.New("state: secret too short")
+	errStateEmptyTeam     = errors.New("state: empty teamID")
+	errStateEmptyUser     = errors.New("state: empty userID")
+	errStateIDHasSeparator = errors.New("state: teamID or userID contains pipe separator")
 )
 
 // signedPayload returns the canonical "teamID|userID|nonce|ts" byte
@@ -76,6 +79,13 @@ func MintState(secret []byte, teamID, userID string, now time.Time) (string, err
 	}
 	if userID == "" {
 		return "", errStateEmptyUser
+	}
+	// The wire format uses '|' as the separator between payload parts.
+	// Today's Slack team/user IDs are pure [A-Z0-9], but if Slack ever
+	// extends the alphabet a stray '|' would split into more parts than
+	// VerifyState expects and silently mismatch. Reject up front.
+	if strings.ContainsRune(teamID, stateSeparatorRune) || strings.ContainsRune(userID, stateSeparatorRune) {
+		return "", errStateIDHasSeparator
 	}
 	nonceBytes := make([]byte, stateNonceLen)
 	if _, err := rand.Read(nonceBytes); err != nil {

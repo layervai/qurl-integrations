@@ -179,13 +179,28 @@ func Callback(cfg Config) http.HandlerFunc {
 		// DM target is the Slack user_id from the signed state — never
 		// from an unsigned query parameter. Goroutine deliberately uses
 		// a fresh context (not r.Context()): r.Context() cancels the
-		// moment we render the success page below.
+		// moment we render the success page below. AsyncTracker scopes
+		// it under handler.wg so SIGTERM during a callback waits for
+		// the DM (and the revoke from the persist-failure path) to
+		// drain rather than cutting them off mid-call.
 		if cfg.SlackClient != nil {
-			go dmAdminAsync(cfg.SlackClient, verified.UserID, verified.TeamID, keyPrefix)
+			spawnAsync(cfg.AsyncTracker, func() {
+				dmAdminAsync(cfg.SlackClient, verified.UserID, verified.TeamID, keyPrefix)
+			})
 		}
 
 		renderSuccess(w, verified.TeamID, keyPrefix, qurlEmail)
 	}
+}
+
+// spawnAsync routes a goroutine through the AsyncTracker if one is
+// wired, falling back to plain `go` for tests / unconfigured callers.
+func spawnAsync(tracker AsyncTracker, fn func()) {
+	if tracker != nil {
+		tracker.Go(fn)
+		return
+	}
+	go fn()
 }
 
 // mintAndPersist runs steps 5 + 6: mint key on qurl-service, persist via
@@ -214,7 +229,9 @@ func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, acce
 		// context) because the request context may be canceling by
 		// the time we get to write the error response; we still want
 		// the revoke to run to bound the orphan-key window.
-		go revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+		spawnAsync(cfg.AsyncTracker, func() {
+			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+		})
 		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
 		return "", false
 	}

@@ -113,6 +113,7 @@ func TestJWKSVerifierHappyPath(t *testing.T) {
 		jwt.IssuedAtKey:   now,
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
 		emailClaim:        testAdminEmail,
+		"email_verified":  true,
 	})
 
 	email, err := f.verifier.VerifyEmail(context.Background(), string(signed))
@@ -226,6 +227,33 @@ func TestJWKSVerifierAcceptsVerifiedEmail(t *testing.T) {
 	}
 }
 
+// TestJWKSVerifierReturnsEmptyEmailWhenEmailVerifiedAbsent locks the
+// fail-closed contract: Auth0 connections that omit email_verified
+// (some enterprise/SAML configs do) get an empty email rather than a
+// surfaced-as-verified one.
+func TestJWKSVerifierReturnsEmptyEmailWhenEmailVerifiedAbsent(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		emailClaim:        testAdminEmail,
+		// email_verified deliberately omitted.
+	})
+	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	if err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty email when email_verified is absent, got %q", got)
+	}
+}
+
+// TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing covers the verified-
+// but-no-email path (a verified token that simply doesn't include the
+// email claim at all).
 func TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing(t *testing.T) {
 	f := newJWKSFixture(t, "client-aud")
 	now := time.Now()
@@ -234,6 +262,7 @@ func TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing(t *testing.T) {
 		jwt.AudienceKey:   []string{f.audience},
 		jwt.IssuedAtKey:   now,
 		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		"email_verified":  true,
 	})
 	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
 	if err != nil {

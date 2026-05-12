@@ -174,6 +174,10 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 		// the operator-facing failure is more discoverable here.
 		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
 	}
+	// Defensive copy: the field is read on the request hot path without
+	// a lock. A caller mutating the original byte slice would silently
+	// poison every subsequent MintState call.
+	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
 	h.oauthSetup = &cfg
 }
 
@@ -213,6 +217,19 @@ func NewHandler(cfg Config) *Handler {
 // ctx, wedging shutdown past the platform's hard-kill window.
 func (h *Handler) Wait() {
 	h.wg.Wait()
+}
+
+// Go runs fn in a goroutine tracked by h.wg so the cmd shutdown drain
+// covers it. Implements oauth.AsyncTracker — the OAuth callback's
+// fire-and-forget DM and orphan-key revoke goroutines flow through
+// here, putting them inside the same WaitTimeout budget as the
+// slash-command async workers.
+func (h *Handler) Go(fn func()) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		fn()
+	}()
 }
 
 // WaitTimeout drains in-flight async workers, returning early after d.

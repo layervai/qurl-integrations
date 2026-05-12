@@ -194,6 +194,28 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	}
 }
 
+// TestDDBProviderSetAPIKeyFailsFastOnGetItemError locks the contract
+// that a transient pre-flight GetItem failure aborts the write rather
+// than degrading to "destroy configured_at on rotation". Without the
+// fail-fast, a transport blip would silently wipe the original install
+// timestamp.
+func TestDDBProviderSetAPIKeyFailsFastOnGetItemError(t *testing.T) {
+	ddb := &fakeDDBClient{getErr: errors.New("ddb transient")}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	}
+	err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_xxx", "U_ADMIN")
+	if err == nil {
+		t.Fatal("expected error when pre-flight GetItem fails")
+	}
+	if ddb.putInput != nil {
+		t.Error("PutItem must NOT run when pre-flight GetItem errored")
+	}
+}
+
 // TestDDBProviderSetAPIKeyPreservesConfiguredAt locks the rotation
 // contract: when a row already exists, configured_at retains its
 // original value (the install timestamp) while updated_at moves to

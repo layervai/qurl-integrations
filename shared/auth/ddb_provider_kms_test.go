@@ -97,9 +97,25 @@ func TestKMSEncryptorSealGenErrorPropagates(t *testing.T) {
 		Client: &fakeKMS{genErr: errors.New("KMS access denied")},
 		KeyID:  testKMSKeyARN,
 	}
-	_, _, err := enc.Seal(context.Background(), []byte("pt"), nil)
+	_, _, err := enc.Seal(context.Background(), []byte("pt"), []byte("workspace-id"))
 	if err == nil {
 		t.Fatal("want error, got nil")
+	}
+}
+
+// TestKMSEncryptorRejectsEmptyAAD locks the fail-fast on AAD-required:
+// the workspace_id binding is what blocks cross-workspace ciphertext
+// swap, and a Seal/Open call without it is a misuse to surface loudly.
+func TestKMSEncryptorRejectsEmptyAAD(t *testing.T) {
+	enc := &KMSEncryptor{
+		Client: &fakeKMS{dataKey: make([]byte, 32), wrappedBlob: []byte("wrapped")},
+		KeyID:  testKMSKeyARN,
+	}
+	if _, _, err := enc.Seal(context.Background(), []byte("pt"), nil); err == nil {
+		t.Error("Seal with nil aad must reject")
+	}
+	if _, err := enc.Open(context.Background(), []byte("ciphertext-long-enough"), []byte("wrapped"), nil); err == nil {
+		t.Error("Open with nil aad must reject")
 	}
 }
 
