@@ -701,6 +701,15 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // PR adds a TTL-driven sweeper it MUST emit a distinct event
 // (e.g. FLOW_REAPED) so the SLI math stays intact.
 //
+// `stage` is both the audit value AND the conditional-delete gate:
+// the row is only removed when its `stage` attribute equals the
+// caller-supplied value. This prevents cross-flow contamination
+// across commands that share a `flow_id` shape: when /qurl revoke
+// supersedes its own `awaiting_revoke_select` row, it must not be
+// able to admin_cleanup an in-flight /qurl setup row keyed at the
+// same (user, channel). The stage gate enforces "delete the flow
+// I expect, not whatever flow happens to live at this key."
+//
 // `reason` is one of 'terminal' | 'abort' | 'admin_cleanup' per
 // the audit event's payload contract. Caller-supplied because
 // flow-state can't know whether a given delete is a clean
@@ -719,28 +728,51 @@ async function deleteFlow(flow_id, { stage, reason }) {
   // Conditional Delete + emit-on-success. The SLI math
   //   silently_dropped = count(FLOW_CREATED) - count(FLOW_DELETED)
   // requires at-most-once emission per logical flow on BOTH sides.
-  // CREATED is gated by `attribute_not_exists`; DELETED needs the
-  // mirror — `attribute_exists` — otherwise an SQS redelivery of an
-  // abort/admin_cleanup path (which have no version-checked
-  // predecessor to gate on) would Delete-success-idempotently a
-  // second time and double-emit FLOW_DELETED. Numerator inflates,
-  // signal lost.
+  // CREATED is gated by `attribute_not_exists`; DELETED needs both
+  // attribute_exists (so SQS redeliveries don't double-emit) AND
+  // the stage gate (so a sibling flow at the same flow_id is never
+  // collateral damage).
   //
   // Returns `{ deleted: bool }` so callers can gate user-visible
   // "flow completed" side effects on actual deletion (a false
-  // return means someone else already deleted, or the TTL reaped
-  // — either way, don't re-DM the user).
+  // return means someone else already deleted, the TTL reaped, OR
+  // the stored stage doesn't match — for any of those, don't re-DM
+  // the user).
   try {
     await ddb.send(new DeleteCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ConditionExpression: 'attribute_exists(flow_id)',
+      ConditionExpression: 'attribute_exists(flow_id) AND #s = :stage',
+      ExpressionAttributeNames: { '#s': 'stage' },
+      ExpressionAttributeValues: { ':stage': stage },
     }));
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      // Row was already gone (redelivery, TTL reap, or concurrent
-      // delete). No-op. Do NOT emit FLOW_DELETED — the SLI's
-      // count(FLOW_DELETED) must stay at-most-once per logical flow.
+      // Row absent OR stage mismatch. Discriminate via post-recheck
+      // for the forensic log line — same pattern as transitionFlow's
+      // recheck. Best-effort: any throw here is swallowed because
+      // the recheck is purely informational.
+      let actual_stage = null;
+      let row_present = false;
+      try {
+        const recheck = await ddb.send(new GetCommand({
+          TableName: TABLE_NAME,
+          Key: { flow_id },
+          ProjectionExpression: 'stage',
+          ConsistentRead: true,
+        }));
+        if (recheck.Item) {
+          row_present = true;
+          actual_stage = recheck.Item.stage;
+        }
+      } catch (rcErr) {
+        logger.warn('flow-state.deleteFlow: post-CCFE recheck failed (informational)', {
+          flow_id, error: rcErr && rcErr.message,
+        });
+      }
+      logger.debug('flow-state.deleteFlow: condition failed', {
+        flow_id, expected_stage: stage, actual_stage, row_present,
+      });
       return { deleted: false };
     }
     throw err;
