@@ -1554,16 +1554,72 @@ describe('handleAddRecipients', () => {
       // sendConfig has no self_destruct_seconds → null inherits through.
       null,
     );
-    // mintLinks is called against the NEW resource (conn-res-43)
-    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key', expect.any(String));
+    // mintLinks is called against the NEW resource (conn-res-43).
+    // 5th arg is expires_in from sendConfig — pinned to the literal
+    // '6h' (not just any-string) so a future bug that swaps the
+    // expires_at ISO into this slot fails CI.
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-43', expect.any(String), 2, 'test-api-key', '6h');
     // createOneTimeLink should NOT have been called
     expect(mockCreateOneTimeLink).not.toHaveBeenCalled();
+    // Both recipients' qURL records share the batch resource_id —
+    // the mock returns no per-link resource_id, exercising the
+    // legacy/cold-start fallback (link.resource_id || currentResourceId).
+    expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].resourceId).toBe('conn-res-43');
+    expect(mockDb.recordQURLSendBatch.mock.calls[0][0][1].resourceId).toBe('conn-res-43');
     // DMs should have been sent
     expect(mockSendDM).toHaveBeenCalledTimes(2);
     // DB should record the new sends
     expect(mockDb.recordQURLSendBatch).toHaveBeenCalledTimes(1);
     expect(mockDb.recordQURLSendBatch.mock.calls[0][0]).toHaveLength(2);
     expect(result.msg).toMatch(/Added 2 recipients/);
+  });
+
+  it('file send: per-vid response shape — uses per-link resource_id from connector', async () => {
+    // Connector PR #526's per-recipient vid path returns a distinct
+    // resource_id per minted link. The bot must honor that
+    // (link.resource_id) instead of falling back to the batch's
+    // currentResourceId — otherwise downstream revoke would target
+    // the original qURL rather than the fresh per-recipient ones.
+    // Regression fence for the mintLinksInBatches branch:
+    //   resourceId: link.resource_id || currentResourceId
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-old',
+      actual_url: null,
+      expires_in: '1h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: 'report.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/report.pdf',
+      self_destruct_seconds: 30,
+    });
+    mockDownloadAndUpload.mockResolvedValue({
+      resource_id: 'conn-res-batch',
+      fileBuffer: new ArrayBuffer(8),
+    });
+    // Connector's per-vid path returns a fresh resource_id per link.
+    mockMintLinks.mockResolvedValue([
+      { qurl_link: 'https://q.test/per-vid-1', resource_id: 'per-vid-rid-1' },
+      { qurl_link: 'https://q.test/per-vid-2', resource_id: 'per-vid-rid-2' },
+    ]);
+    mockSendDM.mockResolvedValue(true);
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-pv-1', bot: false, username: 'Pat' },
+      { id: 'rcpt-pv-2', bot: false, username: 'Quinn' },
+    ]);
+
+    await handleAddRecipients('send-pv-1', users, mockOriginalInteraction, 'test-api-key');
+
+    // 5th arg (expires_in) opts the connector into per-vid path.
+    expect(mockMintLinks).toHaveBeenCalledWith('conn-res-batch', expect.any(String), 2, 'test-api-key', '1h');
+    // Each recipient's stored resourceId is its own per-vid id —
+    // NOT the batch's currentResourceId. This is the fence: drop
+    // `link.resource_id || ...` from mintLinksInBatches and these
+    // two assertions break.
+    expect(mockDb.recordQURLSendBatch.mock.calls[0][0][0].resourceId).toBe('per-vid-rid-1');
+    expect(mockDb.recordQURLSendBatch.mock.calls[0][0][1].resourceId).toBe('per-vid-rid-2');
   });
 
   it('file send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
