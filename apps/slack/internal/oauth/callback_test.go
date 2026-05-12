@@ -516,7 +516,7 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 // valid JSON token response to exactly 8 KiB and assert the success
 // path runs.
 func TestExchangeAuth0CodeAcceptsExactCapBody(t *testing.T) {
-	cfg, _, _, _ := newCallbackCfg(t)
+	cfg := newCallbackCfgOnly(t)
 	atCapAuth0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Build a payload exactly auth0TokenBodyLimit bytes long. The
 		// id_token claim is padding; the parser only reads
