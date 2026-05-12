@@ -1,6 +1,11 @@
 module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/tests/**/*.test.js'],
+  // Global env setup — sets DDB_TABLE_PREFIX + AWS_REGION before any
+  // test file loads, so source modules with fail-fast module-load
+  // guards (flow-state, ddb-store) can be required without throwing.
+  // See tests/setup-env.js for the rationale.
+  setupFiles: ['<rootDir>/tests/setup-env.js'],
   // Note: `restoreMocks` is NOT set globally — qurl-send-state-machine.test.js
   // and others rely on jest.spyOn results persisting across tests within a
   // describe (the spies are set up in module-level scope and tests assert

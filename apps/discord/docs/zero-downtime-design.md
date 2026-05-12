@@ -136,6 +136,22 @@ flow row in a given `(channel_id)` cannot start a second flow there. The second
 cancel it first."` This avoids needing a GSI on the flow table and keeps the
 state model simple.
 
+**Per-command override matrix.** The block-second-flow rule above is the
+default. Two commands carry intentional exceptions because their UX shape
+makes blocking the wrong call:
+
+| Command | Behavior on existing flow | Rationale |
+|---|---|---|
+| `/qurl revoke` | **Supersede** (admin_cleanup + recreate) | The menu is a stateless listing of recent sends; an admin who can't remember whether they cancelled the prior dropdown shouldn't be told "finish your existing dropdown first." Re-running shows a fresh menu and the orphan menu's selection lands on `loadFlow → null → "superseded"`. |
+| `/qurl setup` | Block (default) | Multi-step OAuth / API-key paste flow with in-progress state; the user should finish or cancel the active step. |
+| `/qurl send` | Block (default) | Multi-step send flow (recipient picker, attachment capture, confirm); abandoning mid-flow because a duplicate `/qurl send` slipped through would lose user input. |
+
+The supersede semantics are **enforced at the harness level** by `deleteFlow`'s
+conditional `stage = :expected` gate (see `apps/discord/src/flow-state.js`).
+A revoke command can only supersede a revoke flow; it cannot accidentally
+admin_cleanup a sibling setup or send flow that happens to share the same
+`flow_id` keying.
+
 **MESSAGE_CREATE handler.** Today the file-drop step uses
 `captureChannel.awaitMessages({...})` on a DM channel. Under the redesign,
 **workers** subscribe to a `MESSAGE_CREATE` event class from the queue. The
