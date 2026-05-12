@@ -354,11 +354,11 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 // operator-log inclusion, marking the truncation. Defense against PII
 // or noise leaks when surfacing third-party (Auth0/qurl-service)
 // strings in slog attributes.
-func truncateForLog(s string, max int) string {
-	if len(s) <= max {
+func truncateForLog(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return s[:max] + "…[truncated]"
+	return s[:limit] + "…[truncated]"
 }
 
 // exchangeAuth0Code POSTs application/x-www-form-urlencoded to
