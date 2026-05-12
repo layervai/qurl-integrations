@@ -2651,24 +2651,47 @@ async function handleRevoke(interaction, apiKey) {
     expires_at,
   });
   if (!created.created) {
-    // Existing row from a prior /qurl revoke (or some other flow in
-    // this channel). Tear it down and try again. The admin_cleanup
-    // reason marks this as an out-of-band delete rather than a
-    // terminal completion — keeps the SLI's silently_dropped count
-    // honest (the prior flow never reached its own terminal).
+    // Existing row from a prior /qurl revoke. Tear it down (the
+    // stage gate on deleteFlow ensures we won't admin_cleanup a
+    // sibling flow at the same flow_id, e.g. an in-flight setup
+    // modal) and try again. The admin_cleanup reason marks this as
+    // an out-of-band delete rather than a terminal completion —
+    // keeps the SLI's silently_dropped count honest (the prior
+    // flow never reached its own terminal).
+    //
+    // If deleteFlow returns deleted:false the row at this flow_id
+    // belongs to a different flow type; the retry createFlow will
+    // then also return created:false and the user gets the generic
+    // "could not start" message. That's correct — we don't want to
+    // bulldoze a sibling flow.
     await deleteFlow(flow_id, {
       stage: REVOKE_STAGE_AWAITING_SELECT,
       reason: 'admin_cleanup',
     });
-    const retry = await createFlow({
-      flow_id,
-      stage: REVOKE_STAGE_AWAITING_SELECT,
-      payload: null,
-      expires_at,
-    });
+    let retry;
+    try {
+      retry = await createFlow({
+        flow_id,
+        stage: REVOKE_STAGE_AWAITING_SELECT,
+        payload: null,
+        expires_at,
+      });
+    } catch (err) {
+      // DDB throttle / IAM blip on the retry — the prior flow row
+      // is gone but we couldn't open a new one. Surface a
+      // recoverable error rather than letting it propagate to the
+      // generic "error executing command" reply.
+      logger.warn('handleRevoke: createFlow retry threw after admin_cleanup', {
+        flow_id, error: err && err.message,
+      });
+      return interaction.editReply({
+        content: 'Could not start a revoke session — please try again.',
+      });
+    }
     if (!retry.created) {
-      // Two races in a row would be exceptional. Surface as an
-      // error rather than loop — the user can retry the command.
+      // Two races in a row (or a sibling flow blocking us). Surface
+      // as an error rather than loop — the user can retry the
+      // command, or finish their other in-flight flow.
       logger.warn('handleRevoke: createFlow racy after admin_cleanup', { flow_id });
       return interaction.editReply({
         content: 'Could not start a revoke session — please try again.',
@@ -2713,8 +2736,18 @@ async function handleRevoke(interaction, apiKey) {
 // the future worker tier, or a Discord double-dispatch today) sees
 // `{ deleted: false }` and exits.
 async function handleRevokeSelect(interaction, { flow_id }) {
-  // getGuildApiKey + deleteFlow are independent reads — run them in
-  // parallel to save one DDB RTT per click.
+  // Parallelize the dedup primitive (deleteFlow) with the apiKey
+  // resolution. Safe here because getGuildApiKey is an idempotent
+  // DDB read with zero side effects — the dedup loser short-circuits
+  // before the qURL API call, so a duplicate event never multiplies
+  // the parallel call's cost.
+  //
+  // Rule for future handlers in PR 6/7/8/9: parallelize the dedup
+  // primitive ONLY with idempotent / free reads. Do NOT parallelize
+  // with a paid side-effect call (a Google Places lookup, a recipient
+  // resolution that hits an external API, a connector upload) —
+  // at-least-once redelivery would then bill or trigger the side
+  // effect once per duplicate, defeating the dedup gate's purpose.
   const [guildApiKey, deleteResult] = await Promise.all([
     interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
     deleteFlow(flow_id, {

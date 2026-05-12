@@ -277,10 +277,13 @@ if (isGateway) {
     if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
       return handleFlowInteraction(interaction);
     }
-    // Anything else (button-builder selects of a kind we don't
-    // ship today, future Discord interaction types) is silently
-    // ignored — same shape as the pre-conversion code, which
-    // short-circuited any non-ChatInputCommand interaction.
+    // Future Discord interaction types we don't ship today fall
+    // through here. Log at debug so an operator triaging "why isn't
+    // my new component routing" sees the unrouted type rather than
+    // the silent-drop black box the pre-conversion code provided.
+    logger.debug('interactionCreate: unrouted interaction type', {
+      type: interaction.type,
+    });
     return undefined;
   });
 

@@ -10,10 +10,14 @@
 // flow-resume) under one error-handling envelope. Split modules
 // keep each surface single-purpose.
 //
-// Handlers register their prefix at load-time (see registerFlow
+// Handlers register their customId at load-time (see registerFlow
 // callsites in commands.js + future flow modules). Routing-table-as-
-// single-source-of-truth means a `handlers.has(prefix)` check is the
-// only thing standing between an unknown customId and a silent drop.
+// single-source-of-truth means a `handlers.has(customId)` check is
+// the only thing standing between an unknown customId and a silent
+// drop. Match is EXACT — `handlers.get(customId)`, not startsWith.
+// If a future flow needs a nonce'd suffix (e.g. `setup_modal:<id>`),
+// extend the lookup here; do not let callers pass partial routing
+// keys.
 //
 // Trust model for customId routing:
 //
@@ -38,17 +42,16 @@ const logger = require('./logger');
 // the table is read-only after boot. No concurrency hazard.
 const handlers = new Map();
 
-// Register a flow handler. `prefix` is matched against the full
-// customId (exact match, not startsWith — see customId rationale at
-// callsite). `expectedStage` is what `loadFlow(flow_id).stage` must
-// equal for the handler to fire; mismatches yield a "superseded"
-// user-visible reply.
+// Register a flow handler. `customId` is matched exactly against
+// `interaction.customId` (not startsWith — see module header).
+// `expectedStage` is what `loadFlow(flow_id).stage` must equal for
+// the handler to fire; mismatches yield a "superseded" reply.
 //
 // Throws on duplicate registration — silently overwriting a handler
 // would mask a real bug (two modules claiming the same customId).
-function registerFlow(prefix, { expectedStage, handler }) {
-  if (typeof prefix !== 'string' || prefix.length === 0) {
-    throw new TypeError('flow-dispatch.registerFlow: prefix must be a non-empty string');
+function registerFlow(customId, { expectedStage, handler }) {
+  if (typeof customId !== 'string' || customId.length === 0) {
+    throw new TypeError('flow-dispatch.registerFlow: customId must be a non-empty string');
   }
   if (typeof expectedStage !== 'string' || expectedStage.length === 0) {
     throw new TypeError('flow-dispatch.registerFlow: expectedStage must be a non-empty string');
@@ -56,10 +59,10 @@ function registerFlow(prefix, { expectedStage, handler }) {
   if (typeof handler !== 'function') {
     throw new TypeError('flow-dispatch.registerFlow: handler must be a function');
   }
-  if (handlers.has(prefix)) {
-    throw new Error(`flow-dispatch.registerFlow: prefix ${JSON.stringify(prefix)} is already registered`);
+  if (handlers.has(customId)) {
+    throw new Error(`flow-dispatch.registerFlow: customId ${JSON.stringify(customId)} is already registered`);
   }
-  handlers.set(prefix, { expectedStage, handler });
+  handlers.set(customId, { expectedStage, handler });
 }
 
 // Derive the canonical flow_id for an interaction from its trusted

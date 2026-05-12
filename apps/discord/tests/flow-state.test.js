@@ -865,7 +865,7 @@ describe('flow-state.transitionFlow', () => {
 });
 
 describe('flow-state.deleteFlow', () => {
-  test('issues a conditional DeleteCommand, emits FLOW_DELETED, returns deleted:true', async () => {
+  test('issues a stage-gated DeleteCommand, emits FLOW_DELETED, returns deleted:true', async () => {
     ddbMock.on(DeleteCommand).resolves({});
 
     const res = await flowState.deleteFlow('id', { stage: 'completed', reason: 'terminal' });
@@ -874,7 +874,10 @@ describe('flow-state.deleteFlow', () => {
     const call = ddbMock.commandCalls(DeleteCommand)[0];
     expect(call.args[0].input.TableName).toBe(EXPECTED_TABLE);
     expect(call.args[0].input.Key).toEqual({ flow_id: 'id' });
-    expect(call.args[0].input.ConditionExpression).toBe('attribute_exists(flow_id)');
+    expect(call.args[0].input.ConditionExpression)
+      .toBe('attribute_exists(flow_id) AND #s = :stage');
+    expect(call.args[0].input.ExpressionAttributeNames).toEqual({ '#s': 'stage' });
+    expect(call.args[0].input.ExpressionAttributeValues).toEqual({ ':stage': 'completed' });
 
     expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_DELETED, {
       flow_id: 'id',
@@ -887,8 +890,34 @@ describe('flow-state.deleteFlow', () => {
     // The SLI math requires at-most-once FLOW_DELETED per logical flow.
     // A second delete on an already-gone row must not emit again.
     ddbMock.on(DeleteCommand).rejects(ccfe());
+    // Post-recheck GetCommand sees no row — confirms "row absent" branch.
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
 
     const res = await flowState.deleteFlow('id', { stage: 's', reason: 'abort' });
+    expect(res).toEqual({ deleted: false });
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('returns deleted:false when stage mismatch (sibling flow at same flow_id)', async () => {
+    // Critical correctness primitive: a /qurl revoke supersede call
+    // must NOT admin_cleanup an in-flight /qurl setup flow that
+    // shares the same (user, channel) flow_id. The conditional
+    // delete's stage gate enforces "delete the flow I expect,
+    // not whatever happens to live at this key."
+    ddbMock.on(DeleteCommand).rejects(ccfe());
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        flow_id: 'id',
+        stage: 'awaiting_setup_modal',
+        version: 1,
+        expires_at: Math.floor(Date.now() / 1000) + 600,
+      },
+    });
+
+    const res = await flowState.deleteFlow('id', {
+      stage: 'awaiting_revoke_select',
+      reason: 'admin_cleanup',
+    });
     expect(res).toEqual({ deleted: false });
     expect(logger.audit).not.toHaveBeenCalled();
   });

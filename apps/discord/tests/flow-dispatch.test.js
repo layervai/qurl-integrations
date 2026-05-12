@@ -90,9 +90,9 @@ describe('registerFlow', () => {
       .toThrow(/already registered/);
   });
 
-  it('rejects non-string prefix', () => {
+  it('rejects non-string customId', () => {
     expect(() => registerFlow('', { expectedStage: 's', handler: jest.fn() }))
-      .toThrow(/prefix must be a non-empty string/);
+      .toThrow(/customId must be a non-empty string/);
   });
 
   it('rejects non-string expectedStage', () => {
