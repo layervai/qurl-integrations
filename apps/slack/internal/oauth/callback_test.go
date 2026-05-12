@@ -248,6 +248,26 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 }
 
+// TestTruncateForLogRuneBoundary locks the UTF-8 boundary backup. A
+// truncation that splits a multi-byte rune (Auth0 SAML
+// error_description is UTF-8; emoji or accented chars are common in
+// federated identity providers' error strings) would corrupt the
+// slog attribute. The function backs up to a utf8.RuneStart byte.
+func TestTruncateForLogRuneBoundary(t *testing.T) {
+	// 'é' = 0xC3 0xA9 (2 bytes). Build a string where the limit falls
+	// mid-rune, then verify the result ends at a rune boundary.
+	prefix := strings.Repeat("a", 10) // 10 ASCII bytes
+	s := prefix + "é" + "tail"        // total = 10 + 2 + 4 = 16 bytes
+	// limit=11 falls in the middle of the 'é' rune.
+	got := truncateForLog(s, 11)
+	if !strings.HasSuffix(strings.TrimSuffix(got, "…[truncated]"), prefix) {
+		t.Errorf("truncate split a UTF-8 rune: got %q", got)
+	}
+	if !strings.HasSuffix(got, "[truncated]") {
+		t.Errorf("expected truncation marker, got %q", got)
+	}
+}
+
 // TestSuccessPageHTMLEscapesInterpolations is the explicit lock for the
 // html/template auto-escape contract — the load-bearing XSS defense
 // for the success page. A refactor that swapped html/template for

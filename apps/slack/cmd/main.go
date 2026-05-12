@@ -31,9 +31,23 @@ const (
 	// shutdownTimeout sits inside Fargate's 30s SIGTERM→SIGKILL window with
 	// 5s of headroom for the container runtime to actually deliver SIGKILL
 	// and reap the process. This is the cap on the drain *as a whole*, not
-	// per request — http.Server.WriteTimeout (15s) still bounds individual
+	// per request — http.Server.WriteTimeout (75s) still bounds individual
 	// in-flight handlers; bumping shutdownTimeout above 25s won't extend
 	// long-running handlers, only the wait for short ones to drain.
+	//
+	// Interaction with oauthHandlerTimeout (60s): a SIGTERM landing
+	// mid-OAuth-callback means the request handler's TimeoutHandler
+	// deadline could exceed our 25s drain budget. srv.Shutdown returns
+	// when handlers ack-and-return, which for an OAuth callback is
+	// "when the success page is written". A callback in-flight at
+	// SIGTERM is allowed to complete its (potentially 60s) work via
+	// the WriteTimeout=75s connection budget, but the *drain wait* is
+	// capped at 25s. If the callback exceeds 25s, srv.Shutdown
+	// returns early, the OS later SIGKILLs, and the OAuth response
+	// the user sees is the partial mid-write state. Trade-off:
+	// raising shutdownTimeout past Fargate's 30s window doesn't help;
+	// the operator-facing fix is to drain the listener and rely on
+	// the ALB to stop sending new requests before SIGTERM.
 	//
 	// Budget contract: shutdownTimeout is sized against the EXPECTED
 	// drain, not the theoretical max. The expected drain is
