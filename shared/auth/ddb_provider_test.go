@@ -307,6 +307,24 @@ func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
 	}
 }
 
+// TestDDBProviderSetAPIKeyNilNowDoesNotPanic locks the contract that
+// a bare-struct DDBProvider (no Now field set) doesn't nil-deref on
+// SetAPIKey. NewDDBProvider always sets Now, but tests / unusual
+// constructions can produce a DDBProvider{} that previously crashed
+// the moment a write path executed.
+func TestDDBProviderSetAPIKeyNilNowDoesNotPanic(t *testing.T) {
+	ddb := &fakeDDBClient{}
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		// Now deliberately unset.
+	}
+	if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live", "U_x"); err != nil {
+		t.Fatalf("SetAPIKey with nil Now should fall through to time.Now, got err: %v", err)
+	}
+}
+
 func TestDDBProviderDeleteAPIKey(t *testing.T) {
 	ddb := &fakeDDBClient{}
 	p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
