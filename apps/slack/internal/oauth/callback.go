@@ -129,8 +129,9 @@ func Callback(cfg Config) http.HandlerFunc {
 			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
 			return
 		}
-		if len(cookieState) != len(stateParam) ||
-			!hmac.Equal([]byte(cookieState), []byte(stateParam)) {
+		// hmac.Equal handles length-mismatch in constant time; no
+		// explicit len pre-check needed.
+		if !hmac.Equal([]byte(cookieState), []byte(stateParam)) {
 			slog.Warn("oauth/callback cookie/state mismatch")
 			clearStateCookie(w)
 			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)

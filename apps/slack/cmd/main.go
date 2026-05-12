@@ -295,13 +295,17 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Co
 	}
 
 	// JWKS verifier opens the network for the initial JWKS fetch (bounded
-	// inside NewJWKSVerifier). If it fails, the callback proceeds without
-	// email-claim verification — the qURL key still gets minted; only the
-	// success-page email line is missing.
+	// inside NewJWKSVerifier). If the prime fails, the callback proceeds
+	// without email-claim verification for the lifetime of the process —
+	// the qURL key still gets minted; only the success-page email line
+	// is missing. We don't retry: the failure path is the operator-
+	// configured-wrong-domain scenario, where a lazy retry would log a
+	// noisy warning on every callback rather than once at boot.
+	// Operators who fix the domain restart the task.
 	var verifier oauth.IDTokenVerifier
 	issuer := "https://" + domain + "/"
 	if v, err := newJWKSVerifier(ctx, issuer, clientID); err != nil {
-		slog.Warn("JWKS verifier init failed — id_token email will not be displayed", "error", err)
+		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task", "error", err)
 	} else {
 		verifier = v
 	}

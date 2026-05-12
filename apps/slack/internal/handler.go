@@ -19,7 +19,21 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-const authFailureMessage = "Failed to authenticate. Please check your qURL API key configuration."
+const (
+	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
+	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
+)
+
+// authErrorMessage maps an APIKey-lookup error to the right user-facing
+// reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
+// /qurl setup yet" path — surface a useful next-action instead of the
+// generic auth-failure string.
+func authErrorMessage(err error) string {
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return workspaceNotSetupMessage
+	}
+	return authFailureMessage
+}
 
 // ackWorkingOnIt is the user-visible ephemeral text returned synchronously
 // while async work runs. The hourglass keeps the user oriented that a

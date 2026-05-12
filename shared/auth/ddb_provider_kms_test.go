@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -123,14 +124,20 @@ func TestKMSEncryptorRejectsEmptyAAD(t *testing.T) {
 // ciphertext guard. A ciphertext shorter than the GCM nonce can only
 // arise from a corrupted DDB row; we surface it before attempting
 // AES-GCM open so the error message is useful for incident response.
+// AAD is non-empty so the empty-AAD guard doesn't pre-empt the
+// truncation branch.
 func TestKMSEncryptorOpenRejectsTruncatedCiphertext(t *testing.T) {
 	enc := &KMSEncryptor{
 		Client: &fakeKMS{dataKey: make([]byte, 32), wrappedBlob: []byte("wrapped")},
 		KeyID:  testKMSKeyARN,
 	}
 	// gcmNonceSize is 12; 5 bytes is unambiguously too short.
-	if _, err := enc.Open(context.Background(), []byte("short"), []byte("wrapped"), nil); err == nil {
+	_, err := enc.Open(context.Background(), []byte("short"), []byte("wrapped"), []byte("ws"))
+	if err == nil {
 		t.Fatal("expected truncated-ciphertext error")
+	}
+	if !strings.Contains(err.Error(), "shorter than nonce") {
+		t.Errorf("expected truncated-ciphertext error message, got %v", err)
 	}
 }
 

@@ -19,6 +19,7 @@ package oauth
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -78,9 +79,8 @@ type SetupConfig struct {
 func (s SetupConfig) SetupURL(state string) string {
 	u, err := url.JoinPath(s.SlackBaseURL, StartPath)
 	if err != nil {
-		// SLACK_BASE_URL is operator-set; malformed values fail-fast
-		// at startup elsewhere. Fall back to plain concat so a misused
-		// caller (e.g. a test passing junk) still gets a clear URL.
+		slog.Warn("SetupURL: url.JoinPath failed — falling back to concat", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"error", err, "slack_base_url", s.SlackBaseURL)
 		u = s.SlackBaseURL + StartPath
 	}
 	return u + "?state=" + url.QueryEscape(state)

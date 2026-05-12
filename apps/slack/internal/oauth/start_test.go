@@ -100,6 +100,31 @@ func TestStartHappyPath(t *testing.T) {
 	}
 }
 
+// TestClearStateCookieScopedToOAuthPath locks the contract that the
+// cleared cookie carries the same Path as the set cookie. A mismatch
+// would leave the browser holding a stale cookie under the original
+// path (clear-only-applies-when-path-matches).
+func TestClearStateCookieScopedToOAuthPath(t *testing.T) {
+	rec := httptest.NewRecorder()
+	clearStateCookie(rec)
+	var got *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName {
+			got = c
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("clearStateCookie did not set a cookie")
+	}
+	if got.Path != "/oauth/qurl" {
+		t.Errorf("cleared cookie Path: got %q want %q", got.Path, "/oauth/qurl")
+	}
+	if got.MaxAge >= 0 {
+		t.Errorf("cleared cookie MaxAge must be negative, got %d", got.MaxAge)
+	}
+}
+
 func TestStartRejectsMissingState(t *testing.T) {
 	cfg := newStartCfg()
 	h := Start(cfg)

@@ -125,7 +125,7 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authErrorMessage(err))
 		return
 	}
 
@@ -151,7 +151,7 @@ func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authErrorMessage(err))
 		return
 	}
 
