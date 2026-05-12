@@ -284,14 +284,19 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 	// Race acknowledged: read-modify-write is TOCTOU under concurrent
 	// /qurl setup completions for the same workspace. Two simultaneous
 	// installers can both see "no row," both encrypt fresh keys, and
-	// race on PutItem — losing the original configured_at for the loser
-	// and orphaning the loser's qurl-service key (no revoke is wired
-	// for the lost-the-race case; only the persist-failure case
-	// revokes). The collision requires two parallel admins clicking the
-	// /qurl setup link within ~the DDB write latency, on the *same*
-	// workspace — extremely rare by construction. Tracked at #265:
-	// switch to PutItem + ReturnValues=ALL_OLD or UpdateItem with
-	// `if_not_exists(configured_at, :now)` for an atomic close.
+	// race on PutItem. The losing PutItem clobbers the winner: loser's
+	// configured_at overwrites winner's, AND the winner's qurl-service
+	// key is now orphaned in qurl-service (the existing fire-and-forget
+	// revoke covers only the persist-failure case, not the "lost the
+	// PutItem race" case — the winner's persist returned success even
+	// though the row was immediately overwritten). Collision requires
+	// two parallel admins clicking the /qurl setup link within ~the
+	// DDB write latency, on the *same* workspace — extremely rare by
+	// construction. Tracked at #265: switch to PutItem +
+	// ReturnValues=ALL_OLD (or UpdateItem with
+	// `if_not_exists(configured_at, :now)`) for an atomic close. When
+	// that lands, mintAndPersist should also revoke on conflict so the
+	// orphan window closes end-to-end.
 	existing, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{

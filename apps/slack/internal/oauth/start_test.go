@@ -100,6 +100,27 @@ func TestStartHappyPath(t *testing.T) {
 	}
 }
 
+// TestAuthorizeURLAndAPIKeyScopesAgree locks the contract that the
+// scopes requested at /authorize match the scopes carried by the
+// downstream qurl-service mint. A drift here would surface as an
+// Auth0-issued access_token with the wrong scopes, the mint succeeding
+// but the resulting key carrying scopes the workspace bot never
+// expected.
+func TestAuthorizeURLAndAPIKeyScopesAgree(t *testing.T) {
+	cfg := newStartCfg()
+	authURL := authorizeURL(cfg, "irrelevant")
+	u, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	authScope := u.Query().Get("scope")
+	for _, want := range apiKeyScopes() {
+		if !strings.Contains(authScope, want) {
+			t.Errorf("authorize scope %q missing %q from apiKeyScopes()", authScope, want)
+		}
+	}
+}
+
 // TestClearStateCookieScopedToOAuthPath locks the contract that the
 // cleared cookie carries the same Path as the set cookie. A mismatch
 // would leave the browser holding a stale cookie under the original
