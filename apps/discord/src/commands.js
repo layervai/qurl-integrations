@@ -2835,18 +2835,12 @@ const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 // trip the `extended: true` audit flag on the FLOW_TRANSITION event
 // — correct: the deadline really was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
-  // `row.version` is the OCC handle the dispatcher already loaded.
-  // The dispatcher's invariant (flow-dispatch.js — handleFlowInteraction)
-  // guarantees `row` is non-null with an integer `version` when the
-  // handler runs. A defensive check here would only fire if that
-  // invariant drifted; preferring an explicit failure over a
-  // confusing TypeError-on-undefined deep inside transitionFlow.
-  // Mirror transitionFlow's own validation (`Number.isInteger`) so a
-  // NaN-from-bad-parseInt-upstream is caught at the dispatcher
-  // boundary, not inside the OCC primitive.
-  if (!Number.isInteger(row?.version)) {
-    throw new TypeError('handleSetupButton: dispatcher contract violated — row.version must be an integer');
-  }
+  // `row.version` is the OCC handle the dispatcher already loaded
+  // (flow-dispatch.js — handleFlowInteraction). transitionFlow
+  // validates it via `Number.isInteger` at the OCC primitive
+  // boundary, so a defensive guard here would re-validate something
+  // already-validated downstream — exactly the scenario CLAUDE.md
+  // calls out as "validation for scenarios that can't happen."
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
@@ -2907,26 +2901,13 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     .setMaxLength(64);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
 
-  // Roll back the OCC transition if showModal throws. The
-  // transitionFlow committed the row to `awaiting_setup_modal`,
-  // but the modal never opened — leaving the row in that stage
-  // would mean the admin sees Discord's "interaction failed"
-  // notice and then, on rerun of /qurl setup, the supersede path
-  // refuses to admin_cleanup an awaiting_setup_modal row (its
-  // stage gate is awaiting_setup_button) and the loadFlow peek
-  // tells them "you already have a modal open" — but they don't.
-  // The admin would have to wait out the full SETUP_MODAL_TTL_SECONDS
-  // before recovering. Delete the row instead so the next /qurl
-  // setup runs cleanly. Best-effort reply — the interaction token
-  // may itself be in the failed state that just took down showModal.
-  //
-  // Trapped-state recovery: if BOTH showModal AND the rollback
-  // deleteFlow fail (e.g. DDB region outage that killed both calls),
-  // the row stays at awaiting_setup_modal until TTL reap. The
-  // admin's only recovery is to wait out the SETUP_MODAL_TTL_SECONDS
-  // (5 min). Both errors are logged at error-level so a support
-  // ticket like "I can't run /qurl setup, it says I have a modal
-  // open but I don't" maps cleanly to this branch in CloudWatch.
+  // Roll back the OCC transition if showModal throws. Without the
+  // delete, the row sits at awaiting_setup_modal until TTL and the
+  // admin's /qurl setup rerun trips the loadFlow-peek into the
+  // misleading "you already have a modal open" branch. If the
+  // rollback itself also fails (DDB region outage), both errors
+  // log at error-level — admin recovery is the SETUP_MODAL_TTL_SECONDS
+  // (5 min) wait.
   try {
     await interaction.showModal(modal);
   } catch (err) {
@@ -2982,7 +2963,8 @@ async function handleSetupModal(interaction, { flow_id }) {
   // (admin keeps re-pasting the wrong key, or a credential rotation
   // broke them) needs to surface in ops dashboards — that's only
   // possible if every failure logs guild_id + configured_by.
-  // Bare reply paths (no .catch on the user-facing editReply) below
+  // Bare reply paths (no .catch on the malformed-key `interaction.reply`
+  // and the validation-failure `interaction.editReply` branches below)
   // are intentional: the flow row is already deleted by this point,
   // so a Discord throw propagates to the dispatcher's safety net
   // which replies "run again" — which IS the correct UX for these
@@ -3931,12 +3913,17 @@ const commands = [
           expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
         });
         if (!setupCreated.created) {
-          await deleteFlow(setupFlowId, {
-            stage: SETUP_STAGE_AWAITING_BUTTON,
-            reason: 'admin_cleanup',
-          });
+          // Both deleteFlow and the retry createFlow run under a
+          // single try-envelope so a DDB throttle / IAM blip on
+          // either gets the recoverable "could not start" message
+          // instead of falling through to handleCommand's generic
+          // "error executing this command" wording.
           let setupRetry;
           try {
+            await deleteFlow(setupFlowId, {
+              stage: SETUP_STAGE_AWAITING_BUTTON,
+              reason: 'admin_cleanup',
+            });
             setupRetry = await createFlow({
               flow_id: setupFlowId,
               stage: SETUP_STAGE_AWAITING_BUTTON,
@@ -3947,7 +3934,7 @@ const commands = [
               expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
             });
           } catch (err) {
-            logger.warn('handleSetup: createFlow retry threw after admin_cleanup', {
+            logger.warn('handleSetup: supersede deleteFlow+createFlow threw', {
               flow_id: setupFlowId, error: err && err.message,
             });
             return interaction.editReply({

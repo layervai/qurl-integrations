@@ -1903,10 +1903,12 @@ describe('handleSetupModal (dispatcher path)', () => {
     // swallows it. Use mockImplementation rather than mockRejected
     // so the prior editReply assertions on other tests aren't
     // disturbed.
-    // Match on a stable substring shared by every success-blurb
-    // revision rather than the full copy — so a future tweak of
-    // the success message doesn't silently stop this test
-    // asserting at the throw site.
+    // Substring `'configured for this server'` is the stable token
+    // — it's the load-bearing UX phrase ("qURL is now configured
+    // for this server") that survives copy tweaks. Matching on the
+    // leading "✅" emoji or full sentence would break the moment
+    // someone polishes the wording; matching on this phrase pins
+    // the throw to the persist-success branch specifically.
     interaction.editReply = jest.fn().mockImplementation(async (arg) => {
       if (typeof arg?.content === 'string' && arg.content.includes('configured for this server')) {
         throw new Error('Unknown interaction (token expired)');
@@ -1920,6 +1922,32 @@ describe('handleSetupModal (dispatcher path)', () => {
 
     // setGuildApiKey did commit before the editReply threw.
     expect(mockDb.setGuildApiKey).toHaveBeenCalled();
+  });
+
+  it('propagates deferReply throw after deleteFlow (flow row already gone, key never persisted)', async () => {
+    // Pin the post-deleteFlow / pre-deferReply window. If
+    // deferReply throws (token expired during the DDB round-trip),
+    // the flow row is already gone but the qURL API call never
+    // fires and setGuildApiKey never runs. Admin sees Discord's
+    // generic "interaction failed" and reruns /qurl setup; the
+    // supersede path finds no row (deleted) so a fresh button
+    // renders cleanly. The throw itself propagates to the
+    // dispatcher's safety net.
+    const deferErr = new Error('Unknown interaction (token expired)');
+    const interaction = makeModalInteraction({
+      deferReply: jest.fn().mockRejectedValue(deferErr),
+    });
+
+    await expect(
+      handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })
+    ).rejects.toThrow('Unknown interaction');
+
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      '0:1#guild-1#ch-1#user-1',
+      { stage: 'awaiting_setup_modal', reason: 'terminal' },
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
   });
 });
 
