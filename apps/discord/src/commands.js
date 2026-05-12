@@ -3659,19 +3659,27 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke
+      // Gate: require guild API key for send/revoke. In multi-tenant
+      // mode the global config.QURL_API_KEY is NEVER a valid fallback —
+      // it points at the layerv-internal bootstrap customer, and a
+      // guild that hasn't completed /qurl setup must NOT silently ride
+      // that account (audit attribution, quota burn, billing). The
+      // fallback is honored only in single-guild mode where the bot
+      // operator IS the owner of the global key (their bot, their
+      // account).
       let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
-        if (!guildApiKey && !config.QURL_API_KEY) {
+        const fallbackAllowed = !config.isMultiTenant;
+        if (!guildApiKey && !(fallbackAllowed && config.QURL_API_KEY)) {
           return interaction.reply({
             content: '❌ **qURL is not configured for this server.**\n\n' +
-              'A server admin needs to run `/qurl setup` first.\n' +
-              'Sign up at **https://layerv.ai** to get your API key.',
+              'A server admin needs to run `/qurl setup` first and sign in with a layerv account.\n' +
+              'Sign up at **https://layerv.ai** if you don\'t have an account yet.',
             ephemeral: true,
           });
         }
-        resolvedApiKey = guildApiKey || config.QURL_API_KEY;
+        resolvedApiKey = guildApiKey || (fallbackAllowed ? config.QURL_API_KEY : null);
       }
 
       // Pass API key as an explicit parameter rather than monkey-patching
