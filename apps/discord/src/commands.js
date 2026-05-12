@@ -3659,14 +3659,9 @@ const commands = [
         });
       }
 
-      // Gate: require per-guild API key for send/revoke. In multi-tenant
-      // mode the global config.QURL_API_KEY is NEVER a valid fallback —
-      // it points at the layerv-internal bootstrap customer, and a
-      // guild that hasn't completed /qurl setup must NOT silently ride
-      // that account (audit attribution, quota burn, billing). The
-      // fallback is honored only in single-guild mode where the bot
-      // operator IS the owner of the global key (their bot, their
-      // account).
+      // Multi-tenant gate: global QURL_API_KEY is NEVER a valid fallback —
+      // it would silently attribute every unconfigured guild's mints to
+      // the bootstrap customer. Honor it only in single-guild mode.
       let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;

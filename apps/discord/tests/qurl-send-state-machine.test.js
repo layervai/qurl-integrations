@@ -397,19 +397,9 @@ describe('handleSend — pre-flight guards', () => {
     jest.dontMock('../src/store');
   });
 
-  // CRITICAL regression guard. Before this gate, a guild that hadn't
-  // run /qurl setup would silently fall back to config.QURL_API_KEY
-  // (= the layerv-internal bootstrap customer's key in prod). Every
-  // qURL minted by every unconfigured server was attributed to that
-  // single account — audit, quota, and (eventually) billing all
-  // collapsed onto one row. This test fires on every build to make
-  // sure multi-tenant mode ALWAYS requires a per-guild key from
-  // /qurl setup and never silently rides the global fallback.
-  // Parameterized over both subcommands that consume the API key. Both
-  // hit the same gate (`sub === 'send' || sub === 'revoke'`) in
-  // commands.js; pinning revoke too prevents a future edit from
-  // narrowing the gate to send-only and reintroducing the leak via the
-  // revoke path.
+  // Regression guard for the bootstrap-fallback leak (see PR #257).
+  // Parameterized over both subcommands sharing the gate to prevent a
+  // future edit from narrowing it to send-only.
   it.each(['send', 'revoke'])(
     'multi-tenant: refuses /qurl %s even when QURL_API_KEY is set (no global fallback)',
     async (subName) => {
@@ -477,10 +467,8 @@ describe('handleSend — pre-flight guards', () => {
     }
   );
 
-  // Positive case: multi-tenant mode with a per-guild key DOES proceed
-  // past the gate and does NOT touch config.QURL_API_KEY. Pins the
-  // happy path so a future refactor can't silently revert to "always
-  // use global".
+  // Pins the multi-tenant happy path so a future refactor can't
+  // silently revert to "always use global".
   it('multi-tenant: with per-guild key, proceeds past gate without consulting QURL_API_KEY', async () => {
     jest.resetModules();
     const guildKeyMock = jest.fn().mockResolvedValue('lv_live_perguildxxxxxxxxxxxxxxxxxxx');
@@ -529,10 +517,8 @@ describe('handleSend — pre-flight guards', () => {
     jest.dontMock('../src/store');
   });
 
-  // DM context: /qurl send is reachable in DMs (no setDMPermission(false)
-  // on the command). The gate refuses (no guildId → no per-guild key
-  // possible), but the refusal copy MUST NOT instruct the user to ask a
-  // "server admin" — there's no server. Pins the DM-aware copy branch.
+  // /qurl send has no setDMPermission(false), so DMs reach this gate.
+  // Pin the DM-aware refusal copy — must not reference "server admin".
   it('multi-tenant: /qurl send in a DM refuses with DM-aware copy (no "server admin" reference)', async () => {
     jest.resetModules();
     jest.doMock('../src/store', () => ({
