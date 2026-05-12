@@ -315,6 +315,7 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
 	if err := successPageTemplate.Execute(w, successPageData{
 		TeamID:    teamID,

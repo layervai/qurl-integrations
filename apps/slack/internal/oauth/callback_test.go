@@ -223,6 +223,9 @@ func TestCallbackHappyPath(t *testing.T) {
 	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
 		t.Errorf("Referrer-Policy: got %q want no-referrer", rec.Header().Get("Referrer-Policy"))
 	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("X-Content-Type-Options: got %q want nosniff", rec.Header().Get("X-Content-Type-Options"))
+	}
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
