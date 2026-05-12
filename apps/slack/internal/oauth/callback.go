@@ -17,12 +17,13 @@ import (
 
 const (
 	// drainCap bounds the post-LimitReader keep-alive drain. We've
-	// already enforced the body cap (auth0TokenBodyLimit / minterBodyLimit);
-	// the deferred drain just discards anything the LimitReader didn't
-	// consume so the connection can be reused. An unbounded io.Copy
-	// here would let a misbehaving upstream stream indefinitely within
-	// the request timeout, holding the connection. drainCap caps that
-	// at body-limit headroom × 2.
+	// already enforced the body cap (auth0TokenBodyLimit / minterBodyLimit
+	// are both 8 KiB); the deferred drain just discards anything the
+	// LimitReader didn't consume so the connection can be reused. An
+	// unbounded io.Copy here would let a misbehaving upstream stream
+	// indefinitely within the request timeout, holding the connection.
+	// 32 KiB = 4× the body cap, plenty of headroom without unbounded
+	// commitment to a hostile or runaway upstream.
 	drainCap          = 32 << 10
 	auth0TokenTimeout = 15 * time.Second
 	// revokeTimeout bounds the orphan-key DELETE on qurl-service when a
@@ -240,6 +241,17 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 //
 // Extracted so Callback stays straight-line and the linter doesn't need
 // gocognit/gocyclo suppressors.
+//
+// Post-timeout-completion footgun: the mint + persist contexts are
+// deliberately fresh (decoupled from the request context) so a
+// TimeoutHandler cancel doesn't desync row state from what we tell the
+// user. The flip side: if oauthHandlerTimeout (60s) fires after we
+// already started the mint, the goroutine continues for up to
+// mintTimeout + persistTimeout (≈30s) after we've returned an error to
+// the user. The user retries, mints K2, and the eventual completion of
+// K1 races K2's persist as a row overwrite. K1 then becomes an orphan
+// in qurl-service (no revoke wired for this case). Tracked at #265
+// alongside the lost-PutItem-race orphan path.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
 func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {

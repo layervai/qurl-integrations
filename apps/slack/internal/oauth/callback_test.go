@@ -248,6 +248,27 @@ func TestCallbackHappyPath(t *testing.T) {
 	}
 }
 
+// TestSuccessPageHTMLEscapesInterpolations is the explicit lock for the
+// html/template auto-escape contract — the load-bearing XSS defense
+// for the success page. A refactor that swapped html/template for
+// text/template (or for a string concat) would let TeamID/KeyPrefix/
+// Email render raw. We render a synthetic payload with a <script> tag
+// and assert it appears escaped.
+func TestSuccessPageHTMLEscapesInterpolations(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderSuccess(rec, "T<script>alert(1)</script>", "lv_<b>", "user@<i>x</i>.com")
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") {
+		t.Errorf("raw <script> rendered — auto-escape regressed:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("expected escaped <script> in body:\n%s", body)
+	}
+	if strings.Contains(body, "<b>") || strings.Contains(body, "<i>") {
+		t.Errorf("HTML tags leaked through:\n%s", body)
+	}
+}
+
 func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
 	// Regression: configuredBy used to be read from ?admin_user=…
 	// which let an attacker pick the DM target. Now the value is
