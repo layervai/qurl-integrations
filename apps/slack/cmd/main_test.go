@@ -108,3 +108,26 @@ func TestBuildOAuthConfigShortSecret(t *testing.T) {
 		t.Error("expected ok=false on short OAUTH_STATE_SECRET")
 	}
 }
+
+// TestBuildOAuthConfigStripsTrailingSlashes asserts SLACK_BASE_URL,
+// AUTH0_DOMAIN, and QURL_ENDPOINT are normalized at config-load. Auth0
+// rejects redirect_uri mismatches strictly, so a stray // in the
+// concatenated URL would silently break every install.
+func TestBuildOAuthConfigStripsTrailingSlashes(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env["SLACK_BASE_URL"] = "https://slack-bot.example/"
+	env["AUTH0_DOMAIN"] = "example.auth0.com/"
+	env["QURL_ENDPOINT"] = "https://api.qurl.invalid/"
+	applyEnv(t, env)
+	cfg, ok := buildOAuthConfig(context.Background(), newFakeProvider())
+	if !ok {
+		t.Fatal("expected ok=true with trailing slashes — config should normalize them")
+	}
+	if cfg.SlackBaseURL != "https://slack-bot.example" {
+		t.Errorf("SlackBaseURL not trimmed: got %q", cfg.SlackBaseURL)
+	}
+	if cfg.Auth0Domain != "example.auth0.com" {
+		t.Errorf("Auth0Domain not trimmed: got %q", cfg.Auth0Domain)
+	}
+}

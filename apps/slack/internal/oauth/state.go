@@ -31,7 +31,7 @@ const (
 	stateMaxAge      = 5 * time.Minute
 	statePartCount   = 5
 	stateNonceLen    = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	stateMinSecret   = 32 // bytes — HMAC-SHA256 block-size floor; rejects ergonomically-weak operator secrets.
+	StateMinSecret   = 32 // bytes — HMAC-SHA256 block-size floor; rejects ergonomically-weak operator secrets.
 	stateFutureSkew  = 30 * time.Second
 	stateSeparator   = "|"
 	stateSeparatorB  = byte('|')
@@ -66,9 +66,9 @@ func signedPayload(teamID, userID, nonce, ts string) []byte {
 // secret. Exported so the slash-command handler in package internal can
 // mint state from a Slack-signature-verified /qurl setup dispatch.
 //
-// Returns errStateShortKey if secret is shorter than stateMinSecret.
+// Returns errStateShortKey if secret is shorter than StateMinSecret.
 func MintState(secret []byte, teamID, userID string, now time.Time) (string, error) {
-	if len(secret) < stateMinSecret {
+	if len(secret) < StateMinSecret {
 		return "", errStateShortKey
 	}
 	if teamID == "" {
@@ -109,7 +109,7 @@ type VerifiedState struct {
 // Rejects future timestamps beyond stateFutureSkew so a clock-skewed
 // minter can't produce links that outlive stateMaxAge.
 func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, error) {
-	if len(secret) < stateMinSecret {
+	if len(secret) < StateMinSecret {
 		return VerifiedState{}, errStateShortKey
 	}
 	if encoded == "" {

@@ -36,6 +36,16 @@ const (
 	callbackPath = "/oauth/qurl/callback"
 )
 
+// oauthHandlerTimeout caps the per-request budget for the OAuth surface.
+// The Slack bot's parent http.Server runs with WriteTimeout=15s, which
+// is appropriate for the /slack/* surface (slash-command handlers ack
+// in <1s) but too tight for /oauth/qurl/callback whose worst-case sum
+// of upstream calls (Auth0 token exchange + qurl-service mint + KMS
+// GenerateDataKey + DDB PutItem) approaches 30s. http.TimeoutHandler
+// gives the OAuth routes a per-handler ceiling without bumping the
+// server-wide write timeout (which would mask hung /slack/* requests).
+const oauthHandlerTimeout = 60 * time.Second
+
 // apiKeyScopes is the qurl-service scope set the callback requests for
 // the workspace API key. authorizeURL also weaves "openid email" in
 // for the id_token email claim consumed by the success page.
@@ -181,8 +191,10 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
-	mux.HandleFunc(StartPath, Start(cfg))
-	mux.HandleFunc(callbackPath, Callback(cfg))
+	mux.Handle(StartPath, http.TimeoutHandler(
+		Start(cfg), oauthHandlerTimeout, "oauth/start timed out"))
+	mux.Handle(callbackPath, http.TimeoutHandler(
+		Callback(cfg), oauthHandlerTimeout, "oauth/callback timed out"))
 }
 
 // authorizeURL composes the Auth0 /authorize redirect target.

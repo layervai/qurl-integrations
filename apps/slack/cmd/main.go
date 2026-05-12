@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -266,13 +267,17 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.
 func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Config, bool) {
-	domain := os.Getenv("AUTH0_DOMAIN")
+	// Strip trailing slashes from URL-shaped env vars at one chokepoint so
+	// downstream concatenations (redirect_uri, /oauth/token URL composition)
+	// can't produce //-path artifacts. Auth0 rejects redirect_uri mismatches
+	// strictly, so a single stray slash is a real failure surface.
+	domain := strings.TrimRight(os.Getenv("AUTH0_DOMAIN"), "/")
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")
-	baseURL := os.Getenv("SLACK_BASE_URL")
+	baseURL := strings.TrimRight(os.Getenv("SLACK_BASE_URL"), "/")
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
-	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
+	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")
 
 	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
 		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {

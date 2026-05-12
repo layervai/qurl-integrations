@@ -156,13 +156,23 @@ type Handler struct {
 }
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
-// /qurl setup slash command. Called once by cmd/main.go after
-// buildOAuthConfig returns a valid config. Calling with an empty
-// secret or baseURL is a no-op (/qurl setup will reply that OAuth is
-// not configured).
+// /qurl setup slash command. Must be called exactly once, before
+// srv.Serve. Empty/short secret or empty base URL is a no-op
+// (/qurl setup will reply that OAuth is not configured). A second call
+// panics — the field is read without synchronization on the request
+// hot path, and the only safe write window is before any goroutine can
+// observe it.
 func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
+	if h.oauthSetup != nil {
+		panic("SetOAuthSetup called twice — must be called once before Serve")
+	}
 	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
 		return
+	}
+	if len(cfg.StateSecret) < oauth.StateMinSecret {
+		// Fail-fast at startup: MintState would reject this later, but
+		// the operator-facing failure is more discoverable here.
+		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
 	}
 	h.oauthSetup = &cfg
 }

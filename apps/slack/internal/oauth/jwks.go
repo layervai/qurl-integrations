@@ -80,6 +80,19 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 	if err != nil {
 		return "", fmt.Errorf("parse/verify: %w", err)
 	}
+	// Refuse to surface an unverified email. Auth0 ships email_verified
+	// as a boolean alongside email; without this gate, an Auth0
+	// connection that lets users self-assert their email (e.g.
+	// password-based with no verification step) could surface a fake
+	// "qURL account: someone-else@target.tld" line on the success page.
+	// The blast radius is small (HTML-escaped, no XSS) but the readout
+	// would be misleading.
+	if v, ok := tok.Get("email_verified"); ok {
+		verified, isBool := v.(bool)
+		if !isBool || !verified {
+			return "", nil
+		}
+	}
 	email, ok := tok.Get("email")
 	if !ok {
 		return "", nil // verified but no email claim — surface as ""

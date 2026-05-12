@@ -25,7 +25,7 @@ func Start(cfg Config) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if len(cfg.OAuthStateSecret) < stateMinSecret {
+		if len(cfg.OAuthStateSecret) < StateMinSecret {
 			slog.Error("oauth/start refused: OAUTH_STATE_SECRET unset or shorter than 32 bytes")
 			http.Error(w, "oauth not configured", http.StatusServiceUnavailable)
 			return

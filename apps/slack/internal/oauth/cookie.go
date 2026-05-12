@@ -19,10 +19,13 @@ import (
 //	Path=/oauth/qurl — scopes to the OAuth surface so the cookie isn't
 //	             sent on /slack/* or unrelated /oauth/* routes
 const (
-	cookieName       = "qurl_oauth_state"
-	cookiePath       = "/oauth/qurl"
-	cookieMaxAgeSecs = 300 // 5 minutes; mirrors stateMaxAge
+	cookieName = "qurl_oauth_state"
+	cookiePath = "/oauth/qurl"
 )
+
+// cookieMaxAgeSecs derives the cookie's MaxAge from stateMaxAge so the
+// two can't drift on a future change to the state-token lifetime.
+var cookieMaxAgeSecs = int(stateMaxAge.Seconds())
 
 // setStateCookie writes the cookie. Caller is responsible for setting
 // it before any 302 — once headers are committed Set-Cookie is a no-op.

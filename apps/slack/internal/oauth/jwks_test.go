@@ -180,6 +180,52 @@ func TestJWKSVerifierRejectsBadSignature(t *testing.T) {
 	}
 }
 
+// TestJWKSVerifierSuppressesUnverifiedEmail locks the contract: an
+// id_token carrying email_verified=false (or absent verified-flag
+// alongside a present email_verified key set to a non-bool) suppresses
+// the email line on the success page. Without this gate, an Auth0
+// connection that lets a user self-assert their email could surface a
+// misleading "qURL account: someone-else@target.tld" line.
+func TestJWKSVerifierSuppressesUnverifiedEmail(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		emailClaim:        testAdminEmail,
+		"email_verified":  false,
+	})
+	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	if err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty email when email_verified=false, got %q", got)
+	}
+}
+
+func TestJWKSVerifierAcceptsVerifiedEmail(t *testing.T) {
+	f := newJWKSFixture(t, "client-aud")
+	now := time.Now()
+	signed := f.signToken(t, map[string]any{
+		jwt.IssuerKey:     f.issuer,
+		jwt.AudienceKey:   []string{f.audience},
+		jwt.IssuedAtKey:   now,
+		jwt.ExpirationKey: now.Add(5 * time.Minute),
+		emailClaim:        testAdminEmail,
+		"email_verified":  true,
+	})
+	got, err := f.verifier.VerifyEmail(context.Background(), string(signed))
+	if err != nil {
+		t.Fatalf("VerifyEmail: %v", err)
+	}
+	if got != testAdminEmail {
+		t.Errorf("email: got %q want %q", got, testAdminEmail)
+	}
+}
+
 func TestJWKSVerifierReturnsEmptyEmailWhenClaimMissing(t *testing.T) {
 	f := newJWKSFixture(t, "client-aud")
 	now := time.Now()

@@ -16,7 +16,12 @@ import (
 )
 
 const (
-	auth0TokenTimeout   = 15 * time.Second
+	auth0TokenTimeout = 15 * time.Second
+	// revokeTimeout bounds the orphan-key DELETE on qurl-service when a
+	// post-mint persist failure forces us to clean up. Named separately
+	// from auth0TokenTimeout because the call targets qurl-service, not
+	// Auth0 — drift between the two budgets is fine.
+	revokeTimeout       = 15 * time.Second
 	dmTimeout           = 5 * time.Second
 	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 )
@@ -217,7 +222,7 @@ func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, acce
 }
 
 func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), auth0TokenTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
 		//nolint:gosec // G706: slog escapes control bytes in attribute values.

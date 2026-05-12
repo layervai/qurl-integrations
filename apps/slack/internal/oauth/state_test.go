@@ -9,7 +9,7 @@ import (
 )
 
 // testSecret is the 32-byte HMAC key used across state tests — the
-// stateMinSecret floor rejects anything shorter, so the same constant
+// StateMinSecret floor rejects anything shorter, so the same constant
 // stands in for "valid" everywhere.
 var testSecret = []byte("hmac-secret-32-bytes-or-whatever")
 
@@ -61,7 +61,7 @@ func TestVerifyStateRejectsFutureTimestamp(t *testing.T) {
 }
 
 func TestVerifyStateRejectsBadHMAC(t *testing.T) {
-	other := bytes.Repeat([]byte("x"), stateMinSecret)
+	other := bytes.Repeat([]byte("x"), StateMinSecret)
 	now := time.Unix(1700000000, 0)
 	tok, err := MintState(testSecret, testStateTeamID, testStateUserID, now)
 	if err != nil {
