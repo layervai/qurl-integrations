@@ -81,11 +81,15 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 		return "", fmt.Errorf("parse/verify: %w", err)
 	}
 	// Fail-closed on email_verified: surface the email only when the
-	// claim is present *and* explicitly true. Some Auth0 enterprise/SAML
-	// connections omit the claim entirely; treating that as "verified
-	// by default" would let a self-asserted email surface as
-	// "qURL account: someone-else@target.tld" on the success page
-	// (HTML-escaped — no XSS — but the readout would be misleading).
+	// claim is present *and* a `bool` *and* explicitly true. Some
+	// Auth0 enterprise/SAML connections omit the claim entirely;
+	// treating that as "verified by default" would let a self-asserted
+	// email surface as "qURL account: someone-else@target.tld" on the
+	// success page (HTML-escaped — no XSS — but the readout would be
+	// misleading). Auth0 ships email_verified as a JSON boolean; a
+	// future federation that returned the string "true"/"false" would
+	// fall through to the !isBool branch and suppress the email
+	// (benign degradation — success page still renders).
 	rawVerified, hasClaim := tok.Get("email_verified")
 	if !hasClaim {
 		return "", nil

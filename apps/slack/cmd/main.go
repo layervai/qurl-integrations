@@ -304,6 +304,14 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	domain := strings.TrimPrefix(os.Getenv("AUTH0_DOMAIN"), "https://")
 	domain = strings.TrimPrefix(domain, "http://")
 	domain = strings.TrimRight(domain, "/")
+	// AUTH0_DOMAIN must be a bare host — embedded paths (or any "/"
+	// after stripping the trailing slash) compose into garbage URLs at
+	// jwks.go and exchangeAuth0Code. Fail-fast at config-load rather
+	// than letting it surface as a 502 from "/.well-known/jwks.json"
+	// or a 404 from "/path/oauth/token".
+	if strings.ContainsRune(domain, '/') {
+		return oauth.Config{}, false, fmt.Errorf("AUTH0_DOMAIN must be a bare host, no path (got %q)", domain)
+	}
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
 	audience := os.Getenv("AUTH0_AUDIENCE")

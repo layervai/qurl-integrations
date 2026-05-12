@@ -27,7 +27,12 @@ const (
 	// the write mid-PutItem and leave the row state misaligned with
 	// what we report to the user. 15s is well over typical DDB PutItem
 	// latency.
-	persistTimeout      = 15 * time.Second
+	persistTimeout = 15 * time.Second
+	// mintTimeout bounds the qurl-service POST /v1/api-keys call from
+	// mintAndPersist. Same fresh-context rationale as persistTimeout:
+	// TimeoutHandler cancelling mid-mint would orphan a key the bot
+	// can no longer revoke (no keyID to DELETE against).
+	mintTimeout         = 15 * time.Second
 	dmTimeout           = 5 * time.Second
 	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 )
@@ -186,7 +191,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			}
 		}
 
-		keyPrefix, ok := mintAndPersist(r.Context(), w, cfg, accessToken, verified.TeamID, verified.UserID)
+		keyPrefix, ok := mintAndPersist(w, cfg, accessToken, verified.TeamID, verified.UserID)
 		if !ok {
 			return
 		}
@@ -229,9 +234,18 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 // gocognit/gocyclo suppressors.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
+func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
 	keyName := "Slack workspace " + teamID
-	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(ctx, accessToken,
+	// Fresh bounded context for the mint, decoupled from the request
+	// context. TimeoutHandler's 60s deadline could fire mid-mint;
+	// qurl-service may have already created the key, but we'd surface
+	// an error client-side with no keyID — making the key an
+	// unbounded orphan (no revoke path possible without keyID). The
+	// fresh context gives the mint its own budget; if it times out
+	// distinctly, qurl-service's idempotency will eventually reconcile.
+	mintCtx, mintCancel := context.WithTimeout(context.Background(), mintTimeout)
+	defer mintCancel()
+	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(mintCtx, accessToken,
 		keyName, apiKeyScopes())
 	if err != nil {
 		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
