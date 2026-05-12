@@ -155,7 +155,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			// On the success path, the cookie clears after verify; this
 			// closes the same-browser-replay window on Auth0 reject too.
 			clearStateCookie(w)
-			http.Error(w, "authorization declined — run /qurl setup again to retry", http.StatusBadRequest)
+			http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadRequest)
 			return
 		}
 		code := q.Get("code")

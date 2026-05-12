@@ -37,7 +37,10 @@ import (
 // re-bind in a different browser. A nonce-store-backed one-shot would
 // close the same-browser-twice case completely; the tradeoff is the
 // extra storage dependency on a flow that's per-workspace-install rare.
-// Acceptable for v1; revisit if install-flow logs show legitimate replay.
+// If we ever need it, DDB with a TTL attribute on the nonce keeps the
+// storage cost bounded (~5min retention) and reuses the existing
+// workspace_state plumbing. Acceptable for v1; revisit if install-flow
+// logs show legitimate replay.
 const (
 	stateMaxAge        = 5 * time.Minute
 	statePartCount     = 5
