@@ -1836,7 +1836,7 @@ describe('handleSetupButton (dispatcher path)', () => {
 // deliberate test update rather than silently passing the existing
 // handler-level coverage.
 describe('SETUP_API_KEY_REGEX shape', () => {
-  const { SETUP_API_KEY_REGEX, SETUP_API_KEY_MAX_LENGTH } = _test;
+  const { SETUP_API_KEY_REGEX, SETUP_API_KEY_MIN_LENGTH, SETUP_API_KEY_MAX_LENGTH } = _test;
 
   test.each([
     'lv_live_abcdefghijklmnopqrstuvwxyz12',
@@ -1859,12 +1859,17 @@ describe('SETUP_API_KEY_REGEX shape', () => {
     expect(SETUP_API_KEY_REGEX.test(key)).toBe(false);
   });
 
-  it('declares a max length that exceeds the regex minimum', () => {
-    // 28 = 8 (lv_live_) + 20 (suffix floor). 64 leaves comfortable
-    // room above the floor; the constant itself is what the modal's
-    // setMaxLength uses, so a regression that drops it below the
-    // floor would surface as legitimate keys getting truncated.
-    expect(SETUP_API_KEY_MAX_LENGTH).toBeGreaterThan(28);
+  it('min/max length constants form a coherent lockstep with the regex', () => {
+    // MIN = 28 = 8 (lv_live_/lv_test_) + 20 (regex suffix floor).
+    // MAX = 64 — defense-in-depth cap, well above MIN. Adding a
+    // new prefix family that changes the prefix length would have
+    // to bump MIN to stay coherent.
+    expect(SETUP_API_KEY_MIN_LENGTH).toBe(28);
+    expect(SETUP_API_KEY_MAX_LENGTH).toBeGreaterThan(SETUP_API_KEY_MIN_LENGTH);
+    // The regex itself accepts strings at the MIN boundary.
+    const atFloor = 'lv_live_' + 'a'.repeat(SETUP_API_KEY_MIN_LENGTH - 'lv_live_'.length);
+    expect(atFloor.length).toBe(SETUP_API_KEY_MIN_LENGTH);
+    expect(SETUP_API_KEY_REGEX.test(atFloor)).toBe(true);
   });
 });
 

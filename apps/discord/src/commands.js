@@ -2822,12 +2822,17 @@ const SETUP_MODAL_TTL_SECONDS = 300;
 // JWT-shaped key format must update both in lockstep — grep with
 // `git grep TODO(upstream-rebrand)` lands every mirroring site.
 const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
-// Hard ceiling for the modal's TextInput, paired with
-// SETUP_API_KEY_REGEX above. Both must move in lockstep — a future
-// JWT-shaped key format that exceeds this would silently truncate at
-// the modal and surface as a misleading "Invalid API key format"
-// reply. Keeping the constant adjacent to the regex makes the pair
-// impossible to update independently.
+// Length floor + ceiling for the modal's TextInput, paired with
+// SETUP_API_KEY_REGEX above. The floor (28) derives from
+// `lv_live_`-prefix (8 chars) + the regex suffix floor of 20 chars;
+// the ceiling (64) is a defense-in-depth cap for pathological
+// pastes (Discord's default is 4000). Every member of the trio
+// must move in lockstep — a future JWT-shaped key format that
+// exceeds the ceiling would silently truncate at the modal and
+// surface as a misleading "Invalid API key format" reply. Keeping
+// the constants adjacent makes the lockstep impossible to update
+// independently.
+const SETUP_API_KEY_MIN_LENGTH = 28;
 const SETUP_API_KEY_MAX_LENGTH = 64;
 
 // User-visible success message on successful setup. Exported via
@@ -2917,10 +2922,10 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     .setPlaceholder('lv_live_your_key_here')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
-    .setMinLength(28)
-    // TODO(upstream-rebrand): mirrors upstream qurl-service's
-    // key-format ceiling. Constant lives next to SETUP_API_KEY_REGEX
-    // so the lockstep pair is impossible to update independently.
+    // TODO(upstream-rebrand): min+max mirror upstream qurl-service's
+    // key-format bounds. Both constants live next to SETUP_API_KEY_REGEX
+    // so the lockstep trio is impossible to update independently.
+    .setMinLength(SETUP_API_KEY_MIN_LENGTH)
     .setMaxLength(SETUP_API_KEY_MAX_LENGTH);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
 
@@ -3045,13 +3050,15 @@ async function handleSetupModal(interaction, { flow_id }) {
     configured_by: interaction.user.id,
   };
 
-  // Defensive String() wrap insulates against a Discord SDK contract
-  // change that returns a non-string from getTextInputValue. The flow
-  // row is already deleted by this point, so an unexpected throw
-  // here would surface as the dispatcher's "Something went wrong"
-  // reply AFTER the row is gone — admin reruns and it works, but
-  // the cost of an uncaught throw is asymmetrically high relative
-  // to a `String(...) ?? ''` defense.
+  // Defensive coalesce + stringify in case a Discord SDK contract
+  // change ever returns null/undefined/non-string from
+  // getTextInputValue. The `?? ''` runs first so String(null) →
+  // 'null' / String(undefined) → 'undefined' can't slip through as
+  // valid-looking key strings; the outer String(...) catches any
+  // remaining non-string return shape. The flow row is already
+  // deleted by this point, so an uncaught throw here would surface
+  // as the dispatcher's "Something went wrong" AFTER the row is
+  // gone — asymmetrically expensive vs. this two-token defense.
   const submittedKey = String(
     interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY) ?? '',
   ).trim();
@@ -4039,6 +4046,17 @@ const commands = [
             logger.warn('handleSetup: createFlow racy after admin_cleanup', {
               flow_id: setupFlowId,
             });
+            // TODO(stuck-orphan-#273): loadFlow filters logically-
+            // expired rows to null. If the orphan row is past its
+            // logical TTL but not yet physically reaped (DDB reap
+            // is async, minutes-to-hours), the peek returns null
+            // and we fall through to the generic "could not start"
+            // message — leaving the admin stuck until physical
+            // reap. /qurl revoke doesn't hit this because its
+            // supersede stage gate matches the orphan's own stage.
+            // Tracked in #273; mitigation likely a
+            // loadFlow({include_expired: true}) opt-in plus a
+            // matching deleteFlow against the expired stage.
             const surviving = await loadFlow(setupFlowId).catch((err) => {
               // Preserve observability — a DDB outage here silently
               // degrades the user-visible wording from actionable
@@ -4544,6 +4562,7 @@ module.exports = {
       SETUP_BUTTON_TTL_SECONDS,
       SETUP_MODAL_TTL_SECONDS,
       SETUP_API_KEY_REGEX,
+      SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
     },
