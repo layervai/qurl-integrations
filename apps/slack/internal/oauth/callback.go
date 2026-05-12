@@ -216,7 +216,7 @@ func spawnAsync(tracker AsyncTracker, fn func()) {
 func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
 	keyName := "Slack workspace " + teamID
 	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(ctx, accessToken,
-		keyName, apiKeyScopes)
+		keyName, apiKeyScopes())
 	if err != nil {
 		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)

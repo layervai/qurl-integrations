@@ -48,9 +48,13 @@ const (
 const oauthHandlerTimeout = 60 * time.Second
 
 // apiKeyScopes is the qurl-service scope set the callback requests for
-// the workspace API key. authorizeURL also weaves "openid email" in
-// for the id_token email claim consumed by the success page.
-var apiKeyScopes = []string{"qurl:read", "qurl:write"}
+// the workspace API key. Returned fresh on each call so an in-package
+// caller can't mutate the slice and silently change every future mint.
+// authorizeURL also weaves "openid email" in for the id_token email
+// claim consumed by the success page.
+func apiKeyScopes() []string {
+	return []string{"qurl:read", "qurl:write"}
+}
 
 // callbackURL composes the Auth0 redirect_uri. SlackBaseURL is tolerated
 // with or without a trailing slash via url.JoinPath. Falling back to
@@ -240,7 +244,7 @@ func authorizeURL(cfg Config, state string) string {
 	// Scope set is symmetric with the Discord flow (qurl-oauth.js):
 	// APIKeyScopes for the qurl-service mint, openid + email for the
 	// id_token claim used in the success-page binding readout.
-	q.Set("scope", strings.Join(apiKeyScopes, " ")+" openid email")
+	q.Set("scope", strings.Join(apiKeyScopes(), " ")+" openid email")
 	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
 	q.Set("prompt", "consent")

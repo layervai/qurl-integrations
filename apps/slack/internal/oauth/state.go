@@ -32,7 +32,7 @@ const (
 	stateMaxAge        = 5 * time.Minute
 	statePartCount     = 5
 	stateNonceLen      = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
-	StateMinSecret     = 32 // bytes — HMAC-SHA256 block-size floor; rejects ergonomically-weak operator secrets.
+	StateMinSecret     = 32 // bytes — HMAC-SHA256 output size; floor against ergonomically-weak operator secrets.
 	stateFutureSkew    = 30 * time.Second
 	stateSeparator     = "|"
 	stateSeparatorB    = byte('|')

@@ -255,11 +255,10 @@ func run() error {
 	return nil
 }
 
-// minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET. HMAC-
-// SHA256 will compute over any length, but a short operator-typed value
-// is the kind of weak-CSRF posture worth failing-fast on at startup
-// rather than discovering after a key-takeover incident.
-const minStateSecretBytes = 32
+// minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET.
+// Sourced from oauth.StateMinSecret so the constant is single-sourced
+// and a future bump on the verify side propagates here automatically.
+const minStateSecretBytes = oauth.StateMinSecret
 
 // newJWKSVerifier is overridable in tests so the env-var-table tests
 // don't hit the real internet trying to fetch example.auth0.com's JWKS
@@ -308,6 +307,10 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	stateSecret := os.Getenv("OAUTH_STATE_SECRET")
 	qurlEndpoint := strings.TrimRight(os.Getenv("QURL_ENDPOINT"), "/")
 
+	// QURL_ENDPOINT is already required at run() startup; including it
+	// here is belt-and-suspenders so a refactor that drops the earlier
+	// check still fails-soft at the OAuth seam rather than constructing
+	// a Minter pointed at an empty URL.
 	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
 		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {
 		return oauth.Config{}, false, nil
