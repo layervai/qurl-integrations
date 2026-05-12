@@ -19,12 +19,11 @@
 //
 // This is materially the same posture as the proprietary AWS Database
 // Encryption SDK for DynamoDB but implemented directly against
-// crypto/cipher + the KMS SDK because that SDK doesn't ship a maintained
-// Go binding. TODO(claude-followup): if AWS publishes a Go binding of
-// the DB Encryption SDK, port this to it so that we get the
+// crypto/cipher + the KMS SDK because that SDK doesn't ship a
+// maintained Go binding. If AWS ever publishes one, port to it for the
 // canonical attribute-level encrypt/sign/material-provider story
 // (column-level "do not encrypt" / "sign only" / "encrypt and sign"
-// declarations) for free.
+// declarations) — tracked at #269.
 package auth
 
 import (

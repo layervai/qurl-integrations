@@ -67,7 +67,11 @@ docker buildx build --platform linux/arm64 \
 | `OAUTH_STATE_SECRET` | OAuth | HMAC-SHA256 key for state-token signing. Must be ≥32 bytes. |
 | `QURL_SLACK_MAX_CONCURRENT_ASYNC` | No | Pool cap for in-flight async slash-command workers. Empty/0 uses the built-in default (50). Tune up if a workspace's load shape sustains `:warning: Slack bot is busy` acks; tune down if memory pressure during retry storms is observed. |
 
+`WORKSPACE_STATE_TABLE` + `WORKSPACE_STATE_KMS_KEY_ARN` are
+unconditionally required at startup — the bot needs DDB+KMS for
+per-workspace key lookups even on `/qurl create`/`/qurl list`.
+
 The `OAuth` group is required only when the bot needs to serve the
-`/oauth/qurl/{start,callback}` surface. Sandbox boots without these
-vars still serve `/slack/*` and `/health`; `/qurl setup` replies "OAuth
-is not configured" until the OAuth env vars are populated.
+`/oauth/qurl/{start,callback}` surface. Boots without these vars still
+serve `/slack/*` and `/health`; `/qurl setup` replies "OAuth is not
+configured" until the OAuth env vars are populated.

@@ -173,6 +173,27 @@ func TestDDBProviderAPIKey(t *testing.T) {
 		}
 	})
 
+	t.Run("missing qurl_api_key_dk attribute", func(t *testing.T) {
+		// Inverse of "missing qurl_api_key": the wrapped data key column
+		// is absent. Without the KMS-wrapped key we can't decrypt; fail
+		// loud rather than falling through to a nil-pointer panic on
+		// Open.
+		ddb := &fakeDDBClient{
+			getOutput: &dynamodb.GetItemOutput{
+				Item: map[string]ddbtypes.AttributeValue{
+					attrTeamID:     &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+					attrQURLAPIKey: &ddbtypes.AttributeValueMemberB{Value: []byte("ct")},
+					// attrDataKeyCT omitted.
+				},
+			},
+		}
+		p := &DDBProvider{Client: ddb, TableName: "ws", Encryptor: &passthroughEncryptor{}}
+		_, err := p.APIKey(context.Background(), testTeamID)
+		if err == nil {
+			t.Fatal("want error when qurl_api_key_dk attribute is missing")
+		}
+	})
+
 	t.Run("missing qurl_api_key attribute", func(t *testing.T) {
 		ddb := &fakeDDBClient{
 			getOutput: &dynamodb.GetItemOutput{
