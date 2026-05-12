@@ -42,6 +42,7 @@ jest.mock('../src/config', () => ({
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
+  SHARD_ID: '0:1',
   isMultiTenant: false,
   ENABLE_OPENNHP_FEATURES: true,
   isOpenNHPActive: true,
@@ -183,6 +184,18 @@ jest.mock('../src/qurl', () => ({
 }));
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
+
+// Stub flow-state so loading commands.js doesn't reach into DDB.
+// These tests target the back-half (monitorLinkStatus, revokeAllLinks,
+// handleAddRecipients) — none of which touch flow_state — but
+// commands.js registers a flow handler at module load and requires
+// the module regardless of which export the test consumes.
+jest.mock('../src/flow-state', () => ({
+  createFlow: jest.fn(),
+  loadFlow: jest.fn(),
+  transitionFlow: jest.fn(),
+  deleteFlow: jest.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Require modules under test

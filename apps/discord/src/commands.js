@@ -31,6 +31,8 @@ const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
+const { createFlow, deleteFlow } = require('./flow-state');
+const { flowIdForInteraction, registerFlow } = require('./flow-dispatch');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -2593,6 +2595,25 @@ function formatRevokeDescription(s) {
   return truncate(base);
 }
 
+// Single non-terminal stage between createFlow and deleteFlow.
+// Stage name is the source of truth for the dispatcher routing
+// table (registerFlow at the bottom of the file) — changing it is
+// a single edit.
+const REVOKE_STAGE_AWAITING_SELECT = 'awaiting_revoke_select';
+
+// customId for the select menu. PREFIX-ONLY — no nonce, no flow_id
+// encoded. Concurrent revokes deliberately drop: the second call
+// supersedes the first via deleteFlow + createFlow. See
+// flow-dispatch's trust-model comment on why customId is unsafe as
+// an identity signal.
+const REVOKE_SELECT_CUSTOM_ID = 'qurl_revoke_select';
+
+// TTL for the awaiting-select flow row, in seconds. Matches the
+// pre-existing 60-second click window for the menu. DDB TTL reap is
+// asynchronous (~48 h) but loadFlow filters expired rows
+// synchronously, so the UX cuts off at 60 s on the dot.
+const REVOKE_FLOW_TTL_SECONDS = 60;
+
 async function handleRevoke(interaction, apiKey) {
   if (!apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
@@ -2605,11 +2626,81 @@ async function handleRevoke(interaction, apiKey) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
   }
 
-  // Nonce the customId so two concurrent /qurl revoke select menus don't
-  // route each other's events.
-  const revokeNonce = crypto.randomBytes(8).toString('hex');
+  // Open the flow row BEFORE rendering the menu. If createFlow fails
+  // (DDB outage, IAM regression), we want the user to see an error
+  // immediately rather than a clickable menu whose selection would
+  // then 404 against the dispatcher.
+  //
+  // Supersede semantics: a user with an existing in-flight revoke
+  // flow who runs `/qurl revoke` again gets the old flow torn down
+  // and a fresh menu. The orphan menu in the old message becomes a
+  // no-op (its selection event will hit the dispatcher, miss on
+  // loadFlow, and surface the "superseded — run again" message).
+  // This is a deliberate exception to the design-doc rule that
+  // "a user with an existing non-expired flow in a given channel
+  // cannot start a second flow there" — for revoke specifically,
+  // the menu is a stateless listing and the second invocation is
+  // idempotent, so blocking it would just confuse users who can't
+  // remember whether they cancelled the prior menu.
+  const flow_id = flowIdForInteraction(interaction);
+  const expires_at = Math.floor(Date.now() / 1000) + REVOKE_FLOW_TTL_SECONDS;
+  const created = await createFlow({
+    flow_id,
+    stage: REVOKE_STAGE_AWAITING_SELECT,
+    payload: null,
+    expires_at,
+  });
+  if (!created.created) {
+    // Existing row from a prior /qurl revoke. Tear it down (the
+    // stage gate on deleteFlow ensures we won't admin_cleanup a
+    // sibling flow at the same flow_id, e.g. an in-flight setup
+    // modal) and try again. The admin_cleanup reason marks this as
+    // an out-of-band delete rather than a terminal completion —
+    // keeps the SLI's silently_dropped count honest (the prior
+    // flow never reached its own terminal).
+    //
+    // If deleteFlow returns deleted:false the row at this flow_id
+    // belongs to a different flow type; the retry createFlow will
+    // then also return created:false and the user gets the generic
+    // "could not start" message. That's correct — we don't want to
+    // bulldoze a sibling flow.
+    await deleteFlow(flow_id, {
+      stage: REVOKE_STAGE_AWAITING_SELECT,
+      reason: 'admin_cleanup',
+    });
+    let retry;
+    try {
+      retry = await createFlow({
+        flow_id,
+        stage: REVOKE_STAGE_AWAITING_SELECT,
+        payload: null,
+        expires_at,
+      });
+    } catch (err) {
+      // DDB throttle / IAM blip on the retry — the prior flow row
+      // is gone but we couldn't open a new one. Surface a
+      // recoverable error rather than letting it propagate to the
+      // generic "error executing command" reply.
+      logger.warn('handleRevoke: createFlow retry threw after admin_cleanup', {
+        flow_id, error: err && err.message,
+      });
+      return interaction.editReply({
+        content: 'Could not start a revoke session — please try again.',
+      });
+    }
+    if (!retry.created) {
+      // Two races in a row (or a sibling flow blocking us). Surface
+      // as an error rather than loop — the user can retry the
+      // command, or finish their other in-flight flow.
+      logger.warn('handleRevoke: createFlow racy after admin_cleanup', { flow_id });
+      return interaction.editReply({
+        content: 'Could not start a revoke session — please try again.',
+      });
+    }
+  }
+
   const select = new StringSelectMenuBuilder()
-    .setCustomId(`qurl_revoke_select_${revokeNonce}`)
+    .setCustomId(REVOKE_SELECT_CUSTOM_ID)
     .setPlaceholder('Select a send to revoke')
     .addOptions(recentSends.map(s => {
       // StringSelectMenu labels are plain text — <#id> mention syntax
@@ -2628,31 +2719,74 @@ async function handleRevoke(interaction, apiKey) {
     }));
 
   const row = new ActionRowBuilder().addComponents(select);
-  const response = await interaction.editReply({
+  await interaction.editReply({
     content: 'Select a send to revoke all its links:',
     components: [row],
   });
+}
 
-  try {
-    const selectInteraction = await response.awaitMessageComponent({
-      componentType: ComponentType.StringSelect,
-      filter: (i) => i.user.id === interaction.user.id && i.customId === `qurl_revoke_select_${revokeNonce}`,
-      time: 60000,
-    });
+// `reason: 'terminal'` reflects the FLOW lifecycle, not the qURL
+// API call's success. The state machine terminated when the user
+// picked an item; downstream revoke outcome is captured by its
+// own `revoke_success` / `revoke_failed` audit events.
+//
+// `deleteFlow` is the at-most-once dedup primitive — only the
+// worker whose conditional delete returns `{ deleted: true }`
+// proceeds. A duplicate event (SQS at-least-once redelivery in
+// the future worker tier, or a Discord double-dispatch today) sees
+// `{ deleted: false }` and exits.
+async function handleRevokeSelect(interaction, { flow_id }) {
+  // Parallelize the dedup primitive (deleteFlow) with the apiKey
+  // resolution. Safe here because getGuildApiKey is an idempotent
+  // DDB read with zero side effects — the dedup loser short-circuits
+  // before the qURL API call, so a duplicate event never multiplies
+  // the parallel call's cost.
+  //
+  // Rule for future handlers in PR 6/7/8/9: parallelize the dedup
+  // primitive ONLY with idempotent / free reads. Do NOT parallelize
+  // with a paid side-effect call (a Google Places lookup, a recipient
+  // resolution that hits an external API, a connector upload) —
+  // at-least-once redelivery would then bill or trigger the side
+  // effect once per duplicate, defeating the dedup gate's purpose.
+  const [guildApiKey, deleteResult] = await Promise.all([
+    interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
+    deleteFlow(flow_id, {
+      stage: REVOKE_STAGE_AWAITING_SELECT,
+      reason: 'terminal',
+    }),
+  ]);
+  const apiKey = guildApiKey || config.QURL_API_KEY;
 
-    const sendId = selectInteraction.values[0];
-    const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-
-    // Slash-command path lacks the in-scope `recipients` array needed
-    // to resolve names → no "Revoked for: …" line here. Operators
-    // wanting names should use the inline button after a send.
-    await selectInteraction.update({
-      content: buildRevokeHeader(revoked.success, revoked.total),
-      components: [],
-    });
-  } catch {
-    await interaction.editReply({ content: 'Revocation timed out.', components: [] }).catch(logIgnoredDiscordErr);
+  if (!deleteResult.deleted) {
+    // Another worker already completed (or admin_cleanup'd) this flow.
+    // Reply rather than update — `interaction.update` would mutate
+    // the original ephemeral message, but a duplicate event by
+    // definition means the original was already updated by the
+    // winning worker. Ephemeral reply preserves the user-visible
+    // first result.
+    return interaction.reply({
+      content: 'This revoke was already processed.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
   }
+
+  if (!apiKey) {
+    return interaction.update({
+      content: 'qURL API key is no longer configured for this server.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const sendId = interaction.values[0];
+  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+
+  // Slash-command path lacks the in-scope `recipients` array needed
+  // to resolve names → no "Revoked for: …" line here. Operators
+  // wanting names should use the inline button after a send.
+  await interaction.update({
+    content: buildRevokeHeader(revoked.success, revoked.total),
+    components: [],
+  });
 }
 
 // Pure rendering / wording logic lives in `./revoke-render` so the
@@ -3975,10 +4109,24 @@ async function handleCommand(interaction) {
   }
 }
 
+// Wire flow handlers into the dispatcher at module-load time.
+// flow-dispatch's `registerFlow` is the single source of truth for
+// the customId → handler routing table; doing this here (rather than
+// in index.js) co-locates the registration with the handler
+// implementation so future readers don't have to grep two modules to
+// understand the routing.
+registerFlow(REVOKE_SELECT_CUSTOM_ID, {
+  expectedStage: REVOKE_STAGE_AWAITING_SELECT,
+  handler: handleRevokeSelect,
+});
+
 module.exports = {
   commands,
   registerCommands,
   handleCommand,
+  // Exported for the dispatcher's unit tests. Production code reaches
+  // it via flow-dispatch's registry, not this export.
+  handleRevokeSelect,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
