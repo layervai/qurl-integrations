@@ -3659,7 +3659,7 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke. In multi-tenant
+      // Gate: require per-guild API key for send/revoke. In multi-tenant
       // mode the global config.QURL_API_KEY is NEVER a valid fallback —
       // it points at the layerv-internal bootstrap customer, and a
       // guild that hasn't completed /qurl setup must NOT silently ride
@@ -3670,16 +3670,26 @@ const commands = [
       let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
-        const fallbackAllowed = !config.isMultiTenant;
-        if (!guildApiKey && !(fallbackAllowed && config.QURL_API_KEY)) {
-          return interaction.reply({
-            content: '❌ **qURL is not configured for this server.**\n\n' +
+        const operatorOwnsGlobalKey = !config.isMultiTenant;
+        if (!guildApiKey && !(operatorOwnsGlobalKey && config.QURL_API_KEY)) {
+          logger.warn('qurl gate refused: no per-guild API key in multi-tenant mode', {
+            sub,
+            guildId: interaction.guildId || null,
+            multiTenant: config.isMultiTenant,
+            hasGlobalKey: !!config.QURL_API_KEY,
+          });
+          const refusalCopy = interaction.guildId
+            ? '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first and sign in with a layerv account.\n' +
-              'Sign up at **https://layerv.ai** if you don\'t have an account yet.',
+              'Sign up at **https://layerv.ai** if you don\'t have an account yet.'
+            : '❌ **qURL `/' + sub + '` is only available inside a server.**\n\n' +
+              'Run this command in a Discord server where qURL has been set up via `/qurl setup`.';
+          return interaction.reply({
+            content: refusalCopy,
             ephemeral: true,
           });
         }
-        resolvedApiKey = guildApiKey || (fallbackAllowed ? config.QURL_API_KEY : null);
+        resolvedApiKey = guildApiKey || (operatorOwnsGlobalKey ? config.QURL_API_KEY : null);
       }
 
       // Pass API key as an explicit parameter rather than monkey-patching
