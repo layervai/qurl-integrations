@@ -22,8 +22,8 @@ const (
 	// LimitReader didn't consume so the connection can be reused. An
 	// unbounded io.Copy here would let a misbehaving upstream stream
 	// indefinitely within the request timeout, holding the connection.
-	// 32 KiB = 4× the body cap, plenty of headroom without unbounded
-	// commitment to a hostile or runaway upstream.
+	// Worst-case total bytes-read per call: 8 KiB (body cap) + 32 KiB
+	// (drain) = 40 KiB. Bounded commitment to a hostile/runaway upstream.
 	drainCap          = 32 << 10
 	auth0TokenTimeout = 15 * time.Second
 	// revokeTimeout bounds the orphan-key DELETE on qurl-service when a
@@ -114,6 +114,9 @@ type auth0TokenResponse struct {
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
 func Callback(cfg Config) http.HandlerFunc {
+	// `now` is a clock provider (a func, not a fixed time) so the
+	// closure invokes time.Now per request — captured once here at
+	// construction.
 	now := cfg.now()
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -295,6 +298,11 @@ func mintAndPersist(w http.ResponseWriter, cfg Config, accessToken, teamID, user
 		spawnAsync(cfg.AsyncTracker, func() {
 			revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
 		})
+		// TODO(#265): revoke is wired only for the persist-failure case.
+		// A TimeoutHandler-induced abandon (outer 60s fires after mint
+		// has started but before persist returns) escapes this branch
+		// and leaks an orphan. Closes when #265's ConditionExpression
+		// shift lets us detect the lost-race case end-to-end.
 		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
 		return "", false
 	}

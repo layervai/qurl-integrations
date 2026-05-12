@@ -521,6 +521,22 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 	}
 }
 
+// TestSetOAuthSetupPanicsOnDoubleCall locks the documented "called
+// exactly once before Serve" contract. The field is read without a
+// lock on the request hot path; the panic is the safety net for a
+// future refactor that accidentally re-wires it.
+func TestSetOAuthSetupPanicsOnDoubleCall(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic on second SetOAuthSetup call")
+		}
+	}()
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+}
+
 func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
 	h := newTestHandler(t, noopQURLServer(t))
 	// SetOAuthSetup deliberately NOT called → oauthSetup == nil.

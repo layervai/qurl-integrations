@@ -49,6 +49,11 @@ func Start(cfg Config) http.HandlerFunc {
 				reason = "future_timestamp"
 			}
 			slog.Warn("oauth/start rejected invalid state", "reason", reason)
+			// Clear any stale cookie from a prior /start the user
+			// abandoned. Without this, the next /callback hit would
+			// surface the misleading "setup must be completed in the
+			// same browser" error rather than re-running setup cleanly.
+			clearStateCookie(w)
 			http.Error(w, "invalid or expired setup link — run /qurl setup again", http.StatusBadRequest)
 			return
 		}
