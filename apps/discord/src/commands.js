@@ -32,7 +32,7 @@ const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { createFlow, deleteFlow, transitionFlow, loadFlow } = require('./flow-state');
-const { flowIdForInteraction, registerFlow } = require('./flow-dispatch');
+const { flowIdForInteraction, registerFlow, safeReply } = require('./flow-dispatch');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -2920,6 +2920,11 @@ async function handleSetupButton(interaction, { flow_id, row }) {
   // "you already have a modal open" message. Window is bounded by
   // a single DDB round-trip; not worth closing with an additional
   // OCC primitive yet, but greppable for future readers.
+  //
+  // No spurious error log if a concurrent supersede ALSO cleared
+  // this row first — CCFE in deleteFlow returns `{deleted: false}`
+  // rather than throwing (flow-state.js), so the .catch below never
+  // fires on that path.
   try {
     await interaction.showModal(modal);
   } catch (err) {
@@ -2949,10 +2954,16 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // (the .catch swallows it), and the wait-vs-retry distinction
     // is marginal UX in an already-rare error path; keep the
     // simpler wording.
-    await interaction.reply({
-      content: 'Could not open the configuration form — please run `/qurl setup` again.',
-      ephemeral: true,
-    }).catch(logIgnoredDiscordErr);
+    //
+    // Use safeReply (followUp vs reply based on interaction state)
+    // rather than a bare .reply.catch — showModal may have partially
+    // acked before throwing, leaving interaction.replied=true; a
+    // bare .reply would then throw InteractionAlreadyReplied and
+    // silently swallow, leaving the admin with no feedback.
+    await safeReply(
+      interaction,
+      'Could not open the configuration form — please run `/qurl setup` again.',
+    );
   }
 }
 
@@ -3940,11 +3951,12 @@ const commands = [
           expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
         });
         if (!setupCreated.created) {
-          // Both deleteFlow and the retry createFlow run under a
-          // single try-envelope so a DDB throttle / IAM blip on
-          // either gets the recoverable "could not start" message
-          // instead of falling through to handleCommand's generic
-          // "error executing this command" wording.
+          // Within the supersede branch, deleteFlow + retry createFlow
+          // share one try-envelope so a DDB throttle / IAM blip on
+          // either gets the recoverable "could not start" message.
+          // The FIRST createFlow above is NOT wrapped — its throw
+          // bubbles to handleCommand's outer envelope (covered by
+          // test "propagates the throw when the first createFlow fails").
           //
           // Race-edge: two same-user supersede calls from different
           // clients within the deleteFlow round-trip can have the

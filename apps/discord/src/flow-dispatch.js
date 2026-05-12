@@ -204,6 +204,12 @@ async function safeReply(interaction, content) {
 module.exports = {
   registerFlow,
   flowIdForInteraction,
+  // Best-effort reply helper that picks followUp vs reply based on
+  // interaction.replied/deferred state. Exported so handlers reaching
+  // a reply point with ambiguous ack state (e.g. showModal that may
+  // have partially acked before throwing) can use it instead of
+  // re-implementing the branch.
+  safeReply,
   handleFlowInteraction,
   // Exported for tests so they can assert the supersede wording
   // without duplicating the string.
