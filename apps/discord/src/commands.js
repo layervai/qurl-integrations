@@ -2808,12 +2808,13 @@ const SETUP_BUTTON_CUSTOM_ID = 'qurl_setup_button';
 const SETUP_MODAL_CUSTOM_ID = 'qurl_setup_modal';
 const SETUP_MODAL_FIELD_API_KEY = 'api_key';
 
-// Two-stage TTL budget. The button-stage window is short because an
-// admin who runs `/qurl setup` should click the button within
-// seconds; if they walk away, supersede semantics let them rerun
-// without confusion. The modal-stage window is the real budget for
-// finding and pasting the key.
-const SETUP_BUTTON_TTL_SECONDS = 60;
+// Two-stage TTL budget. The button-stage window covers "click the
+// button" — short enough that an abandoned button is naturally
+// superseded, long enough that a mobile admin who app-switches to
+// a password manager doesn't come back to an expired button. The
+// modal-stage window is the real budget for finding and pasting
+// the key.
+const SETUP_BUTTON_TTL_SECONDS = 120;
 const SETUP_MODAL_TTL_SECONDS = 300;
 
 const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
@@ -2872,18 +2873,14 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // transitionFlow Update (TTL reap or a concurrent
     // admin_cleanup). Tell the user to rerun.
     return interaction.reply({
-      content: 'This setup session expired — please run `/qurl setup` again.',
+      content: 'This setup session expired or was replaced — please run `/qurl setup` again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Note: transitionFlow throws on non-CCFE failures (DDB outage,
-  // pre-read errors). Those propagate to the dispatcher's universal
-  // safety net, which replies with the generic "Something went wrong
-  // — please run the command again." The result discriminator only
-  // surfaces success | conflict | not_found.
-
   // Success — show the modal. It becomes the interaction's ACK.
+  // (Non-CCFE transitionFlow failures throw and propagate to the
+  // dispatcher's safety net; see flow-state.js for the contract.)
   const modal = new ModalBuilder()
     .setCustomId(SETUP_MODAL_CUSTOM_ID)
     .setTitle('Configure qURL');
@@ -2897,7 +2894,9 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // Defense-in-depth ceiling. The regex below is open-ended on
     // the high side and Discord's default is 4000 chars; a stricter
     // client-side cap clips pathological pastes before they hit
-    // the network. A real qURL API key is well under 64 chars.
+    // the network. A real qURL API key is well under 64 chars
+    // today — align with upstream qurl-service key-format spec if
+    // longer formats (e.g. JWT-shaped) ever ship.
     .setMaxLength(64);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
 

@@ -1624,6 +1624,31 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     await expect(cmd.execute(interaction)).rejects.toThrow('DDB region timeout');
     expect(mockDeleteFlow).not.toHaveBeenCalled();
   });
+
+  it('handleCommand wraps the createFlow throw into a generic user-visible reply', async () => {
+    // Integration-style pin: drive the same throw THROUGH handleCommand
+    // (not just cmd.execute) and assert the outer try/catch in
+    // handleCommand surfaces the recoverable "There was an error"
+    // message. Closes the gap between "cmd.execute throws" and
+    // "user sees an error" — a future refactor that swallows the
+    // envelope reply would break user-visible UX without tripping
+    // the bare cmd.execute test above.
+    mockCreateFlow.mockRejectedValueOnce(new Error('DDB region timeout'));
+
+    const interaction = makeSetupInteraction();
+    await handleCommand(interaction);
+
+    // handleCommand uses followUp when interaction is deferred/replied
+    // (deferReply fired inside the setup branch before the throw).
+    const replyCalls = [
+      ...interaction.followUp.mock.calls,
+      ...interaction.reply.mock.calls,
+    ];
+    const errorReply = replyCalls.find(
+      (c) => /There was an error executing this command/.test(c[0]?.content || ''),
+    );
+    expect(errorReply).toBeDefined();
+  });
 });
 
 describe('handleSetupButton (dispatcher path)', () => {
@@ -1654,7 +1679,14 @@ describe('handleSetupButton (dispatcher path)', () => {
     expect(transitionArgs[1]).toBe(1); // version
     expect(transitionArgs[2].stage_to).toBe('awaiting_setup_modal');
     expect(transitionArgs[2].terminal).toBe(false);
-    expect(transitionArgs[2].set_expires_at).toEqual(expect.any(Number));
+    // Pin the modal-stage TTL (300s), not just "some number" —
+    // a refactor that accidentally re-used SETUP_BUTTON_TTL_SECONDS
+    // here would pass an `any(Number)` assertion. Lower bound is
+    // `now + 250` (allows ~50s of clock drift / test execution time);
+    // upper bound is `now + 350`.
+    const nowSec = Math.floor(Date.now() / 1000);
+    expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + 250);
+    expect(transitionArgs[2].set_expires_at).toBeLessThanOrEqual(nowSec + 350);
     // Pin: button-stage transition must NOT write a payload. The
     // setup flow carries no encrypted state — the key itself
     // arrives in interaction.fields on the modal submit, not in
