@@ -1655,6 +1655,12 @@ describe('handleSetupButton (dispatcher path)', () => {
     expect(transitionArgs[2].stage_to).toBe('awaiting_setup_modal');
     expect(transitionArgs[2].terminal).toBe(false);
     expect(transitionArgs[2].set_expires_at).toEqual(expect.any(Number));
+    // Pin: button-stage transition must NOT write a payload. The
+    // setup flow carries no encrypted state — the key itself
+    // arrives in interaction.fields on the modal submit, not in
+    // flow_state. A future refactor that accidentally persists
+    // anything sensitive here would trip this assertion.
+    expect(transitionArgs[2].payload).toBeUndefined();
 
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
     expect(interaction.reply).not.toHaveBeenCalled();
@@ -1712,6 +1718,38 @@ describe('handleSetupButton (dispatcher path)', () => {
 
     expect(interaction.showModal).not.toHaveBeenCalled();
     expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the flow row when showModal throws after transitionFlow committed', async () => {
+    // The transitionFlow commits the row to `awaiting_setup_modal`
+    // before showModal fires. If showModal throws (Discord token
+    // expiry, REST blip), leaving the row in that stage would force
+    // the admin to wait out the full TTL — `/qurl setup` rerun
+    // would see the loadFlow peek find awaiting_setup_modal and
+    // surface the misleading "you already have a modal open"
+    // wording. Recovery requires the handler to delete the row.
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
+    const showModalErr = new Error('Unknown interaction (token expired during ACK)');
+    const interaction = makeButtonInteraction({
+      showModal: jest.fn().mockRejectedValue(showModalErr),
+    });
+
+    await handleSetupButton(interaction, {
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      row: { stage: 'awaiting_setup_button', version: 1 },
+    });
+
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      '0:1#guild-1#ch-1#user-1',
+      { stage: 'awaiting_setup_modal', reason: 'abort' },
+    );
+    // Best-effort reply attempted (may fail itself; that's logged).
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('please run `/qurl setup` again'),
+      }),
+    );
   });
 });
 
@@ -1803,6 +1841,14 @@ describe('handleSetupModal (dispatcher path)', () => {
     await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    // Pin the 401-specific phrasing — the format-rejection branch
+    // also includes "Invalid API key", so a substring-only match
+    // could silently route through the wrong branch if VALID_KEY
+    // ever drifts. `Double-check your key` is unique to the 401
+    // path's blurb.
+    const replyArg = interaction.editReply.mock.calls.at(-1)[0];
+    expect(replyArg.content).toContain('Double-check your key');
+    expect(replyArg.content).not.toMatch(/format/);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('Invalid API key'),

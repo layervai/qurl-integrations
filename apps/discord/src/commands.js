@@ -2896,9 +2896,45 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     .setPlaceholder('lv_live_your_key_here')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
-    .setMinLength(28);
+    .setMinLength(28)
+    // Defense-in-depth ceiling. The regex below is open-ended on
+    // the high side and Discord's default is 4000 chars; a stricter
+    // client-side cap clips pathological pastes before they hit
+    // the network. A real qURL API key is well under 64 chars.
+    .setMaxLength(64);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
-  await interaction.showModal(modal);
+
+  // Roll back the OCC transition if showModal throws. The
+  // transitionFlow committed the row to `awaiting_setup_modal`,
+  // but the modal never opened — leaving the row in that stage
+  // would mean the admin sees Discord's "interaction failed"
+  // notice and then, on rerun of /qurl setup, the supersede path
+  // refuses to admin_cleanup an awaiting_setup_modal row (its
+  // stage gate is awaiting_setup_button) and the loadFlow peek
+  // tells them "you already have a modal open" — but they don't.
+  // The admin would have to wait out the full SETUP_MODAL_TTL_SECONDS
+  // before recovering. Delete the row instead so the next /qurl
+  // setup runs cleanly. Best-effort reply — the interaction token
+  // may itself be in the failed state that just took down showModal.
+  try {
+    await interaction.showModal(modal);
+  } catch (err) {
+    logger.error('handleSetupButton: showModal failed after transitionFlow committed', {
+      flow_id, error: err && err.message,
+    });
+    await deleteFlow(flow_id, {
+      stage: SETUP_STAGE_AWAITING_MODAL,
+      reason: 'abort',
+    }).catch((rollbackErr) => {
+      logger.error('handleSetupButton: rollback deleteFlow failed', {
+        flow_id, error: rollbackErr && rollbackErr.message,
+      });
+    });
+    await interaction.reply({
+      content: 'Could not open the configuration form — please run `/qurl setup` again.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
 }
 
 // Modal-submit handler. Routed by flow-dispatch when the admin
