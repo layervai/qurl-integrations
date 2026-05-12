@@ -88,13 +88,9 @@ func run() error {
 		return errors.New("SLACK_SIGNING_SECRET is required")
 	}
 
-	// Per-workspace OAuth runtime: DDBProvider reads the workspace_state
-	// table populated by /oauth/qurl/callback. The bot can't function
-	// before the table is provisioned (qurl-integrations-infra TF
-	// feat/slack-oauth-wireup), so a missing WORKSPACE_STATE_TABLE
-	// fails startup distinctly from an empty table. The legacy
-	// QURL_API_KEY env var is read once below as a per-workspace
-	// override for the breakglass / sandbox-test posture — see comment.
+	// DDBProvider reads the workspace_state table populated by
+	// /oauth/qurl/callback. Missing WORKSPACE_STATE_TABLE fails
+	// startup distinctly from an empty table.
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -164,9 +160,13 @@ func run() error {
 	// the internal handler stays unchanged.
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/", handler)
-	if oauthCfg, ok := buildOAuthConfig(ddbProvider); ok {
+	if oauthCfg, ok := buildOAuthConfig(signalCtx, ddbProvider); ok {
 		oauth.RegisterRoutes(rootMux, oauthCfg)
 		slog.Info("registered /oauth/qurl/{start,callback} routes")
+		handler.SetOAuthSetup(oauth.SetupConfig{
+			StateSecret:  oauthCfg.OAuthStateSecret,
+			SlackBaseURL: oauthCfg.SlackBaseURL,
+		})
 	} else {
 		slog.Warn("OAuth routes NOT registered — required env vars unset (AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE, SLACK_BASE_URL, OAUTH_STATE_SECRET)")
 	}
@@ -238,16 +238,26 @@ func run() error {
 	return nil
 }
 
+// minStateSecretBytes is the operator floor for OAUTH_STATE_SECRET. HMAC-
+// SHA256 will compute over any length, but a short operator-typed value
+// is the kind of weak-CSRF posture worth failing-fast on at startup
+// rather than discovering after a key-takeover incident.
+const minStateSecretBytes = 32
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
-// (cfg, false) when any required env var is missing — the caller logs
-// and skips route registration so a sandbox boot with no Auth0
-// configured still serves the existing Slack surface.
+// (cfg, false) when any required env var is missing or invalid —
+// the caller logs and skips route registration so a sandbox boot with
+// no Auth0 configured still serves the existing Slack surface.
 //
 // Required env vars:
 //
 //	AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE
-//	SLACK_BASE_URL, OAUTH_STATE_SECRET
-func buildOAuthConfig(provider *auth.DDBProvider) (oauth.Config, bool) {
+//	SLACK_BASE_URL, OAUTH_STATE_SECRET, QURL_ENDPOINT
+//
+// ctx is the parent context for the JWKS refresh goroutine spawned
+// inside NewJWKSVerifier — pass the signal-canceled context so the
+// goroutine tears down on SIGTERM.
+func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Config, bool) {
 	domain := os.Getenv("AUTH0_DOMAIN")
 	clientID := os.Getenv("AUTH0_CLIENT_ID")
 	clientSecret := os.Getenv("AUTH0_CLIENT_SECRET")
@@ -257,17 +267,22 @@ func buildOAuthConfig(provider *auth.DDBProvider) (oauth.Config, bool) {
 	qurlEndpoint := os.Getenv("QURL_ENDPOINT")
 
 	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
-		baseURL == "" || stateSecret == "" {
+		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {
+		return oauth.Config{}, false
+	}
+	if len(stateSecret) < minStateSecretBytes {
+		slog.Error("OAUTH_STATE_SECRET is shorter than required minimum",
+			"min_bytes", minStateSecretBytes, "got_bytes", len(stateSecret))
 		return oauth.Config{}, false
 	}
 
-	// JWKS verifier is initialized lazily (NewJWKSVerifier opens the
-	// network for the initial JWKS fetch). If it fails, the callback
-	// proceeds without email-claim verification — the qURL key still
-	// gets minted; only the success-page email line is missing.
+	// JWKS verifier opens the network for the initial JWKS fetch (bounded
+	// inside NewJWKSVerifier). If it fails, the callback proceeds without
+	// email-claim verification — the qURL key still gets minted; only the
+	// success-page email line is missing.
 	var verifier oauth.IDTokenVerifier
 	issuer := "https://" + domain + "/"
-	if v, err := oauth.NewJWKSVerifier(context.Background(), issuer, clientID); err != nil {
+	if v, err := oauth.NewJWKSVerifier(ctx, issuer, clientID); err != nil {
 		slog.Warn("JWKS verifier init failed — id_token email will not be displayed", "error", err)
 	} else {
 		verifier = v
@@ -283,8 +298,7 @@ func buildOAuthConfig(provider *auth.DDBProvider) (oauth.Config, bool) {
 		Provider:          provider,
 		IDTokenVerifier:   verifier,
 		Minter:            &oauth.HTTPAPIKeyMinter{BaseURL: qurlEndpoint},
-		// SlackClient left nil for now — DM-after-success is the
-		// `TODO(claude-followup)` Slack-API wiring; the success-page
-		// HTML still renders and the user gets confirmation.
+		// SlackClient left nil for now — DM-after-success Slack-API
+		// wiring is a follow-up; the success-page HTML still renders.
 	}, true
 }

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -116,6 +117,12 @@ type Handler struct {
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
+	// oauthSetup carries the runtime configuration the /qurl setup
+	// slash-command needs to mint a state token and build the /start
+	// URL. nil when the OAuth surface is not configured (sandbox /
+	// missing env vars) — /qurl setup returns a "not configured"
+	// ephemeral in that case rather than minting a useless link.
+	oauthSetup *oauth.SetupConfig
 	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
 	// context.Background()). Each async goroutine derives a
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
@@ -146,6 +153,18 @@ type Handler struct {
 	// returned value, which is the SSRF-sanitization pattern CodeQL's
 	// taint analysis recognizes.
 	validateResponseURLFn func(string) (*url.URL, error)
+}
+
+// SetOAuthSetup wires the per-workspace OAuth configuration into the
+// /qurl setup slash command. Called once by cmd/main.go after
+// buildOAuthConfig returns a valid config. Calling with an empty
+// secret or baseURL is a no-op (/qurl setup will reply that OAuth is
+// not configured).
+func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
+	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+		return
+	}
+	h.oauthSetup = &cfg
 }
 
 // NewHandler creates a new Slack handler.
@@ -374,14 +393,16 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	command := values.Get("command")
-	text := strings.TrimSpace(values.Get("text"))
+	command := values.Get(fieldCommand)
+	text := strings.TrimSpace(values.Get(fieldText))
 
 	slog.Info("slash command", "command", command, "text", text)
 
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, helpMessage())
+	case text == "setup":
+		h.handleSetup(w, values)
 	case strings.HasPrefix(text, "create "):
 		h.handleCreate(w, values)
 	case text == "list":
@@ -401,7 +422,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 }
 
 func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
-	text := strings.TrimSpace(values.Get("text"))
+	text := strings.TrimSpace(values.Get(fieldText))
 	targetURL := strings.TrimSpace(strings.TrimPrefix(text, "create "))
 
 	if targetURL == "" {
@@ -418,6 +439,33 @@ func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processList(ctx, log, values)
 	})
+}
+
+// handleSetup mints a workspace-bound state token and replies with the
+// /oauth/qurl/start URL. team_id + user_id come from the Slack form
+// payload, which has already passed signing-secret verification — that
+// chain is what binds workspace identity to the resulting state token
+// (the alternative, taking team_id from an unsigned query param at
+// /start, was the workspace-rebind primitive flagged in PR review).
+func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
+	if h.oauthSetup == nil {
+		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
+		return
+	}
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	userID := strings.TrimSpace(values.Get(fieldUserID))
+	if teamID == "" || userID == "" {
+		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
+		return
+	}
+	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
+	if err != nil {
+		slog.Error("/qurl setup: MintState failed", "error", err)
+		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
+		return
+	}
+	setupURL := h.oauthSetup.SetupURL(state)
+	respondSlack(w, "Click to connect qURL to your Slack workspace: <"+setupURL+"|Connect qURL>\n\nThis link is valid for 5 minutes and only works for you.")
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
@@ -460,6 +508,7 @@ func helpMessage() string {
 	return `*/qurl* — Create and manage qURLs from Slack
 
 *Commands:*
+• ` + "`/qurl setup`" + ` — Connect qURL to your Slack workspace (workspace admin only)
 • ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
 • ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
 • ` + "`/qurl help`" + ` — Show this help message`

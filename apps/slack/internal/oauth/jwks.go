@@ -10,10 +10,25 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
+const (
+	// jwksRefreshInterval bounds how often the cache will re-fetch the
+	// JWKS document from Auth0. Auth0's signing keys rotate at most
+	// every ~few months in practice — 15m is well under that horizon
+	// while keeping the per-task RPS against /.well-known/jwks.json
+	// well below 1 req/min.
+	jwksRefreshInterval = 15 * time.Minute
+	// jwksPrimeTimeout caps how long NewJWKSVerifier may wait on the
+	// initial refresh. If Auth0 is briefly unreachable at boot we'd
+	// rather start up degraded and warm the cache on the first /callback
+	// than wedge in init for the full request-timeout budget.
+	jwksPrimeTimeout = 5 * time.Second
+)
+
 // JWKSVerifier verifies Auth0 id_tokens against the tenant's JWKS at
-// https://<domain>/.well-known/jwks.json. Cache TTL is 1h by default —
-// JWKS rarely rotates, so a longer cache lowers Auth0 RPS without
-// meaningfully extending the post-revocation window.
+// https://<domain>/.well-known/jwks.json. The cache is refreshed at
+// jwksRefreshInterval; the refresh goroutine is rooted at the context
+// passed to NewJWKSVerifier so canceling it (typically SIGTERM via
+// signalCtx) tears the goroutine down with the rest of the server.
 type JWKSVerifier struct {
 	Issuer   string // e.g. "https://layerv.us.auth0.com/" — must end with "/"
 	Audience string // the Auth0 client_id
@@ -21,16 +36,24 @@ type JWKSVerifier struct {
 }
 
 // NewJWKSVerifier constructs a verifier and starts a background
-// cache-refresh goroutine for the JWKS URI. The returned ctx is the
-// parent for the refresh; cancel it on shutdown.
+// cache-refresh goroutine for the JWKS URI. The supplied ctx is the
+// parent for the refresh goroutine — callers must pass a context that
+// cancels on shutdown (e.g. the signal-canceled context from
+// signal.NotifyContext) so the goroutine doesn't outlive the process.
+//
+// The initial prime fetch is bounded by jwksPrimeTimeout so a briefly
+// unreachable Auth0 doesn't wedge startup; on prime-failure the
+// returned error is surfaced and the caller decides whether to fall
+// back to the no-verifier code path.
 func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifier, error) {
 	jwksURL := issuer + ".well-known/jwks.json"
 	c := jwk.NewCache(ctx)
-	if err := c.Register(jwksURL, jwk.WithMinRefreshInterval(15*time.Minute)); err != nil {
+	if err := c.Register(jwksURL, jwk.WithMinRefreshInterval(jwksRefreshInterval)); err != nil {
 		return nil, fmt.Errorf("register jwks: %w", err)
 	}
-	// Prime the cache so the first /callback doesn't pay a cold-start fetch.
-	if _, err := c.Refresh(ctx, jwksURL); err != nil {
+	primeCtx, cancel := context.WithTimeout(ctx, jwksPrimeTimeout)
+	defer cancel()
+	if _, err := c.Refresh(primeCtx, jwksURL); err != nil {
 		return nil, fmt.Errorf("refresh jwks: %w", err)
 	}
 	return &JWKSVerifier{Issuer: issuer, Audience: audience, cache: c}, nil

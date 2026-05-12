@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	auth0TokenTimeout = 15 * time.Second
-	dmTimeout         = 5 * time.Second
+	auth0TokenTimeout   = 15 * time.Second
+	dmTimeout           = 5 * time.Second
+	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 )
 
 // successPageTemplate mirrors the Discord-side success page
@@ -69,14 +70,13 @@ type successPageData struct {
 type auth0TokenResponse struct {
 	AccessToken string `json:"access_token"`
 	IDToken     string `json:"id_token"`
-	TokenType   string `json:"token_type"`
 }
 
 // Callback returns the http.HandlerFunc for GET /oauth/qurl/callback.
 //
 // Steps mirror the Discord LIVE flow (apps/discord/src/routes/qurl-oauth.js):
 //  1. Validate cookie + query.state via timing-safe compare.
-//  2. Validate the state's HMAC + recover teamID.
+//  2. Validate the state's HMAC + recover (teamID, userID).
 //  3. POST to Auth0 /oauth/token to exchange code → access_token + id_token.
 //  4. Verify id_token signature against Auth0 JWKS (non-fatal — success
 //     page renders without the email line if verify fails).
@@ -86,15 +86,9 @@ type auth0TokenResponse struct {
 //  7. DM the admin (fire-and-forget; failure doesn't block the page).
 //  8. Render success HTML.
 //
-// even at this length — every branch is a single early-return error path,
-// and splitting into separate funcs would obscure the linear flow.
-//
-//nolint:gocognit,gocyclo // the linear OAuth callback shape is straightforward
-func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
+//nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API-surface friction.
+func Callback(cfg Config) http.HandlerFunc {
+	now := cfg.now()
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: auth0TokenTimeout}
@@ -107,13 +101,13 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 			return
 		}
 
-		// Step 1: extract query params + Auth0-side error pass-through.
 		q := r.URL.Query()
 		if errParam := q.Get("error"); errParam != "" {
-			slog.Warn("oauth/callback Auth0 returned error", //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			//nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			slog.Warn("oauth/callback Auth0 returned error",
 				"error", errParam,
 				"error_description", q.Get("error_description"))
-			http.Error(w, "authorization declined", http.StatusBadRequest)
+			http.Error(w, "authorization declined — run /qurl setup again to retry", http.StatusBadRequest)
 			return
 		}
 		code := q.Get("code")
@@ -123,24 +117,27 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 			return
 		}
 
-		// Step 2: double-submit cookie check.
 		cookieState := readStateCookie(r)
 		if cookieState == "" {
 			slog.Warn("oauth/callback missing state cookie")
+			clearStateCookie(w)
 			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
 			return
 		}
 		if len(cookieState) != len(stateParam) ||
 			!hmac.Equal([]byte(cookieState), []byte(stateParam)) {
 			slog.Warn("oauth/callback cookie/state mismatch")
+			clearStateCookie(w)
 			http.Error(w, "setup must be completed in the same browser", http.StatusBadRequest)
 			return
 		}
 
-		// Step 2b: HMAC + expiry on the state token itself.
-		teamID, err := verifyState(cfg.OAuthStateSecret, stateParam, now())
+		// HMAC + expiry on the state token itself; the cookie check
+		// above proves "same browser" but not "minted by us".
+		verified, err := VerifyState(cfg.OAuthStateSecret, stateParam, now())
 		if err != nil {
-			slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+			slog.Warn("oauth/callback rejected invalid state", "reason", err.Error()) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			clearStateCookie(w)
 			http.Error(w, "invalid or expired setup link", http.StatusBadRequest)
 			return
 		}
@@ -148,86 +145,115 @@ func Callback(cfg Config) http.HandlerFunc { //nolint:gocritic // hugeParam: Con
 		// Cookie has done its job — clear so a refresh can't re-bind.
 		clearStateCookie(w)
 
-		// Step 3: Auth0 token exchange.
 		accessToken, idToken, err := exchangeAuth0Code(r.Context(), httpClient, cfg, code)
 		if err != nil {
 			slog.Error("oauth/callback Auth0 token exchange failed", "error", err)
-			http.Error(w, "authorization failed", http.StatusBadGateway)
+			http.Error(w, "authorization failed — run /qurl setup again to retry", http.StatusBadGateway)
 			return
 		}
 
-		// Step 4: verify id_token (best-effort).
+		// id_token verification is best-effort; failure suppresses the
+		// success-page email line but never blocks key mint or persist.
 		var qurlEmail string
 		if idToken != "" && cfg.IDTokenVerifier != nil {
 			email, verr := cfg.IDTokenVerifier.VerifyEmail(r.Context(), idToken)
-			switch {
-			case verr != nil:
+			if verr != nil {
 				slog.Warn("oauth/callback id_token verify failed (non-fatal)", "error", verr)
-			default:
+			} else {
 				qurlEmail = email
 			}
 		}
 
-		// Step 5: mint qURL API key.
-		keyName := "Slack workspace " + teamID
-		apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(r.Context(), accessToken,
-			keyName, []string{"qurl:read", "qurl:write"})
-		if err != nil {
-			slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-			http.Error(w, "could not provision qURL key", http.StatusBadGateway)
+		keyPrefix, ok := mintAndPersist(w, r.Context(), cfg, accessToken, verified.TeamID, verified.UserID)
+		if !ok {
 			return
 		}
 
-		// Step 6: persist. On failure, best-effort revoke + 500 to user.
-		configuredBy := r.URL.Query().Get("admin_user") // optional hint; Slack OAuth provides via separate channel
-		if perr := cfg.Provider.SetAPIKey(r.Context(), teamID, apiKey, configuredBy); perr != nil {
-			slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
-				"error", perr, "team_id", teamID, "key_id", keyID)
-			// Fire-and-forget revoke. Using a fresh context (not r.Context())
-			// because the request context may be canceling by the time we
-			// get to write the error response; we still want the revoke to
-			// run to bound the orphan-key window.
-			go func() {
-				revokeCtx, cancel := context.WithTimeout(context.Background(), auth0TokenTimeout)
-				defer cancel()
-				if rerr := cfg.Minter.RevokeAPIKey(revokeCtx, accessToken, keyID); rerr != nil {
-					slog.Warn("oauth/callback orphan-key revoke failed",
-						"error", rerr, "key_id", keyID, "team_id", teamID)
-				}
-			}()
-			http.Error(w, "qURL key provisioned but not stored — run setup again", http.StatusInternalServerError)
-			return
+		slog.Info("oauth/callback completed", "team_id", verified.TeamID, "user_id", verified.UserID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+
+		// DM target is the Slack user_id from the signed state — never
+		// from an unsigned query parameter.
+		if cfg.SlackClient != nil {
+			//nolint:gosec // G118: deliberate fresh context. r.Context() cancels as soon as we render the success page, but the DM is fire-and-forget and should outlive the response.
+			go dmAdminAsync(cfg.SlackClient, verified.UserID, verified.TeamID, keyPrefix)
 		}
 
-		slog.Info("oauth/callback completed", "team_id", teamID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog's JSON handler escapes control bytes in attribute values, same posture as the request-path slog sites.
+		renderSuccess(w, verified.TeamID, keyPrefix, qurlEmail)
+	}
+}
 
-		// Step 7: DM the admin (fire-and-forget; failure non-fatal).
-		if cfg.SlackClient != nil && configuredBy != "" {
-			go func() {
-				dmCtx, cancel := context.WithTimeout(context.Background(), dmTimeout)
-				defer cancel()
-				msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl create`."
-				if keyPrefix != "" {
-					msg += "\nKey prefix: `" + keyPrefix + "`"
-				}
-				if derr := cfg.SlackClient.PostDirectMessage(dmCtx, configuredBy, msg); derr != nil {
-					slog.Warn("oauth/callback DM failed", "error", derr, "user_id", configuredBy)
-				}
-			}()
-		}
+// mintAndPersist runs steps 5 + 6: mint key on qurl-service, persist via
+// WorkspaceStore, fire-and-forget revoke if persist fails. Returns
+// (keyPrefix, true) on success; on failure writes the HTTP error response
+// and returns (_, false).
+//
+// Extracted so Callback stays straight-line and the linter doesn't need
+// gocognit/gocyclo suppressors.
+//
+//nolint:gocritic // hugeParam: see Callback — Config is value-passed.
+func mintAndPersist(w http.ResponseWriter, ctx context.Context, cfg Config, accessToken, teamID, userID string) (string, bool) {
+	keyName := "Slack workspace " + teamID
+	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(ctx, accessToken,
+		keyName, APIKeyScopes)
+	if err != nil {
+		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)
+		return "", false
+	}
 
-		// Step 8: success HTML.
-		renderSuccess(w, teamID, keyPrefix, qurlEmail)
+	if perr := cfg.Provider.SetAPIKey(ctx, teamID, apiKey, userID); perr != nil {
+		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+			"error", perr, "team_id", teamID, "key_id", keyID)
+		// Fire-and-forget revoke. Using a fresh context (not the request
+		// context) because the request context may be canceling by the
+		// time we get to write the error response; we still want the
+		// revoke to run to bound the orphan-key window.
+		//nolint:gosec // G118: deliberate fresh context — see comment above.
+		go revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
+		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
+		return "", false
+	}
+	return keyPrefix, true
+}
+
+func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), auth0TokenTimeout)
+	defer cancel()
+	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		slog.Warn("oauth/callback orphan-key revoke failed",
+			"error", err, "key_id", keyID, "team_id", teamID)
+	}
+}
+
+func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
+	if userID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dmTimeout)
+	defer cancel()
+	msg := "qURL is connected to your Slack workspace. Your team can now use `/qurl create`."
+	if keyPrefix != "" {
+		msg += "\nKey prefix: `" + keyPrefix + "`"
+	}
+	if err := client.PostDirectMessage(ctx, userID, msg); err != nil {
+		slog.Warn("oauth/callback DM failed", "error", err, "user_id", userID, "team_id", teamID)
 	}
 }
 
 func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
-	// html/template handles all escaping. teamID is also teamIDPattern-
-	// validated upstream, keyPrefix comes from qurl-service's JSON
-	// response, email is JWKS-verified — but the template's context-aware
-	// auto-escape is the load-bearing XSS defense here.
+	// html/template handles all escaping. teamID is HMAC-verified upstream;
+	// keyPrefix comes from qurl-service's JSON response; email is JWKS-
+	// verified — but the template's context-aware auto-escape is the
+	// load-bearing XSS defense here.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	// Defense-in-depth headers: success page is rendered post-auth so it
+	// shouldn't be framable (clickjacking), shouldn't leak the URL via
+	// Referer to anything the page links to, and shouldn't load any
+	// off-origin resources beyond the inline style.
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
 	if err := successPageTemplate.Execute(w, successPageData{
 		TeamID:    teamID,
@@ -250,7 +276,7 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 	form.Set("client_id", cfg.Auth0ClientID)
 	form.Set("client_secret", cfg.Auth0ClientSecret)
 
-	tokenURL := "https://" + cfg.Auth0Domain + "/oauth/token"
+	tokenURL := (&url.URL{Scheme: "https", Host: cfg.Auth0Domain, Path: "/oauth/token"}).String()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", "", fmt.Errorf("new request: %w", err)
@@ -263,9 +289,12 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 		return "", "", fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
+		// Drain any unread bytes (e.g. the >limit reject path below)
+		// so the connection can be reused under keep-alive.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, auth0TokenBodyLimit))
 	if err != nil {
 		return "", "", fmt.Errorf("read body: %w", err)
 	}

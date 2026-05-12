@@ -102,3 +102,45 @@ func TestKMSEncryptorSealGenErrorPropagates(t *testing.T) {
 		t.Fatal("want error, got nil")
 	}
 }
+
+// TestKMSEncryptorOpenRejectsTruncatedCiphertext exercises the short-
+// ciphertext guard. A ciphertext shorter than the GCM nonce can only
+// arise from a corrupted DDB row; we surface it before attempting
+// AES-GCM open so the error message is useful for incident response.
+func TestKMSEncryptorOpenRejectsTruncatedCiphertext(t *testing.T) {
+	enc := &KMSEncryptor{
+		Client: &fakeKMS{dataKey: make([]byte, 32), wrappedBlob: []byte("wrapped")},
+		KeyID:  testKMSKeyARN,
+	}
+	// gcmNonceSize is 12; 5 bytes is unambiguously too short.
+	if _, err := enc.Open(context.Background(), []byte("short"), []byte("wrapped"), nil); err == nil {
+		t.Fatal("expected truncated-ciphertext error")
+	}
+}
+
+// TestKMSEncryptorEncryptionContextWorkspaceID locks the CloudTrail-
+// visible attribute name. A renamed key would silently break attribution
+// across versions; pinning the wire-side name catches that.
+func TestKMSEncryptorEncryptionContextWorkspaceID(t *testing.T) {
+	captured := &capturingKMS{fakeKMS: fakeKMS{dataKey: make([]byte, 32), wrappedBlob: []byte("wrapped")}}
+	enc := &KMSEncryptor{Client: captured, KeyID: testKMSKeyARN}
+	if _, _, err := enc.Seal(context.Background(), []byte("pt"), []byte("T123ABCDEF")); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if got := captured.lastContext["workspace_id"]; got != "T123ABCDEF" {
+		t.Errorf("EncryptionContext[workspace_id]: got %q want %q", got, "T123ABCDEF")
+	}
+	if _, ok := captured.lastContext["aad"]; ok {
+		t.Error("legacy EncryptionContext[aad] should no longer be set")
+	}
+}
+
+type capturingKMS struct {
+	fakeKMS
+	lastContext map[string]string
+}
+
+func (c *capturingKMS) GenerateDataKey(ctx context.Context, in *kms.GenerateDataKeyInput, opts ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
+	c.lastContext = in.EncryptionContext
+	return c.fakeKMS.GenerateDataKey(ctx, in, opts...)
+}

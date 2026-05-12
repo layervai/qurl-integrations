@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -45,6 +46,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 )
+
+// kmsWorkspaceAADKey is the CloudTrail-visible name for the workspace
+// identifier in KMS EncryptionContext. The fixed key matches what
+// CloudTrail records on every Decrypt call, which is the discriminator
+// incident responders use to attribute a Decrypt to a workspace without
+// needing to fetch the DDB row.
+const kmsWorkspaceAADKey = "workspace_id"
 
 // Attribute names on the `workspace_state` DDB table. Mirrored on the
 // qurl-integrations-infra side in the TF for the table schema; changing
@@ -205,9 +213,12 @@ func (p *DDBProvider) APIKey(ctx context.Context, workspaceID string) (string, e
 		return "", errors.New("DDBProvider.APIKey: workspaceID is empty")
 	}
 
+	// Eventually-consistent read is correct here: the per-workspace key
+	// only changes on (re-)install, and the few-ms propagation delay is
+	// inside the same "click the setup link" window. Strong reads would
+	// double RCU cost without changing the failure modes that matter.
 	out, err := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:      aws.String(p.TableName),
-		ConsistentRead: aws.Bool(true),
+		TableName: aws.String(p.TableName),
 		Key: map[string]ddbtypes.AttributeValue{
 			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		},
@@ -251,29 +262,49 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: encrypt: %w", err)
 	}
 
-	now := p.now().UTC().Format(time.RFC3339)
+	// Pre-flight GetItem serves two purposes on this rare path:
+	//   1. Preserve the original configured_at on key rotation — otherwise
+	//      every rotation would overwrite the first-install timestamp and
+	//      the audit trail loses the install date.
+	//   2. Emit a warn line on overwrite so operator dashboards can
+	//      distinguish first-installs from rotation churn.
+	// The install path is invoked once per workspace, so doubling the RTT
+	// here is a non-issue.
+	existing, getErr := p.Client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(p.TableName),
+		Key: map[string]ddbtypes.AttributeValue{
+			attrTeamID: &ddbtypes.AttributeValueMemberS{Value: workspaceID},
+		},
+	})
+	overwriting := getErr == nil && existing != nil && len(existing.Item) > 0
+
+	now := p.Now().UTC().Format(time.RFC3339)
+	configuredAt := now
+	if overwriting {
+		if prev, ok := existing.Item[attrConfiguredAt].(*ddbtypes.AttributeValueMemberS); ok && prev.Value != "" {
+			configuredAt = prev.Value
+		}
+	}
 	item := map[string]ddbtypes.AttributeValue{
 		attrTeamID:       &ddbtypes.AttributeValueMemberS{Value: workspaceID},
 		attrQURLAPIKey:   &ddbtypes.AttributeValueMemberB{Value: ct},
 		attrDataKeyCT:    &ddbtypes.AttributeValueMemberB{Value: wrapped},
 		attrConfiguredBy: &ddbtypes.AttributeValueMemberS{Value: configuredBy},
 		attrUpdatedAt:    &ddbtypes.AttributeValueMemberS{Value: now},
+		attrConfiguredAt: &ddbtypes.AttributeValueMemberS{Value: configuredAt},
 	}
-	// On first install, set configured_at; on subsequent rotations leave
-	// it untouched. Use attribute_not_exists on the PK to discriminate
-	// upsert-vs-insert without a separate GetItem hop.
-	//
-	// In practice we just always set configured_at on PutItem — the
-	// rotation case is rare and the operator value of "exact first-install
-	// timestamp" is low. If we ever care, switch to UpdateItem with
-	// `if_not_exists(configured_at, :now)`.
-	item[attrConfiguredAt] = &ddbtypes.AttributeValueMemberS{Value: now}
 
 	if _, err := p.Client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(p.TableName),
 		Item:      item,
 	}); err != nil {
 		return fmt.Errorf("DDBProvider.SetAPIKey: PutItem: %w", err)
+	}
+	if overwriting {
+		//nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace row",
+			"workspace_id", workspaceID,
+			"configured_by", configuredBy)
 	}
 	return nil
 }
@@ -294,14 +325,6 @@ func (p *DDBProvider) DeleteAPIKey(ctx context.Context, workspaceID string) erro
 		return fmt.Errorf("DDBProvider.DeleteAPIKey: DeleteItem: %w", err)
 	}
 	return nil
-}
-
-// now centralizes the time-source so tests can pin it.
-func (p *DDBProvider) now() time.Time {
-	if p.Now != nil {
-		return p.Now()
-	}
-	return time.Now()
 }
 
 // --- KMSEncryptor ----------------------------------------------------------
@@ -332,7 +355,7 @@ func (e *KMSEncryptor) Seal(ctx context.Context, plaintext, aad []byte) (ciphert
 	dkOut, err := e.Client.GenerateDataKey(ctx, &kms.GenerateDataKeyInput{
 		KeyId:             aws.String(e.KeyID),
 		KeySpec:           kmstypes.DataKeySpecAes256,
-		EncryptionContext: map[string]string{"aad": string(aad)},
+		EncryptionContext: map[string]string{kmsWorkspaceAADKey: string(aad)},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("KMSEncryptor.Seal: GenerateDataKey: %w", err)
@@ -363,7 +386,7 @@ func (e *KMSEncryptor) Open(ctx context.Context, ciphertext, wrappedKey, aad []b
 	decOut, err := e.Client.Decrypt(ctx, &kms.DecryptInput{
 		CiphertextBlob:    wrappedKey,
 		KeyId:             aws.String(e.KeyID),
-		EncryptionContext: map[string]string{"aad": string(aad)},
+		EncryptionContext: map[string]string{kmsWorkspaceAADKey: string(aad)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("KMSEncryptor.Open: KMS Decrypt: %w", err)

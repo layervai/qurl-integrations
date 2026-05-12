@@ -15,15 +15,19 @@ func newStartCfg() Config {
 		Auth0ClientID:    testAuth0ClientID,
 		Auth0Audience:    "https://api.qurl.invalid",
 		SlackBaseURL:     "https://slack-bot.example",
-		OAuthStateSecret: []byte("test-secret"),
+		OAuthStateSecret: testSecret,
 		Now:              func() time.Time { return time.Unix(1700000000, 0) },
 	}
 }
 
 func TestStartHappyPath(t *testing.T) {
 	cfg := newStartCfg()
+	state, err := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, cfg.Now())
+	if err != nil {
+		t.Fatalf("MintState: %v", err)
+	}
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 
@@ -52,6 +56,9 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("audience") != "https://api.qurl.invalid" {
 		t.Errorf("audience: %q", q.Get("audience"))
 	}
+	if q.Get("prompt") != "consent" {
+		t.Errorf("prompt: got %q want %q (rotation forces consent)", q.Get("prompt"), "consent")
+	}
 	if !strings.Contains(q.Get("scope"), "qurl:write") || !strings.Contains(q.Get("scope"), "qurl:read") {
 		t.Errorf("scope missing qurl:write/read: %q", q.Get("scope"))
 	}
@@ -61,8 +68,8 @@ func TestStartHappyPath(t *testing.T) {
 	if q.Get("redirect_uri") != "https://slack-bot.example/oauth/qurl/callback" {
 		t.Errorf("redirect_uri: %q", q.Get("redirect_uri"))
 	}
-	if q.Get("state") == "" {
-		t.Error("state missing")
+	if q.Get("state") != state {
+		t.Errorf("state: got %q want %q (must pass through the signed state)", q.Get("state"), state)
 	}
 
 	// Cookie set with the same state, HttpOnly + Lax.
@@ -76,8 +83,8 @@ func TestStartHappyPath(t *testing.T) {
 	if stateCookie == nil {
 		t.Fatal("state cookie not set")
 	}
-	if stateCookie.Value != q.Get("state") {
-		t.Errorf("cookie != query state: %q vs %q", stateCookie.Value, q.Get("state"))
+	if stateCookie.Value != state {
+		t.Errorf("cookie != state: %q vs %q", stateCookie.Value, state)
 	}
 	if !stateCookie.HttpOnly {
 		t.Error("cookie must be HttpOnly")
@@ -88,25 +95,71 @@ func TestStartHappyPath(t *testing.T) {
 	if !stateCookie.Secure {
 		t.Error("cookie must be Secure")
 	}
+	if stateCookie.Path != "/oauth/qurl" {
+		t.Errorf("cookie path: got %q want %q (tightened from /oauth)", stateCookie.Path, "/oauth/qurl")
+	}
 }
 
-func TestStartRejectsBadTeam(t *testing.T) {
-	for _, in := range []string{"", "foo", "t123abcdef", "T123", "X12345678"} {
-		cfg := newStartCfg()
-		h := Start(cfg)
-		req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team="+url.QueryEscape(in), http.NoBody)
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("team=%q: got %d want 400", in, rec.Code)
-		}
+func TestStartRejectsMissingState(t *testing.T) {
+	cfg := newStartCfg()
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start", http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d want 400", rec.Code)
+	}
+}
+
+func TestStartRejectsRawTeamQuery(t *testing.T) {
+	// The unsigned `?team=` form used to mint state on the server side;
+	// after the origin-binding refactor it has no special meaning. The
+	// request fails as "missing state".
+	cfg := newStartCfg()
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d want 400", rec.Code)
+	}
+}
+
+func TestStartRejectsTamperedState(t *testing.T) {
+	cfg := newStartCfg()
+	state, _ := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, cfg.Now())
+	// Flip a byte in the encoded state to invalidate the HMAC.
+	tampered := state[:len(state)-1] + "A"
+	if tampered == state {
+		tampered = "A" + state[1:]
+	}
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(tampered), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d want 400", rec.Code)
+	}
+}
+
+func TestStartRejectsExpiredState(t *testing.T) {
+	cfg := newStartCfg()
+	old := cfg.Now()
+	state, _ := MintState(cfg.OAuthStateSecret, testStateTeamID, testStateUserID, old)
+	cfg.Now = func() time.Time { return old.Add(10 * time.Minute) }
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state="+url.QueryEscape(state), http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d want 400", rec.Code)
 	}
 }
 
 func TestStartRejectsWrongMethod(t *testing.T) {
 	cfg := newStartCfg()
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodPost, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
+	req := httptest.NewRequest(http.MethodPost, "/oauth/qurl/start?state=anything", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -118,7 +171,19 @@ func TestStartRefusesWithoutSecret(t *testing.T) {
 	cfg := newStartCfg()
 	cfg.OAuthStateSecret = nil
 	h := Start(cfg)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?team=T123ABCDEF", http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state=anything", http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("got %d want 503", rec.Code)
+	}
+}
+
+func TestStartRefusesWithShortSecret(t *testing.T) {
+	cfg := newStartCfg()
+	cfg.OAuthStateSecret = []byte("too-short")
+	h := Start(cfg)
+	req := httptest.NewRequest(http.MethodGet, "/oauth/qurl/start?state=anything", http.NoBody)
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {

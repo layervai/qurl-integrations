@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -457,6 +458,89 @@ func TestHandle_MalformedEventJSON_Returns200(t *testing.T) {
 	}
 	if result["ok"] != "true" {
 		t.Errorf("malformed JSON event: body = %q, want ok=true", w.Body.String())
+	}
+}
+
+// TestSlashCommandSetup_RepliesWithStartURL exercises the /qurl setup
+// subcommand path: SetOAuthSetup wires the state secret + base URL,
+// /qurl setup mints a signed state from the slash-command-verified
+// team_id + user_id, and replies ephemerally with a /oauth/qurl/start
+// URL carrying that state. The URL-encoded state must round-trip
+// through oauth.VerifyState — that's the bridge from Slack's signing
+// secret to the OAuth callback's HMAC.
+func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	secret := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	h.SetOAuthSetup(oauth.SetupConfig{StateSecret: secret, SlackBaseURL: "https://slack-bot.example"})
+	// newTestHandler already pins h.now to fixedNow, which is the clock
+	// /qurl setup uses to mint state.
+
+	body := url.Values{
+		"command": {"/qurl"},
+		"text":    {"setup"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["response_type"] != "ephemeral" {
+		t.Errorf("response_type: got %q want ephemeral", result["response_type"])
+	}
+	text := result["text"]
+	if !strings.Contains(text, "https://slack-bot.example/oauth/qurl/start?state=") {
+		t.Fatalf("missing /start URL in setup reply: %q", text)
+	}
+
+	// Extract the state query value and verify it parses through the
+	// oauth package — that's the load-bearing property of this whole
+	// flow.
+	start := strings.Index(text, "state=")
+	if start < 0 {
+		t.Fatalf("no state= in reply: %q", text)
+	}
+	rest := text[start+len("state="):]
+	end := strings.IndexAny(rest, "|>") // strip Slack mrkdwn link suffix.
+	if end >= 0 {
+		rest = rest[:end]
+	}
+	stateRaw, err := url.QueryUnescape(rest)
+	if err != nil {
+		t.Fatalf("unescape state: %v", err)
+	}
+	if _, err := oauth.VerifyState(secret, stateRaw, fixedNow.Add(30*time.Second)); err != nil {
+		t.Errorf("minted state failed VerifyState: %v", err)
+	}
+}
+
+func TestSlashCommandSetup_RepliesNotConfiguredWhenOAuthOff(t *testing.T) {
+	h := newTestHandler(t, noopQURLServer(t))
+	// SetOAuthSetup deliberately NOT called → oauthSetup == nil.
+	body := url.Values{
+		"command": {"/qurl"},
+		"text":    {"setup"},
+		"team_id": {"T123ABCDEF"},
+		"user_id": {"U_ADMIN1"},
+	}.Encode()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", w.Code, w.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.Contains(result["text"], "not configured") {
+		t.Errorf("expected 'not configured' reply, got %q", result["text"])
 	}
 }
 

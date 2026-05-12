@@ -158,11 +158,12 @@ func TestDDBProviderAPIKey(t *testing.T) {
 
 func TestDDBProviderSetAPIKey(t *testing.T) {
 	ddb := &fakeDDBClient{}
+	fixedNow := time.Unix(1700000000, 0).UTC()
 	p := &DDBProvider{
 		Client:    ddb,
 		TableName: "ws",
 		Encryptor: &passthroughEncryptor{},
-		Now:       func() time.Time { return time.Unix(1700000000, 0).UTC() },
+		Now:       func() time.Time { return fixedNow },
 	}
 	err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_xxx", "U_ADMIN")
 	if err != nil {
@@ -183,6 +184,50 @@ func TestDDBProviderSetAPIKey(t *testing.T) {
 	}
 	if v, ok := item[attrConfiguredBy].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != "U_ADMIN" {
 		t.Errorf("configured_by wrong: %v", item[attrConfiguredBy])
+	}
+	wantTS := fixedNow.Format(time.RFC3339)
+	if v, ok := item[attrUpdatedAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantTS {
+		t.Errorf("updated_at wrong: got %v want %q", item[attrUpdatedAt], wantTS)
+	}
+	if v, ok := item[attrConfiguredAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantTS {
+		t.Errorf("configured_at wrong: got %v want %q", item[attrConfiguredAt], wantTS)
+	}
+}
+
+// TestDDBProviderSetAPIKeyPreservesConfiguredAt locks the rotation
+// contract: when a row already exists, configured_at retains its
+// original value (the install timestamp) while updated_at moves to
+// "now". A rotation that wiped configured_at would silently destroy
+// audit trail.
+func TestDDBProviderSetAPIKeyPreservesConfiguredAt(t *testing.T) {
+	original := "2026-01-01T00:00:00Z"
+	ddb := &fakeDDBClient{
+		getOutput: &dynamodb.GetItemOutput{
+			Item: map[string]ddbtypes.AttributeValue{
+				attrTeamID:       &ddbtypes.AttributeValueMemberS{Value: testTeamID},
+				attrQURLAPIKey:   &ddbtypes.AttributeValueMemberB{Value: []byte("old-ct")},
+				attrDataKeyCT:    &ddbtypes.AttributeValueMemberB{Value: []byte(passthroughWrappedKey)},
+				attrConfiguredAt: &ddbtypes.AttributeValueMemberS{Value: original},
+			},
+		},
+	}
+	rotatedAt := time.Unix(1800000000, 0).UTC()
+	p := &DDBProvider{
+		Client:    ddb,
+		TableName: "ws",
+		Encryptor: &passthroughEncryptor{},
+		Now:       func() time.Time { return rotatedAt },
+	}
+	if err := p.SetAPIKey(context.Background(), testTeamID, "lv_live_new", "U_ADMIN2"); err != nil {
+		t.Fatalf("SetAPIKey: %v", err)
+	}
+	item := ddb.putInput.Item
+	if v, ok := item[attrConfiguredAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != original {
+		t.Errorf("configured_at must preserve original on rotation: got %v want %q", item[attrConfiguredAt], original)
+	}
+	wantUpdated := rotatedAt.Format(time.RFC3339)
+	if v, ok := item[attrUpdatedAt].(*ddbtypes.AttributeValueMemberS); !ok || v.Value != wantUpdated {
+		t.Errorf("updated_at must move to rotation time: got %v want %q", item[attrUpdatedAt], wantUpdated)
 	}
 }
 

@@ -2,12 +2,14 @@
 // (/oauth/qurl/start and /oauth/qurl/callback).
 //
 // The flow mirrors the LIVE Discord flow at
-// apps/discord/src/routes/qurl-oauth.js — admin clicks a link in the
-// /qurl setup ephemeral reply, /start sets a double-submit CSRF cookie
-// and 302s to Auth0, Auth0 redirects to /callback with `code` + `state`,
-// /callback exchanges the code for an access_token, verifies the
-// id_token against Auth0's JWKS, mints a workspace-scoped qURL API key
-// via POST /v1/api-keys, persists it via DDBProvider, and DMs the admin.
+// apps/discord/src/routes/qurl-oauth.js — admin runs /qurl setup, the
+// slash-command handler (signature-verified by Slack) mints a signed
+// state token and replies with a link to /start. /start verifies the
+// state token, sets a double-submit CSRF cookie and 302s to Auth0.
+// Auth0 redirects to /callback with `code` + `state`. /callback exchanges
+// the code for an access_token, verifies the id_token against Auth0's
+// JWKS, mints a workspace-scoped qURL API key via POST /v1/api-keys,
+// persists it via DDBProvider, and DMs the admin.
 //
 // The Slack handler is HTTP-only — no Slack-app-distribution OAuth (the
 // Slack workspace install side) is handled here; the API key it stores
@@ -19,19 +21,42 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
 
-// Route paths exposed by RegisterRoutes. Kept here (not callback.go /
-// start.go) so a single import lists the public surface, and so the
-// redirect_uri assembled in callback.go / authorizeURL stays in lockstep
-// with the mux registration below.
+// Route paths exposed by RegisterRoutes. StartPath is exported so the
+// /qurl setup slash-command handler in package internal builds the
+// setup-link URL from the same constant the mux registers — drift
+// between the two would silently 404 every setup attempt.
 const (
-	startPath    = "/oauth/qurl/start"
+	StartPath    = "/oauth/qurl/start"
 	callbackPath = "/oauth/qurl/callback"
 )
+
+// APIKeyScopes is the qurl-service scope set the callback requests for
+// the workspace API key. authorizeURL also weaves "openid email" in
+// for the id_token email claim consumed by the success page.
+var APIKeyScopes = []string{"qurl:read", "qurl:write"}
+
+// SetupConfig is the slice of runtime configuration the /qurl setup
+// slash-command handler needs to mint a state token and build the link
+// to /start. Carrying its own struct (vs accepting Config) keeps the
+// slash-command surface decoupled from the OAuth-handler surface — a
+// future addition like SetupLinkTTL only changes one signature.
+type SetupConfig struct {
+	StateSecret  []byte
+	SlackBaseURL string
+}
+
+// SetupURL builds the /qurl setup link from the supplied state token.
+// The path is owned by package oauth (StartPath) so handlers in other
+// packages don't drift on it.
+func (s SetupConfig) SetupURL(state string) string {
+	return s.SlackBaseURL + StartPath + "?state=" + url.QueryEscape(state)
+}
 
 // SlackClient is the slice of slack-API surface the callback uses to DM
 // the admin after a successful key mint. Interface so tests don't need
@@ -78,8 +103,8 @@ type Config struct {
 	SlackBaseURL string
 
 	// OAuthStateSecret is the HMAC-SHA256 key used to mint and verify
-	// the `state` token threaded through Auth0. Operator-set; if empty
-	// the constructor refuses.
+	// the `state` token threaded through Auth0. Operator-set; the
+	// constructor refuses anything shorter than stateMinSecret.
 	OAuthStateSecret []byte
 
 	// Provider is the DDB-backed key store. The callback handler calls
@@ -102,8 +127,20 @@ type Config struct {
 	// &http.Client{Timeout: 15s}.
 	HTTPClient *http.Client
 
-	// Now is injected for test-time clock pinning.
+	// Now is injected for test-time clock pinning. Nil → time.Now.
 	Now func() time.Time
+}
+
+// now returns Now() or time.Now if unset. Centralizing here so handlers
+// don't each carry a `now := cfg.Now; if now == nil { now = time.Now }`
+// preamble.
+//
+//nolint:gocritic // hugeParam: Config is value-passed across the package for the API-surface reasons documented in Callback; same posture here.
+func (c Config) now() func() time.Time {
+	if c.Now != nil {
+		return c.Now
+	}
+	return time.Now
 }
 
 // WorkspaceStore is the write-path the callback hits after a successful
@@ -126,11 +163,18 @@ var _ WorkspaceStore = (*auth.DDBProvider)(nil)
 //
 //nolint:gocritic // hugeParam: Config is value-passed at startup once; pointer churn here isn't worth the API surface friction.
 func RegisterRoutes(mux *http.ServeMux, cfg Config) {
-	mux.HandleFunc(startPath, Start(cfg))
+	mux.HandleFunc(StartPath, Start(cfg))
 	mux.HandleFunc(callbackPath, Callback(cfg))
 }
 
 // authorizeURL composes the Auth0 /authorize redirect target.
+//
+// prompt=consent matches the Discord rotation contract: even though the
+// signed-state-token round-trip already enforces same-user origin
+// binding, an admin re-running /qurl setup to rotate keys would
+// otherwise hit Auth0's silent-consent shortcut and skip the user-facing
+// confirmation. Forcing consent keeps the surface predictable: every
+// /qurl setup ends in a fresh Auth0 prompt → new key → new DDB row.
 //
 //nolint:gocritic // hugeParam: value-passed in line with the rest of the package's posture; see Callback.
 func authorizeURL(cfg Config, state string) string {
@@ -144,11 +188,12 @@ func authorizeURL(cfg Config, state string) string {
 	q.Set("client_id", cfg.Auth0ClientID)
 	q.Set("audience", cfg.Auth0Audience)
 	// Scope set is symmetric with the Discord flow (qurl-oauth.js):
-	// qurl:write + qurl:read for the API-key mint, openid + email for
-	// the id_token claim used in the success-page binding readout.
-	q.Set("scope", "qurl:write qurl:read openid email")
+	// APIKeyScopes for the qurl-service mint, openid + email for the
+	// id_token claim used in the success-page binding readout.
+	q.Set("scope", strings.Join(APIKeyScopes, " ")+" openid email")
 	q.Set("redirect_uri", cfg.SlackBaseURL+callbackPath)
 	q.Set("state", state)
+	q.Set("prompt", "consent")
 	u.RawQuery = q.Encode()
 	return u.String()
 }

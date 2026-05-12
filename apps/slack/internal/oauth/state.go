@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,26 +10,36 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // State token format:
 //
-//	base64url( teamID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
+//	base64url( teamID + "|" + userID + "|" + nonce + "|" + unix_timestamp + "|" + hmac_hex )
 //
-// where hmac_hex = HMAC-SHA256(secret, teamID + "|" + nonce + "|" + ts).
+// where hmac_hex = HMAC-SHA256(secret, teamID + "|" + userID + "|" + nonce + "|" + ts).
 //
-// We keep the parts un-hashed so the callback can recover teamID from
-// the state itself (it isn't stored in the cookie). The HMAC binds the
-// triple so the callback rejects any tampered or forged state value.
+// teamID + userID are carried in the signed payload (recovered at
+// /callback) so the workspace identity isn't taken from an unsigned
+// query parameter. The only thing that can mint a valid state is the
+// /qurl setup slash-command handler, which has already verified the
+// Slack signing secret and therefore the caller's workspace identity.
 //
-// Expiry is enforced by checking (now - ts) <= stateMaxAge. Five minutes
-// matches the cookie max-age set in cookie.go.
+// Expiry: 5 minutes from mint covers the slash-command-reply → click →
+// Auth0 authenticate → callback round-trip.
 const (
-	stateMaxAge    = 5 * time.Minute
-	statePartCount = 4
-	stateNonceLen  = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	stateMaxAge      = 5 * time.Minute
+	statePartCount   = 5
+	stateNonceLen    = 16 // 16 bytes → 32 hex chars; plenty for one-shot CSRF.
+	stateMinSecret   = 32 // bytes — HMAC-SHA256 block-size floor; rejects ergonomically-weak operator secrets.
+	stateFutureSkew  = 30 * time.Second
+	stateSeparator   = "|"
+	stateSeparatorB  = byte('|')
+	stateUserIDIndex = 1
+	stateTeamIDIndex = 0
+	stateNonceIndex  = 2
+	stateTSIndex     = 3
+	stateSigIndex    = 4
 )
 
 // Sentinel errors so callers can log a stable reason without parsing
@@ -38,15 +49,33 @@ var (
 	errStateMalformed = errors.New("state: malformed")
 	errStateBadHMAC   = errors.New("state: HMAC mismatch")
 	errStateExpired   = errors.New("state: expired")
+	errStateFuture    = errors.New("state: timestamp in future")
+	errStateShortKey  = errors.New("state: secret too short")
+	errStateEmptyTeam = errors.New("state: empty teamID")
+	errStateEmptyUser = errors.New("state: empty userID")
 )
 
-// mintState produces a fresh state token for the given teamID.
-func mintState(secret []byte, teamID string, now time.Time) (string, error) {
-	if len(secret) == 0 {
-		return "", errors.New("state: empty secret")
+// signedPayload returns the canonical "teamID|userID|nonce|ts" byte
+// slice that both MintState and VerifyState HMAC over. Sharing the
+// construction means the two paths can't drift on separator or order.
+func signedPayload(teamID, userID, nonce, ts string) []byte {
+	return []byte(teamID + stateSeparator + userID + stateSeparator + nonce + stateSeparator + ts)
+}
+
+// MintState produces a fresh state token binding (teamID, userID) under
+// secret. Exported so the slash-command handler in package internal can
+// mint state from a Slack-signature-verified /qurl setup dispatch.
+//
+// Returns errStateShortKey if secret is shorter than stateMinSecret.
+func MintState(secret []byte, teamID, userID string, now time.Time) (string, error) {
+	if len(secret) < stateMinSecret {
+		return "", errStateShortKey
 	}
 	if teamID == "" {
-		return "", errors.New("state: empty teamID")
+		return "", errStateEmptyTeam
+	}
+	if userID == "" {
+		return "", errStateEmptyUser
 	}
 	nonceBytes := make([]byte, stateNonceLen)
 	if _, err := rand.Read(nonceBytes); err != nil {
@@ -54,53 +83,72 @@ func mintState(secret []byte, teamID string, now time.Time) (string, error) {
 	}
 	nonce := hex.EncodeToString(nonceBytes)
 	ts := strconv.FormatInt(now.Unix(), 10)
-	signed := teamID + "|" + nonce + "|" + ts
+	signed := signedPayload(teamID, userID, nonce, ts)
 	mac := hmac.New(sha256.New, secret)
-	if _, err := mac.Write([]byte(signed)); err != nil {
-		return "", fmt.Errorf("state: hmac write: %w", err)
-	}
+	// hmac.Hash.Write never returns an error (documented in stdlib); the
+	// signature satisfies io.Writer so the result is discarded.
+	mac.Write(signed)
 	sig := hex.EncodeToString(mac.Sum(nil))
-	raw := signed + "|" + sig
-	return base64.RawURLEncoding.EncodeToString([]byte(raw)), nil
+	raw := append(signed, stateSeparatorB)
+	raw = append(raw, sig...)
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// verifyState validates and decodes a state token. Returns the teamID on
-// success or one of the sentinel errors above on failure.
-func verifyState(secret []byte, encoded string, now time.Time) (string, error) {
+// VerifiedState is the (teamID, userID) pair recovered from a valid
+// state token.
+type VerifiedState struct {
+	TeamID string
+	UserID string
+}
+
+// VerifyState validates and decodes a state token. Returns the recovered
+// (teamID, userID) on success or one of the sentinel errors on failure.
+//
+// Rejects future timestamps beyond stateFutureSkew so a clock-skewed
+// minter can't produce links that outlive stateMaxAge.
+func VerifyState(secret []byte, encoded string, now time.Time) (VerifiedState, error) {
+	if len(secret) < stateMinSecret {
+		return VerifiedState{}, errStateShortKey
+	}
 	if encoded == "" {
-		return "", errStateMalformed
+		return VerifiedState{}, errStateMalformed
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", errStateMalformed
+		return VerifiedState{}, errStateMalformed
 	}
-	parts := strings.Split(string(raw), "|")
+	parts := bytes.Split(raw, []byte{stateSeparatorB})
 	if len(parts) != statePartCount {
-		return "", errStateMalformed
+		return VerifiedState{}, errStateMalformed
 	}
-	teamID, nonce, ts, sigHex := parts[0], parts[1], parts[2], parts[3]
-	if teamID == "" || nonce == "" || ts == "" || sigHex == "" {
-		return "", errStateMalformed
+	teamID := string(parts[stateTeamIDIndex])
+	userID := string(parts[stateUserIDIndex])
+	nonce := parts[stateNonceIndex]
+	tsBytes := parts[stateTSIndex]
+	sigHex := parts[stateSigIndex]
+	if teamID == "" || userID == "" || len(nonce) == 0 || len(tsBytes) == 0 || len(sigHex) == 0 {
+		return VerifiedState{}, errStateMalformed
 	}
-	wantSig, err := hex.DecodeString(sigHex)
+	wantSig, err := hex.DecodeString(string(sigHex))
 	if err != nil {
-		return "", errStateMalformed
+		return VerifiedState{}, errStateMalformed
 	}
-	signed := teamID + "|" + nonce + "|" + ts
+	signed := signedPayload(teamID, userID, string(nonce), string(tsBytes))
 	mac := hmac.New(sha256.New, secret)
-	if _, err := mac.Write([]byte(signed)); err != nil {
-		return "", errStateMalformed
+	mac.Write(signed)
+	if !hmac.Equal(wantSig, mac.Sum(nil)) {
+		return VerifiedState{}, errStateBadHMAC
 	}
-	gotSig := mac.Sum(nil)
-	if !hmac.Equal(wantSig, gotSig) {
-		return "", errStateBadHMAC
-	}
-	tsInt, err := strconv.ParseInt(ts, 10, 64)
+	tsInt, err := strconv.ParseInt(string(tsBytes), 10, 64)
 	if err != nil {
-		return "", errStateMalformed
+		return VerifiedState{}, errStateMalformed
 	}
-	if now.Sub(time.Unix(tsInt, 0)) > stateMaxAge {
-		return "", errStateExpired
+	mintedAt := time.Unix(tsInt, 0)
+	if mintedAt.After(now.Add(stateFutureSkew)) {
+		return VerifiedState{}, errStateFuture
 	}
-	return teamID, nil
+	if now.Sub(mintedAt) > stateMaxAge {
+		return VerifiedState{}, errStateExpired
+	}
+	return VerifiedState{TeamID: teamID, UserID: userID}, nil
 }

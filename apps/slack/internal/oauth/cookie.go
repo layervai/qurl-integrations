@@ -16,11 +16,11 @@ import (
 //	SameSite=Lax — survives the Auth0 redirect (Lax allows top-level
 //	             GETs across origin) while still blocking cross-site
 //	             POST replays
-//	Path=/oauth — scopes to the OAuth surface so the cookie isn't
-//	            sent on /slack/* requests
+//	Path=/oauth/qurl — scopes to the OAuth surface so the cookie isn't
+//	             sent on /slack/* or unrelated /oauth/* routes
 const (
 	cookieName       = "qurl_oauth_state"
-	cookiePath       = "/oauth"
+	cookiePath       = "/oauth/qurl"
 	cookieMaxAgeSecs = 300 // 5 minutes; mirrors stateMaxAge
 )
 
@@ -39,7 +39,9 @@ func setStateCookie(w http.ResponseWriter, state string) {
 }
 
 // clearStateCookie expires the cookie. Called from /callback after the
-// double-submit check passes so a refreshed callback URL can't re-bind.
+// double-submit check passes (so a refreshed callback URL can't re-bind)
+// and from /callback's CSRF / state-verify reject paths (so the user
+// can retry /qurl setup without a stuck cookie).
 func clearStateCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,

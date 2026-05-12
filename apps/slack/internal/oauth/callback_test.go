@@ -13,11 +13,14 @@ import (
 	"time"
 )
 
-// testTeamID + testAuth0ClientID are reused across cases to keep
-// fixture values comparable and to avoid the goconst linter trip.
 const (
 	testTeamID        = "T123ABCDEF"
+	testUserID        = "U_ADMIN1"
 	testAuth0ClientID = "client-id"
+	testKeyID         = "k_1"
+	testKeyPrefix     = "lv_live_abcd"
+	testAPIKey        = "lv_live_abcd1234"
+	testAdminEmail    = "admin@example.com"
 )
 
 // fakeWorkspaceStore captures SetAPIKey calls.
@@ -65,6 +68,26 @@ func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, 
 	return f.email, f.err
 }
 
+// fakeSlackClient captures PostDirectMessage calls.
+type fakeSlackClient struct {
+	mu       sync.Mutex
+	gotUser  string
+	gotText  string
+	sendErr  error
+	postedCh chan struct{}
+}
+
+func (f *fakeSlackClient) PostDirectMessage(_ context.Context, userID, text string) error {
+	f.mu.Lock()
+	f.gotUser = userID
+	f.gotText = text
+	f.mu.Unlock()
+	if f.postedCh != nil {
+		close(f.postedCh)
+	}
+	return f.sendErr
+}
+
 // Narrowed helpers that pick only what each test actually asserts on —
 // keeps dogsled happy without losing the multi-return flexibility of
 // the shared builder.
@@ -103,12 +126,11 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"access_token": "auth0-access",
 			"id_token":     "auth0-id-token",
-			"token_type":   "Bearer",
 		})
 	}))
 	t.Cleanup(auth0.Close)
 	store := &fakeWorkspaceStore{}
-	minter := &fakeMinter{apiKey: "lv_live_abcd1234", keyID: "k_1", keyPrefix: "lv_live_abcd"}
+	minter := &fakeMinter{apiKey: testAPIKey, keyID: testKeyID, keyPrefix: testKeyPrefix}
 
 	// Re-point HTTPClient at the stub Auth0 by rewriting the request host
 	// via a custom Transport. The simplest path: a Transport that
@@ -120,9 +142,9 @@ func newCallbackCfg(t *testing.T) (Config, *httptest.Server, *fakeWorkspaceStore
 		Auth0ClientSecret: "client-secret",
 		Auth0Audience:     "aud",
 		SlackBaseURL:      "https://slack-bot.example",
-		OAuthStateSecret:  []byte("test-secret"),
+		OAuthStateSecret:  testSecret,
 		Provider:          store,
-		IDTokenVerifier:   &fakeIDTokenVerifier{email: "admin@example.com"},
+		IDTokenVerifier:   &fakeIDTokenVerifier{email: testAdminEmail},
 		Minter:            minter,
 		HTTPClient:        &http.Client{Transport: stubTransport, Timeout: 5 * time.Second},
 		Now:               func() time.Time { return time.Unix(1700000000, 0) },
@@ -148,28 +170,57 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-func TestCallbackHappyPath(t *testing.T) {
-	cfg, _, store, minter := newCallbackCfg(t)
-
-	// Mint a valid state token + matching cookie.
-	state, err := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
+func mintTestState(t *testing.T, cfg *Config) string {
+	t.Helper()
+	state, err := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, cfg.Now())
 	if err != nil {
-		t.Fatalf("mintState: %v", err)
+		t.Fatalf("MintState: %v", err)
 	}
+	return state
+}
 
-	h := Callback(cfg)
+func callbackRequest(state string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	return req
+}
+
+func TestCallbackHappyPath(t *testing.T) {
+	cfg, _, store, minter := newCallbackCfg(t)
+
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
 	rec := httptest.NewRecorder()
-	h(rec, req)
+	h(rec, callbackRequest(state))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "qURL connected") {
-		t.Errorf("success body missing headline: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "qURL connected") {
+		t.Errorf("success body missing headline: %s", body)
 	}
+	// Lock auto-escape: KeyPrefix and Email must render verbatim (html/
+	// template is the load-bearing XSS defense; a refactor to text/template
+	// would silently drop the protection).
+	if !strings.Contains(body, testKeyPrefix) {
+		t.Errorf("success body missing key prefix: %s", body)
+	}
+	if !strings.Contains(body, testAdminEmail) {
+		t.Errorf("success body missing email: %s", body)
+	}
+	// Defense-in-depth headers are required on the success page.
+	if rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("X-Frame-Options: got %q want DENY", rec.Header().Get("X-Frame-Options"))
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Errorf("CSP missing default-src 'none': %q", rec.Header().Get("Content-Security-Policy"))
+	}
+	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Errorf("Referrer-Policy: got %q want no-referrer", rec.Header().Get("Referrer-Policy"))
+	}
+
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs == nil {
@@ -178,17 +229,47 @@ func TestCallbackHappyPath(t *testing.T) {
 	if store.setArgs.WorkspaceID != testTeamID {
 		t.Errorf("workspaceID: got %q", store.setArgs.WorkspaceID)
 	}
-	if store.setArgs.APIKey != "lv_live_abcd1234" {
+	if store.setArgs.APIKey != testAPIKey {
 		t.Errorf("apiKey: got %q", store.setArgs.APIKey)
+	}
+	// configuredBy must come from the verified state's userID — never
+	// from an unsigned query parameter.
+	if store.setArgs.ConfiguredBy != testUserID {
+		t.Errorf("configuredBy: got %q want %q (must be recovered from signed state)", store.setArgs.ConfiguredBy, testUserID)
 	}
 	if minter.revoked {
 		t.Error("happy path should not revoke")
 	}
 }
 
+func TestCallbackIgnoresAdminUserQueryParam(t *testing.T) {
+	// Regression: configuredBy used to be read from ?admin_user=…
+	// which let an attacker pick the DM target. Now the value is
+	// strictly recovered from the signed state payload.
+	cfg, _, store, _ := newCallbackCfg(t)
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth/qurl/callback?code=abc&admin_user=U_ATTACKER&state="+url.QueryEscape(state), http.NoBody)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200", rec.Code)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.setArgs.ConfiguredBy == "U_ATTACKER" {
+		t.Error("configuredBy must NOT come from admin_user query param")
+	}
+	if store.setArgs.ConfiguredBy != testUserID {
+		t.Errorf("configuredBy: got %q want %q", store.setArgs.ConfiguredBy, testUserID)
+	}
+}
+
 func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	cfg, store := newCallbackCfgStore(t)
-	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
+	state := mintTestState(t, &cfg)
 
 	h := Callback(cfg)
 	req := httptest.NewRequest(http.MethodGet,
@@ -201,6 +282,18 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400", rec.Code)
 	}
+	// On reject, the cookie should be cleared so a refresh isn't stuck
+	// looping on the same mismatch.
+	var clearedCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieName && c.MaxAge < 0 {
+			clearedCookie = c
+			break
+		}
+	}
+	if clearedCookie == nil {
+		t.Error("expected state cookie to be cleared on CSRF reject")
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.setArgs != nil {
@@ -210,7 +303,7 @@ func TestCallbackRejectsCSRFMismatch(t *testing.T) {
 
 func TestCallbackRejectsMissingCookie(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
-	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
+	state := mintTestState(t, &cfg)
 	h := Callback(cfg)
 	req := httptest.NewRequest(http.MethodGet,
 		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
@@ -225,15 +318,12 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	// Mint state at T0; verify at T0+10min — past stateMaxAge (5min).
 	oldNow := cfg.Now()
-	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, oldNow)
+	state, _ := MintState(cfg.OAuthStateSecret, testTeamID, testUserID, oldNow)
 	cfg.Now = func() time.Time { return oldNow.Add(10 * time.Minute) }
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet,
-		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	rec := httptest.NewRecorder()
-	h(rec, req)
+	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
@@ -242,14 +332,11 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.setErr = errors.New("ddb down")
-	state, _ := mintState(cfg.OAuthStateSecret, testTeamID, cfg.Now())
+	state := mintTestState(t, &cfg)
 
 	h := Callback(cfg)
-	req := httptest.NewRequest(http.MethodGet,
-		"/oauth/qurl/callback?code=abc&state="+url.QueryEscape(state), http.NoBody)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: state, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	rec := httptest.NewRecorder()
-	h(rec, req)
+	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d want 500", rec.Code)
 	}
@@ -287,5 +374,98 @@ func TestCallbackHandlesAuth0Error(t *testing.T) {
 	h(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("got %d want 400", rec.Code)
+	}
+}
+
+// TestCallbackRendersSuccessWhenVerifierFails locks the documented
+// non-fatal contract: a JWKS / id_token verify failure suppresses the
+// email line on the success page but never blocks the key mint or
+// the success render.
+func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	cfg.IDTokenVerifier = &fakeIDTokenVerifier{err: errors.New("jwks fetch failed")}
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), testAdminEmail) {
+		t.Error("verifier-error path should NOT render email")
+	}
+	if !strings.Contains(rec.Body.String(), "qURL connected") {
+		t.Errorf("expected success body even when verifier errored: %s", rec.Body.String())
+	}
+}
+
+// TestCallbackAuth0TokenFailure exercises the non-200 branch in
+// exchangeAuth0Code by swapping in an Auth0 stub that always 500s.
+func TestCallbackAuth0TokenFailure(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(failing.Close)
+	cfg.HTTPClient = &http.Client{
+		Transport: &rewriteTransport{target: failing.URL},
+		Timeout:   2 * time.Second,
+	}
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
+	}
+}
+
+// TestCallbackAuth0EmptyAccessToken locks the "empty access_token →
+// failure" guard in exchangeAuth0Code. An Auth0 200 with no
+// access_token (or no id_token) is a misconfiguration the callback
+// must not silently proceed past.
+func TestCallbackAuth0EmptyAccessToken(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"id_token": "only"})
+	}))
+	t.Cleanup(empty.Close)
+	cfg.HTTPClient = &http.Client{
+		Transport: &rewriteTransport{target: empty.URL},
+		Timeout:   2 * time.Second,
+	}
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d want 502", rec.Code)
+	}
+}
+
+// TestCallbackDMsConfiguredUser asserts that the success-path DM uses
+// the userID recovered from the verified state — and only that userID.
+func TestCallbackDMsConfiguredUser(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	posted := make(chan struct{})
+	slackClient := &fakeSlackClient{postedCh: posted}
+	cfg.SlackClient = slackClient
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200", rec.Code)
+	}
+	select {
+	case <-posted:
+	case <-time.After(time.Second):
+		t.Fatal("DM goroutine never fired")
+	}
+	slackClient.mu.Lock()
+	defer slackClient.mu.Unlock()
+	if slackClient.gotUser != testUserID {
+		t.Errorf("DM user: got %q want %q", slackClient.gotUser, testUserID)
 	}
 }
