@@ -2867,7 +2867,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     // showModal on the same parent interaction surfaces as a
     // confusing Discord error.
     return interaction.reply({
-      content: 'Another setup attempt is in progress — please use the existing modal.',
+      content: 'Another setup attempt is in progress — finish or close it, then retry.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -2911,10 +2911,24 @@ async function handleSetupButton(interaction, { flow_id, row }) {
   // rollback itself also fails (DDB region outage), both errors
   // log at error-level — admin recovery is the SETUP_MODAL_TTL_SECONDS
   // (5 min) wait.
+  //
+  // TODO(supersede-race): the rollback delete uses
+  // stage='awaiting_setup_modal' (matching the just-committed
+  // transition). A concurrent /qurl setup rerun whose loadFlow
+  // peek lands in the narrow window AFTER the transition committed
+  // but BEFORE this rollback fires will surface the misleading
+  // "you already have a modal open" message. Window is bounded by
+  // a single DDB round-trip; not worth closing with an additional
+  // OCC primitive yet, but greppable for future readers.
   try {
     await interaction.showModal(modal);
   } catch (err) {
-    logger.error('handleSetupButton: showModal failed after transitionFlow committed', {
+    // warn-level: the dominant cause is Discord token expiry /
+    // transient REST blips that are fully recoverable by user
+    // rerun. error-level is reserved for the rollback-also-failed
+    // branch below, which is the genuine "this admin is stuck for
+    // up to SETUP_MODAL_TTL_SECONDS" condition that warrants paging.
+    logger.warn('handleSetupButton: showModal failed after transitionFlow committed', {
       flow_id, error: err && err.message,
     });
     await deleteFlow(flow_id, {

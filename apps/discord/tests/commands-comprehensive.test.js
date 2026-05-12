@@ -1706,6 +1706,17 @@ describe('handleSetupButton (dispatcher path)', () => {
 
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
     expect(interaction.reply).not.toHaveBeenCalled();
+
+    // Pin the API-key TextInput length bounds. The 28-char floor
+    // matches the regex's minimum (8-char prefix + 20-char suffix);
+    // the 64-char ceiling carries the TODO(upstream-rebrand) lockstep
+    // marker. A regression that drops either bound — exactly the
+    // risk the marker is meant to surface — would now trip this
+    // assertion instead of sliding through green.
+    const { TextInputBuilder } = require('discord.js');
+    const lastInputBuilder = TextInputBuilder.mock.results.at(-1).value;
+    expect(lastInputBuilder.setMinLength).toHaveBeenCalledWith(28);
+    expect(lastInputBuilder.setMaxLength).toHaveBeenCalledWith(64);
   });
 
   it('replies (no modal) on OCC conflict', async () => {
