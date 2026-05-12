@@ -2837,12 +2837,15 @@ const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 async function handleSetupButton(interaction, { flow_id, row }) {
   // `row.version` is the OCC handle the dispatcher already loaded.
   // The dispatcher's invariant (flow-dispatch.js — handleFlowInteraction)
-  // guarantees `row` is non-null with a numeric `version` field when
-  // the handler runs. A defensive check here would only fire if that
+  // guarantees `row` is non-null with an integer `version` when the
+  // handler runs. A defensive check here would only fire if that
   // invariant drifted; preferring an explicit failure over a
   // confusing TypeError-on-undefined deep inside transitionFlow.
-  if (typeof row?.version !== 'number') {
-    throw new TypeError('handleSetupButton: dispatcher contract violated — row.version must be numeric');
+  // Mirror transitionFlow's own validation (`Number.isInteger`) so a
+  // NaN-from-bad-parseInt-upstream is caught at the dispatcher
+  // boundary, not inside the OCC primitive.
+  if (!Number.isInteger(row?.version)) {
+    throw new TypeError('handleSetupButton: dispatcher contract violated — row.version must be an integer');
   }
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
@@ -2916,6 +2919,14 @@ async function handleSetupButton(interaction, { flow_id, row }) {
   // before recovering. Delete the row instead so the next /qurl
   // setup runs cleanly. Best-effort reply — the interaction token
   // may itself be in the failed state that just took down showModal.
+  //
+  // Trapped-state recovery: if BOTH showModal AND the rollback
+  // deleteFlow fail (e.g. DDB region outage that killed both calls),
+  // the row stays at awaiting_setup_modal until TTL reap. The
+  // admin's only recovery is to wait out the SETUP_MODAL_TTL_SECONDS
+  // (5 min). Both errors are logged at error-level so a support
+  // ticket like "I can't run /qurl setup, it says I have a modal
+  // open but I don't" maps cleanly to this branch in CloudWatch.
   try {
     await interaction.showModal(modal);
   } catch (err) {
@@ -2955,8 +2966,13 @@ async function handleSetupModal(interaction, { flow_id }) {
     reason: 'terminal',
   });
   if (!deleted) {
+    // `deleted: false` collapses three real causes: TTL'd between
+    // modal open and submit, concurrent admin_cleanup, and a duplicate
+    // submit from Discord retry. The TTL case is the most plausible
+    // (admin walks away mid-paste past the 300 s budget), so the
+    // wording covers both "expired" and "already processed."
     return interaction.reply({
-      content: 'This setup was already processed.',
+      content: 'This setup session has expired or was already processed — run `/qurl setup` again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -2984,7 +3000,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
     logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
-      content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
+      content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters. Run `/qurl setup` again to retry.',
       ephemeral: true,
     });
   }

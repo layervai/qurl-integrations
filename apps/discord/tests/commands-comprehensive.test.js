@@ -1813,12 +1813,14 @@ describe('handleSetupModal (dispatcher path)', () => {
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
-        content: expect.stringContaining('already processed'),
+        // Covers both TTL'd and already-processed cases (deleted:false
+        // collapses both into the same branch).
+        content: expect.stringMatching(/expired or was already processed/),
       }),
     );
   });
 
-  it('rejects malformed API key', async () => {
+  it('rejects malformed API key with rerun hint', async () => {
     const interaction = makeModalInteraction({
       fields: { getTextInputValue: jest.fn(() => 'short-bad-key') },
     });
@@ -1827,11 +1829,12 @@ describe('handleSetupModal (dispatcher path)', () => {
 
     expect(global.fetch).not.toHaveBeenCalled();
     expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining('Invalid API key format'),
-      }),
-    );
+    const replyArg = interaction.reply.mock.calls.at(-1)[0];
+    expect(replyArg.content).toContain('Invalid API key format');
+    // The rerun hint is what closes the UX loop — the admin's flow
+    // row was already deleted by deleteFlow, so without this hint
+    // they'd be stuck without a path forward.
+    expect(replyArg.content).toContain('Run `/qurl setup` again');
   });
 
   it('surfaces 401 from qURL API as invalid-key message', async () => {
