@@ -16,6 +16,14 @@ import (
 )
 
 const (
+	// drainCap bounds the post-LimitReader keep-alive drain. We've
+	// already enforced the body cap (auth0TokenBodyLimit / minterBodyLimit);
+	// the deferred drain just discards anything the LimitReader didn't
+	// consume so the connection can be reused. An unbounded io.Copy
+	// here would let a misbehaving upstream stream indefinitely within
+	// the request timeout, holding the connection. drainCap caps that
+	// at body-limit headroom × 2.
+	drainCap          = 32 << 10
 	auth0TokenTimeout = 15 * time.Second
 	// revokeTimeout bounds the orphan-key DELETE on qurl-service when a
 	// post-mint persist failure forces us to clean up. Named separately
@@ -352,8 +360,10 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 	}
 	defer func() {
 		// Drain any unread bytes (e.g. the >limit reject path below)
-		// so the connection can be reused under keep-alive.
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// so the connection can be reused under keep-alive. Bounded by
+		// drainCap so a misbehaving upstream that streams indefinitely
+		// can't hold the connection for the full request timeout.
+		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 		_ = resp.Body.Close()
 	}()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, auth0TokenBodyLimit))

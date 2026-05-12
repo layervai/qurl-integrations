@@ -98,7 +98,8 @@ func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name str
 		return "", "", "", fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// Bounded drain — see callback.go drainCap rationale.
+		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 		_ = resp.Body.Close()
 	}()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit))
@@ -138,7 +139,8 @@ func (m *HTTPAPIKeyMinter) RevokeAPIKey(ctx context.Context, accessToken, keyID 
 		return fmt.Errorf("do request: %w", err)
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		// Bounded drain — see callback.go drainCap rationale.
+		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode >= 400 {
