@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -362,11 +363,22 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 // operator-log inclusion, marking the truncation. Defense against PII
 // or noise leaks when surfacing third-party (Auth0/qurl-service)
 // strings in slog attributes.
+// truncateForLog caps an arbitrary upstream string at limit bytes for
+// operator-log inclusion. Backs up to a UTF-8 rune boundary so the
+// truncation doesn't split a multi-byte sequence (Auth0 SAML
+// error_description is UTF-8).
 func truncateForLog(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	return s[:limit] + "…[truncated]"
+	// Back up to a rune boundary. UTF-8 continuation bytes have the
+	// pattern 10xxxxxx (0x80..0xBF); the first byte of a multi-byte
+	// rune is either ASCII (< 0x80) or 11xxxxxx (>= 0xC0).
+	cut := limit
+	for cut > 0 && cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
 }
 
 // exchangeAuth0Code POSTs application/x-www-form-urlencoded to

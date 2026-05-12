@@ -67,8 +67,14 @@ func callbackURL(slackBaseURL string) string {
 	if u, err := url.JoinPath(slackBaseURL, callbackPath); err == nil {
 		return u
 	}
+	// Log only the host so an accidental "https://user:pass@..."
+	// configuration doesn't surface credentials in operator logs.
+	host := slackBaseURL
+	if u, err := url.Parse(slackBaseURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
 	slog.Warn("callbackURL: url.JoinPath failed — falling back to concat",
-		"slack_base_url", slackBaseURL)
+		"slack_base_host", host)
 	return slackBaseURL + callbackPath
 }
 

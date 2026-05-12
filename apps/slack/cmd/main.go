@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -363,6 +364,14 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if !strings.HasPrefix(baseURL, "https://") {
 		return oauth.Config{}, false, fmt.Errorf("SLACK_BASE_URL must be https:// (got %q)", baseURL)
 	}
+	// SLACK_BASE_URL must be a bare origin — embedded paths (e.g.
+	// https://bot.example/prefix) compose to redirect_uri /authorize
+	// hits like https://bot.example/prefix/oauth/qurl/callback, but
+	// the mux only registers /oauth/qurl/callback. Auth0's redirect
+	// would silently miss the route. Parse + check Path is "".
+	if u, err := url.Parse(baseURL); err != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return oauth.Config{}, false, fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query (got %q)", baseURL)
+	}
 	if len(stateSecret) < minStateSecretBytes {
 		// Fail-fast: the bot would silently disable OAuth and /qurl
 		// setup would reply "not configured" forever otherwise.
@@ -380,6 +389,10 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// Operators who fix the domain restart the task.
 	var verifier oauth.IDTokenVerifier
 	issuer := "https://" + domain + "/"
+	// id_tokens carry the application's client_id as their `aud`
+	// claim, distinct from AUTH0_AUDIENCE (the API resource server
+	// identifier used at /authorize for access-token scope). Passing
+	// clientID here matches what Auth0 actually stamps into id_tokens.
 	if v, err := newJWKSVerifier(ctx, issuer, clientID); err != nil {
 		slog.Warn("JWKS verifier init failed — id_token email will not be displayed for the lifetime of this task", "error", err)
 	} else {
