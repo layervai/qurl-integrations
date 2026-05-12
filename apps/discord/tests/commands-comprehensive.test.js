@@ -1829,6 +1829,45 @@ describe('handleSetupButton (dispatcher path)', () => {
   });
 });
 
+// Direct shape coverage of SETUP_API_KEY_REGEX. Round-tripping
+// through the handler (via VALID_KEY / 'short-bad-key') exercises
+// the format-rejection PATH; this pins the format itself, so adding
+// a new prefix family (lv_sandbox_, lv_internal_, etc.) requires a
+// deliberate test update rather than silently passing the existing
+// handler-level coverage.
+describe('SETUP_API_KEY_REGEX shape', () => {
+  const { SETUP_API_KEY_REGEX, SETUP_API_KEY_MAX_LENGTH } = _test;
+
+  test.each([
+    'lv_live_abcdefghijklmnopqrstuvwxyz12',
+    'lv_test_abcdefghijklmnopqrstuvwxyz12',
+    'lv_live_aaaaaaaaaaaaaaaaaaaa',                          // exactly 20 chars in suffix
+    'lv_test_AaBbCcDdEeFfGgHh-1234_5',                       // mixed-case + - + _
+  ])('accepts %s', (key) => {
+    expect(SETUP_API_KEY_REGEX.test(key)).toBe(true);
+  });
+
+  test.each([
+    '',
+    'live_abcdefghijklmnopqrstuvwxyz12',                     // missing lv_ prefix
+    'lv_sandbox_abcdefghijklmnopqrstuvwxyz12',               // unknown family
+    'lv_live_short',                                          // < 20-char suffix
+    'lv_live_abcdefghijklmnopqrst!!!!!',                     // disallowed char
+    'lv_live_abcdefghijklmnopqrstuvwxyz12 ',                 // trailing whitespace
+    'LV_LIVE_abcdefghijklmnopqrstuvwxyz12',                  // wrong case on prefix
+  ])('rejects %s', (key) => {
+    expect(SETUP_API_KEY_REGEX.test(key)).toBe(false);
+  });
+
+  it('declares a max length that exceeds the regex minimum', () => {
+    // 28 = 8 (lv_live_) + 20 (suffix floor). 64 leaves comfortable
+    // room above the floor; the constant itself is what the modal's
+    // setMaxLength uses, so a regression that drops it below the
+    // floor would surface as legitimate keys getting truncated.
+    expect(SETUP_API_KEY_MAX_LENGTH).toBeGreaterThan(28);
+  });
+});
+
 describe('handleSetupModal (dispatcher path)', () => {
   const { handleSetupModal } = require('../src/commands');
   const VALID_KEY = 'lv_live_abcdefghijklmnopqrstuvwxyz12';
@@ -1982,8 +2021,10 @@ describe('handleSetupModal (dispatcher path)', () => {
     // Identify the success-path editReply by exact match against
     // the production constant — no string drift on copy polish.
     const { SETUP_SUCCESS_MSG } = _test;
+    let successBranchInvoked = false;
     interaction.editReply = jest.fn().mockImplementation(async (arg) => {
       if (arg?.content === SETUP_SUCCESS_MSG) {
+        successBranchInvoked = true;
         throw new Error('Unknown interaction (token expired)');
       }
       return undefined;
@@ -1995,6 +2036,15 @@ describe('handleSetupModal (dispatcher path)', () => {
 
     // setGuildApiKey did commit before the editReply threw.
     expect(mockDb.setGuildApiKey).toHaveBeenCalled();
+    // Guard against a future refactor that augments the success
+    // editReply with extra fields (components, embeds, etc.) — the
+    // strict `arg.content === SETUP_SUCCESS_MSG` mock would silently
+    // miss the new shape and the test would pass green without
+    // exercising the swallow logic. Pin: the throw branch DID fire.
+    expect(successBranchInvoked).toBe(true);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: SETUP_SUCCESS_MSG }),
+    );
   });
 
   it('propagates deferReply throw after deleteFlow (flow row already gone, key never persisted)', async () => {

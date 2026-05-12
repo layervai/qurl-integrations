@@ -3034,6 +3034,12 @@ async function handleSetupModal(interaction, { flow_id }) {
   // branches (admin really should rerun). Contrast the success-
   // path .catch a few lines down, where "run again" would mislead
   // because the key was already persisted.
+  //
+  // Exception: the `!deleted` early-return above DOES .catch — the
+  // dedup-loser path means another worker already replied to the
+  // user, and a second "run again" from the safety net would
+  // visually duplicate. The bare-reply rule applies only to the
+  // post-deleteFlow validation branches.
   const logFields = {
     guild_id: interaction.guildId,
     configured_by: interaction.user.id,
@@ -4033,7 +4039,17 @@ const commands = [
             logger.warn('handleSetup: createFlow racy after admin_cleanup', {
               flow_id: setupFlowId,
             });
-            const surviving = await loadFlow(setupFlowId).catch(() => null);
+            const surviving = await loadFlow(setupFlowId).catch((err) => {
+              // Preserve observability — a DDB outage here silently
+              // degrades the user-visible wording from actionable
+              // ("you have a /qurl revoke menu open") to generic
+              // ("try again"). Without this warn, an intermittent
+              // read-side regression would be invisible to ops.
+              logger.warn('handleSetup: loadFlow peek failed (post-supersede disambiguation)', {
+                flow_id: setupFlowId, error: err && err.message,
+              });
+              return null;
+            });
             if (surviving?.stage === SETUP_STAGE_AWAITING_MODAL) {
               return interaction.editReply({
                 content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
