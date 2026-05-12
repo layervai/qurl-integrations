@@ -106,17 +106,6 @@ type FieldEncryptor interface {
 	Open(ctx context.Context, ciphertext, wrappedKey, aad []byte) ([]byte, error)
 }
 
-// nowOrDefault is the safe clock accessor — NewDDBProvider always sets
-// Now, but a bare &DDBProvider{} construction (e.g. for tests that
-// satisfy a type signature without exercising writes) would nil-deref
-// on p.Now(). Defaulting here keeps the bare-struct path safe.
-func (p *DDBProvider) nowOrDefault() time.Time {
-	if p.Now != nil {
-		return p.Now()
-	}
-	return time.Now()
-}
-
 // DDBProvider implements Provider by reading per-workspace API keys from
 // a DynamoDB table, with field-level envelope encryption on the key
 // column.
@@ -129,6 +118,17 @@ type DDBProvider struct {
 	// updated_at assertions without poking package-global state. Defaults
 	// to time.Now.
 	Now func() time.Time
+}
+
+// nowOrDefault is the safe clock accessor — NewDDBProvider always sets
+// Now, but a bare &DDBProvider{} construction (e.g. for tests that
+// satisfy a type signature without exercising writes) would nil-deref
+// on p.Now(). Defaulting here keeps the bare-struct path safe.
+func (p *DDBProvider) nowOrDefault() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
 }
 
 // DDBProviderOption configures NewDDBProvider.
