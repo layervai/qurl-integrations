@@ -175,9 +175,9 @@ func run() error {
 			StateSecret:  oauthCfg.OAuthStateSecret,
 			SlackBaseURL: oauthCfg.SlackBaseURL,
 		})
-	} else {
-		slog.Warn("OAuth routes NOT registered — required env vars unset (AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE, SLACK_BASE_URL, OAUTH_STATE_SECRET)")
 	}
+	// Else: buildOAuthConfig already logged the specific missing-var
+	// list; nothing more to say here.
 
 	srv := &http.Server{
 		// Addr intentionally omitted: srv.Serve(ln) ignores it, and we
@@ -270,6 +270,25 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
 }
 
+// missingOAuthEnvVars returns the env-var names with empty values, in
+// stable order, so the warn log says exactly which one(s) the operator
+// needs to set. Previously the all-or-nothing return just logged the
+// whole list, which is harder to act on.
+func missingOAuthEnvVars(vals map[string]string) []string {
+	// Stable order so the slog attribute is diff-friendly across runs.
+	keys := []string{
+		"AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET",
+		"AUTH0_AUDIENCE", "SLACK_BASE_URL", "OAUTH_STATE_SECRET", "QURL_ENDPOINT",
+	}
+	var missing []string
+	for _, k := range keys {
+		if vals[k] == "" {
+			missing = append(missing, k)
+		}
+	}
+	return missing
+}
+
 // errOAuthStateSecretTooShort is returned by buildOAuthConfig when the
 // operator's OAUTH_STATE_SECRET is set but below oauth.StateMinSecret.
 // Bubbling it up to run() turns a misconfiguration that previously
@@ -323,8 +342,17 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// here is belt-and-suspenders so a refactor that drops the earlier
 	// check still fails-soft at the OAuth seam rather than constructing
 	// a Minter pointed at an empty URL.
-	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
-		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {
+	missing := missingOAuthEnvVars(map[string]string{
+		"AUTH0_DOMAIN":        domain,
+		"AUTH0_CLIENT_ID":     clientID,
+		"AUTH0_CLIENT_SECRET": clientSecret,
+		"AUTH0_AUDIENCE":      audience,
+		"SLACK_BASE_URL":      baseURL,
+		"OAUTH_STATE_SECRET":  stateSecret,
+		"QURL_ENDPOINT":       qurlEndpoint,
+	})
+	if len(missing) > 0 {
+		slog.Warn("OAuth routes NOT registered — required env vars unset", "missing", missing)
 		return oauth.Config{}, false, nil
 	}
 	// SLACK_BASE_URL must be HTTPS: the state cookie is Secure, and a

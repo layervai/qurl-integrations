@@ -93,6 +93,22 @@ func TestHTTPAPIKeyMinterMintNon2xx(t *testing.T) {
 	}
 }
 
+// TestHTTPAPIKeyMinterMintMissingAPIKey is the symmetric case to
+// MissingKeyID — qurl-service returns 200 with key_id but the api_key
+// field empty. The mint must reject so the bot doesn't hand the caller
+// "" and watch qurl-service surface an opaque 401 downstream.
+func TestHTTPAPIKeyMinterMintMissingAPIKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"key_id":"k_1","key_prefix":"lv_x"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
+	if err := mintAPIKeyOnlyErr(m); err == nil {
+		t.Fatal("expected error when api_key is empty")
+	}
+}
+
 func TestHTTPAPIKeyMinterMintMissingKeyID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
