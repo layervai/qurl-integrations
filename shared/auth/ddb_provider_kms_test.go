@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 )
 
 const testKMSKeyARN = "arn:fake"
@@ -142,8 +143,9 @@ func TestKMSEncryptorOpenRejectsTruncatedCiphertext(t *testing.T) {
 }
 
 // TestKMSEncryptorEncryptionContextWorkspaceID locks the CloudTrail-
-// visible attribute name. A renamed key would silently break attribution
-// across versions; pinning the wire-side name catches that.
+// visible attribute name AND the AES-256 key spec. A renamed key
+// would break attribution across versions; a silent downgrade to
+// AES_128 (or unset spec) would weaken the cipher without surfacing.
 func TestKMSEncryptorEncryptionContextWorkspaceID(t *testing.T) {
 	captured := &capturingKMS{fakeKMS: fakeKMS{dataKey: make([]byte, 32), wrappedBlob: []byte("wrapped")}}
 	enc := &KMSEncryptor{Client: captured, KeyID: testKMSKeyARN}
@@ -156,14 +158,19 @@ func TestKMSEncryptorEncryptionContextWorkspaceID(t *testing.T) {
 	if _, ok := captured.lastContext["aad"]; ok {
 		t.Error("legacy EncryptionContext[aad] should no longer be set")
 	}
+	if captured.lastKeySpec != kmstypes.DataKeySpecAes256 {
+		t.Errorf("KeySpec: got %v want AES_256", captured.lastKeySpec)
+	}
 }
 
 type capturingKMS struct {
 	fakeKMS
 	lastContext map[string]string
+	lastKeySpec kmstypes.DataKeySpec
 }
 
 func (c *capturingKMS) GenerateDataKey(ctx context.Context, in *kms.GenerateDataKeyInput, opts ...func(*kms.Options)) (*kms.GenerateDataKeyOutput, error) {
 	c.lastContext = in.EncryptionContext
+	c.lastKeySpec = in.KeySpec
 	return c.fakeKMS.GenerateDataKey(ctx, in, opts...)
 }

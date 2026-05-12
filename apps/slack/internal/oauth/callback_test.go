@@ -368,6 +368,24 @@ func TestCallbackRejectsMissingCode(t *testing.T) {
 	}
 }
 
+// TestCallbackRejectsNonGET locks the method-allow contract: a POST
+// (or any non-GET) to /oauth/qurl/callback returns 405 with an Allow
+// header — Auth0 redirects with GET so any non-GET hit is a
+// misconfiguration or probe.
+func TestCallbackRejectsNonGET(t *testing.T) {
+	cfg := newCallbackCfgOnly(t)
+	h := Callback(cfg)
+	req := httptest.NewRequest(http.MethodPost, "/oauth/qurl/callback", http.NoBody)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("got %d want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET" {
+		t.Errorf("Allow header: got %q want GET", got)
+	}
+}
+
 func TestCallbackHandlesAuth0Error(t *testing.T) {
 	cfg := newCallbackCfgOnly(t)
 	h := Callback(cfg)

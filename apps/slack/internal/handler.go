@@ -233,6 +233,12 @@ func (h *Handler) Wait() {
 	h.wg.Wait()
 }
 
+// Compile-time check that *Handler still satisfies oauth.AsyncTracker
+// after any future rename of Handler.Go — would break here rather
+// than nil-tracker the OAuth callback's fire-and-forget revoke path
+// at runtime.
+var _ oauth.AsyncTracker = (*Handler)(nil)
+
 // Go runs fn in a goroutine tracked by h.wg so the cmd shutdown drain
 // covers it. Implements oauth.AsyncTracker — the OAuth callback's
 // fire-and-forget DM and orphan-key revoke goroutines flow through
