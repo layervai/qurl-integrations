@@ -242,7 +242,6 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
-		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
@@ -259,7 +258,6 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 		msg += "\nKey prefix: `" + keyPrefix + "`"
 	}
 	if err := client.PostDirectMessage(ctx, userID, msg); err != nil {
-		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Warn("oauth/callback DM failed", "error", err, "user_id", userID, "team_id", teamID)
 	}
 }

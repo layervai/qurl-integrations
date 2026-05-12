@@ -470,7 +470,7 @@ func (c *countingTracker) Go(fn func()) {
 // `go`. Without this, a SIGTERM during a callback could cut the
 // orphan-key revoke off mid-call.
 func TestCallbackAsyncTrackerRoutesGoroutines(t *testing.T) {
-	cfg, _, _, _ := newCallbackCfg(t)
+	cfg := newCallbackCfgOnly(t)
 	cfg.SlackClient = &fakeSlackClient{}
 	tracker := &countingTracker{}
 	cfg.AsyncTracker = tracker
