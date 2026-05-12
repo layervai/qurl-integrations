@@ -31,7 +31,7 @@ const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
-const { createFlow, deleteFlow, transitionFlow } = require('./flow-state');
+const { createFlow, deleteFlow, transitionFlow, loadFlow } = require('./flow-state');
 const { flowIdForInteraction, registerFlow } = require('./flow-dispatch');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
@@ -2835,12 +2835,30 @@ const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 // trip the `extended: true` audit flag on the FLOW_TRANSITION event
 // — correct: the deadline really was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
+  // `row.version` is the OCC handle the dispatcher already loaded.
+  // The dispatcher's invariant (flow-dispatch.js — handleFlowInteraction)
+  // guarantees `row` is non-null with a numeric `version` field when
+  // the handler runs. A defensive check here would only fire if that
+  // invariant drifted; preferring an explicit failure over a
+  // confusing TypeError-on-undefined deep inside transitionFlow.
+  if (typeof row?.version !== 'number') {
+    throw new TypeError('handleSetupButton: dispatcher contract violated — row.version must be numeric');
+  }
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
     set_expires_at: Math.floor(Date.now() / 1000) + SETUP_MODAL_TTL_SECONDS,
   });
 
+  // Both early-return branches use `interaction.reply` directly,
+  // not flow-dispatch's `safeReply`. Two reasons: (a) the button
+  // click cannot be deferReply'd ahead of time (showModal must be
+  // the first response, and we don't know yet whether we'll get
+  // there), so `interaction.replied/deferred` are guaranteed false
+  // when we arrive here — safeReply's followUp branch would never
+  // be taken. (b) The shape matches handleRevokeSelect's OCC-loser
+  // path, keeping the dispatcher-side handler convention consistent
+  // across commands.
   if (result.result === 'conflict') {
     // Two concurrent button clicks. The OCC loser must NOT call
     // showModal — the winner will (or already did), and a duplicate
@@ -2961,10 +2979,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   }
 
   await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
-  logger.info('Guild API key configured', {
-    guild_id: interaction.guildId,
-    configured_by: interaction.user.id,
-  });
+  logger.info('Guild API key configured', logFields);
   // Swallow Discord errors on the post-persist editReply. If the
   // editReply throws AFTER setGuildApiKey commits, letting it
   // propagate would fire the dispatcher's universal safety-net
@@ -3857,12 +3872,11 @@ const commands = [
         // supersede + recreate gives them a fresh button.
         await interaction.deferReply({ ephemeral: true });
         const setupFlowId = flowIdForInteraction(interaction);
-        const setupExpiresAt = Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS;
         const setupCreated = await createFlow({
           flow_id: setupFlowId,
           stage: SETUP_STAGE_AWAITING_BUTTON,
           payload: null,
-          expires_at: setupExpiresAt,
+          expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
         });
         if (!setupCreated.created) {
           await deleteFlow(setupFlowId, {
@@ -3875,7 +3889,10 @@ const commands = [
               flow_id: setupFlowId,
               stage: SETUP_STAGE_AWAITING_BUTTON,
               payload: null,
-              expires_at: setupExpiresAt,
+              // Recompute expires_at after the deleteFlow round-trip
+              // so the retried row gets a full SETUP_BUTTON_TTL_SECONDS
+              // budget, not a sub-second-truncated one.
+              expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
             });
           } catch (err) {
             logger.warn('handleSetup: createFlow retry threw after admin_cleanup', {
@@ -3886,11 +3903,28 @@ const commands = [
             });
           }
           if (!setupRetry.created) {
-            // Prior flow is mid-modal (stage gate refused the
-            // admin_cleanup) or two races in a row. Tell the admin
-            // to finish the existing modal.
+            // Retry create can fail for three distinct reasons:
+            //   (a) stage gate refused admin_cleanup because the
+            //       prior row is mid-modal → tell admin to finish
+            //       their existing modal.
+            //   (b) sibling flow type lives at this flow_id (e.g.
+            //       in-flight revoke) → don't claim a modal is
+            //       open; use the generic "could not start" wording.
+            //   (c) two races in a row → also generic wording.
+            // Disambiguate with a loadFlow peek. Adds one DDB read
+            // on a rare error path; cheap relative to telling the
+            // user about a modal that doesn't exist.
+            logger.warn('handleSetup: createFlow racy after admin_cleanup', {
+              flow_id: setupFlowId,
+            });
+            const surviving = await loadFlow(setupFlowId).catch(() => null);
+            if (surviving?.stage === SETUP_STAGE_AWAITING_MODAL) {
+              return interaction.editReply({
+                content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
+              });
+            }
             return interaction.editReply({
-              content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
+              content: 'Could not start a setup session — please try again.',
             });
           }
         }

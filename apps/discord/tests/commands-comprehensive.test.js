@@ -1554,20 +1554,75 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     // Harness-level guarantee: deleteFlow with stage='awaiting_setup_button'
     // returns deleted:false when the row is actually in
     // 'awaiting_setup_modal'. The retry createFlow then conflicts on
-    // the existing row.
+    // the existing row, and the loadFlow peek confirms the prior
+    // flow is mid-modal so the user-visible message names the modal.
     mockCreateFlow
       .mockResolvedValueOnce({ created: false })
       .mockResolvedValueOnce({ created: false });
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    mockLoadFlow.mockResolvedValueOnce({
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      stage: 'awaiting_setup_modal',
+      version: 2,
+    });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
     await cmd.execute(interaction);
 
+    // Pin the slash-path block message specifically — not the
+    // button-handler conflict message which also contains "modal".
     const blockedCall = interaction.editReply.mock.calls.find(
-      (c) => /modal open/.test(c[0]?.content || ''),
+      (c) => /already have a `\/qurl setup` modal open/.test(c[0]?.content || ''),
     );
     expect(blockedCall).toBeDefined();
+  });
+
+  it('uses generic wording when retry fails for a sibling-flow / race (not mid-modal)', async () => {
+    // The post-failure loadFlow peek discriminates: if the surviving
+    // row at flow_id is NOT awaiting_setup_modal, the user sees the
+    // generic "could not start" message instead of the misleading
+    // "modal open" wording.
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: false });
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    mockLoadFlow.mockResolvedValueOnce({
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      stage: 'awaiting_revoke_select', // sibling flow type
+      version: 1,
+    });
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    await cmd.execute(interaction);
+
+    const genericCall = interaction.editReply.mock.calls.find(
+      (c) => /Could not start a setup session/.test(c[0]?.content || ''),
+    );
+    expect(genericCall).toBeDefined();
+    const modalMsgCall = interaction.editReply.mock.calls.find(
+      (c) => /modal open/.test(c[0]?.content || ''),
+    );
+    expect(modalMsgCall).toBeUndefined();
+  });
+
+  it('propagates the throw when the first createFlow fails (caught by handleCommand)', async () => {
+    // The slash-path's first createFlow has no try/catch — a throw
+    // there propagates to handleCommand's outer error envelope
+    // (commands.js handleCommand try/catch), which replies the
+    // generic "There was an error executing this command." Pin
+    // here that cmd.execute lets the throw bubble; if a future
+    // refactor adds a try/catch around the first createFlow and
+    // accidentally swallows it (no user-visible error), this test
+    // trips instead of regressing silently.
+    mockCreateFlow.mockRejectedValueOnce(new Error('DDB region timeout'));
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+
+    await expect(cmd.execute(interaction)).rejects.toThrow('DDB region timeout');
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
   });
 });
 
