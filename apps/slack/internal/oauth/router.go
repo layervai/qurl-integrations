@@ -79,7 +79,7 @@ type SetupConfig struct {
 func (s SetupConfig) SetupURL(state string) string {
 	u, err := url.JoinPath(s.SlackBaseURL, StartPath)
 	if err != nil {
-		slog.Warn("SetupURL: url.JoinPath failed — falling back to concat", //nolint:gosec // G706: slog escapes control bytes in attribute values.
+		slog.Warn("SetupURL: url.JoinPath failed — falling back to concat",
 			"error", err, "slack_base_url", s.SlackBaseURL)
 		u = s.SlackBaseURL + StartPath
 	}
