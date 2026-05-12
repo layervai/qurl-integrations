@@ -59,10 +59,16 @@ func apiKeyScopes() []string {
 // callbackURL composes the Auth0 redirect_uri. SlackBaseURL is tolerated
 // with or without a trailing slash via url.JoinPath. Falling back to
 // plain concat keeps drift between this and SetupURL impossible.
+// buildOAuthConfig already validates the input is https://-prefixed and
+// trailing-slash-stripped, so the error branch is unreachable in
+// practice; the slog.Warn fires only if a future caller bypasses the
+// validation.
 func callbackURL(slackBaseURL string) string {
 	if u, err := url.JoinPath(slackBaseURL, callbackPath); err == nil {
 		return u
 	}
+	slog.Warn("callbackURL: url.JoinPath failed — falling back to concat",
+		"slack_base_url", slackBaseURL)
 	return slackBaseURL + callbackPath
 }
 

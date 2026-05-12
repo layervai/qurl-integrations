@@ -494,6 +494,16 @@ func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
 // chain is what binds workspace identity to the resulting state token
 // (the alternative, taking team_id from an unsigned query param at
 // /start, was the workspace-rebind primitive flagged in PR review).
+//
+// Admin restriction: this handler does NOT verify the invoking user is
+// a workspace admin. That gate lives in the Slack app manifest — the
+// `/qurl setup` command must be declared admin-only (or restricted via
+// channel/role permissions in the install config). Without that gate,
+// any workspace user could initiate setup and overwrite the workspace's
+// qURL key with one minted against their own Auth0 account. Confirm
+// the manifest before shipping; an in-bot check would require an extra
+// Slack API round-trip per setup attempt that the manifest already
+// covers.
 func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
 	if h.oauthSetup == nil {
 		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
