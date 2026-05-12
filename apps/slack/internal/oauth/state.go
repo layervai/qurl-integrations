@@ -28,6 +28,16 @@ import (
 //
 // Expiry: 5 minutes from mint covers the slash-command-reply → click →
 // Auth0 authenticate → callback round-trip.
+//
+// Replay posture: within the 5-minute TTL the token *can* be replayed —
+// the nonce is random-per-mint but not persisted to a one-shot store.
+// The double-submit cookie blunts the replay surface (a second clicker
+// needs the same browser, and clearStateCookie runs on every reject
+// path plus on successful state-verify), so a leaked URL alone doesn't
+// re-bind in a different browser. A nonce-store-backed one-shot would
+// close the same-browser-twice case completely; the tradeoff is the
+// extra storage dependency on a flow that's per-workspace-install rare.
+// Acceptable for v1; revisit if install-flow logs show legitimate replay.
 const (
 	stateMaxAge        = 5 * time.Minute
 	statePartCount     = 5
