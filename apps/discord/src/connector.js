@@ -322,8 +322,16 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * field applies PER minted link: `n` recipients get `n` independent
  * one-time tokens, so one recipient opening their link doesn't
  * invalidate anyone else's.
+ *
+ * `expiresIn` (optional duration string like `1h`, `168h`) opts the
+ * caller into the connector's per-recipient `vid` path
+ * (qurl-integrations-infra#525): each mint becomes its own
+ * one-time-use qURL with a unique vid baked into target_url, so the
+ * server-side viewer enforcement keys per-recipient. Omitting it
+ * keeps the legacy shape (one qURL, N tokens, shared target_url) —
+ * no per-recipient refresh-bypass enforcement.
  */
-async function mintLinks(resourceId, expiresAt, n, apiKey) {
+async function mintLinks(resourceId, expiresAt, n, apiKey, expiresIn) {
   if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
@@ -335,10 +343,14 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
   if (!Number.isInteger(n) || n < 1 || n > 100) {
     throw new Error(`Invalid link count (n must be integer 1..100): ${n}`);
   }
+  const body = { expires_at: expiresAt, n, one_time_use: true };
+  if (expiresIn) {
+    body.expires_in = expiresIn;
+  }
   const response = await fetch(`${config.CONNECTOR_URL}/api/mint_link/${resourceId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...connectorAuthHeaders(apiKey) },
-    body: JSON.stringify({ expires_at: expiresAt, n, one_time_use: true }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(30000),
   });
 
@@ -354,7 +366,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
     throw new Error('Connector mint_link returned no links array');
   }
 
-  logger.info('Minted links', { resource_id: resourceId, count: result.links.length });
+  logger.info('Minted links', { resource_id: resourceId, count: result.links.length, per_vid: Boolean(expiresIn) });
   return result.links;
 }
 

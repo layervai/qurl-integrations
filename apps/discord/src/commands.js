@@ -745,16 +745,31 @@ async function fetchGuildMembers(guild) {
  * and handleAddRecipients (file/location). Centralizing this means a fix to
  * the re-upload / batching / quota logic lands in one place.
  *
+ * `expiresIn` (optional duration string like "1h", "168h") opts into the
+ * connector's per-recipient vid path (qurl-integrations-infra#525). Each
+ * minted link becomes its own one-time-use qURL with a unique vid in
+ * target_url, so refresh after the viewer self-destruct fires returns 410
+ * for that specific recipient. Omitting it keeps the legacy shape (1 qURL
+ * + N tokens, shared target_url, no server-side refresh enforcement).
+ *
+ * Per-recipient resource_id: when the connector takes the per-vid path,
+ * each link comes back with its own fresh resource_id; we honor that
+ * (link.resource_id) for downstream tracking. The legacy path returns the
+ * shared resource_id; fallback to the currentResourceId we drove the
+ * batch with preserves the existing contract.
+ *
  * @param {object} opts
  * @param {string} opts.initialResourceId — resource_id from the first upload
  * @param {() => Promise<{resource_id: string}>} opts.reuploadFn — called when
  *   the current resource's token pool is drained. Must return a fresh resource.
  * @param {string} opts.expiresAt — ISO string; forwarded to mintLinks.
+ * @param {string} [opts.expiresIn] — duration string ("1h", "168h"); when
+ *   set, opts into per-recipient vid enforcement on the connector side.
  * @param {number} opts.recipientCount — number of tokens to mint in total.
  * @param {string} opts.apiKey — QURL API key.
  * @returns {Array<{qurl_link: string, resourceId: string}>}
  */
-async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, recipientCount, apiKey }) {
+async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, expiresIn, recipientCount, apiKey }) {
   const allLinks = [];
   let currentResourceId = initialResourceId;
   let tokensUsed = 0;
@@ -766,9 +781,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
       tokensUsed = 0;
     }
     const batchSize = Math.min(TOKENS_PER_RESOURCE, recipientCount - i);
-    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey);
+    const minted = await mintLinks(currentResourceId, expiresAt, batchSize, apiKey, expiresIn);
     for (const link of minted) {
-      allLinks.push({ qurl_link: link.qurl_link, resourceId: currentResourceId });
+      // Per-vid path returns per-mint resource_id. Legacy path returns
+      // the shared one (or nothing, on a pre-#525 connector). Fall back
+      // so this stays compatible with both shapes.
+      allLinks.push({ qurl_link: link.qurl_link, resourceId: link.resource_id || currentResourceId });
     }
     tokensUsed += batchSize;
   }
@@ -1719,6 +1737,10 @@ async function handleSend(interaction, apiKey) {
           initialResourceId: firstUpload.resource_id,
           reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
           expiresAt,
+          // Opt into the connector's per-recipient vid path so refresh
+          // after self-destruct returns 410 per recipient
+          // (qurl-integrations-infra#525).
+          expiresIn,
           recipientCount: recipients.length,
           apiKey,
         });
@@ -1755,6 +1777,11 @@ async function handleSend(interaction, apiKey) {
         initialResourceId: firstUpload.resource_id,
         reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
         expiresAt,
+        // Per-recipient vid path (qurl-integrations-infra#525). Note:
+        // google-map JSON resources hit the connector's render
+        // carve-out today (#480) so vid is provisioned but inert
+        // until the carve-out is removed.
+        expiresIn,
         recipientCount: recipients.length,
         apiKey,
       });
@@ -2335,6 +2362,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           initialResourceId: first.resource_id,
           reuploadFn: () => reUploadBuffer(fileBuffer, filename, contentType, apiKey, inheritedDestruct),
           expiresAt,
+          // Per-recipient vid path on the connector
+          // (qurl-integrations-infra#525) — same opt-in as the
+          // original send.
+          expiresIn: sendConfig.expires_in,
           recipientCount: newRecipients.length,
           apiKey,
         });
@@ -2379,6 +2410,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         initialResourceId: firstUpload.resource_id,
         reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct),
         expiresAt,
+        // Per-recipient vid path (qurl-integrations-infra#525). Inert
+        // for google-map JSON today per the #480 carve-out — still
+        // forwarded so behavior matches once the carve-out is removed.
+        expiresIn: sendConfig.expires_in,
         recipientCount: newRecipients.length,
         apiKey,
       });
