@@ -21,7 +21,13 @@ const (
 	// post-mint persist failure forces us to clean up. Named separately
 	// from auth0TokenTimeout because the call targets qurl-service, not
 	// Auth0 — drift between the two budgets is fine.
-	revokeTimeout       = 15 * time.Second
+	revokeTimeout = 15 * time.Second
+	// persistTimeout bounds the DDB PutItem from mintAndPersist. Fresh
+	// context (not the request context) so TimeoutHandler can't cancel
+	// the write mid-PutItem and leave the row state misaligned with
+	// what we report to the user. 15s is well over typical DDB PutItem
+	// latency.
+	persistTimeout      = 15 * time.Second
 	dmTimeout           = 5 * time.Second
 	auth0TokenBodyLimit = 8 << 10 // 8 KiB — Auth0's /oauth/token response is ~2 KiB; tighter than the previous 64 KiB.
 )
@@ -96,7 +102,17 @@ func Callback(cfg Config) http.HandlerFunc {
 	now := cfg.now()
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: auth0TokenTimeout}
+		httpClient = &http.Client{
+			Timeout: auth0TokenTimeout,
+			// Mirror defaultResponseURLClient in apps/slack/internal:
+			// Auth0 won't 30x /oauth/token in practice, but a
+			// CheckRedirect that surfaces the response rather than
+			// auto-following gives operator logs the actual status
+			// code and removes a class of cross-host hop surprises.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +239,15 @@ func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, acce
 		return "", false
 	}
 
-	if perr := cfg.Provider.SetAPIKey(ctx, teamID, apiKey, userID); perr != nil {
+	// Persist with a fresh bounded context, not the request context.
+	// TimeoutHandler's 60s deadline could fire mid-PutItem; the write
+	// would return context.Canceled but DDB may still have committed,
+	// producing a row we then report to the user as "not stored." The
+	// fresh context decouples the persist outcome from the handler-
+	// level timeout — what we tell the user matches what's in DDB.
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
+	defer persistCancel()
+	if perr := cfg.Provider.SetAPIKey(persistCtx, teamID, apiKey, userID); perr != nil {
 		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", perr, "team_id", teamID, "key_id", keyID)
 		// Fire-and-forget revoke. Fresh context (not the request

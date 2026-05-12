@@ -118,6 +118,51 @@ func TestBuildOAuthConfigShortSecret(t *testing.T) {
 	}
 }
 
+// TestBuildOAuthConfigSecretLengthBoundary pins both sides of the
+// StateMinSecret floor — one byte less rejects, exactly StateMinSecret
+// accepts. A future bump of the constant on one side without the other
+// would be caught here.
+func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
+	stubJWKSVerifier(t)
+	t.Run("just_under", func(t *testing.T) {
+		env := validEnv()
+		env["OAUTH_STATE_SECRET"] = strings.Repeat("a", oauth.StateMinSecret-1)
+		applyEnv(t, env)
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+		if ok || !errors.Is(err, errOAuthStateSecretTooShort) {
+			t.Errorf("ok=%v err=%v — want ok=false + errOAuthStateSecretTooShort at StateMinSecret-1 bytes", ok, err)
+		}
+	})
+	t.Run("exactly_at", func(t *testing.T) {
+		env := validEnv()
+		env["OAUTH_STATE_SECRET"] = strings.Repeat("a", oauth.StateMinSecret)
+		applyEnv(t, env)
+		_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+		if !ok || err != nil {
+			t.Errorf("ok=%v err=%v — want ok=true at exactly StateMinSecret bytes", ok, err)
+		}
+	})
+}
+
+// TestBuildOAuthConfigRejectsNonHTTPSSlackBaseURL locks the Secure-cookie
+// contract: a Set-Cookie: Secure is dropped silently by browsers over
+// http://, which would break the double-submit check with a misleading
+// "setup must be completed in the same browser" error. Fail-fast at
+// config load.
+func TestBuildOAuthConfigRejectsNonHTTPSSlackBaseURL(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env["SLACK_BASE_URL"] = "http://slack-bot.example"
+	applyEnv(t, env)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	if ok {
+		t.Error("expected ok=false on http:// SLACK_BASE_URL")
+	}
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Errorf("expected https:// error, got %v", err)
+	}
+}
+
 // TestBuildOAuthConfigNormalizesURLEnvVars asserts SLACK_BASE_URL,
 // AUTH0_DOMAIN, and QURL_ENDPOINT are normalized at config-load:
 //   - trailing slashes are stripped (Auth0 rejects redirect_uri mismatches)

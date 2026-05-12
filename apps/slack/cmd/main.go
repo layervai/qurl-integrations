@@ -270,10 +270,18 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 	return oauth.NewJWKSVerifier(ctx, issuer, audience)
 }
 
+// errOAuthStateSecretTooShort is returned by buildOAuthConfig when the
+// operator's OAUTH_STATE_SECRET is set but below oauth.StateMinSecret.
+// Bubbling it up to run() turns a misconfiguration that previously
+// degraded silently into a fail-fast startup error.
+var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
-// (cfg, false) when any required env var is missing or invalid —
-// the caller logs and skips route registration so a sandbox boot with
-// no Auth0 configured still serves the existing Slack surface.
+// (cfg, false, nil) when any required env var is missing — the caller
+// logs and skips route registration so a sandbox boot with no Auth0
+// configured still serves the existing Slack surface. Returns
+// (_, false, err) when a required env var is set but malformed
+// (short secret, non-HTTPS SlackBaseURL) — the caller fails-fast.
 //
 // Required env vars:
 //
@@ -283,12 +291,6 @@ var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.
 // ctx is the parent context for the JWKS refresh goroutine spawned
 // inside NewJWKSVerifier — pass the signal-canceled context so the
 // goroutine tears down on SIGTERM.
-// errOAuthStateSecretTooShort is returned by buildOAuthConfig when the
-// operator's OAUTH_STATE_SECRET is set but below stateMinSecret. Bubbling
-// it up to run() turns a misconfiguration that previously degraded
-// silently into a fail-fast startup error.
-var errOAuthStateSecretTooShort = errors.New("OAUTH_STATE_SECRET shorter than required minimum")
-
 func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker oauth.AsyncTracker) (oauth.Config, bool, error) {
 	// Strip trailing slashes from URL-shaped env vars at one chokepoint so
 	// downstream concatenations (redirect_uri, /oauth/token URL composition)
@@ -316,6 +318,14 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	if domain == "" || clientID == "" || clientSecret == "" || audience == "" ||
 		baseURL == "" || stateSecret == "" || qurlEndpoint == "" {
 		return oauth.Config{}, false, nil
+	}
+	// SLACK_BASE_URL must be HTTPS: the state cookie is Secure, and a
+	// browser silently drops Set-Cookie: Secure on an http:// response,
+	// which would break the double-submit check with a misleading
+	// "setup must be completed in the same browser" error. Reject
+	// fail-fast at config load.
+	if !strings.HasPrefix(baseURL, "https://") {
+		return oauth.Config{}, false, fmt.Errorf("SLACK_BASE_URL must be https:// (got %q)", baseURL)
 	}
 	if len(stateSecret) < minStateSecretBytes {
 		// Fail-fast: the bot would silently disable OAuth and /qurl
