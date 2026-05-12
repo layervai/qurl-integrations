@@ -146,6 +146,15 @@ const isDiscordInstallConfigured = Boolean(
   isQurlOAuthConfigured && process.env.DISCORD_CLIENT_SECRET,
 );
 
+// Shard identifier for the shard-aware composite flow_id
+// (`<shard_id>#<guild_id>#<channel_id>#<user_id>`, see src/flow-id.js).
+// Single-shard today, so the default is `'0:1'` (shard 0 of 1) per the
+// zero-downtime design doc. When sharding lands, the runtime will set
+// SHARD_ID per process to `'k:n'` (e.g. `'3:8'` for shard 3 of 8); the
+// schema is already shard-aware so no migration is needed. Single
+// export point so a future grep-and-replace doesn't miss a callsite.
+const SHARD_ID = process.env.SHARD_ID || '0:1';
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -269,4 +278,6 @@ module.exports = {
   // disable the rate limit; a recipients cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
+
+  SHARD_ID,
 };

@@ -20,6 +20,7 @@ jest.mock('../src/config', () => ({
   ADMIN_USER_IDS: ['admin-1'],
   BASE_URL: 'http://localhost:3000',
   GUILD_ID: 'guild-1',
+  SHARD_ID: '0:1',
   isMultiTenant: false,
   // This suite exercises every slash command (both /qurl and the OpenNHP
   // ones). registerCommands + handleCommand filter to the customer-safe
@@ -152,6 +153,10 @@ const mockDb = {
   recordQURLSend: jest.fn(),
   recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
+  // Default to "no per-guild key configured" → the revoke + send
+  // gates fall through to config.QURL_API_KEY (which is set in
+  // the config mock at the top of this file).
+  getGuildApiKey: jest.fn().mockResolvedValue(null),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -213,6 +218,19 @@ jest.mock('../src/places', () => ({
   searchPlaces: jest.fn().mockResolvedValue([]),
 }));
 
+// flow-state is the DDB-backed harness consumed by /qurl revoke
+// post-conversion (PR 5). Mock it here rather than hit DDB.
+const mockCreateFlow = jest.fn().mockResolvedValue({ created: true, version: 1 });
+const mockLoadFlow = jest.fn();
+const mockDeleteFlow = jest.fn().mockResolvedValue({ deleted: true });
+const mockTransitionFlow = jest.fn();
+jest.mock('../src/flow-state', () => ({
+  createFlow: (...args) => mockCreateFlow(...args),
+  loadFlow: (...args) => mockLoadFlow(...args),
+  deleteFlow: (...args) => mockDeleteFlow(...args),
+  transitionFlow: (...args) => mockTransitionFlow(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Require modules under test
 // ---------------------------------------------------------------------------
@@ -267,6 +285,7 @@ function makeInteraction(overrides = {}) {
       members: new Map(),
     },
     channelId: 'ch-1',
+    guildId: 'guild-1',
     guild: {
       members: { fetch: jest.fn().mockResolvedValue(undefined) },
       voiceStates: { cache: new Map() },
@@ -1152,7 +1171,17 @@ describe('/qurl help subcommand', () => {
   });
 });
 
+// The slash command writes a flow_state row to DDB and renders the
+// select menu; the actual revoke executes on the menu's selection
+// event in the dispatcher path. Tests split accordingly — "menu is
+// rendered" lives here, "revoke executes" lives in the
+// `handleRevokeSelect (dispatcher)` describe below.
 describe('/qurl revoke subcommand', () => {
+  beforeEach(() => {
+    mockCreateFlow.mockResolvedValue({ created: true, version: 1 });
+    mockDeleteFlow.mockResolvedValue({ deleted: true });
+  });
+
   it('shows no recent sends message', async () => {
     mockDb.getRecentSends.mockReturnValue([]);
     const cmd = commands.find(c => c.data.name === 'qurl');
@@ -1169,9 +1198,12 @@ describe('/qurl revoke subcommand', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('No recent sends') }),
     );
+    // No flow row should be opened when there's nothing to revoke —
+    // an early no-op shouldn't poison the SLI's create-count.
+    expect(mockCreateFlow).not.toHaveBeenCalled();
   });
 
-  it('shows select menu for recent sends and revokes', async () => {
+  it('opens a flow row and renders the select menu', async () => {
     mockDb.getRecentSends.mockReturnValue([
       {
         send_id: 'send-1',
@@ -1183,16 +1215,6 @@ describe('/qurl revoke subcommand', () => {
         created_at: new Date().toISOString(),
       },
     ]);
-    mockDb.getSendResourceIds.mockReturnValue(['res-1']);
-    mockDeleteLink.mockResolvedValue(undefined);
-
-    const selectInteraction = {
-      values: ['send-1'],
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const responseObj = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeInteraction({
@@ -1201,48 +1223,203 @@ describe('/qurl revoke subcommand', () => {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'revoke'),
       },
-      editReply: jest.fn().mockResolvedValue(responseObj),
     });
 
     await cmd.execute(interaction);
 
-    expect(selectInteraction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('Revoked') }),
+    expect(mockCreateFlow).toHaveBeenCalledTimes(1);
+    const createArgs = mockCreateFlow.mock.calls[0][0];
+    expect(createArgs.stage).toBe('awaiting_revoke_select');
+    expect(createArgs.payload).toBeNull();
+    expect(createArgs.flow_id).toMatch(/^0:1#guild-1#ch-1#user-1$/);
+    expect(createArgs.expires_at).toEqual(expect.any(Number));
+
+    // Menu was rendered to the user.
+    const menuCall = interaction.editReply.mock.calls.find(
+      (c) => c[0]?.components?.length > 0,
+    );
+    expect(menuCall).toBeDefined();
+    expect(menuCall[0].content).toMatch(/Select a send to revoke/);
+  });
+
+  it('supersedes a prior in-flight revoke flow', async () => {
+    // First createFlow loses the OCC race (existing row from a
+    // previous /qurl revoke call); admin_cleanup + retry must
+    // win, and the menu still renders.
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: true, version: 1 });
+    mockDb.getRecentSends.mockReturnValue([
+      {
+        send_id: 'send-1',
+        resource_type: 'file',
+        target_type: 'user',
+        recipient_count: 1,
+        delivered_count: 1,
+        expires_in: '24h',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    expect(mockCreateFlow).toHaveBeenCalledTimes(2);
+    expect(mockDeleteFlow).toHaveBeenCalledTimes(1);
+    expect(mockDeleteFlow.mock.calls[0][1]).toEqual({
+      stage: 'awaiting_revoke_select',
+      reason: 'admin_cleanup',
+    });
+    // Menu should still be rendered after supersede.
+    const menuCall = interaction.editReply.mock.calls.find(
+      (c) => c[0]?.components?.length > 0,
+    );
+    expect(menuCall).toBeDefined();
+  });
+
+  it('surfaces an error when supersede + retry both lose the race', async () => {
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: false });
+    mockDb.getRecentSends.mockReturnValue([
+      {
+        send_id: 'send-1',
+        resource_type: 'file',
+        target_type: 'user',
+        recipient_count: 1,
+        delivered_count: 1,
+        expires_in: '24h',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const errorCall = interaction.editReply.mock.calls.find(
+      (c) => /Could not start a revoke session/.test(c[0]?.content || ''),
+    );
+    expect(errorCall).toBeDefined();
+  });
+});
+
+// Dispatcher-side tests for handleRevokeSelect — the post-conversion
+// execution path. Direct-invocation tests rather than going through
+// the dispatcher itself; the routing layer is covered in
+// flow-dispatch.test.js.
+describe('handleRevokeSelect (dispatcher path)', () => {
+  const { handleRevokeSelect } = require('../src/commands');
+
+  function makeSelectInteraction(overrides = {}) {
+    return {
+      values: ['send-1'],
+      user: { id: 'user-1' },
+      guildId: 'guild-1',
+      channelId: 'ch-1',
+      update: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    mockDeleteFlow.mockResolvedValue({ deleted: true });
+  });
+
+  it('runs revoke when deleteFlow wins (deleted=true)', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
+      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
+    ]);
+    mockDeleteLink.mockResolvedValue(undefined);
+    const interaction = makeSelectInteraction({ values: ['send-99'] });
+
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      '0:1#guild-1#ch-1#user-1',
+      { stage: 'awaiting_revoke_select', reason: 'terminal' },
+    );
+    expect(mockDeleteLink).toHaveBeenCalledTimes(3);
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('3/3') }),
     );
   });
 
-  it('handles revocation timeout', async () => {
-    mockDb.getRecentSends.mockReturnValue([
-      {
-        send_id: 'send-1',
-        resource_type: 'file',
-        target_type: 'user',
-        recipient_count: 1,
-        delivered_count: 1,
-        expires_in: '24h',
-        created_at: new Date().toISOString(),
-      },
+  it('skips revoke when deleteFlow loses the race (deleted=false)', async () => {
+    // A duplicate event (SQS redelivery in the future worker tier,
+    // or a Discord double-dispatch today) — only the worker whose
+    // conditional delete succeeds proceeds. The loser must NOT
+    // touch the qURL API.
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    const interaction = makeSelectInteraction();
+
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('already processed'),
+      }),
+    );
+  });
+
+  it('updates with an error if apiKey resolution is no longer configured', async () => {
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: true });
+    mockDb.getGuildApiKey = jest.fn().mockResolvedValue(null);
+    // Drop the fallback as well — emulates an admin unsetting the
+    // key between revoke-init and revoke-execute.
+    const originalQurlApiKey = require('../src/config').QURL_API_KEY;
+    require('../src/config').QURL_API_KEY = null;
+
+    const interaction = makeSelectInteraction();
+    try {
+      await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+      expect(mockDeleteLink).not.toHaveBeenCalled();
+      expect(interaction.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('no longer configured'),
+        }),
+      );
+    } finally {
+      require('../src/config').QURL_API_KEY = originalQurlApiKey;
+    }
+  });
+
+  it('reports a partial revoke (some links already opened)', async () => {
+    mockDb.getSendItems.mockReturnValue([
+      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
+      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
     ]);
+    mockDeleteLink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('not found'));
 
-    const responseObj = {
-      awaitMessageComponent: jest.fn().mockRejectedValue(new Error('timeout')),
-    };
+    const interaction = makeSelectInteraction({ values: ['send-partial'] });
+    await handleRevokeSelect(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
 
-    const cmd = commands.find(c => c.data.name === 'qurl');
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      options: {
-        ...makeInteraction().options,
-        getSubcommand: jest.fn(() => 'revoke'),
-      },
-      editReply: jest.fn().mockResolvedValue(responseObj),
-    });
-
-    await cmd.execute(interaction);
-
-    // Should have called editReply for timeout message
-    const lastCall = interaction.editReply.mock.calls[interaction.editReply.mock.calls.length - 1][0];
-    expect(lastCall.content).toContain('timed out');
+    expect(interaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('1/2') }),
+    );
   });
 });
 
@@ -1269,104 +1446,9 @@ describe('handleCommand — autocomplete', () => {
   // stale registration) is short-circuited without dispatch.
 });
 
-describe('revokeAllLinks', () => {
-  it('revokes multiple resource IDs', async () => {
-    mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
-      { resource_id: 'res-3', recipient_discord_id: 'u-3' },
-    ]);
-    mockDeleteLink.mockResolvedValue(undefined);
-
-    // Access revokeAllLinks indirectly through the revoke flow
-    // We test it via the button handler indirectly, but let's also
-    // test the direct function if it's exported
-    // Since it's not in _test, we test via the revoke subcommand which calls it
-
-    mockDb.getRecentSends.mockReturnValue([
-      {
-        send_id: 'send-99',
-        resource_type: 'file',
-        target_type: 'user',
-        recipient_count: 3,
-        delivered_count: 3,
-        expires_in: '24h',
-        created_at: new Date().toISOString(),
-      },
-    ]);
-
-    const selectInteraction = {
-      values: ['send-99'],
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const responseObj = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
-
-    const cmd = commands.find(c => c.data.name === 'qurl');
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      options: {
-        ...makeInteraction().options,
-        getSubcommand: jest.fn(() => 'revoke'),
-      },
-      editReply: jest.fn().mockResolvedValue(responseObj),
-    });
-
-    await cmd.execute(interaction);
-
-    expect(mockDeleteLink).toHaveBeenCalledTimes(3);
-    expect(selectInteraction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('3/3') }),
-    );
-  });
-
-  it('handles partial revocation failures', async () => {
-    mockDb.getSendItems.mockReturnValue([
-      { resource_id: 'res-1', recipient_discord_id: 'u-1' },
-      { resource_id: 'res-2', recipient_discord_id: 'u-2' },
-    ]);
-    mockDeleteLink
-      .mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error('not found'));
-
-    mockDb.getRecentSends.mockReturnValue([
-      {
-        send_id: 'send-partial',
-        resource_type: 'url',
-        target_type: 'channel',
-        recipient_count: 2,
-        delivered_count: 2,
-        expires_in: '1h',
-        created_at: new Date().toISOString(),
-      },
-    ]);
-
-    const selectInteraction = {
-      values: ['send-partial'],
-      update: jest.fn().mockResolvedValue(undefined),
-    };
-    const responseObj = {
-      awaitMessageComponent: jest.fn().mockResolvedValue(selectInteraction),
-    };
-
-    const cmd = commands.find(c => c.data.name === 'qurl');
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      options: {
-        ...makeInteraction().options,
-        getSubcommand: jest.fn(() => 'revoke'),
-      },
-      editReply: jest.fn().mockResolvedValue(responseObj),
-    });
-
-    await cmd.execute(interaction);
-
-    expect(selectInteraction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ content: expect.stringContaining('1/2') }),
-    );
-  });
-});
+// `revokeAllLinks` coverage lives in qurl-send-back-half.test.js
+// (direct unit tests) and in the `handleRevokeSelect (dispatcher
+// path)` block above (integration through the flow).
 
 // connector and qurl tests that require resetModules are in qurl-send.test.js
 

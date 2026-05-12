@@ -2,6 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
+const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
@@ -260,8 +261,28 @@ if (isGateway) {
     await registerCommands(client);
   });
 
-  // Handle interactions
-  client.on('interactionCreate', handleCommand);
+  // Handle interactions. Split-dispatch by interaction kind:
+  // ChatInputCommand + Autocomplete go through the slash-command
+  // path (handleCommand); MessageComponent + ModalSubmit go through
+  // the DDB-backed flow dispatcher (handleFlowInteraction, which
+  // replaces the legacy in-process `awaitMessageComponent` pattern
+  // per the zero-downtime upgrade rollout). Keep the two paths
+  // disjoint — a single listener that branched internally would
+  // mix two state machines (slash dispatch vs. flow-resume) under
+  // one error-handling envelope; cleaner to wire them separately.
+  client.on('interactionCreate', (interaction) => {
+    if (interaction.isChatInputCommand() || interaction.isAutocomplete()) {
+      return handleCommand(interaction);
+    }
+    if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
+      return handleFlowInteraction(interaction);
+    }
+    // Anything else (button-builder selects of a kind we don't
+    // ship today, future Discord interaction types) is silently
+    // ignored — same shape as the pre-conversion code, which
+    // short-circuited any non-ChatInputCommand interaction.
+    return undefined;
+  });
 
   // Tick the gateway-activity timestamp on every WebSocket frame.
   // Feeds the `activity_age_ms` observability gauge ONLY — does not
