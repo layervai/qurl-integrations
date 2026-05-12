@@ -369,8 +369,8 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 	// hits like https://bot.example/prefix/oauth/qurl/callback, but
 	// the mux only registers /oauth/qurl/callback. Auth0's redirect
 	// would silently miss the route. Parse + check Path is "".
-	if u, err := url.Parse(baseURL); err != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return oauth.Config{}, false, fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query (got %q)", baseURL)
+	if u, err := url.Parse(baseURL); err != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return oauth.Config{}, false, fmt.Errorf("SLACK_BASE_URL must be a bare https:// origin with no path/query/userinfo (got %q)", baseURL)
 	}
 	if len(stateSecret) < minStateSecretBytes {
 		// Fail-fast: the bot would silently disable OAuth and /qurl

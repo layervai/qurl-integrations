@@ -150,6 +150,11 @@ func Callback(cfg Config) http.HandlerFunc {
 				// the rejected username in error_description. Truncate
 				// to bound PII exposure in operator logs.
 				"error_description", truncateForLog(q.Get("error_description"), 128))
+			// Clear the cookie even on the Auth0-error branch so the
+			// stale state can't be replayed within the 5-minute TTL.
+			// On the success path, the cookie clears after verify; this
+			// closes the same-browser-replay window on Auth0 reject too.
+			clearStateCookie(w)
 			http.Error(w, "authorization declined — run /qurl setup again to retry", http.StatusBadRequest)
 			return
 		}
@@ -359,14 +364,12 @@ func renderSuccess(w http.ResponseWriter, teamID, keyPrefix, email string) {
 	}
 }
 
-// truncateForLog caps an arbitrary upstream string at max bytes for
-// operator-log inclusion, marking the truncation. Defense against PII
-// or noise leaks when surfacing third-party (Auth0/qurl-service)
-// strings in slog attributes.
 // truncateForLog caps an arbitrary upstream string at limit bytes for
-// operator-log inclusion. Backs up to a UTF-8 rune boundary so the
-// truncation doesn't split a multi-byte sequence (Auth0 SAML
-// error_description is UTF-8).
+// operator-log inclusion. Defense against PII / noise leaks when
+// surfacing third-party (Auth0/qurl-service) strings in slog
+// attributes. Backs up to a UTF-8 rune boundary so the truncation
+// doesn't split a multi-byte sequence (Auth0 SAML error_description
+// is UTF-8).
 func truncateForLog(s string, limit int) string {
 	if len(s) <= limit {
 		return s
