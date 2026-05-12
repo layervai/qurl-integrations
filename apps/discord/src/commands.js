@@ -2822,6 +2822,39 @@ const SETUP_MODAL_TTL_SECONDS = 300;
 // JWT-shaped key format must update both in lockstep — grep with
 // `git grep TODO(upstream-rebrand)` lands every mirroring site.
 const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
+// Hard ceiling for the modal's TextInput, paired with
+// SETUP_API_KEY_REGEX above. Both must move in lockstep — a future
+// JWT-shaped key format that exceeds this would silently truncate at
+// the modal and surface as a misleading "Invalid API key format"
+// reply. Keeping the constant adjacent to the regex makes the pair
+// impossible to update independently.
+const SETUP_API_KEY_MAX_LENGTH = 64;
+
+// User-visible success message on successful setup. Exported via
+// _test so test assertions read the production string instead of
+// hardcoding a copy that drifts.
+const SETUP_SUCCESS_MSG =
+  '✅ **qURL is now configured for this server!**\n\n'
+  + 'Your team can use `/qurl send` to share files and locations securely.\n'
+  + 'All qURL usage will be billed to your API key.';
+
+// Sibling-flow → message map for the post-supersede-retry-failure
+// disambiguation in handleSetup. Each entry says: "if the surviving
+// row at this flow_id is at THIS stage, tell the admin what to do
+// about it." The forgot-to-add-an-entry footgun is real once more
+// flows land — the dispatcher-side test in
+// commands-comprehensive.test.js pins both the known-stage and
+// generic-fallback branches.
+//
+// Future PRs (e.g. /qurl send) should add their awaiting_* entry
+// here as they ship.
+const SIBLING_FLOW_MESSAGES = {
+  [REVOKE_STAGE_AWAITING_SELECT]:
+    'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
+};
+function siblingMessageForStage(stage) {
+  return SIBLING_FLOW_MESSAGES[stage] ?? null;
+}
 
 // Button-stage handler. Routed by flow-dispatch when the admin
 // clicks the [Configure qURL] button rendered by handleSetup.
@@ -2835,10 +2868,12 @@ const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 // wall, the user sees Discord's "interaction failed" notice and
 // can re-click. Acceptable tradeoff vs. losing OCC dedup.
 //
-// `set_expires_at` resets the TTL window so the admin has a fresh
-// 5 minutes to paste from the moment the modal opens. This will
-// trip the `extended: true` audit flag on the FLOW_TRANSITION event
-// — correct: the deadline really was extended.
+// `set_expires_at` extends the row's TTL from the 120s button window
+// (SETUP_BUTTON_TTL_SECONDS) to the 300s modal window
+// (SETUP_MODAL_TTL_SECONDS), giving the admin a fresh budget from
+// the moment the modal opens. This trips the `extended: true` audit
+// flag on the FLOW_TRANSITION event — correct: the deadline really
+// was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
@@ -2883,13 +2918,10 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMinLength(28)
-    // TODO(upstream-rebrand): 64 mirrors upstream qurl-service's
-    // current key-format ceiling (see SETUP_API_KEY_REGEX above).
-    // Discord's default is 4000 chars; a stricter client-side cap
-    // clips pathological pastes before they hit the regex/network.
-    // A future JWT-shaped key format must update this in lockstep
-    // with the regex.
-    .setMaxLength(64);
+    // TODO(upstream-rebrand): mirrors upstream qurl-service's
+    // key-format ceiling. Constant lives next to SETUP_API_KEY_REGEX
+    // so the lockstep pair is impossible to update independently.
+    .setMaxLength(SETUP_API_KEY_MAX_LENGTH);
   modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
 
   // Roll back the OCC transition if showModal throws. Without the
@@ -2928,8 +2960,13 @@ async function handleSetupButton(interaction, { flow_id, row }) {
       stage: SETUP_STAGE_AWAITING_MODAL,
       reason: 'abort',
     }).catch((rollbackErr) => {
+      // `metric: 'setup_rollback_failed'` is the stable selector
+      // for the CloudWatch alarm filter. Keying on the message
+      // string instead would break the moment a copy tweak lands.
       logger.error('handleSetupButton: rollback deleteFlow failed', {
-        flow_id, error: rollbackErr && rollbackErr.message,
+        flow_id,
+        error: rollbackErr && rollbackErr.message,
+        metric: 'setup_rollback_failed',
       });
     });
     // The "run /qurl setup again" guidance is accurate when the
@@ -3002,9 +3039,16 @@ async function handleSetupModal(interaction, { flow_id }) {
     configured_by: interaction.user.id,
   };
 
-  const submittedKey = interaction.fields
-    .getTextInputValue(SETUP_MODAL_FIELD_API_KEY)
-    .trim();
+  // Defensive String() wrap insulates against a Discord SDK contract
+  // change that returns a non-string from getTextInputValue. The flow
+  // row is already deleted by this point, so an unexpected throw
+  // here would surface as the dispatcher's "Something went wrong"
+  // reply AFTER the row is gone — admin reruns and it works, but
+  // the cost of an uncaught throw is asymmetrically high relative
+  // to a `String(...) ?? ''` defense.
+  const submittedKey = String(
+    interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY) ?? '',
+  ).trim();
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
     logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
@@ -3048,9 +3092,7 @@ async function handleSetupModal(interaction, { flow_id }) {
   // with /qurl status; the saved-but-no-confirmation case is rare
   // and recoverable, the misleading-error case is not.
   return interaction.editReply({
-    content: '✅ **qURL is now configured for this server!**\n\n' +
-      'Your team can use `/qurl send` to share files and locations securely.\n' +
-      'All qURL usage will be billed to your API key.',
+    content: SETUP_SUCCESS_MSG,
   }).catch(logIgnoredDiscordErr);
 }
 
@@ -3997,16 +4039,14 @@ const commands = [
                 content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
               });
             }
-            // Discriminate known sibling flows so the admin gets
-            // actionable guidance instead of "try again" — a sibling
-            // flow won't clear until ITS owner finishes or its TTL
-            // fires, so a blind retry of /qurl setup would loop
-            // forever. Map each sibling stage to the command the
-            // admin should finish/cancel first.
-            if (surviving?.stage === REVOKE_STAGE_AWAITING_SELECT) {
-              return interaction.editReply({
-                content: 'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
-              });
+            // Sibling-flow message lookup. A known sibling stage
+            // (revoke today, send/etc tomorrow) gets actionable
+            // wording naming the command the admin should finish
+            // or cancel first; an unknown stage / row-vanished
+            // case falls through to the generic "try again."
+            const siblingMsg = siblingMessageForStage(surviving?.stage);
+            if (siblingMsg) {
+              return interaction.editReply({ content: siblingMsg });
             }
             return interaction.editReply({
               content: 'Could not start a setup session — please try again.',
@@ -4480,11 +4520,16 @@ module.exports = {
       // alarm — table-driven tests pin every shape so a silent regex
       // breakage can't slip through.
       isAckTimeoutError,
-      // Setup-flow TTL constants — exposed so tests assert against
-      // the production values, not stale duplicates that would
-      // silently pass when the constants are tuned.
+      // Setup-flow constants — exposed so tests assert against
+      // production values, not stale duplicates that would silently
+      // pass when the constants are tuned. The regex export lets
+      // future tests assert format shape directly rather than via
+      // VALID_KEY round-tripping.
       SETUP_BUTTON_TTL_SECONDS,
       SETUP_MODAL_TTL_SECONDS,
+      SETUP_API_KEY_REGEX,
+      SETUP_API_KEY_MAX_LENGTH,
+      SETUP_SUCCESS_MSG,
     },
   }),
 };

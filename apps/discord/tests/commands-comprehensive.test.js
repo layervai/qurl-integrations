@@ -1979,14 +1979,11 @@ describe('handleSetupModal (dispatcher path)', () => {
     // swallows it. Use mockImplementation rather than mockRejected
     // so the prior editReply assertions on other tests aren't
     // disturbed.
-    // Substring `'configured for this server'` is the stable token
-    // — it's the load-bearing UX phrase ("qURL is now configured
-    // for this server") that survives copy tweaks. Matching on the
-    // leading "✅" emoji or full sentence would break the moment
-    // someone polishes the wording; matching on this phrase pins
-    // the throw to the persist-success branch specifically.
+    // Identify the success-path editReply by exact match against
+    // the production constant — no string drift on copy polish.
+    const { SETUP_SUCCESS_MSG } = _test;
     interaction.editReply = jest.fn().mockImplementation(async (arg) => {
-      if (typeof arg?.content === 'string' && arg.content.includes('configured for this server')) {
+      if (arg?.content === SETUP_SUCCESS_MSG) {
         throw new Error('Unknown interaction (token expired)');
       }
       return undefined;
