@@ -73,7 +73,7 @@ code{background:#e5e7eb;padding:.1rem .3rem;border-radius:4px;font-size:.875em}
 </head>
 <body>
 <div class="card">
-<h1><span class="ok">&#10003;</span> qURL connected</h1>
+<h1><span class="ok">&#10003;</span> qURL Connected</h1>
 <p>qURL is connected to your Slack workspace. Your team can now use <code>/qurl create</code> and <code>/qurl list</code>.</p>
 <div class="kv">
 <div>Slack workspace: <code>{{.TeamID}}</code></div>

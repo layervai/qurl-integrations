@@ -439,7 +439,10 @@ func (e *KMSEncryptor) Open(ctx context.Context, ciphertext, wrappedKey, aad []b
 	// catches a future regression — e.g., a misconfigured key spec
 	// that returned a 16-byte key — at a more useful stack frame.
 	if len(decOut.Plaintext) != 32 {
-		return nil, fmt.Errorf("KMSEncryptor.Open: data key has wrong size %d (want 32)", len(decOut.Plaintext))
+		// 32 bytes is the AES_256 KeySpec contract. A different size
+		// almost always means the KMS-side KeySpec is misconfigured;
+		// surface that in the error to skip a layer of triage.
+		return nil, fmt.Errorf("KMSEncryptor.Open: data key has wrong size %d (want 32 for AES_256 KeySpec)", len(decOut.Plaintext))
 	}
 
 	block, err := aes.NewCipher(decOut.Plaintext)

@@ -201,7 +201,7 @@ func TestCallbackHappyPath(t *testing.T) {
 		t.Fatalf("status: got %d want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "qURL connected") {
+	if !strings.Contains(body, "qURL Connected") {
 		t.Errorf("success body missing headline: %s", body)
 	}
 	// Lock auto-escape: KeyPrefix and Email must render verbatim (html/
@@ -356,6 +356,30 @@ func TestCallbackRejectsExpiredState(t *testing.T) {
 	}
 }
 
+// TestCallbackMintFailureDoesNotRevoke locks the contract: when the
+// qurl-service mint itself fails, there's no keyID to revoke, so the
+// RevokeAPIKey path MUST NOT fire. A refactor that moved the revoke
+// spawn earlier would silently regress.
+func TestCallbackMintFailureDoesNotRevoke(t *testing.T) {
+	cfg, _, minter := newCallbackCfgStoreMinter(t)
+	minter.mintErr = errors.New("qurl-service down")
+	state := mintTestState(t, &cfg)
+
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("got %d want 502 (mint failure → 502)", rec.Code)
+	}
+	// Give any spurious revoke goroutine a window to fire.
+	time.Sleep(50 * time.Millisecond)
+	minter.revokeMu.Lock()
+	defer minter.revokeMu.Unlock()
+	if minter.revoked {
+		t.Error("RevokeAPIKey must NOT be called when mint itself failed (no keyID exists)")
+	}
+}
+
 func TestCallbackRevokesOnPersistFailure(t *testing.T) {
 	cfg, store, minter := newCallbackCfgStoreMinter(t)
 	store.setErr = errors.New("ddb down")
@@ -439,7 +463,7 @@ func TestCallbackRendersSuccessWhenVerifierFails(t *testing.T) {
 	if strings.Contains(rec.Body.String(), testAdminEmail) {
 		t.Error("verifier-error path should NOT render email")
 	}
-	if !strings.Contains(rec.Body.String(), "qURL connected") {
+	if !strings.Contains(rec.Body.String(), "qURL Connected") {
 		t.Errorf("expected success body even when verifier errored: %s", rec.Body.String())
 	}
 }
