@@ -3050,17 +3050,16 @@ async function handleSetupModal(interaction, { flow_id }) {
     configured_by: interaction.user.id,
   };
 
-  // Defensive coalesce + stringify in case a Discord SDK contract
-  // change ever returns null/undefined/non-string from
-  // getTextInputValue. The `?? ''` runs first so String(null) →
-  // 'null' / String(undefined) → 'undefined' can't slip through as
-  // valid-looking key strings; the outer String(...) catches any
-  // remaining non-string return shape. The flow row is already
-  // deleted by this point, so an uncaught throw here would surface
-  // as the dispatcher's "Something went wrong" AFTER the row is
-  // gone — asymmetrically expensive vs. this two-token defense.
+  // `String(...)` coerces any non-string return shape (a hypothetical
+  // Discord SDK contract change) into a string before .trim(). A
+  // null/undefined coerces to 'null'/'undefined', which the regex
+  // format check below cleanly rejects as malformed — the defense's
+  // job is just to keep .trim() from throwing, not to validate.
+  // The flow row is already deleted by this point, so an uncaught
+  // throw here would surface as "Something went wrong" AFTER the
+  // row is gone — asymmetrically expensive vs. this one-token wrap.
   const submittedKey = String(
-    interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY) ?? '',
+    interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY),
   ).trim();
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
     logger.warn('validate-key rejected (bad format)', logFields);
