@@ -159,7 +159,6 @@ const mockDb = {
   // the config mock at the top of this file).
   getGuildApiKey: jest.fn().mockResolvedValue(null),
   setGuildApiKey: jest.fn().mockResolvedValue(undefined),
-  getGuildConfig: jest.fn().mockResolvedValue(null),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -1640,17 +1639,24 @@ describe('handleSetupButton (dispatcher path)', () => {
     );
   });
 
-  it('replies on transition error', async () => {
-    mockTransitionFlow.mockResolvedValueOnce({ result: 'error', version: null });
+  it('propagates throws from transitionFlow (caught by dispatcher safety net)', async () => {
+    // transitionFlow throws on non-CCFE failures (DDB outage, pre-
+    // read errors); it does not synthesize a `result: 'error'`
+    // return value. The handler must let the throw propagate so the
+    // dispatcher's universal safety net catches it — wrapping it
+    // here would swallow the audit signal flow-state already
+    // emitted for the failure.
+    const ddbErr = new Error('DDB region timeout');
+    mockTransitionFlow.mockRejectedValueOnce(ddbErr);
     const interaction = makeButtonInteraction();
 
-    await handleSetupButton(interaction, {
+    await expect(handleSetupButton(interaction, {
       flow_id: '0:1#guild-1#ch-1#user-1',
       row: { stage: 'awaiting_setup_button', version: 1 },
-    });
+    })).rejects.toThrow('DDB region timeout');
 
     expect(interaction.showModal).not.toHaveBeenCalled();
-    expect(interaction.reply).toHaveBeenCalled();
+    expect(interaction.reply).not.toHaveBeenCalled();
   });
 });
 
@@ -1779,6 +1785,37 @@ describe('handleSetupModal (dispatcher path)', () => {
         content: expect.stringContaining('503'),
       }),
     );
+  });
+
+  it('swallows Discord errors on the post-persist success reply', async () => {
+    // The key is already saved by the time the success editReply
+    // fires. If editReply throws (Discord interaction-token expiry,
+    // transient API blip), the throw must NOT propagate to the
+    // dispatcher's universal safety net — that net replies "run
+    // the command again", which would be misleading after a
+    // successful persist. Admin can confirm via /qurl status.
+    const interaction = makeModalInteraction();
+    // First editReply (success path) throws; verify the handler
+    // swallows it. Use mockImplementation rather than mockRejected
+    // so the prior editReply assertions on other tests aren't
+    // disturbed.
+    // Match on a stable substring shared by every success-blurb
+    // revision rather than the full copy — so a future tweak of
+    // the success message doesn't silently stop this test
+    // asserting at the throw site.
+    interaction.editReply = jest.fn().mockImplementation(async (arg) => {
+      if (typeof arg?.content === 'string' && arg.content.includes('configured for this server')) {
+        throw new Error('Unknown interaction (token expired)');
+      }
+      return undefined;
+    });
+
+    await expect(
+      handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' })
+    ).resolves.not.toThrow();
+
+    // setGuildApiKey did commit before the editReply threw.
+    expect(mockDb.setGuildApiKey).toHaveBeenCalled();
   });
 });
 

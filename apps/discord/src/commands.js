@@ -2862,12 +2862,11 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  if (result.result === 'error') {
-    return interaction.reply({
-      content: 'Could not start the setup modal — please try again in a moment.',
-      ephemeral: true,
-    }).catch(logIgnoredDiscordErr);
-  }
+  // Note: transitionFlow throws on non-CCFE failures (DDB outage,
+  // pre-read errors). Those propagate to the dispatcher's universal
+  // safety net, which replies with the generic "Something went wrong
+  // — please run the command again." The result discriminator only
+  // surfaces success | conflict | not_found.
 
   // Success — show the modal. It becomes the interaction's ACK.
   const modal = new ModalBuilder()
@@ -2908,10 +2907,28 @@ async function handleSetupModal(interaction, { flow_id }) {
     }).catch(logIgnoredDiscordErr);
   }
 
+  // Structured-log fields shared across every validation failure
+  // branch. A guild that hits "Invalid API key" 50 times in a row
+  // (admin keeps re-pasting the wrong key, or a credential rotation
+  // broke them) needs to surface in ops dashboards — that's only
+  // possible if every failure logs guild_id + configured_by.
+  // Bare reply paths (no .catch on the user-facing editReply) below
+  // are intentional: the flow row is already deleted by this point,
+  // so a Discord throw propagates to the dispatcher's safety net
+  // which replies "run again" — which IS the correct UX for these
+  // branches (admin really should rerun). Contrast the success-
+  // path .catch a few lines down, where "run again" would mislead
+  // because the key was already persisted.
+  const logFields = {
+    guild_id: interaction.guildId,
+    configured_by: interaction.user.id,
+  };
+
   const submittedKey = interaction.fields
     .getTextInputValue(SETUP_MODAL_FIELD_API_KEY)
     .trim();
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
+    logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
       content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
       ephemeral: true,
@@ -2925,9 +2942,11 @@ async function handleSetupModal(interaction, { flow_id }) {
       signal: AbortSignal.timeout(10000),
     });
     if (resp.status === 401 || resp.status === 403) {
+      logger.warn('validate-key rejected by qURL API', { ...logFields, status: resp.status });
       return interaction.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
     }
     if (!resp.ok) {
+      logger.warn('validate-key non-2xx from qURL API', { ...logFields, status: resp.status });
       return interaction.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
     }
   } catch (err) {
@@ -2935,7 +2954,7 @@ async function handleSetupModal(interaction, { flow_id }) {
     // contain internal hostnames/IPs (e.g. "connect ECONNREFUSED
     // 10.0.0.5:8080") that should not leak to a guild admin's
     // screen. Same redaction shape as the pre-conversion code.
-    logger.error('validate-key request failed', { error: err.message });
+    logger.error('validate-key request failed', { ...logFields, error: err.message });
     return interaction.editReply({
       content: '❌ **Could not validate key.** Please try again in a moment.',
     });
