@@ -132,6 +132,7 @@ jest.mock('discord.js', () => ({
     setPlaceholder: jest.fn().mockReturnThis(),
     setStyle: jest.fn().mockReturnThis(),
     setMaxLength: jest.fn().mockReturnThis(),
+    setMinLength: jest.fn().mockReturnThis(),
     setRequired: jest.fn().mockReturnThis(),
   })),
   TextInputStyle: { Short: 1, Paragraph: 2 },
@@ -157,6 +158,8 @@ const mockDb = {
   // gates fall through to config.QURL_API_KEY (which is set in
   // the config mock at the top of this file).
   getGuildApiKey: jest.fn().mockResolvedValue(null),
+  setGuildApiKey: jest.fn().mockResolvedValue(undefined),
+  getGuildConfig: jest.fn().mockResolvedValue(null),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -1419,6 +1422,362 @@ describe('handleRevokeSelect (dispatcher path)', () => {
 
     expect(interaction.update).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('1/2') }),
+    );
+  });
+});
+
+// /qurl setup post-conversion (PR 6): legacy modal-paste path is now
+// button-first. The slash command writes a flow row + replies with a
+// button; clicking the button (dispatcher path) transitions the flow
+// and shows the modal; submitting the modal (dispatcher path)
+// validates the key + persists + deletes the flow.
+describe('/qurl setup subcommand (legacy modal-paste path)', () => {
+  const originalKEK = process.env.KEY_ENCRYPTION_KEY;
+  const originalAuthDomain = process.env.AUTH0_DOMAIN;
+  beforeAll(() => {
+    process.env.KEY_ENCRYPTION_KEY = '0'.repeat(64);
+    // Force the legacy path by clearing any Auth0 hints. The config
+    // mock at the top of this file doesn't define AUTH0_* and we
+    // rely on `config.isQurlOAuthConfigured` being falsy.
+    delete process.env.AUTH0_DOMAIN;
+  });
+  afterAll(() => {
+    if (originalKEK === undefined) delete process.env.KEY_ENCRYPTION_KEY;
+    else process.env.KEY_ENCRYPTION_KEY = originalKEK;
+    if (originalAuthDomain === undefined) delete process.env.AUTH0_DOMAIN;
+    else process.env.AUTH0_DOMAIN = originalAuthDomain;
+  });
+  beforeEach(() => {
+    mockCreateFlow.mockResolvedValue({ created: true, version: 1 });
+    mockDeleteFlow.mockResolvedValue({ deleted: true });
+  });
+
+  function makeSetupInteraction() {
+    return makeInteraction({
+      commandName: 'qurl',
+      memberPermissions: { has: jest.fn().mockReturnValue(true) },
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'setup'),
+      },
+    });
+  }
+
+  it('opens a flow row + renders the configure button', async () => {
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+
+    await cmd.execute(interaction);
+
+    expect(mockCreateFlow).toHaveBeenCalledTimes(1);
+    const createArgs = mockCreateFlow.mock.calls[0][0];
+    expect(createArgs.stage).toBe('awaiting_setup_button');
+    expect(createArgs.payload).toBeNull();
+    expect(createArgs.flow_id).toBe('0:1#guild-1#ch-1#user-1');
+
+    const buttonCall = interaction.editReply.mock.calls.find(
+      (c) => c[0]?.components?.length > 0,
+    );
+    expect(buttonCall).toBeDefined();
+    expect(buttonCall[0].content).toMatch(/Connect qURL to this server/);
+  });
+
+  it('refuses if KEK is not set', async () => {
+    const savedKEK = process.env.KEY_ENCRYPTION_KEY;
+    delete process.env.KEY_ENCRYPTION_KEY;
+    try {
+      const cmd = commands.find(c => c.data.name === 'qurl');
+      const interaction = makeSetupInteraction();
+      await cmd.execute(interaction);
+
+      expect(mockCreateFlow).not.toHaveBeenCalled();
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('KEY_ENCRYPTION_KEY'),
+        }),
+      );
+    } finally {
+      process.env.KEY_ENCRYPTION_KEY = savedKEK;
+    }
+  });
+
+  it('refuses in DM context', async () => {
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    interaction.guildId = null;
+
+    await cmd.execute(interaction);
+
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('server, not in DMs'),
+      }),
+    );
+  });
+
+  it('refuses for non-admin users', async () => {
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    interaction.memberPermissions = { has: jest.fn().mockReturnValue(false) };
+
+    await cmd.execute(interaction);
+
+    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('administrators'),
+      }),
+    );
+  });
+
+  it('supersedes a stale pre-modal flow', async () => {
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: true, version: 1 });
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    await cmd.execute(interaction);
+
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      '0:1#guild-1#ch-1#user-1',
+      { stage: 'awaiting_setup_button', reason: 'admin_cleanup' },
+    );
+    expect(mockCreateFlow).toHaveBeenCalledTimes(2);
+    const buttonCall = interaction.editReply.mock.calls.find(
+      (c) => c[0]?.components?.length > 0,
+    );
+    expect(buttonCall).toBeDefined();
+  });
+
+  it('blocks when a mid-modal flow is in progress (supersede fails on stage gate)', async () => {
+    // Harness-level guarantee: deleteFlow with stage='awaiting_setup_button'
+    // returns deleted:false when the row is actually in
+    // 'awaiting_setup_modal'. The retry createFlow then conflicts on
+    // the existing row.
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: false });
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    await cmd.execute(interaction);
+
+    const blockedCall = interaction.editReply.mock.calls.find(
+      (c) => /modal open/.test(c[0]?.content || ''),
+    );
+    expect(blockedCall).toBeDefined();
+  });
+});
+
+describe('handleSetupButton (dispatcher path)', () => {
+  const { handleSetupButton } = require('../src/commands');
+
+  function makeButtonInteraction(overrides = {}) {
+    return {
+      user: { id: 'user-1' },
+      guildId: 'guild-1',
+      channelId: 'ch-1',
+      showModal: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  it('transitions flow to awaiting_setup_modal + shows modal on success', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
+    const interaction = makeButtonInteraction();
+
+    await handleSetupButton(interaction, {
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      row: { stage: 'awaiting_setup_button', version: 1 },
+    });
+
+    const transitionArgs = mockTransitionFlow.mock.calls[0];
+    expect(transitionArgs[0]).toBe('0:1#guild-1#ch-1#user-1');
+    expect(transitionArgs[1]).toBe(1); // version
+    expect(transitionArgs[2].stage_to).toBe('awaiting_setup_modal');
+    expect(transitionArgs[2].terminal).toBe(false);
+    expect(transitionArgs[2].set_expires_at).toEqual(expect.any(Number));
+
+    expect(interaction.showModal).toHaveBeenCalledTimes(1);
+    expect(interaction.reply).not.toHaveBeenCalled();
+  });
+
+  it('replies (no modal) on OCC conflict', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict', version: null });
+    const interaction = makeButtonInteraction();
+
+    await handleSetupButton(interaction, {
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      row: { stage: 'awaiting_setup_button', version: 1 },
+    });
+
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('Another setup attempt'),
+      }),
+    );
+  });
+
+  it('replies on not_found (TTL race)', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found', version: null });
+    const interaction = makeButtonInteraction();
+
+    await handleSetupButton(interaction, {
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      row: { stage: 'awaiting_setup_button', version: 1 },
+    });
+
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('expired'),
+      }),
+    );
+  });
+
+  it('replies on transition error', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'error', version: null });
+    const interaction = makeButtonInteraction();
+
+    await handleSetupButton(interaction, {
+      flow_id: '0:1#guild-1#ch-1#user-1',
+      row: { stage: 'awaiting_setup_button', version: 1 },
+    });
+
+    expect(interaction.showModal).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalled();
+  });
+});
+
+describe('handleSetupModal (dispatcher path)', () => {
+  const { handleSetupModal } = require('../src/commands');
+  const VALID_KEY = 'lv_live_abcdefghijklmnopqrstuvwxyz12';
+
+  function makeModalInteraction(overrides = {}) {
+    return {
+      user: { id: 'user-1' },
+      guildId: 'guild-1',
+      channelId: 'ch-1',
+      fields: {
+        getTextInputValue: jest.fn(() => VALID_KEY),
+      },
+      deferReply: jest.fn().mockResolvedValue(undefined),
+      editReply: jest.fn().mockResolvedValue(undefined),
+      reply: jest.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+  }
+
+  let originalFetch;
+  beforeAll(() => {
+    originalFetch = global.fetch;
+  });
+  beforeEach(() => {
+    mockDeleteFlow.mockResolvedValue({ deleted: true });
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+  });
+  afterAll(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('validates key + persists + replies success', async () => {
+    const interaction = makeModalInteraction();
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      '0:1#guild-1#ch-1#user-1',
+      { stage: 'awaiting_setup_modal', reason: 'terminal' },
+    );
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockDb.setGuildApiKey).toHaveBeenCalledWith(
+      'guild-1', VALID_KEY, 'user-1',
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('qURL is now configured'),
+      }),
+    );
+  });
+
+  it('skips work when deleteFlow loses dedup race', async () => {
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    const interaction = makeModalInteraction();
+
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('already processed'),
+      }),
+    );
+  });
+
+  it('rejects malformed API key', async () => {
+    const interaction = makeModalInteraction({
+      fields: { getTextInputValue: jest.fn(() => 'short-bad-key') },
+    });
+
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('Invalid API key format'),
+      }),
+    );
+  });
+
+  it('surfaces 401 from qURL API as invalid-key message', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 401 });
+    const interaction = makeModalInteraction();
+
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('Invalid API key'),
+      }),
+    );
+  });
+
+  it('redacts network-error details from user-facing reply', async () => {
+    // Internal hostnames or IPs in err.message must NOT leak to
+    // Discord. The pre-conversion code carried this guarantee and
+    // the dispatcher path preserves it.
+    global.fetch = jest.fn().mockRejectedValue(
+      new Error('connect ECONNREFUSED 10.0.0.5:8080'),
+    );
+    const interaction = makeModalInteraction();
+
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    const replyContent = interaction.editReply.mock.calls.at(-1)[0].content;
+    expect(replyContent).not.toMatch(/10\.0\.0\.5/);
+    expect(replyContent).not.toMatch(/ECONNREFUSED/);
+    expect(replyContent).toContain('Could not validate key');
+  });
+
+  it('surfaces non-2xx non-401 as generic API error', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 });
+    const interaction = makeModalInteraction();
+
+    await handleSetupModal(interaction, { flow_id: '0:1#guild-1#ch-1#user-1' });
+
+    expect(mockDb.setGuildApiKey).not.toHaveBeenCalled();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('503'),
+      }),
     );
   });
 });

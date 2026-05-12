@@ -143,7 +143,7 @@ makes blocking the wrong call:
 | Command | Behavior on existing flow | Rationale |
 |---|---|---|
 | `/qurl revoke` | **Supersede** (admin_cleanup + recreate) | The menu is a stateless listing of recent sends; an admin who can't remember whether they cancelled the prior dropdown shouldn't be told "finish your existing dropdown first." Re-running shows a fresh menu and the orphan menu's selection lands on `loadFlow → null → "superseded"`. |
-| `/qurl setup` | Block (default) | Multi-step OAuth / API-key paste flow with in-progress state; the user should finish or cancel the active step. |
+| `/qurl setup` | **Supersede if pre-modal, block if mid-modal** | Two-stage flow (`awaiting_setup_button` → `awaiting_setup_modal`). The supersede call passes `stage: 'awaiting_setup_button'` to `deleteFlow`; the harness's stage gate succeeds when the prior flow is still on the button (admin walked away — give them a fresh one) and fails when the prior flow has advanced to `awaiting_setup_modal` (admin is actively pasting a key — don't yank their modal). The retry `createFlow` then returns `created: false` on the mid-modal case and the user sees "you already have a modal open — finish it." The OAuth path is unchanged — it has no `await*` to convert, so it doesn't enter the flow_state ledger at all. |
 | `/qurl send` | Block (default) | Multi-step send flow (recipient picker, attachment capture, confirm); abandoning mid-flow because a duplicate `/qurl send` slipped through would lose user input. |
 
 The supersede semantics are **enforced at the harness level** by `deleteFlow`'s
