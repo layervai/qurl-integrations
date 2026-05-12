@@ -70,11 +70,12 @@ func (f *fakeIDTokenVerifier) VerifyEmail(_ context.Context, _ string) (string, 
 
 // fakeSlackClient captures PostDirectMessage calls.
 type fakeSlackClient struct {
-	mu       sync.Mutex
-	gotUser  string
-	gotText  string
-	sendErr  error
-	postedCh chan struct{}
+	mu        sync.Mutex
+	gotUser   string
+	gotText   string
+	sendErr   error
+	postedCh  chan struct{}
+	closeOnce sync.Once
 }
 
 func (f *fakeSlackClient) PostDirectMessage(_ context.Context, userID, text string) error {
@@ -83,7 +84,9 @@ func (f *fakeSlackClient) PostDirectMessage(_ context.Context, userID, text stri
 	f.gotText = text
 	f.mu.Unlock()
 	if f.postedCh != nil {
-		close(f.postedCh)
+		// sync.Once guards against a future test that triggers two
+		// PostDirectMessage calls — close-of-closed-channel panics.
+		f.closeOnce.Do(func() { close(f.postedCh) })
 	}
 	return f.sendErr
 }

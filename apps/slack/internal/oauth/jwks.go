@@ -32,6 +32,7 @@ const (
 type JWKSVerifier struct {
 	Issuer   string // e.g. "https://layerv.us.auth0.com/" — must end with "/"
 	Audience string // the Auth0 client_id
+	jwksURL  string // computed once at construction; cache key and Refresh target
 	cache    *jwk.Cache
 }
 
@@ -56,7 +57,7 @@ func NewJWKSVerifier(ctx context.Context, issuer, audience string) (*JWKSVerifie
 	if _, err := c.Refresh(primeCtx, jwksURL); err != nil {
 		return nil, fmt.Errorf("refresh jwks: %w", err)
 	}
-	return &JWKSVerifier{Issuer: issuer, Audience: audience, cache: c}, nil
+	return &JWKSVerifier{Issuer: issuer, Audience: audience, jwksURL: jwksURL, cache: c}, nil
 }
 
 // VerifyEmail verifies the id_token signature + claims and returns the
@@ -66,8 +67,7 @@ func (v *JWKSVerifier) VerifyEmail(ctx context.Context, idToken string) (string,
 	if v.cache == nil {
 		return "", errors.New("JWKSVerifier: cache not initialized")
 	}
-	jwksURL := v.Issuer + ".well-known/jwks.json"
-	set, err := v.cache.Get(ctx, jwksURL)
+	set, err := v.cache.Get(ctx, v.jwksURL)
 	if err != nil {
 		return "", fmt.Errorf("get jwks: %w", err)
 	}

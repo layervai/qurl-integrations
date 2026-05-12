@@ -190,12 +190,14 @@ func run() error {
 		// only cancels the request context, it doesn't lift this. The
 		// /oauth/qurl/callback handler's worst-case sum (Auth0 token
 		// exchange + qurl-service mint + KMS GenerateDataKey + DDB
-		// PutItem) approaches 30s, so a 15s WriteTimeout would tear the
-		// connection down mid-write under unfavorable conditions. 60s
-		// gives the OAuth surface comfortable headroom; /slack/* and
-		// /health respond in milliseconds so the bump doesn't change
-		// their posture.
-		WriteTimeout:   60 * time.Second,
+		// PutItem) approaches 30s, and oauthHandlerTimeout caps the
+		// per-handler budget at 60s. WriteTimeout must exceed that cap
+		// so the per-handler deadline reliably fires first and produces
+		// the friendly "oauth/callback timed out" body rather than a
+		// torn connection. 75s = 60 + 15s headroom for response write +
+		// keep-alive close. /slack/* and /health respond in
+		// milliseconds, so the bump doesn't change their posture.
+		WriteTimeout:   75 * time.Second,
 		IdleTimeout:    60 * time.Second,
 		MaxHeaderBytes: maxHeaderBytes,
 	}
