@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -506,6 +507,45 @@ func TestCallbackAuth0TokenFailure(t *testing.T) {
 	h(rec, callbackRequest(state))
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("got %d want 502 (auth0 5xx surfaces as 502)", rec.Code)
+	}
+}
+
+// TestExchangeAuth0CodeAcceptsExactCapBody locks the off-by-one fix on
+// the body cap: a response that is exactly auth0TokenBodyLimit bytes
+// long must NOT be misclassified as truncated. We pad an otherwise-
+// valid JSON token response to exactly 8 KiB and assert the success
+// path runs.
+func TestExchangeAuth0CodeAcceptsExactCapBody(t *testing.T) {
+	cfg, _, _, _ := newCallbackCfg(t)
+	atCapAuth0 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Build a payload exactly auth0TokenBodyLimit bytes long. The
+		// id_token claim is padding; the parser only reads
+		// access_token and id_token, so the padding length only
+		// affects byte count.
+		core := `{"access_token":"a","id_token":"`
+		closing := `"}`
+		pad := auth0TokenBodyLimit - len(core) - len(closing)
+		if pad < 0 {
+			t.Fatalf("payload core too long: %d > limit %d", len(core)+len(closing), auth0TokenBodyLimit)
+		}
+		body := core + strings.Repeat("x", pad) + closing
+		if len(body) != auth0TokenBodyLimit {
+			t.Fatalf("setup miscalculated: got %d want %d", len(body), auth0TokenBodyLimit)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(atCapAuth0.Close)
+	cfg.HTTPClient = &http.Client{
+		Transport: &rewriteTransport{target: atCapAuth0.URL},
+		Timeout:   2 * time.Second,
+	}
+	state := mintTestState(t, &cfg)
+	h := Callback(cfg)
+	rec := httptest.NewRecorder()
+	h(rec, callbackRequest(state))
+	if rec.Code != http.StatusOK {
+		t.Errorf("exact-cap body got %d want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

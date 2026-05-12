@@ -102,13 +102,13 @@ func (m *HTTPAPIKeyMinter) MintAPIKey(ctx context.Context, accessToken, name str
 		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 		_ = resp.Body.Close()
 	}()
-	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit))
+	// Read limit+1 so an exact-cap legitimate body isn't misclassified
+	// as truncated — see exchangeAuth0Code for the rationale.
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, minterBodyLimit+1))
 	if err != nil {
 		return "", "", "", fmt.Errorf("read body: %w", err)
 	}
-	// Distinct error on truncation — see exchangeAuth0Code for the
-	// same pattern.
-	if len(rb) == minterBodyLimit {
+	if len(rb) > minterBodyLimit {
 		return "", "", "", fmt.Errorf("qurl-service /v1/api-keys response exceeded %d bytes", minterBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {

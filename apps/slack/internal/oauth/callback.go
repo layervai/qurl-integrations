@@ -420,15 +420,16 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 		_, _ = io.CopyN(io.Discard, resp.Body, drainCap)
 		_ = resp.Body.Close()
 	}()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, auth0TokenBodyLimit))
+	// Read up to limit+1 so we can distinguish "body is exactly limit
+	// bytes long (legitimate)" from "body exceeded the cap and was
+	// truncated". The naive LimitReader(_, limit) returns up to limit
+	// inclusive, so a 8192-byte response would be misclassified as
+	// truncated.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, auth0TokenBodyLimit+1))
 	if err != nil {
 		return "", "", fmt.Errorf("read body: %w", err)
 	}
-	// If we hit the cap exactly, the body was likely truncated; the
-	// subsequent json.Unmarshal would surface as "unexpected end of
-	// JSON input". Emit a distinct error so operator logs point at the
-	// real cause rather than a parse failure.
-	if len(body) == auth0TokenBodyLimit {
+	if len(body) > auth0TokenBodyLimit {
 		return "", "", fmt.Errorf("auth0 token response exceeded %d bytes", auth0TokenBodyLimit)
 	}
 	if resp.StatusCode != http.StatusOK {

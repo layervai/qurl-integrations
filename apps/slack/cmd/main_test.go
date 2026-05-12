@@ -144,6 +144,24 @@ func TestBuildOAuthConfigSecretLengthBoundary(t *testing.T) {
 	})
 }
 
+// TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL locks the contract
+// that a parse-valid but host-less URL (e.g. "https://") is rejected.
+// Without this, the resulting redirect_uri would be
+// "https:///oauth/qurl/callback" — silently broken.
+func TestBuildOAuthConfigRejectsEmptyHostSlackBaseURL(t *testing.T) {
+	stubJWKSVerifier(t)
+	env := validEnv()
+	env["SLACK_BASE_URL"] = "https://"
+	applyEnv(t, env)
+	_, ok, err := buildOAuthConfig(context.Background(), newFakeProvider(), nil)
+	if ok {
+		t.Error("expected ok=false on empty-host SLACK_BASE_URL")
+	}
+	if err == nil {
+		t.Error("expected error on empty-host SLACK_BASE_URL")
+	}
+}
+
 // TestBuildOAuthConfigRejectsNonHTTPSSlackBaseURL locks the Secure-cookie
 // contract: a Set-Cookie: Secure is dropped silently by browsers over
 // http://, which would break the double-submit check with a misleading
