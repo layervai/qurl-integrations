@@ -146,6 +146,8 @@ function isAllowedSourceUrl(sourceUrl) {
 /**
  * Build auth headers for connector requests.
  * Uses the provided API key, or falls back to the global config key.
+ * Multi-tenant safety is enforced by requireApiKey() at each public
+ * entry point — connectorAuthHeaders is internal and trusts callers.
  */
 function connectorAuthHeaders(apiKey) {
   const key = apiKey || config.QURL_API_KEY;
@@ -154,6 +156,19 @@ function connectorAuthHeaders(apiKey) {
     headers['Authorization'] = `Bearer ${key}`;
   }
   return headers;
+}
+
+// Defense-in-depth at the network boundary (#259). PR #257 closes the
+// attribution leak at the slash-command gate, but each public connector
+// entry point also refuses the multi-tenant bootstrap fallback so a new
+// caller bypassing the gate can't silently re-open the leak.
+function requireApiKey(apiKey) {
+  if (!apiKey && config.isMultiTenant) {
+    throw new Error('Refusing to use global QURL_API_KEY in multi-tenant mode — caller must thread a per-guild key');
+  }
+  if (!apiKey && !config.QURL_API_KEY) {
+    throw new Error('QURL_API_KEY is not configured');
+  }
 }
 
 // Append `viewer_ttl_seconds` to the multipart form when a positive value
@@ -182,7 +197,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  */
 async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  requireApiKey(apiKey);
   if (!isAllowedSourceUrl(sourceUrl)) {
     throw new Error('Source URL is not a valid Discord CDN URL');
   }
@@ -248,7 +263,7 @@ async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewe
  */
 async function reUploadBuffer(fileBuffer, filename, contentType, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  requireApiKey(apiKey);
 
   const blob = new Blob([fileBuffer], { type: contentType || 'application/octet-stream' });
   const form = new FormData();
@@ -324,7 +339,7 @@ async function downloadAndUpload(sourceUrl, filename, contentType, apiKey, viewe
  * invalidate anyone else's.
  */
 async function mintLinks(resourceId, expiresAt, n, apiKey) {
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  requireApiKey(apiKey);
   if (!resourceId || !/^[\w-]+$/.test(resourceId)) {
     throw new Error(`Invalid resource ID format: ${resourceId}`);
   }
@@ -364,7 +379,7 @@ async function mintLinks(resourceId, expiresAt, n, apiKey) {
  */
 async function uploadJsonToConnector(jsonPayload, filename, apiKey, viewerTtlSeconds) {
   filename = sanitizeFilename(filename);
-  if (!apiKey && !config.QURL_API_KEY) throw new Error('QURL_API_KEY is not configured');
+  requireApiKey(apiKey);
 
   const blob = new Blob([JSON.stringify(jsonPayload)], { type: 'application/json' });
   const form = new FormData();

@@ -13,11 +13,22 @@ const dns = require('dns').promises;
 // auth/validation failures and retrying won't help.
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
-async function qurlFetch(method, path, body, apiKey) {
-  const key = apiKey || config.QURL_API_KEY;
-  if (!key) {
+// Defense-in-depth at the network boundary (#259). PR #257's slash-
+// command gate is the primary line of defense; this refuses the
+// bootstrap fallback at qurl-service's edge too so a new caller
+// bypassing the gate can't silently re-open the attribution leak.
+function requireApiKey(apiKey) {
+  if (!apiKey && config.isMultiTenant) {
+    throw new Error('Refusing to use global QURL_API_KEY in multi-tenant mode — caller must thread a per-guild key');
+  }
+  if (!apiKey && !config.QURL_API_KEY) {
     throw new Error('QURL_API_KEY is not configured');
   }
+}
+
+async function qurlFetch(method, path, body, apiKey) {
+  requireApiKey(apiKey);
+  const key = apiKey || config.QURL_API_KEY;
   const url = `${config.QURL_ENDPOINT}/v1${path}`;
   const baseOpts = {
     method,

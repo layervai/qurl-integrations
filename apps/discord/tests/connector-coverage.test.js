@@ -532,3 +532,35 @@ describe('Connector client — MD5 hash truncation in upload logs', () => {
     assertNoFullHashLeaked();
   });
 });
+
+// Defense-in-depth at the network boundary: connectorAuthHeaders
+// refuses to fall back to config.QURL_API_KEY in multi-tenant mode
+// even though the slash-command gate (PR #257) is the primary line of
+// defense. Pins issue #259.
+describe('Connector client — multi-tenant fallback refusal at network boundary', () => {
+  let connector;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.mock('../src/config', () => ({
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_API_KEY: 'lv_live_bootstrapxxxxxxxxxxxxxxxxxxx',
+      isMultiTenant: true,
+    }));
+    jest.mock('../src/logger', () => ({
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+    }));
+    connector = require('../src/connector');
+  });
+
+  it('uploadToConnector throws when called without apiKey in multi-tenant mode', async () => {
+    await expect(connector.uploadToConnector(
+      'https://cdn.discordapp.com/file.pdf', 'file.pdf', 'application/pdf',
+    )).rejects.toThrow(/Refusing to use global QURL_API_KEY in multi-tenant mode/);
+  });
+
+  it('mintLinks throws when called without apiKey in multi-tenant mode', async () => {
+    await expect(connector.mintLinks('res-1', '2026-01-01T00:00:00Z', 1))
+      .rejects.toThrow(/Refusing to use global QURL_API_KEY in multi-tenant mode/);
+  });
+});
