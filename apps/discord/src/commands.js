@@ -3061,6 +3061,19 @@ async function handleSetupModal(interaction, { flow_id }) {
   const submittedKey = String(
     interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY),
   ).trim();
+  // Probable client-side truncation: the key landed exactly at the
+  // setMaxLength ceiling. The regex check below will likely reject
+  // (current `lv_*` keys are well under 64 chars), but if it ever
+  // accepts a 64-char value the warn surfaces the truncation
+  // candidate to ops — an upstream key-format change that exceeds
+  // the cap would otherwise look like a guild-side "Invalid API
+  // key format" loop with no trail back to this constant.
+  if (submittedKey.length === SETUP_API_KEY_MAX_LENGTH) {
+    logger.warn('validate-key probable truncation (key landed at SETUP_API_KEY_MAX_LENGTH)', {
+      ...logFields,
+      key_length: submittedKey.length,
+    });
+  }
   if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
     logger.warn('validate-key rejected (bad format)', logFields);
     return interaction.reply({
@@ -3996,9 +4009,12 @@ const commands = [
           // Within the supersede branch, deleteFlow + retry createFlow
           // share one try-envelope so a DDB throttle / IAM blip on
           // either gets the recoverable "could not start" message.
-          // The FIRST createFlow above is NOT wrapped — its throw
-          // bubbles to handleCommand's outer envelope (covered by
-          // test "propagates the throw when the first createFlow fails").
+          // The FIRST createFlow above is intentionally NOT wrapped —
+          // its throw bubbles to handleCommand's outer envelope.
+          // Pinned by:
+          //   - "propagates the throw when the first createFlow fails"
+          //   - "handleCommand wraps the createFlow throw into a generic
+          //      user-visible reply"
           //
           // Race-edge #272: two same-user supersede calls from
           // different clients within the deleteFlow round-trip can
