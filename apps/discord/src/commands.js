@@ -2840,27 +2840,15 @@ const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
 // trip the `extended: true` audit flag on the FLOW_TRANSITION event
 // — correct: the deadline really was extended.
 async function handleSetupButton(interaction, { flow_id, row }) {
-  // `row.version` is the OCC handle the dispatcher already loaded
-  // (flow-dispatch.js — handleFlowInteraction). transitionFlow
-  // validates it via `Number.isInteger` at the OCC primitive
-  // boundary, so a defensive guard here would re-validate something
-  // already-validated downstream — exactly the scenario CLAUDE.md
-  // calls out as "validation for scenarios that can't happen."
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SETUP_STAGE_AWAITING_MODAL,
     terminal: false,
     set_expires_at: Math.floor(Date.now() / 1000) + SETUP_MODAL_TTL_SECONDS,
   });
 
-  // Both early-return branches use `interaction.reply` directly,
-  // not flow-dispatch's `safeReply`. Two reasons: (a) the button
-  // click cannot be deferReply'd ahead of time (showModal must be
-  // the first response, and we don't know yet whether we'll get
-  // there), so `interaction.replied/deferred` are guaranteed false
-  // when we arrive here — safeReply's followUp branch would never
-  // be taken. (b) The shape matches handleRevokeSelect's OCC-loser
-  // path, keeping the dispatcher-side handler convention consistent
-  // across commands.
+  // Early-return branches below use `interaction.reply` directly
+  // (not safeReply): we haven't deferReply'd, so replied/deferred
+  // are false on entry. Matches handleRevokeSelect's shape.
   if (result.result === 'conflict') {
     // Two concurrent button clicks. The OCC loser must NOT call
     // showModal — the winner will (or already did), and a duplicate
@@ -2912,7 +2900,7 @@ async function handleSetupButton(interaction, { flow_id, row }) {
   // log at error-level — admin recovery is the SETUP_MODAL_TTL_SECONDS
   // (5 min) wait.
   //
-  // TODO(supersede-race): the rollback delete uses
+  // TODO(supersede-race) #272: the rollback delete uses
   // stage='awaiting_setup_modal' (matching the just-committed
   // transition). A concurrent /qurl setup rerun whose loadFlow
   // peek lands in the narrow window AFTER the transition committed
@@ -3958,14 +3946,13 @@ const commands = [
           // bubbles to handleCommand's outer envelope (covered by
           // test "propagates the throw when the first createFlow fails").
           //
-          // Race-edge: two same-user supersede calls from different
-          // clients within the deleteFlow round-trip can have the
-          // second deleteFlow stomp the first retry's fresh row
-          // (no OCC on deleteFlow). Worst case is "admin reruns,"
-          // and /qurl setup is admin-only + same-user so the window
-          // is vanishingly small — not worth an OCC primitive yet,
-          // but documented here so the next reader doesn't try to
-          // close it without weighing the cost.
+          // Race-edge #272: two same-user supersede calls from
+          // different clients within the deleteFlow round-trip can
+          // have the second deleteFlow stomp the first retry's
+          // fresh row (no OCC on deleteFlow). Worst case is "admin
+          // reruns," and /qurl setup is admin-only + same-user so
+          // the window is vanishingly small — not worth an OCC
+          // primitive yet, tracked in #272 if/when it bites.
           let setupRetry;
           try {
             await deleteFlow(setupFlowId, {
@@ -4008,6 +3995,17 @@ const commands = [
             if (surviving?.stage === SETUP_STAGE_AWAITING_MODAL) {
               return interaction.editReply({
                 content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
+              });
+            }
+            // Discriminate known sibling flows so the admin gets
+            // actionable guidance instead of "try again" — a sibling
+            // flow won't clear until ITS owner finishes or its TTL
+            // fires, so a blind retry of /qurl setup would loop
+            // forever. Map each sibling stage to the command the
+            // admin should finish/cancel first.
+            if (surviving?.stage === REVOKE_STAGE_AWAITING_SELECT) {
+              return interaction.editReply({
+                content: 'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
               });
             }
             return interaction.editReply({
@@ -4482,6 +4480,11 @@ module.exports = {
       // alarm — table-driven tests pin every shape so a silent regex
       // breakage can't slip through.
       isAckTimeoutError,
+      // Setup-flow TTL constants — exposed so tests assert against
+      // the production values, not stale duplicates that would
+      // silently pass when the constants are tuned.
+      SETUP_BUTTON_TTL_SECONDS,
+      SETUP_MODAL_TTL_SECONDS,
     },
   }),
 };

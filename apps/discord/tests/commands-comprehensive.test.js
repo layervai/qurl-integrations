@@ -1578,20 +1578,48 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     expect(blockedCall).toBeDefined();
   });
 
-  it('uses generic wording when retry fails for a sibling-flow / race (not mid-modal)', async () => {
-    // The post-failure loadFlow peek discriminates: if the surviving
-    // row at flow_id is NOT awaiting_setup_modal, the user sees the
-    // generic "could not start" message instead of the misleading
-    // "modal open" wording.
+  it('names the sibling revoke flow when retry fails because revoke is in-flight', async () => {
+    // The post-failure loadFlow peek discriminates known sibling
+    // stages: if the surviving row is awaiting_revoke_select, the
+    // user sees actionable wording telling them to finish/cancel
+    // their revoke first — instead of "try again" which would loop
+    // forever until the revoke's TTL fires.
     mockCreateFlow
       .mockResolvedValueOnce({ created: false })
       .mockResolvedValueOnce({ created: false });
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     mockLoadFlow.mockResolvedValueOnce({
       flow_id: '0:1#guild-1#ch-1#user-1',
-      stage: 'awaiting_revoke_select', // sibling flow type
+      stage: 'awaiting_revoke_select',
       version: 1,
     });
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    await cmd.execute(interaction);
+
+    const revokeMentionCall = interaction.editReply.mock.calls.find(
+      (c) => /\/qurl revoke.*menu open/.test(c[0]?.content || ''),
+    );
+    expect(revokeMentionCall).toBeDefined();
+    const modalMsgCall = interaction.editReply.mock.calls.find(
+      (c) => /modal open/.test(c[0]?.content || ''),
+    );
+    expect(modalMsgCall).toBeUndefined();
+  });
+
+  it('falls back to generic wording for an unknown sibling stage / two-races-in-a-row', async () => {
+    // If the surviving row is at a stage the dispatcher doesn't
+    // recognize as a known sibling (e.g. an in-flight flow type
+    // added in a future PR before its stage gets a sibling-message
+    // entry, OR the row vanished entirely between the retry and
+    // the peek), the user gets the generic "could not start"
+    // wording. Better than naming a flow that doesn't fit.
+    mockCreateFlow
+      .mockResolvedValueOnce({ created: false })
+      .mockResolvedValueOnce({ created: false });
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    mockLoadFlow.mockResolvedValueOnce(null); // row vanished
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
@@ -1601,10 +1629,6 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       (c) => /Could not start a setup session/.test(c[0]?.content || ''),
     );
     expect(genericCall).toBeDefined();
-    const modalMsgCall = interaction.editReply.mock.calls.find(
-      (c) => /modal open/.test(c[0]?.content || ''),
-    );
-    expect(modalMsgCall).toBeUndefined();
   });
 
   it('propagates the throw when the first createFlow fails (caught by handleCommand)', async () => {
@@ -1679,23 +1703,22 @@ describe('handleSetupButton (dispatcher path)', () => {
     expect(transitionArgs[1]).toBe(1); // version
     expect(transitionArgs[2].stage_to).toBe('awaiting_setup_modal');
     expect(transitionArgs[2].terminal).toBe(false);
-    // Pin the modal-stage TTL (300s), not just "some number" —
-    // a refactor that accidentally re-used SETUP_BUTTON_TTL_SECONDS
-    // here would pass an `any(Number)` assertion. Lower bound is
-    // `now + 250` (allows ~50s of clock drift / test execution time);
-    // upper bound is `now + 350`.
+    // Pin the modal-stage TTL window against the production constant
+    // (NOT a duplicated local literal — if the constant is tuned, a
+    // stale local would silently pass).
+    const { SETUP_BUTTON_TTL_SECONDS, SETUP_MODAL_TTL_SECONDS } = _test;
     const nowSec = Math.floor(Date.now() / 1000);
-    expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + 250);
-    expect(transitionArgs[2].set_expires_at).toBeLessThanOrEqual(nowSec + 350);
+    // Lower bound allows ~50s of clock drift / test execution time;
+    // upper bound is the modal TTL itself.
+    expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + SETUP_MODAL_TTL_SECONDS - 50);
+    expect(transitionArgs[2].set_expires_at).toBeLessThanOrEqual(nowSec + SETUP_MODAL_TTL_SECONDS);
     // `extended: true` audit-flag pin: the new expires_at must
     // exceed the original button-stage TTL window. flow-state.js
     // computes `extended = set_expires_at > priorExpires`; the
     // prior expires_at on a fresh row is at most
     // `now + SETUP_BUTTON_TTL_SECONDS`, so any value strictly
     // greater than that guarantees extended=true at the audit
-    // emission. Pins the "button → modal transitions extend the
-    // TTL" contract that's documented in the handler comment.
-    const SETUP_BUTTON_TTL_SECONDS = 120;
+    // emission.
     expect(transitionArgs[2].set_expires_at).toBeGreaterThan(nowSec + SETUP_BUTTON_TTL_SECONDS);
     // Pin: button-stage transition must NOT write a payload. The
     // setup flow carries no encrypted state — the key itself
