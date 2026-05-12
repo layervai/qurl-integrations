@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,12 @@ type HTTPAPIKeyMinter struct {
 	// default carries a request timeout so a hung qurl-service can't
 	// pin the request goroutine indefinitely.
 	HTTPClient *http.Client
+
+	// defaultClient is the lazily-initialized fallback when HTTPClient
+	// is unset. Memoized via defaultOnce so a per-call allocation
+	// doesn't churn under load.
+	defaultClient *http.Client
+	defaultOnce   sync.Once
 }
 
 type mintRequest struct {
@@ -49,7 +56,10 @@ func (m *HTTPAPIKeyMinter) client() *http.Client {
 	if m.HTTPClient != nil {
 		return m.HTTPClient
 	}
-	return &http.Client{Timeout: minterTimeout}
+	m.defaultOnce.Do(func() {
+		m.defaultClient = &http.Client{Timeout: minterTimeout}
+	})
+	return m.defaultClient
 }
 
 // joinAPIKeyURL composes BaseURL + "/v1/api-keys[/keyID]" so a BaseURL
