@@ -301,7 +301,6 @@ func (p *DDBProvider) SetAPIKey(ctx context.Context, workspaceID, apiKey, config
 		return fmt.Errorf("DDBProvider.SetAPIKey: PutItem: %w", err)
 	}
 	if overwriting {
-		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Warn("DDBProvider.SetAPIKey overwrote existing workspace row",
 			"workspace_id", workspaceID,
 			"configured_by", configuredBy)

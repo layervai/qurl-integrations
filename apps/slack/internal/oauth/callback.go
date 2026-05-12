@@ -164,7 +164,7 @@ func Callback(cfg Config) http.HandlerFunc {
 			}
 		}
 
-		keyPrefix, ok := mintAndPersist(w, r.Context(), cfg, accessToken, verified.TeamID, verified.UserID)
+		keyPrefix, ok := mintAndPersist(r.Context(), w, cfg, accessToken, verified.TeamID, verified.UserID)
 		if !ok {
 			return
 		}
@@ -172,9 +172,10 @@ func Callback(cfg Config) http.HandlerFunc {
 		slog.Info("oauth/callback completed", "team_id", verified.TeamID, "user_id", verified.UserID, "key_prefix", keyPrefix) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 
 		// DM target is the Slack user_id from the signed state — never
-		// from an unsigned query parameter.
+		// from an unsigned query parameter. Goroutine deliberately uses
+		// a fresh context (not r.Context()): r.Context() cancels the
+		// moment we render the success page below.
 		if cfg.SlackClient != nil {
-			//nolint:gosec // G118: deliberate fresh context. r.Context() cancels as soon as we render the success page, but the DM is fire-and-forget and should outlive the response.
 			go dmAdminAsync(cfg.SlackClient, verified.UserID, verified.TeamID, keyPrefix)
 		}
 
@@ -191,10 +192,10 @@ func Callback(cfg Config) http.HandlerFunc {
 // gocognit/gocyclo suppressors.
 //
 //nolint:gocritic // hugeParam: see Callback — Config is value-passed.
-func mintAndPersist(w http.ResponseWriter, ctx context.Context, cfg Config, accessToken, teamID, userID string) (string, bool) {
+func mintAndPersist(ctx context.Context, w http.ResponseWriter, cfg Config, accessToken, teamID, userID string) (string, bool) {
 	keyName := "Slack workspace " + teamID
 	apiKey, keyID, keyPrefix, err := cfg.Minter.MintAPIKey(ctx, accessToken,
-		keyName, APIKeyScopes)
+		keyName, apiKeyScopes)
 	if err != nil {
 		slog.Error("oauth/callback qurl-service mint failed", "error", err, "team_id", teamID) //nolint:gosec // G706: slog escapes control bytes in attribute values.
 		http.Error(w, "could not provision qURL key — run /qurl setup again to retry", http.StatusBadGateway)
@@ -204,11 +205,10 @@ func mintAndPersist(w http.ResponseWriter, ctx context.Context, cfg Config, acce
 	if perr := cfg.Provider.SetAPIKey(ctx, teamID, apiKey, userID); perr != nil {
 		slog.Error("oauth/callback persist failed — revoking minted key", //nolint:gosec // G706: slog escapes control bytes in attribute values.
 			"error", perr, "team_id", teamID, "key_id", keyID)
-		// Fire-and-forget revoke. Using a fresh context (not the request
-		// context) because the request context may be canceling by the
-		// time we get to write the error response; we still want the
-		// revoke to run to bound the orphan-key window.
-		//nolint:gosec // G118: deliberate fresh context — see comment above.
+		// Fire-and-forget revoke. Fresh context (not the request
+		// context) because the request context may be canceling by
+		// the time we get to write the error response; we still want
+		// the revoke to run to bound the orphan-key window.
 		go revokeOrphanKeyAsync(cfg.Minter, accessToken, keyID, teamID)
 		http.Error(w, "qURL key provisioned but not stored — run /qurl setup again", http.StatusInternalServerError)
 		return "", false
@@ -220,6 +220,7 @@ func revokeOrphanKeyAsync(minter QURLAPIKeyMinter, accessToken, keyID, teamID st
 	ctx, cancel := context.WithTimeout(context.Background(), auth0TokenTimeout)
 	defer cancel()
 	if err := minter.RevokeAPIKey(ctx, accessToken, keyID); err != nil {
+		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Warn("oauth/callback orphan-key revoke failed",
 			"error", err, "key_id", keyID, "team_id", teamID)
 	}
@@ -236,6 +237,7 @@ func dmAdminAsync(client SlackClient, userID, teamID, keyPrefix string) {
 		msg += "\nKey prefix: `" + keyPrefix + "`"
 	}
 	if err := client.PostDirectMessage(ctx, userID, msg); err != nil {
+		//nolint:gosec // G706: slog escapes control bytes in attribute values.
 		slog.Warn("oauth/callback DM failed", "error", err, "user_id", userID, "team_id", teamID)
 	}
 }
@@ -272,7 +274,7 @@ func exchangeAuth0Code(ctx context.Context, httpClient *http.Client, cfg Config,
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", cfg.SlackBaseURL+callbackPath)
+	form.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	form.Set("client_id", cfg.Auth0ClientID)
 	form.Set("client_secret", cfg.Auth0ClientSecret)
 

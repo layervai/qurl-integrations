@@ -36,10 +36,20 @@ const (
 	callbackPath = "/oauth/qurl/callback"
 )
 
-// APIKeyScopes is the qurl-service scope set the callback requests for
+// apiKeyScopes is the qurl-service scope set the callback requests for
 // the workspace API key. authorizeURL also weaves "openid email" in
 // for the id_token email claim consumed by the success page.
-var APIKeyScopes = []string{"qurl:read", "qurl:write"}
+var apiKeyScopes = []string{"qurl:read", "qurl:write"}
+
+// callbackURL composes the Auth0 redirect_uri. SlackBaseURL is tolerated
+// with or without a trailing slash via url.JoinPath. Falling back to
+// plain concat keeps drift between this and SetupURL impossible.
+func callbackURL(slackBaseURL string) string {
+	if u, err := url.JoinPath(slackBaseURL, callbackPath); err == nil {
+		return u
+	}
+	return slackBaseURL + callbackPath
+}
 
 // SetupConfig is the slice of runtime configuration the /qurl setup
 // slash-command handler needs to mint a state token and build the link
@@ -53,9 +63,17 @@ type SetupConfig struct {
 
 // SetupURL builds the /qurl setup link from the supplied state token.
 // The path is owned by package oauth (StartPath) so handlers in other
-// packages don't drift on it.
+// packages don't drift on it. SlackBaseURL is tolerated with or without
+// a trailing slash — url.JoinPath collapses the duplicate.
 func (s SetupConfig) SetupURL(state string) string {
-	return s.SlackBaseURL + StartPath + "?state=" + url.QueryEscape(state)
+	u, err := url.JoinPath(s.SlackBaseURL, StartPath)
+	if err != nil {
+		// SLACK_BASE_URL is operator-set; malformed values fail-fast
+		// at startup elsewhere. Fall back to plain concat so a misused
+		// caller (e.g. a test passing junk) still gets a clear URL.
+		u = s.SlackBaseURL + StartPath
+	}
+	return u + "?state=" + url.QueryEscape(state)
 }
 
 // SlackClient is the slice of slack-API surface the callback uses to DM
@@ -190,8 +208,8 @@ func authorizeURL(cfg Config, state string) string {
 	// Scope set is symmetric with the Discord flow (qurl-oauth.js):
 	// APIKeyScopes for the qurl-service mint, openid + email for the
 	// id_token claim used in the success-page binding readout.
-	q.Set("scope", strings.Join(APIKeyScopes, " ")+" openid email")
-	q.Set("redirect_uri", cfg.SlackBaseURL+callbackPath)
+	q.Set("scope", strings.Join(apiKeyScopes, " ")+" openid email")
+	q.Set("redirect_uri", callbackURL(cfg.SlackBaseURL))
 	q.Set("state", state)
 	q.Set("prompt", "consent")
 	u.RawQuery = q.Encode()

@@ -2,11 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 )
+
+// noopVerifier replaces oauth.NewJWKSVerifier in tests so buildOAuthConfig
+// doesn't hit the real internet trying to prime example.auth0.com's JWKS.
+type noopVerifier struct{}
+
+func (noopVerifier) VerifyEmail(_ context.Context, _ string) (string, error) {
+	return "", errors.New("noopVerifier: unused in env-var tests")
+}
 
 // newFakeProvider builds the minimum-viable DDBProvider buildOAuthConfig
 // will accept. The test only inspects the (cfg, ok) return — no DDB or
@@ -44,13 +54,21 @@ func applyEnv(t *testing.T, kvs map[string]string) {
 	}
 }
 
+// stubJWKSVerifier swaps newJWKSVerifier for a noop so the env-var tests
+// stay hermetic. Returns a t.Cleanup-restored seam.
+func stubJWKSVerifier(t *testing.T) {
+	t.Helper()
+	prev := newJWKSVerifier
+	newJWKSVerifier = func(_ context.Context, _, _ string) (oauth.IDTokenVerifier, error) {
+		return noopVerifier{}, nil
+	}
+	t.Cleanup(func() { newJWKSVerifier = prev })
+}
+
 func TestBuildOAuthConfigHappyPath(t *testing.T) {
+	stubJWKSVerifier(t)
 	applyEnv(t, validEnv())
 	cfg, ok := buildOAuthConfig(context.Background(), newFakeProvider())
-	// JWKS prime against example.auth0.com will fail in the test
-	// environment (no network) — buildOAuthConfig surfaces that as a
-	// warn and ok==true with verifier==nil, which is the deliberate
-	// fall-back behavior.
 	if !ok {
 		t.Fatalf("expected ok=true with all env vars set; cfg=%+v", cfg)
 	}
@@ -60,9 +78,13 @@ func TestBuildOAuthConfigHappyPath(t *testing.T) {
 	if string(cfg.OAuthStateSecret) != validStateSecret {
 		t.Errorf("OAuthStateSecret not threaded through")
 	}
+	if cfg.IDTokenVerifier == nil {
+		t.Error("IDTokenVerifier should be wired when the stubbed factory returns nil err")
+	}
 }
 
 func TestBuildOAuthConfigMissingVar(t *testing.T) {
+	stubJWKSVerifier(t)
 	for _, missing := range oauthEnvKeys {
 		t.Run("missing="+missing, func(t *testing.T) {
 			env := validEnv()
@@ -77,6 +99,7 @@ func TestBuildOAuthConfigMissingVar(t *testing.T) {
 }
 
 func TestBuildOAuthConfigShortSecret(t *testing.T) {
+	stubJWKSVerifier(t)
 	env := validEnv()
 	env["OAUTH_STATE_SECRET"] = strings.Repeat("a", 16) // half of the required minimum
 	applyEnv(t, env)

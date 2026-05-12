@@ -244,6 +244,14 @@ func run() error {
 // rather than discovering after a key-takeover incident.
 const minStateSecretBytes = 32
 
+// newJWKSVerifier is overridable in tests so the env-var-table tests
+// don't hit the real internet trying to fetch example.auth0.com's JWKS
+// (and don't burn the 5s prime budget in airgapped CI). Production
+// calls oauth.NewJWKSVerifier directly via this seam.
+var newJWKSVerifier = func(ctx context.Context, issuer, audience string) (oauth.IDTokenVerifier, error) {
+	return oauth.NewJWKSVerifier(ctx, issuer, audience)
+}
+
 // buildOAuthConfig assembles the oauth.Config from env. Returns
 // (cfg, false) when any required env var is missing or invalid —
 // the caller logs and skips route registration so a sandbox boot with
@@ -271,6 +279,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Co
 		return oauth.Config{}, false
 	}
 	if len(stateSecret) < minStateSecretBytes {
+		//nolint:gosec // G706: integer attribute values are not a log-injection vector; slog's JSON handler escapes them.
 		slog.Error("OAUTH_STATE_SECRET is shorter than required minimum",
 			"min_bytes", minStateSecretBytes, "got_bytes", len(stateSecret))
 		return oauth.Config{}, false
@@ -282,7 +291,7 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider) (oauth.Co
 	// success-page email line is missing.
 	var verifier oauth.IDTokenVerifier
 	issuer := "https://" + domain + "/"
-	if v, err := oauth.NewJWKSVerifier(ctx, issuer, clientID); err != nil {
+	if v, err := newJWKSVerifier(ctx, issuer, clientID); err != nil {
 		slog.Warn("JWKS verifier init failed — id_token email will not be displayed", "error", err)
 	} else {
 		verifier = v

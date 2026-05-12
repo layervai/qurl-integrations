@@ -176,7 +176,7 @@ func TestSlashCommandCreate_AcksWithWorkingOnIt(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result["response_type"] != "ephemeral" {
+	if result[respFieldResponseType] != respTypeEphemeral {
 		t.Errorf("expected ephemeral response, got %q", result["response_type"])
 	}
 	if result["text"] != ackWorkingOnIt {
@@ -492,7 +492,7 @@ func TestSlashCommandSetup_RepliesWithStartURL(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result["response_type"] != "ephemeral" {
+	if result[respFieldResponseType] != respTypeEphemeral {
 		t.Errorf("response_type: got %q want ephemeral", result["response_type"])
 	}
 	text := result["text"]

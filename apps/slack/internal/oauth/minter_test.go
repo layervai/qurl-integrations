@@ -161,7 +161,14 @@ func TestHTTPAPIKeyMinterMintParseFailure(t *testing.T) {
 	t.Cleanup(srv.Close)
 	m := &HTTPAPIKeyMinter{BaseURL: srv.URL, HTTPClient: srv.Client()}
 	err := mintAPIKeyOnlyErr(m)
-	if err == nil || !errors.Is(err, err) {
+	if err == nil {
 		t.Fatal("expected error on non-JSON 200")
+	}
+	// The wrapped error chain must preserve a json.SyntaxError so callers
+	// (and future tests) can errors.As on it. Pinning prevents a refactor
+	// that swaps json.Unmarshal for a string-only error message.
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Errorf("expected json.SyntaxError in chain, got %v", err)
 	}
 }

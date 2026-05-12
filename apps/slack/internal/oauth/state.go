@@ -89,7 +89,9 @@ func MintState(secret []byte, teamID, userID string, now time.Time) (string, err
 	// signature satisfies io.Writer so the result is discarded.
 	mac.Write(signed)
 	sig := hex.EncodeToString(mac.Sum(nil))
-	raw := append(signed, stateSeparatorB)
+	raw := make([]byte, 0, len(signed)+1+len(sig))
+	raw = append(raw, signed...)
+	raw = append(raw, stateSeparatorB)
 	raw = append(raw, sig...)
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }

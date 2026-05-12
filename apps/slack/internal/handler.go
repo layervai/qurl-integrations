@@ -546,9 +546,18 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// Slack slash-command response keys + the ephemeral response-type value.
+// Centralized so respondSlack and the parallel writer in postResponse
+// can't drift, and so the goconst/keyword consistency stays linter-clean.
+const (
+	respFieldResponseType = "response_type"
+	respFieldText         = "text"
+	respTypeEphemeral     = "ephemeral"
+)
+
 func respondSlack(w http.ResponseWriter, text string) {
 	respondJSON(w, http.StatusOK, map[string]string{
-		"response_type": "ephemeral",
-		"text":          text,
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
 	})
 }

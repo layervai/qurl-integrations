@@ -256,8 +256,8 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	}
 
 	body, err := json.Marshal(map[string]string{
-		"response_type": "ephemeral",
-		"text":          text,
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
 	})
 	if err != nil {
 		// json.Marshal of a map[string]string can't fail in practice; log
