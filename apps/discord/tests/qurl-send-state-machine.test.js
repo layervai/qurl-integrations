@@ -560,6 +560,10 @@ describe('handleSend — pre-flight guards', () => {
     const refusalReply = replyCalls.find(c => typeof c === 'string' && c.includes('only available'));
     expect(refusalReply).toBeDefined();
     expect(refusalReply).not.toMatch(/server admin/);
+    // The refusal must point users at the real command `/qurl send`,
+    // not the bare `/send` Discord has no command for. Catches the
+    // `'/' + sub` interpolation bug that shipped the wrong slash.
+    expect(refusalReply).toContain('`/qurl send`');
     jest.dontMock('../src/config');
     jest.dontMock('../src/store');
   });

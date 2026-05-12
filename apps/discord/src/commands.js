@@ -3678,8 +3678,8 @@ const commands = [
             ? '❌ **qURL is not configured for this server.**\n\n' +
               'A server admin needs to run `/qurl setup` first and sign in with a layerv account.\n' +
               'Sign up at **https://layerv.ai** if you don\'t have an account yet.'
-            : '❌ **qURL `/' + sub + '` is only available inside a server.**\n\n' +
-              'Run this command in a Discord server where qURL has been set up via `/qurl setup`.';
+            : `❌ **qURL \`/qurl ${sub}\` is only available inside a server.**\n\n`
+              + 'Run this command in a Discord server where qURL has been set up via `/qurl setup`.';
           return interaction.reply({
             content: refusalCopy,
             ephemeral: true,
