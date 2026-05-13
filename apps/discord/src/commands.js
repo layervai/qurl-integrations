@@ -787,19 +787,45 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // handleSendFormSend will construct the params object from the
 // flow_state row's decrypted payload and invoke this function).
 //
-// Caller contract:
-//   - `apiKey` is the resolved guild API key (or env fallback).
-//   - `attachment` is non-null when `resourceType === RESOURCE_TYPES.FILE`
-//     and carries the Discord CDN URL + filename + contentType.
-//   - `locationUrl`/`locationName` are non-null when `resourceType` is
-//     a location kind; the back-half forwards `locationUrl` as a
-//     `google-map` JSON payload to the connector.
-//   - `recipients` is the resolved final list (filtered: sender + bots
-//     excluded, capped at config.QURL_SEND_MAX_RECIPIENTS). The
-//     back-half defends-in-depth with its own length checks but
-//     assumes the caller has done the cap math.
-//   - `sendNonce` is logging-breadcrumb only — keeps continuity with
-//     the caller's earlier log lines on the same flow.
+// Caller contract — full param surface (the destructure list is the
+// authoritative signature; this prose calls out the non-obvious bits):
+//
+//   - `apiKey` — resolved guild API key (or env fallback).
+//   - `resourceType` — `RESOURCE_TYPES.FILE` or location kind; branches
+//     the upload path and lands in DB rows + audit events.
+//   - `attachment` — non-null when `resourceType === RESOURCE_TYPES.FILE`;
+//     carries `{ url, name, contentType }`. The Discord CDN URL is
+//     leak-equivalent-to-the-file; encrypt before persisting.
+//   - `locationUrl` / `locationName` — non-null on a location send;
+//     forwarded as a `google-map` JSON payload to the connector.
+//   - `recipients` — resolved final list, filtered (sender + bots
+//     excluded), capped at `config.QURL_SEND_MAX_RECIPIENTS`. **The
+//     pipeline MUTATES this array** on the Add Recipients post-send
+//     branch (deduped push). Callers reconstructing the list from a
+//     persisted source (flow_state payload, retry, etc.) should treat
+//     it as transferred ownership for the lifetime of the call, not as
+//     a snapshot.
+//   - `target` — `'user' | 'channel' | 'voice'`; gates the channel-
+//     announce message and lands as `targetType` in the DB row.
+//   - `isVoiceContext` — boolean; selects the voice-flavored wording in
+//     the channel-announce blurb.
+//   - `expiresIn` — canonical expiry token ('1h' / '24h' / '7d' / etc.);
+//     fed through `expiryToISO` and `expiryToMs`.
+//   - `selfDestructSeconds` — `null` for no timer, otherwise a positive
+//     finite integer matching one of `SELF_DESTRUCT_PRESETS.seconds`.
+//     Threaded to every (re)upload so Add Recipients honors the same TTL.
+//   - `personalMessage` — sanitized note (or null) embedded in each
+//     recipient's DM.
+//   - `sendNonce` — logging-breadcrumb only; keeps continuity with the
+//     caller's earlier log lines on the same flow.
+//
+// Resolved value: the function awaits to completion and returns
+// `undefined`. The early-exit `return interaction.editReply(...)` paths
+// resolve to the editReply Promise's value, but no caller inspects it
+// (handleSend's `return executeSendPipeline(...)` discards it, and
+// `execute()` in turn ignores handleSend's resolved value). A future
+// caller that needs a structured result (e.g. for a programmatic retry)
+// would have to extend this contract.
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
