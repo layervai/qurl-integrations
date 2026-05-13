@@ -1724,3 +1724,242 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
   });
 });
 
+// Defensive guards for the `recipients` invariants — non-empty and
+// ≤ config.QURL_SEND_MAX_RECIPIENTS. handleSend's front-half
+// already enforces these before the pipeline call; the gates are
+// defense-in-depth for a future caller (deserialized payload,
+// programmatic retry) that skips those checks. Without them, a
+// trip would surface deep inside mintLinksInBatches as "Failed
+// to create any links" with no caller-side breadcrumb.
+describe('executeSendPipeline — recipients shape + cap gates', () => {
+  // Read the cap once from the same config module the gate consults
+  // so the tests don't drift if the cap is bumped. Hoisting out of
+  // the individual tests centralizes the drift-anchor.
+  const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
+
+  function makePipelineParams(recipients) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients,
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['empty array', []],
+    ['null', null],
+    ['undefined', undefined],
+    ['plain object', {}],
+    ['array-like object', { 0: 'u1', length: 1 }],  // pins Array.isArray-strict (not duck-typed)
+    ['string (not array)', 'u1'],
+    ['number', 42],
+  ])('throws TypeError on non-array-or-empty recipients (%s)', async (_label, recipients) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+      .rejects.toThrow(/recipients must be a non-empty array/);
+    // Cancel-edit fires before the throw — same shape as the other
+    // entry gates.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test.each([
+    ['null', null, /typeof=object, value=null/],
+    ['undefined', undefined, /typeof=undefined, value=undefined/],
+    ['plain object', {}, /typeof=object/],
+    ['empty array', [], /typeof=object, value=<empty array>/],
+  ])('rejection message distinguishes %s in the value-detail field', async (_label, recipients, detailRe) => {
+    // Rendering both `null` and `{}` as `typeof=object` would
+    // force a prod-log reader to guess which one tripped the
+    // gate. Pin that the value-detail field disambiguates the
+    // realistic miscoding shapes.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+      .rejects.toThrow(detailRe);
+  });
+
+  test('rejection message truncates pathological values with `…` marker', async () => {
+    // A future caller handing a 1MB string would otherwise dump
+    // the whole blob into the rejection message AND into the
+    // prod logger.error. truncForLog slices at 64 chars and
+    // appends `…` so a reader can tell "the caller passed
+    // exactly these 64 chars" from "we cut a longer value."
+    const interaction = makeInteraction();
+    const oneKB = 'x'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makePipelineParams(oneKB)))
+      .rejects.toThrow(/value=x{64}…/);
+    // Negative pin: a 64-char value should NOT have the marker
+    // (otherwise we can't distinguish exact-fit from truncated).
+    const exact64 = 'y'.repeat(64);
+    await expect(executeSendPipeline(interaction, makePipelineParams(exact64)))
+      .rejects.toThrow(/value=y{64}\)/);
+  });
+
+  test.each([
+    // Hostile-toString: the obvious adversarial shape. Without the
+    // try/catch in truncForLog, the throw-message renderer would
+    // itself throw, replacing the gate's TypeError with an opaque
+    // "Cannot convert object to primitive value" — the exact
+    // worse-than-original-error shape the gate exists to prevent.
+    ['throws on toString', { toString() { throw new Error('nope'); } }],
+    // Object.create(null) is the realistic miscoding shape — a
+    // deserialized payload with prototype detached has no
+    // @@toPrimitive / toString, so `String(v)` throws "Cannot
+    // convert object to primitive value". Pin that the catch
+    // branch handles this shape too, not just the explicitly-
+    // hostile toString case.
+    ['null-prototype object', Object.create(null)],
+  ])('rejection message falls back to <unrepresentable> when String() throws (%s)', async (_label, value) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(value)))
+      .rejects.toThrow(/value=<unrepresentable>/);
+  });
+
+  test('truncation slices on code points, not UTF-16 code units (astral-char safety)', async () => {
+    // `slice(0, 64)` on code units would split a high-surrogate
+    // at position 63 from its low-surrogate at 64, producing a
+    // malformed UTF-16 pair before the `…`. Iterating via [...s]
+    // (the string iterator) operates on code points, so an emoji
+    // at the boundary stays intact. Build a string with 64 emoji
+    // (each 2 code units) — under code-unit slicing this would
+    // surface as 32 intact emoji + a lone high-surrogate; under
+    // code-point slicing it surfaces as 64 intact emoji.
+    const interaction = makeInteraction();
+    const sixtyFourEmoji = '🚀'.repeat(64);
+    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFourEmoji)))
+      .rejects.toThrow(/value=(?:🚀){64}\)/u);
+    // 65 emoji → 64 in the rendering + `…` marker.
+    const sixtyFiveEmoji = '🚀'.repeat(65);
+    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFiveEmoji)))
+      .rejects.toThrow(/value=(?:🚀){64}…/u);
+  });
+
+  test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
+    const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+      .rejects.toThrow(/recipients\.length .* exceeds QURL_SEND_MAX_RECIPIENTS/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('clears cooldown on the recipients-empty path (same convention as other gates)', async () => {
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    interaction.user = { id: 'recipients-empty-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams([])))
+      .rejects.toThrow(TypeError);
+    // The gate's own clearCooldown call IS the cleanup; the
+    // post-throw isOnCooldown assertion is what verifies it.
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+  });
+
+  test('clears cooldown on the recipients-oversized path (RangeError branch)', async () => {
+    // The empty-array test above pins clearCooldown on the
+    // TypeError branch; the oversized-array (RangeError) branch
+    // has its own clearCooldown call. Pin it separately so a
+    // future refactor that drops one of the two clearCooldown
+    // calls is caught by exactly one test failing.
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    interaction.user = { id: 'recipients-oversized-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+      .rejects.toThrow(RangeError);
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+  });
+
+  test.each([
+    ['one recipient', [{ id: 'u1', username: 'u1' }]],
+    ['several recipients', Array.from({ length: 5 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
+    // Boundary case: pin that `length === cap` is accepted (the
+    // gate uses `>`, not `>=`). A future typo flipping `>` to
+    // `>=` would otherwise only show up if a real send happened
+    // to hit exactly the cap.
+    ['exactly at the cap', Array.from({ length: RECIPIENT_CAP }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
+  ])('accepts the allowed shape: %s', async (_label, recipients) => {
+    // Same shape as the other accept-path tests in this file:
+    // assert the gate didn't reject. The pipeline mocks aren't
+    // fully wired here, so anything past the gate is fine — it
+    // either throws downstream with a different message, or
+    // resolves cleanly if the mock chain happens to line up.
+    // The shared vacuous-pass concern across all four accept-
+    // path tests in this file is tracked in #291.
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(recipients));
+    } catch (err) {
+      expect(err.message).not.toMatch(/recipients must be a non-empty array/);
+      expect(err.message).not.toMatch(/exceeds QURL_SEND_MAX_RECIPIENTS/);
+      return;
+    }
+  });
+});
+
+// Pin that truncForLog applies to ALL value-rendering gates in the
+// entry-gate family, not just the recipients gate that introduces
+// it. A future caller handing a 1MB string as `isVoiceContext`,
+// `target`, or `expiresIn` would otherwise dump the whole blob
+// into the rejection message.
+describe('executeSendPipeline — truncForLog applies to all value-rendering gates', () => {
+  function makeParams(overrides) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+      ...overrides,
+    };
+  }
+
+  test('isVoiceContext rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'w'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ isVoiceContext: huge })))
+      .rejects.toThrow(/isVoiceContext must be a boolean .* value=w{64}…\)/);
+  });
+
+  test('target rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'x'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ target: huge })))
+      .rejects.toThrow(/target must be 'user' or 'channel' \(got x{64}…\)/);
+  });
+
+  test('expiresIn rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'y'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ expiresIn: huge })))
+      .rejects.toThrow(/expiresIn must be one of .* \(got y{64}…\)/);
+  });
+});
+

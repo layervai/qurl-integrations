@@ -789,6 +789,10 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     when `resourceType === RESOURCE_TYPES.FILE`.
 //   - `expiresIn` must be a key of `EXPIRY_LABELS`.
 //   - `personalMessage` must be `null` or `string`.
+//   - `recipients` must be a non-empty array (element shape is
+//     `{ id: <discord-user-id>, username: <string> }`; the gate
+//     does NOT validate elements — only the array's outer shape +
+//     length ≤ `config.QURL_SEND_MAX_RECIPIENTS`).
 // Each gate clears the caller's stale ephemeral with a cancel-
 // edit then throws — the user still sees the outer catch's
 // generic followUp, but the gate's specific cancel replaces
@@ -846,6 +850,32 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // early-exit `return interaction.editReply(...)` paths discard
 // observable result; the function exists for its user-visible
 // side-effects (editReply + DM fan-out + channel-announce).
+// Bounded value-renderer for entry-gate throw messages. `String()` is
+// wrapped because a hostile @@toPrimitive / toString would otherwise
+// replace the gate's intended TypeError with the renderer's opaque
+// throw. Code-point (not code-unit) slicing avoids splitting a
+// surrogate pair across the `…` boundary.
+function truncForLog(v) {
+  let s;
+  try {
+    s = String(v);
+  } catch {
+    return '<unrepresentable>';
+  }
+  // Pre-slice bounds the [...head] spread cost on pathological inputs
+  // (1MB string → 128-element array, not 1M). `truncated` is the
+  // authoritative truncation signal because 65 surrogate pairs (130
+  // code units) yields head-cps.length === 64 — relying on cps.length
+  // alone would silently drop the `…` on that shape.
+  const truncated = s.length > 128;
+  const head = truncated ? s.slice(0, 128) : s;
+  const cps = [...head];
+  if (truncated || cps.length > 64) {
+    return `${cps.slice(0, 64).join('')}…`;
+  }
+  return s;
+}
+
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -892,7 +922,11 @@ async function executeSendPipeline(interaction, {
     // a single-field "(got object: null)" rendering. `String()`
     // keeps `undefined` visible (JSON.stringify drops it) and
     // avoids the JSON.stringify-throws-on-BigInt edge case.
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext)})`);
+    // Slice keeps the message bounded if a future caller hands
+    // a pathological value (1MB string, etc.). The `…` marker
+    // signals truncation to a prod-log reader so they don't
+    // assume the rendered value was the full payload.
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${truncForLog(isVoiceContext)})`);
   }
 
   // `target` allowed-set gate. Same silent-mis-render shape: an
@@ -902,7 +936,7 @@ async function executeSendPipeline(interaction, {
   if (target !== 'user' && target !== 'channel') {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${String(target)})`);
+    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
   }
 
   // Defense-in-depth SSRF re-check. handleSend's Step-2 validates
@@ -933,18 +967,51 @@ async function executeSendPipeline(interaction, {
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${String(expiresIn)})`);
+    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
   // null OR string. A non-string object would silently stringify
   // to `[object Object]` in the recipient's DM — exact silent-
-  // regression shape the other gates fence.
+  // regression shape the other gates fence. Intentionally renders
+  // only `typeof`, NOT the value (no truncForLog), since a string
+  // here would be user-authored DM prose; we don't want even a
+  // truncated 64-char prefix of that landing in prod logs.
   if (personalMessage !== null && typeof personalMessage !== 'string') {
     clearCooldown(interaction.user.id);
     cancelEdit();
     throw new TypeError(`executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
   }
+
+  // `recipients` shape + cap gates. The docstring's "non-empty,
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by handleSend's
+  // front-half today; this is defense-in-depth for a future caller
+  // (deserialized payload, programmatic retry, admin tool) that
+  // skips those checks. Trips here would otherwise surface deep
+  // inside mintLinksInBatches as "Failed to create any links" with
+  // no caller-side breadcrumb. The non-empty check ALSO fences the
+  // chain of `recipients.length` reads that follow (the cap check
+  // below, then the editReply) — a non-array reaching either site
+  // would crash on `.length` lookup against undefined.
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    // Same canonical `typeof=`, `value=` rendering as the
+    // isVoiceContext gate above. Empty-array case renders the literal
+    // `<empty array>` sentinel (truncForLog on `[]` would `String()`
+    // to the empty string, which a prod-log reader couldn't
+    // distinguish from a missing value-field).
+    const detail = Array.isArray(recipients)
+      ? 'typeof=object, value=<empty array>'
+      : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
+    throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
+  }
+  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new RangeError(`executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+  }
+
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
   const sendId = crypto.randomUUID();
