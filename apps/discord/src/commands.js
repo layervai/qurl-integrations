@@ -3423,6 +3423,11 @@ const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
 // whichever entry point they use.
 const SEND_FLOW_TTL_SECONDS = 180;
 
+// Subcommands that require the guild API key resolution + cooldown gate.
+// Single-source allowlist: adding a new send-style subcommand only
+// requires touching this set, not the dispatcher fall-through.
+const SEND_LIKE_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
+
 // Slash-option choice arrays. Reuse the existing /qurl send wording
 // so users see the same labels in autocomplete as in the form's
 // dropdowns. EXPIRY_CHOICES already exists. SELF_DESTRUCT_CHOICES is
@@ -3450,9 +3455,15 @@ function selfDestructOptionToSeconds(value) {
   if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
-  const floored = Math.floor(n);
-  if (!SELF_DESTRUCT_PRESET_SECONDS.has(floored)) return null;
-  return floored;
+  // Match the parsed Number directly — SELF_DESTRUCT_PRESETS contains
+  // 0.5 (the "1/2 second" preset), so a Math.floor here would map 0.5
+  // → 0 (not in the set) and silently downgrade to "no timer." The
+  // form path (selfDestructSelectValueToSeconds in utils/time.js) uses
+  // strict string equality against `String(p.seconds)` and gets this
+  // right; matching the parsed numeric value against the Set keeps
+  // the two entry points consistent.
+  if (!SELF_DESTRUCT_PRESET_SECONDS.has(n)) return null;
+  return n;
 }
 
 // Resolve a list of recipient IDs to User-shaped objects via the guild
@@ -3558,9 +3569,21 @@ function partitionRecipients(users, senderId) {
   return { valid, droppedBots, droppedSelf };
 }
 
-// Returns the empty string when nothing is worth surfacing — keeps
-// callers simple (`warningsBlock + content`) without a separate
-// "do I have any warnings" check.
+/**
+ * Render a warnings block for the confirm card. Returns the empty
+ * string when nothing is worth surfacing — keeps callers simple
+ * (`warningsBlock + content`) without a separate "do I have any
+ * warnings" check.
+ *
+ * @param {{
+ *   invalidTokens?: string[],
+ *   cappedCount?: number,
+ *   unresolvedIds?: string[],
+ *   transientFailureIds?: string[],
+ *   droppedBots?: number,
+ *   droppedSelf?: number,
+ * }} [opts]
+ */
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
@@ -4021,7 +4044,12 @@ async function handleQurlMap(interaction) {
   // guard for symmetry + actionable user-visible copy.
   let locationValue;
   try {
-    locationValue = interaction.options.getString('location', true).trim();
+    // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
+    // The slash option's setMaxLength(500) enforces this server-side, so
+    // legitimate clients can't exceed it — the slice is forged-interaction
+    // defense (a fabricated interaction could pass an unbounded payload),
+    // matching the modal entry point one-for-one.
+    locationValue = interaction.options.getString('location', true).trim().slice(0, 500);
   } catch (err) {
     logger.warn('handleQurlMap: required location option missing', {
       user_id: interaction.user.id, error: err && err.message,
@@ -5553,11 +5581,8 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/file/map/revoke. The
-      // `Set.has` lookup keeps the gate's allowlist single-source —
-      // adding a new send-style subcommand in 7b.3+ only requires
-      // touching this set, not the dispatch fall-through below.
-      const SEND_LIKE_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
+      // Gate: require guild API key for send/file/map/revoke.
+      // SEND_LIKE_SUBCOMMANDS hoisted to module scope.
       let resolvedApiKey = null;
       if (SEND_LIKE_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;

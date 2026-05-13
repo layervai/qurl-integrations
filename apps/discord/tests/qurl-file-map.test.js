@@ -314,6 +314,8 @@ describe('selfDestructOptionToSeconds', () => {
     [undefined, null],
     ['', null],
     // Preset values pass through:
+    ['0.5', 0.5],  // "1/2 second" preset — Math.floor would have downgraded this to "no timer"
+    ['1', 1],
     ['5', 5],
     ['30', 30],
     ['300', 300],
@@ -328,7 +330,8 @@ describe('selfDestructOptionToSeconds', () => {
     ['-5', null],
     ['NaN', null],
     ['bogus', null],
-    ['1.5', 1],  // Math.floor(1.5)=1 IS a preset
+    ['1.5', null],   // 1.5 is not in the preset set — no downgrade-to-floor
+    ['0.25', null],  // off-preset fractional
   ])('value=%j → seconds=%j', (input, expected) => {
     expect(selfDestructOptionToSeconds(input)).toBe(expected);
   });
