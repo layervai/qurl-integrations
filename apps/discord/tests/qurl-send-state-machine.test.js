@@ -352,6 +352,20 @@ describe('handleSend — pre-flight guards', () => {
 
   it('rejects when QURL_API_KEY is not configured', async () => {
     jest.resetModules();
+    jest.doMock('../src/store', () => ({
+      getGuildApiKey: jest.fn().mockResolvedValue(null),
+      setGuildApiKey: jest.fn(),
+      getGuildConfig: jest.fn().mockResolvedValue(null),
+      getPendingLink: jest.fn(),
+      consumePendingLink: jest.fn(),
+      recordQURLSendBatch: jest.fn(),
+      updateSendDMStatus: jest.fn(),
+      getRecentSends: jest.fn().mockResolvedValue([]),
+      getSendResourceIds: jest.fn().mockResolvedValue([]),
+      markSendRevoked: jest.fn(),
+      getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(),
+    }));
     jest.doMock('../src/config', () => ({
       ...jest.requireActual('./helpers/buildConfigMock').buildConfigMock({ guildId: 'guild-1' }),
       QURL_API_KEY: '',
@@ -371,11 +385,232 @@ describe('handleSend — pre-flight guards', () => {
     const { commands: cmds } = require('../src/commands');
     const localCmd = cmds.find((c) => c.data.name === 'qurl');
     const interaction = makeInteraction();
+    // Single-guild deployment + invoked inside a guild: the gate should
+    // refuse with the guild-context copy ("not configured for this
+    // server") because the global QURL_API_KEY is empty.
+    interaction.guildId = 'guild-1';
     await localCmd.execute(interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('not configured for this server'),
     }));
     jest.dontMock('../src/config');
+    jest.dontMock('../src/store');
+  });
+
+  // Regression guard for the bootstrap-fallback leak (see PR #257).
+  // Parameterized over both subcommands sharing the gate to prevent a
+  // future edit from narrowing it to send-only.
+  it.each(['send', 'revoke'])(
+    'multi-tenant: refuses /qurl %s even when QURL_API_KEY is set (no global fallback)',
+    async (subName) => {
+      jest.resetModules();
+      // Mock the store with getGuildApiKey returning null — that's the
+      // "no per-guild key" shape the unconfigured-guild leak relied on.
+      jest.doMock('../src/store', () => ({
+        getGuildApiKey: jest.fn().mockResolvedValue(null),
+        setGuildApiKey: jest.fn(),
+        getGuildConfig: jest.fn().mockResolvedValue(null),
+        getPendingLink: jest.fn(),
+        consumePendingLink: jest.fn(),
+        recordQURLSendBatch: jest.fn(),
+        updateSendDMStatus: jest.fn(),
+        getRecentSends: jest.fn().mockResolvedValue([]),
+        getSendResourceIds: jest.fn().mockResolvedValue([]),
+        markSendRevoked: jest.fn(),
+        getSendConfig: jest.fn(),
+        saveSendConfig: jest.fn(),
+      }));
+      const loggerMock = {
+        info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn(),
+      };
+      jest.doMock('../src/logger', () => loggerMock);
+      jest.doMock('../src/config', () => ({
+        ...jest.requireActual('./helpers/buildConfigMock').buildConfigMock({ guildId: null }),
+        QURL_API_KEY: 'lv_live_bootstrapxxxxxxxxxxxxxxxxxxx',
+        QURL_ENDPOINT: 'https://api.test.local',
+        CONNECTOR_URL: 'https://connector.test.local',
+        QURL_SEND_COOLDOWN_MS: 30000,
+        QURL_SEND_MAX_RECIPIENTS: 50,
+        DATABASE_PATH: ':memory:',
+        ADMIN_USER_IDS: [],
+        BASE_URL: 'http://localhost:3000',
+        STAR_MILESTONES: [10],
+        CONTRIBUTOR_ROLE_NAME: 'Contributor',
+        ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
+        CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
+        CHAMPION_ROLE_NAME: 'Champion',
+      }));
+      const { commands: cmds } = require('../src/commands');
+      const localCmd = cmds.find((c) => c.data.name === 'qurl');
+      const interaction = makeInteraction();
+      interaction.options.getSubcommand = jest.fn(() => subName);
+      // guildId present — mirrors the leak shape: real server, real
+      // guildId, just no per-guild key from /qurl setup.
+      interaction.guildId = 'guild-unconfigured';
+      await localCmd.execute(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('not configured for this server'),
+      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('/qurl setup'),
+      }));
+      // Observability: the gate must emit a warn so an operator can see
+      // how often it fires (signals "users hitting a bot that hasn't
+      // been set up" → growth funnel, not just an error).
+      expect(loggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('gate refused'),
+        expect.objectContaining({ sub: subName, multiTenant: true }),
+      );
+      jest.dontMock('../src/config');
+      jest.dontMock('../src/store');
+      jest.dontMock('../src/logger');
+    }
+  );
+
+  // Pins the multi-tenant happy path so a future refactor can't
+  // silently revert to "always use global".
+  it('multi-tenant: with per-guild key, proceeds past gate without consulting QURL_API_KEY', async () => {
+    jest.resetModules();
+    const guildKeyMock = jest.fn().mockResolvedValue('lv_live_perguildxxxxxxxxxxxxxxxxxxx');
+    jest.doMock('../src/store', () => ({
+      getGuildApiKey: guildKeyMock,
+      setGuildApiKey: jest.fn(),
+      getGuildConfig: jest.fn().mockResolvedValue(null),
+      getPendingLink: jest.fn(),
+      consumePendingLink: jest.fn(),
+      recordQURLSendBatch: jest.fn(),
+      updateSendDMStatus: jest.fn(),
+      getRecentSends: jest.fn().mockResolvedValue([]),
+      getSendResourceIds: jest.fn().mockResolvedValue([]),
+      markSendRevoked: jest.fn(),
+      getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(),
+    }));
+    jest.doMock('../src/config', () => ({
+      ...jest.requireActual('./helpers/buildConfigMock').buildConfigMock({ guildId: null }),
+      QURL_API_KEY: 'lv_live_bootstrapxxxxxxxxxxxxxxxxxxx',
+      QURL_ENDPOINT: 'https://api.test.local',
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_SEND_COOLDOWN_MS: 30000,
+      QURL_SEND_MAX_RECIPIENTS: 50,
+      DATABASE_PATH: ':memory:',
+      ADMIN_USER_IDS: [],
+      BASE_URL: 'http://localhost:3000',
+      STAR_MILESTONES: [10],
+      CONTRIBUTOR_ROLE_NAME: 'Contributor',
+      ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
+      CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
+      CHAMPION_ROLE_NAME: 'Champion',
+    }));
+    const { commands: cmds } = require('../src/commands');
+    const localCmd = cmds.find((c) => c.data.name === 'qurl');
+    const interaction = makeInteraction();
+    interaction.guildId = 'guild-configured';
+    await localCmd.execute(interaction);
+    expect(guildKeyMock).toHaveBeenCalledWith('guild-configured');
+    // Should NOT see the gate-refusal copy — the per-guild key satisfies
+    // the gate even though the global QURL_API_KEY is also set.
+    expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('not configured for this server'),
+    }));
+    jest.dontMock('../src/config');
+    jest.dontMock('../src/store');
+  });
+
+  // /qurl send has no setDMPermission(false), so DMs reach this gate.
+  // Pin the DM-aware refusal copy — must not reference "server admin".
+  it('multi-tenant: /qurl send in a DM refuses with DM-aware copy (no "server admin" reference)', async () => {
+    jest.resetModules();
+    jest.doMock('../src/store', () => ({
+      getGuildApiKey: jest.fn().mockResolvedValue(null),
+      setGuildApiKey: jest.fn(),
+      getGuildConfig: jest.fn().mockResolvedValue(null),
+      getPendingLink: jest.fn(),
+      consumePendingLink: jest.fn(),
+      recordQURLSendBatch: jest.fn(),
+      updateSendDMStatus: jest.fn(),
+      getRecentSends: jest.fn().mockResolvedValue([]),
+      getSendResourceIds: jest.fn().mockResolvedValue([]),
+      markSendRevoked: jest.fn(),
+      getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(),
+    }));
+    jest.doMock('../src/config', () => ({
+      ...jest.requireActual('./helpers/buildConfigMock').buildConfigMock({ guildId: null }),
+      QURL_API_KEY: 'lv_live_bootstrapxxxxxxxxxxxxxxxxxxx',
+      QURL_ENDPOINT: 'https://api.test.local',
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_SEND_COOLDOWN_MS: 30000,
+      QURL_SEND_MAX_RECIPIENTS: 50,
+      DATABASE_PATH: ':memory:',
+      ADMIN_USER_IDS: [],
+      BASE_URL: 'http://localhost:3000',
+      STAR_MILESTONES: [10],
+      CONTRIBUTOR_ROLE_NAME: 'Contributor',
+      ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
+      CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
+      CHAMPION_ROLE_NAME: 'Champion',
+    }));
+    const { commands: cmds } = require('../src/commands');
+    const localCmd = cmds.find((c) => c.data.name === 'qurl');
+    const interaction = makeInteraction();
+    interaction.guildId = null;
+    await localCmd.execute(interaction);
+    const replyCalls = interaction.reply.mock.calls.map(c => c[0]?.content || '');
+    const refusalReply = replyCalls.find(c => typeof c === 'string' && c.includes('only available'));
+    expect(refusalReply).toBeDefined();
+    expect(refusalReply).not.toMatch(/server admin/);
+    // The refusal must point users at the real command `/qurl send`,
+    // not the bare `/send` Discord has no command for. Catches the
+    // `'/' + sub` interpolation bug that shipped the wrong slash.
+    expect(refusalReply).toContain('`/qurl send`');
+    jest.dontMock('../src/config');
+    jest.dontMock('../src/store');
+  });
+
+  it('single-guild: still falls back to QURL_API_KEY when guild has no per-guild key (legacy preserved)', async () => {
+    jest.resetModules();
+    jest.doMock('../src/store', () => ({
+      getGuildApiKey: jest.fn().mockResolvedValue(null),
+      setGuildApiKey: jest.fn(),
+      getGuildConfig: jest.fn().mockResolvedValue(null),
+      getPendingLink: jest.fn(),
+      consumePendingLink: jest.fn(),
+      recordQURLSendBatch: jest.fn(),
+      updateSendDMStatus: jest.fn(),
+      getRecentSends: jest.fn().mockResolvedValue([]),
+      getSendResourceIds: jest.fn().mockResolvedValue([]),
+      markSendRevoked: jest.fn(),
+      getSendConfig: jest.fn(),
+      saveSendConfig: jest.fn(),
+    }));
+    jest.doMock('../src/config', () => ({
+      ...jest.requireActual('./helpers/buildConfigMock').buildConfigMock({ guildId: 'guild-1' }),
+      QURL_API_KEY: 'lv_live_singleguildxxxxxxxxxxxxxxxxxxx',
+      QURL_ENDPOINT: 'https://api.test.local',
+      CONNECTOR_URL: 'https://connector.test.local',
+      QURL_SEND_COOLDOWN_MS: 30000,
+      QURL_SEND_MAX_RECIPIENTS: 50,
+      DATABASE_PATH: ':memory:',
+      ADMIN_USER_IDS: [],
+      BASE_URL: 'http://localhost:3000',
+      STAR_MILESTONES: [10],
+      CONTRIBUTOR_ROLE_NAME: 'Contributor',
+      ACTIVE_CONTRIBUTOR_ROLE_NAME: 'Active Contributor',
+      CORE_CONTRIBUTOR_ROLE_NAME: 'Core Contributor',
+      CHAMPION_ROLE_NAME: 'Champion',
+    }));
+    const { commands: cmds } = require('../src/commands');
+    const localCmd = cmds.find((c) => c.data.name === 'qurl');
+    const interaction = makeInteraction();
+    await localCmd.execute(interaction);
+    // Should NOT see "not configured" — the global fallback is honored
+    // in single-guild mode because the bot operator owns the global key.
+    expect(interaction.reply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('not configured for this server'),
+    }));
+    jest.dontMock('../src/config');
+    jest.dontMock('../src/store');
   });
 
   it('rejects when user is on cooldown', async () => {

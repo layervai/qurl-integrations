@@ -4363,19 +4363,33 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke
+      // Multi-tenant gate: global QURL_API_KEY is NEVER a valid fallback —
+      // it would silently attribute every unconfigured guild's mints to
+      // the bootstrap customer. Honor it only in single-guild mode.
       let resolvedApiKey = null;
       if (sub === 'send' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
-        if (!guildApiKey && !config.QURL_API_KEY) {
+        const operatorOwnsGlobalKey = !config.isMultiTenant;
+        if (!guildApiKey && !(operatorOwnsGlobalKey && config.QURL_API_KEY)) {
+          logger.warn('qurl gate refused: no usable API key', {
+            sub,
+            guildId: interaction.guildId || null,
+            userId: interaction.user.id,
+            multiTenant: config.isMultiTenant,
+            hasGlobalKey: !!config.QURL_API_KEY,
+          });
+          const refusalCopy = interaction.guildId
+            ? '❌ **qURL is not configured for this server.**\n\n' +
+              'A server admin needs to run `/qurl setup` first and sign in with a layerv account.\n' +
+              'Sign up at **https://layerv.ai** if you don\'t have an account yet.'
+            : `❌ **qURL \`/qurl ${sub}\` is only available inside a server.**\n\n`
+              + 'Run this command in a Discord server where qURL has been set up via `/qurl setup`.';
           return interaction.reply({
-            content: '❌ **qURL is not configured for this server.**\n\n' +
-              'A server admin needs to run `/qurl setup` first.\n' +
-              'Sign up at **https://layerv.ai** to get your API key.',
+            content: refusalCopy,
             ephemeral: true,
           });
         }
-        resolvedApiKey = guildApiKey || config.QURL_API_KEY;
+        resolvedApiKey = guildApiKey || (operatorOwnsGlobalKey ? config.QURL_API_KEY : null);
       }
 
       // Pass API key as an explicit parameter rather than monkey-patching

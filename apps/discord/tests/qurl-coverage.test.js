@@ -271,3 +271,58 @@ describe('qURL client — createOneTimeLink happy path', () => {
       .rejects.toThrow(/resolved/);
   });
 });
+
+// Defense-in-depth at the network boundary: even if a future caller
+// bypasses the slash-command gate (PR #257), qurlFetch refuses to fall
+// back to config.QURL_API_KEY in multi-tenant mode. Pins issue #259.
+describe('qURL client — multi-tenant fallback refusal at network boundary', () => {
+  let qurl;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      QURL_API_KEY: 'lv_live_bootstrapxxxxxxxxxxxxxxxxxxx',
+      QURL_ENDPOINT: 'https://api.test.local',
+      isMultiTenant: true,
+    }));
+    jest.doMock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn() }));
+    qurl = require('../src/qurl');
+  });
+
+  it('throws when called without apiKey in multi-tenant mode even though QURL_API_KEY is set', async () => {
+    await expect(qurl.getResourceStatus('res-1', null))
+      .rejects.toThrow(/Refusing to use global QURL_API_KEY in multi-tenant mode/);
+  });
+
+  it('accepts an explicit per-guild apiKey in multi-tenant mode (positive path)', async () => {
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ data: { id: 'r1', status: 'active' } }),
+    });
+    await expect(qurl.getResourceStatus('res-1', 'lv_live_perguildxxxxxxxxxxxxxxxxxxx'))
+      .resolves.toBeDefined();
+  });
+});
+
+// Single-guild mode (isMultiTenant: false) MUST still allow the global
+// fallback — that's the legacy operator-owned deployment shape.
+describe('qURL client — single-guild fallback preserved', () => {
+  it('uses config.QURL_API_KEY when apiKey is null in single-guild mode', async () => {
+    jest.resetModules();
+    jest.doMock('../src/config', () => ({
+      QURL_API_KEY: 'lv_live_operatorxxxxxxxxxxxxxxxxxxx',
+      QURL_ENDPOINT: 'https://api.test.local',
+      isMultiTenant: false,
+    }));
+    jest.doMock('../src/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), audit: jest.fn() }));
+    const q = require('../src/qurl');
+    globalThis.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ data: { id: 'r1', status: 'active' } }),
+    });
+    await expect(q.getResourceStatus('res-1', null)).resolves.toBeDefined();
+    // Confirm the global key was actually used (in Authorization header).
+    const callArgs = globalThis.fetch.mock.calls[0][1];
+    expect(callArgs.headers['Authorization']).toBe('Bearer lv_live_operatorxxxxxxxxxxxxxxxxxxx');
+  });
+});
