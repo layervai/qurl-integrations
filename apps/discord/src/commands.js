@@ -870,8 +870,21 @@ function truncForLog(v) {
   } catch {
     return '<unrepresentable>';
   }
-  const cps = [...s];
-  return cps.length > 64 ? `${cps.slice(0, 64).join('')}…` : s;
+  // Bound the spread cost. A 1MB input would otherwise materialize a
+  // 1M-entry code-point array just to take the first 64. 128 code
+  // units is a safe over-budget that covers any 64-code-point prefix
+  // even if every code point uses a surrogate pair (each pair = 2
+  // code units). `truncated` is the authoritative truncation signal
+  // because a string of exactly 65 surrogate pairs (130 code units)
+  // has head-cps.length === 64 — relying on cps.length alone would
+  // silently drop the `…` marker on that shape.
+  const truncated = s.length > 128;
+  const head = truncated ? s.slice(0, 128) : s;
+  const cps = [...head];
+  if (truncated || cps.length > 64) {
+    return `${cps.slice(0, 64).join('')}…`;
+  }
+  return s;
 }
 
 async function executeSendPipeline(interaction, {
@@ -987,18 +1000,20 @@ async function executeSendPipeline(interaction, {
   // (deserialized payload, programmatic retry, admin tool) that
   // skips those checks. Trips here would otherwise surface deep
   // inside mintLinksInBatches as "Failed to create any links" with
-  // no caller-side breadcrumb. The non-empty check ALSO fences
-  // the `recipients.length` read on the editReply below — a non-
-  // array reaching that line would crash on `.length` lookup
-  // against undefined.
+  // no caller-side breadcrumb. The non-empty check ALSO fences the
+  // chain of `recipients.length` reads that follow (the cap check
+  // below, then the editReply) — a non-array reaching either site
+  // would crash on `.length` lookup against undefined.
   if (!Array.isArray(recipients) || recipients.length === 0) {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    // Same `typeof=` + `value=` rendering as the isVoiceContext gate
-    // above. Empty-array branch collapses to just "empty array"
-    // since `[]` is the only observable shape there.
+    // Same canonical `typeof=`, `value=` rendering as the
+    // isVoiceContext gate above. Empty-array case renders the literal
+    // `<empty array>` sentinel (truncForLog on `[]` would `String()`
+    // to the empty string, which a prod-log reader couldn't
+    // distinguish from a missing value-field).
     const detail = Array.isArray(recipients)
-      ? 'empty array'
+      ? 'typeof=object, value=<empty array>'
       : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
     throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
   }

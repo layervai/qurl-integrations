@@ -1780,7 +1780,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['null', null, /typeof=object, value=null/],
     ['undefined', undefined, /typeof=undefined, value=undefined/],
     ['plain object', {}, /typeof=object/],
-    ['empty array', [], /empty array/],
+    ['empty array', [], /typeof=object, value=<empty array>/],
   ])('rejection message distinguishes %s in the value-detail field', async (_label, recipients, detailRe) => {
     // Round-2 cr nit: rendering both `null` and `{}` as
     // `typeof=object` would force a prod-log reader to guess
@@ -1808,16 +1808,23 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       .rejects.toThrow(/value=y{64}\)/);
   });
 
-  test('rejection message falls back to <unrepresentable> if String() throws', async () => {
-    // Pathological caller-shape protection. Without the try/catch
-    // in truncForLog, the throw-message renderer would itself
-    // throw, replacing the gate's TypeError with an opaque
+  test.each([
+    // Hostile-toString: the obvious adversarial shape. Without the
+    // try/catch in truncForLog, the throw-message renderer would
+    // itself throw, replacing the gate's TypeError with an opaque
     // "Cannot convert object to primitive value" — the exact
-    // worse-than-the-original-error shape the gate exists to
-    // prevent. Realistically unreachable from any honest caller.
+    // worse-than-original-error shape the gate exists to prevent.
+    ['throws on toString', { toString() { throw new Error('nope'); } }],
+    // Round-7 cr nit: Object.create(null) is the more realistic
+    // miscoding shape — a deserialized payload with prototype
+    // detached has no @@toPrimitive / toString, so `String(v)`
+    // throws "Cannot convert object to primitive value". Pin that
+    // the catch branch handles this shape too, not just the
+    // explicitly-hostile toString case.
+    ['null-prototype object', Object.create(null)],
+  ])('rejection message falls back to <unrepresentable> when String() throws (%s)', async (_label, value) => {
     const interaction = makeInteraction();
-    const hostile = { toString() { throw new Error('nope'); } };
-    await expect(executeSendPipeline(interaction, makePipelineParams(hostile)))
+    await expect(executeSendPipeline(interaction, makePipelineParams(value)))
       .rejects.toThrow(/value=<unrepresentable>/);
   });
 
