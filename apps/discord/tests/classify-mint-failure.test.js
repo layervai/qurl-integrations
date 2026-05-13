@@ -23,7 +23,12 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ code: 'ETIMEDOUT' })).toBe('timeout');
     });
 
-    test('libuv ECONNABORTED (axios timeout after socket connect)', () => {
+    test('libuv ECONNABORTED — kept defensively (not produced by current native fetch stack)', () => {
+      // ECONNABORTED is axios-shaped; the connector helper uses native
+      // fetch + throwConnectorError so this code path is currently
+      // unreachable. Kept for defensive coverage against a future HTTP-
+      // client swap (axios / got / etc.) that surfaces ECONNABORTED on
+      // socket-level timeouts.
       expect(classifyMintFailure({ code: 'ECONNABORTED' })).toBe('timeout');
     });
 

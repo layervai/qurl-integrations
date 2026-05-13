@@ -2674,6 +2674,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
+        // Mirror the /qurl send catch-block emission (#276) — Add Recipients
+        // is the same upload+mint phase and the 2026-05-13 incident shape
+        // fires through here too. Same quota_exceeded skip semantics.
+        if (err.apiCode !== 'quota_exceeded') {
+          logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+            send_id: sendId,
+            reason: classifyMintFailure(err),
+            api_code: err.apiCode || null,
+            status_code: err.status || null,
+            kind: 'file',
+          });
+        }
         return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
@@ -2729,6 +2741,21 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
+    // Mirror the /qurl send catch-block emission (#276) — Add Recipients
+    // is the same upload+mint phase as initial send and the 2026-05-13
+    // incident shape (viewer_ttl_seconds regression) fires through here
+    // too if the user retries via Add Recipients. Without this, the alarm
+    // under-counts and the next regression of the same shape is invisible
+    // again from this surface.
+    if (error.apiCode !== 'quota_exceeded') {
+      logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+        send_id: sendId,
+        reason: classifyMintFailure(error),
+        api_code: error.apiCode || null,
+        status_code: error.status || null,
+        kind: hasFile ? 'file' : 'location',
+      });
+    }
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
