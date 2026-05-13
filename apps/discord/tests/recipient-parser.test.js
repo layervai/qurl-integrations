@@ -61,23 +61,23 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
 describe('parseRecipientMentions — basic shape', () => {
   test('returns empty result for null/undefined/empty input', () => {
     const int = makeInteraction();
-    expect(parseRecipientMentions(null, int)).toEqual({ ids: [], invalidTokens: [] });
-    expect(parseRecipientMentions(undefined, int)).toEqual({ ids: [], invalidTokens: [] });
-    expect(parseRecipientMentions('', int)).toEqual({ ids: [], invalidTokens: [] });
-    expect(parseRecipientMentions('   \t\n', int)).toEqual({ ids: [], invalidTokens: [] });
+    expect(parseRecipientMentions(null, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions(undefined, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('', int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('   \t\n', int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
   });
 
   test('returns empty result when raw is a non-string (defense vs caller bugs)', () => {
     const int = makeInteraction();
-    expect(parseRecipientMentions(42, int)).toEqual({ ids: [], invalidTokens: [] });
-    expect(parseRecipientMentions({}, int)).toEqual({ ids: [], invalidTokens: [] });
-    expect(parseRecipientMentions([], int)).toEqual({ ids: [], invalidTokens: [] });
+    expect(parseRecipientMentions(42, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions({}, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions([], int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
   });
 
   test('extracts a single user mention', () => {
     const int = makeInteraction({ users: { '111111111111111111': {} } });
     expect(parseRecipientMentions('<@111111111111111111>', int))
-      .toEqual({ ids: ['111111111111111111'], invalidTokens: [] });
+      .toEqual({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('accepts both <@id> and <@!id> forms (legacy nickname mention)', () => {
@@ -85,13 +85,13 @@ describe('parseRecipientMentions — basic shape', () => {
       users: { '111111111111111111': {}, '222222222222222222': {} },
     });
     expect(parseRecipientMentions('<@111111111111111111> <@!222222222222222222>', int))
-      .toEqual({ ids: ['111111111111111111', '222222222222222222'], invalidTokens: [] });
+      .toEqual({ ids: ['111111111111111111', '222222222222222222'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('dedupes repeated mentions', () => {
     const int = makeInteraction({ users: { '111111111111111111': {} } });
     expect(parseRecipientMentions('<@111111111111111111> <@111111111111111111> <@!111111111111111111>', int))
-      .toEqual({ ids: ['111111111111111111'], invalidTokens: [] });
+      .toEqual({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('handles whitespace + comma + mixed separators', () => {
@@ -110,7 +110,7 @@ describe('parseRecipientMentions — filtering', () => {
       users: { '900000000000000001': {}, '222222222222222222': {} },
     });
     expect(parseRecipientMentions('<@900000000000000001> <@222222222222222222>', int))
-      .toEqual({ ids: ['222222222222222222'], invalidTokens: [] });
+      .toEqual({ ids: ['222222222222222222'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('excludes bots flagged in the member cache', () => {
@@ -118,7 +118,7 @@ describe('parseRecipientMentions — filtering', () => {
       users: { '111': { bot: true }, '222': {} },
     });
     expect(parseRecipientMentions('<@111> <@222>', int))
-      .toEqual({ ids: ['222'], invalidTokens: [] });
+      .toEqual({ ids: ['222'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('best-effort bot filter: cache miss leaves the ID in (back-half re-checks)', () => {
@@ -128,7 +128,7 @@ describe('parseRecipientMentions — filtering', () => {
     // check (existing form's "Cannot send to a bot" path) catch it.
     const int = makeInteraction({});  // empty cache
     expect(parseRecipientMentions('<@555>', int))
-      .toEqual({ ids: ['555'], invalidTokens: [] });
+      .toEqual({ ids: ['555'], invalidTokens: [], cappedCount: 0 });
   });
 });
 
@@ -139,7 +139,7 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': ['101', '102', '103'] },
     });
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: ['101', '102', '103'], invalidTokens: [] });
+      .toEqual({ ids: ['101', '102', '103'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('merges role expansion with direct user mentions, deduped', () => {
@@ -158,13 +158,13 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': ['900', '801', '101'] },
     });
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: ['101'], invalidTokens: [] });
+      .toEqual({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('role unknown to the guild lands in invalidTokens', () => {
     const int = makeInteraction({});
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&7000>'] });
+      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
   test('role with no usable members (all sender/bots) lands in invalidTokens', () => {
@@ -181,7 +181,22 @@ describe('parseRecipientMentions — role mentions', () => {
   test('DM context (guild=undefined) treats role mentions as invalid', () => {
     const int = { user: { id: '900' }, guild: undefined };
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&7000>'] });
+      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
+  });
+
+  test('user listed BOTH directly AND via a role mention appears once in ids', () => {
+    // The "merges role expansion with direct user mentions" test
+    // above exercises this implicitly (user 101 is in role 7000 AND
+    // mentioned directly), but a fixture that EXPLICITLY overlaps
+    // makes the dedupe invariant non-incidental — a regression that
+    // re-added role members without the Set guard would surface
+    // here as ids.length === 2 instead of 1.
+    const int = makeInteraction({
+      users: { '101': {} },
+      roles: { '7000': ['101'] },
+    });
+    expect(parseRecipientMentions('<@101> <@&7000>', int))
+      .toEqual({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('role mention repeated in input expands once (no double-counting)', () => {
@@ -204,19 +219,19 @@ describe('parseRecipientMentions — invalid tokens', () => {
   test('channel mentions land in invalidTokens', () => {
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <#456>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<#456>'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
   });
 
   test('custom emoji land in invalidTokens', () => {
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <:smile:789>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<:smile:789>'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['<:smile:789>'], cappedCount: 0 });
   });
 
   test('bare plaintext usernames land in invalidTokens', () => {
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('alice <@111> bob', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['alice', 'bob'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
   });
 
   test('mention with missing closer (truncated input) is treated as invalid', () => {
@@ -228,20 +243,20 @@ describe('parseRecipientMentions — invalid tokens', () => {
     expect(res.invalidTokens.length).toBeGreaterThan(0);
   });
 
-  test('@everyone / @here land in invalidTokens (no fan-out shortcut)', () => {
+  test('@everyone / @here are pre-escaped with zero-width-space in invalidTokens', () => {
     // Discord's @everyone / @here are NOT `<@id>` mentions — they're
-    // bare tokens that the API expands at message-send time. The
-    // parser must surface them as invalid so a power-user typing
-    // `recipients:@everyone` doesn't get silent zero-recipient
-    // behavior (or, worse, the back-half hands the literal `@everyone`
-    // to mintLinksInBatches). Callers that render `invalidTokens`
-    // for the user MUST escape these the same way commands.js does
-    // (zero-width-space insertion) to avoid sending a stray ping.
+    // bare tokens that the API expands at message-send time. A caller
+    // naively interpolating `invalidTokens` into a user-visible
+    // message (`` `Couldn't parse: ${invalidTokens.join(', ')}` ``)
+    // would fan-out-ping the channel. To make the boundary safe by
+    // default, the parser inserts a zero-width space (U+200B) after
+    // the `@` — visually identical, but Discord's tokenizer no longer
+    // recognizes the mass-mention shape.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('@everyone <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@everyone'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone'], cappedCount: 0 });
     expect(parseRecipientMentions('@here <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@here'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere'], cappedCount: 0 });
   });
 
   test('newline characters separate tokens (split regex includes \\n)', () => {
@@ -252,12 +267,12 @@ describe('parseRecipientMentions — invalid tokens', () => {
     // bare-name token.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111>\n<#456>\n\nstray', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<#456>', 'stray'] });
+      .toEqual({ ids: ['111'], invalidTokens: ['<#456>', 'stray'], cappedCount: 0 });
   });
 });
 
 describe('parseRecipientMentions — cap + length safety', () => {
-  test('caps the result at QURL_SEND_MAX_RECIPIENTS', () => {
+  test('caps the result at QURL_SEND_MAX_RECIPIENTS + reports cappedCount', () => {
     // Build 30 user mentions; cap is 25 (set in the jest.mock above).
     // IDs are numeric to match the real Discord-mention format the
     // parser regex requires.
@@ -276,6 +291,9 @@ describe('parseRecipientMentions — cap + length safety', () => {
     // can reorder their mentions to influence the kept set.
     expect(res.ids[0]).toBe('1000000000');
     expect(res.ids[24]).toBe('1000000024');
+    // cappedCount lets the caller surface "I kept 25 of 30" without
+    // re-parsing or re-counting input.
+    expect(res.cappedCount).toBe(5);
   });
 
   test('truncates input above MAX_INPUT_LENGTH before scanning (ReDoS guard)', () => {

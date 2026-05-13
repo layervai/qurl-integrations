@@ -22,8 +22,23 @@
 //     to resolve "alice" to a user ID without an autocomplete round-trip,
 //     and silently dropping it would mask user typos.
 //
+// `invalidTokens` are PRE-ESCAPED at the parser boundary:
+//   - `@everyone` / `@here` are rewritten by inserting a zero-width
+//     space (U+200B) after the `@` — visually identical but Discord's
+//     tokenizer no longer recognizes the mass-mention shape. A caller
+//     naively interpolating an invalid token into a user-visible
+//     message (`` `Couldn't parse: ${invalidTokens.join(', ')}` ``)
+//     cannot accidentally fan-out-ping the channel. Other shapes
+//     that Discord would ping (`<@id>`, `<@&id>`) can't reach this
+//     slot because they parse as valid mentions in the passes above.
+//
 // Output shape:
-//   { ids: [<user_id>, ...], invalidTokens: [<raw_token>, ...] }
+//   {
+//     ids:           [<user_id>, ...],        // deduped, cap-applied
+//     invalidTokens: [<raw_token>, ...],      // pre-escaped (see above)
+//     cappedCount:   <number>,                // 0 if not capped; else
+//                                             // `total_pre_cap - cap`
+//   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
 // same per-send cap the in-channel form enforces), and excludes the
@@ -68,11 +83,13 @@ function parseRecipientMentions(raw, interaction) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0 };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
-  // pathological repetitions still allocate per-match strings.
+  // pathological repetitions still allocate per-match strings. This
+  // cap MUST precede `matchAll` — a refactor that flipped to
+  // "validate then truncate" would silently regress the ReDoS guard.
   const truncated = raw.length > MAX_INPUT_LENGTH;
   let input = truncated ? raw.slice(0, MAX_INPUT_LENGTH) : raw;
   // If the cut lands inside a `<...>` token, drop the trailing partial
@@ -88,7 +105,7 @@ function parseRecipientMentions(raw, interaction) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0 };
   }
 
   const ids = new Set();
@@ -112,7 +129,13 @@ function parseRecipientMentions(raw, interaction) {
   // the raw role token in `invalidTokens` so the caller can surface
   // "couldn't resolve @role" rather than silently produce a smaller
   // recipient list.
+  const cap = config.QURL_SEND_MAX_RECIPIENTS;
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
+    // Short-circuit if we're already at/past the cap. The trim happens
+    // later, but iterating a 5000-member role here just to throw them
+    // away wastes worker time on the request path. Direct mentions
+    // already ran (pass 1), so this only skips role-expansion work.
+    if (ids.size >= cap) break;
     const roleId = m[1];
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
@@ -126,6 +149,11 @@ function parseRecipientMentions(raw, interaction) {
       invalidTokens.push(m[0]);
       continue;
     }
+    // `added` counts loop iterations that passed the sender + bot
+    // filters, NOT net-new additions to `ids` (a member already added
+    // by a direct mention will still count here). Used only to drive
+    // the "no usable members" branch — what we want there is "did the
+    // role contribute anything," and prior dedupe is a contribution.
     let added = 0;
     for (const [memberId, member] of members) {
       if (memberId === senderId) continue;
@@ -145,12 +173,26 @@ function parseRecipientMentions(raw, interaction) {
   // names) by stripping valid mentions and surfacing what's left.
   // Intentionally lossy on subtle parsing — the goal is "tell the user
   // we didn't understand THIS bit", not a perfect tokenizer.
+  //
+  // Separator class includes `;`, `|`, `/` in addition to whitespace
+  // and `,` — these are common when pasting from contact lists or
+  // CSV-ish formats. Without them the user gets `;` and `|` echoed
+  // back as "invalid tokens."
   const stripped = input
     .replace(USER_MENTION_RE, ' ')
     .replace(ROLE_MENTION_RE, ' ');
-  const leftover = stripped.split(/[\s,]+/).filter(Boolean);
+  const leftover = stripped.split(/[\s,;|/]+/).filter(Boolean);
   for (const tok of leftover) {
-    invalidTokens.push(tok);
+    // Pre-escape `@everyone` / `@here` so a caller interpolating
+    // `invalidTokens` into a user-visible message can't accidentally
+    // fan-out-ping the channel. Insert a zero-width-space after `@`
+    // — the rendered glyph is identical, but Discord's tokenizer
+    // sees a different word and won't trigger the mass mention.
+    if (tok === '@everyone' || tok === '@here') {
+      invalidTokens.push(`@\u200b${tok.slice(1)}`);
+    } else {
+      invalidTokens.push(tok);
+    }
   }
 
   // Apply the per-send recipient cap. The cap is enforced by the
@@ -158,9 +200,10 @@ function parseRecipientMentions(raw, interaction) {
   // "I capped at N" before they hit Send — not as a back-half error.
   // Config validates QURL_SEND_MAX_RECIPIENTS via intEnv minPositive
   // (see src/config.js), so trust the invariant — no paranoid guards.
-  const cap = config.QURL_SEND_MAX_RECIPIENTS;
   let finalIds = [...ids];
+  let cappedCount = 0;
   if (finalIds.length > cap) {
+    cappedCount = finalIds.length - cap;
     // Massive over-cap (>2× the limit) signals user confusion —
     // probably pasted a list they didn't trim. Surface at warn so
     // oncall sees the pattern. Modest overshoot is normal-ish
@@ -172,7 +215,7 @@ function parseRecipientMentions(raw, interaction) {
     finalIds = finalIds.slice(0, cap);
   }
 
-  return { ids: finalIds, invalidTokens };
+  return { ids: finalIds, invalidTokens, cappedCount };
 }
 
 module.exports = {
