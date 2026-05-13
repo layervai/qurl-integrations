@@ -1769,6 +1769,21 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     );
   });
 
+  test.each([
+    ['null', null, /typeof=object, value=null/],
+    ['undefined', undefined, /typeof=undefined, value=undefined/],
+    ['plain object', {}, /typeof=object/],
+    ['empty array', [], /empty array/],
+  ])('rejection message distinguishes %s in the value-detail field', async (_label, recipients, detailRe) => {
+    // Round-2 cr nit: rendering both `null` and `{}` as
+    // `typeof=object` would force a prod-log reader to guess
+    // which one tripped the gate. Pin that the value-detail
+    // field disambiguates the realistic miscoding shapes.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+      .rejects.toThrow(detailRe);
+  });
+
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
     // Read the cap via the same config module the gate consults so
     // the test doesn't drift if the cap is bumped.
@@ -1796,6 +1811,25 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       .rejects.toThrow(TypeError);
     // The gate's own clearCooldown call IS the cleanup; the
     // post-throw isOnCooldown assertion is what verifies it.
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+  });
+
+  test('clears cooldown on the recipients-oversized path (RangeError branch)', async () => {
+    // The empty-array test above pins clearCooldown on the
+    // TypeError branch; the oversized-array (RangeError) branch
+    // has its own clearCooldown call. Pin it separately so a
+    // future refactor that drops one of the two clearCooldown
+    // calls is caught by exactly one test failing.
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    const cfg = require('../src/config');
+    const oversized = Array.from({ length: cfg.QURL_SEND_MAX_RECIPIENTS + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    interaction.user = { id: 'recipients-oversized-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+      .rejects.toThrow(RangeError);
     expect(isOnCooldown(interaction.user.id)).toBe(false);
   });
 
