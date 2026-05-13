@@ -363,6 +363,37 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(res.cappedCount).toBe(3);  // 28 unique - 25 cap
   });
 
+  test('cappedCount accounts for role-expansion overflow (not just direct mentions)', () => {
+    // Round-5 cr regression test: a `<@&role1> <@&role2>` where role1
+    // fills the cap and role2 has more usable members must NOT
+    // silently truncate. Both roles' members count toward
+    // `cappedCount`, even though the inner loop short-circuits Set
+    // insertions past cap. Without this, callers can't tell users
+    // "we kept 25 of N" when the overflow source is role expansion.
+    const role1Members = [];
+    const role2Members = [];
+    const users = {};
+    for (let i = 0; i < 50; i++) {
+      const id = `${3000000000 + i}`;
+      users[id] = {};
+      role1Members.push(id);
+    }
+    for (let i = 0; i < 20; i++) {
+      const id = `${4000000000 + i}`;
+      users[id] = {};
+      role2Members.push(id);
+    }
+    const int = makeInteraction({
+      users,
+      roles: { '7000': role1Members, '7001': role2Members },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7001>', int);
+    expect(res.ids).toHaveLength(25);
+    // 50 (role1) + 20 (role2) = 70 unique candidates; 25 kept; 45 dropped.
+    expect(res.cappedCount).toBe(45);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
   test('cap and invalidTokens are populated independently in the same call', () => {
     // The cap test above exercises 30 valid → 25 ids. The invalid-
     // tokens tests exercise typos in isolation. Pin the cross-cut:

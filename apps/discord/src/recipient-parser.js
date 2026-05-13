@@ -110,10 +110,27 @@ function parseRecipientMentions(raw, interaction) {
     return { ids: [], invalidTokens: [], cappedCount: 0 };
   }
 
+  // `seen` is the canonical post-filter unique-candidate set (every
+  // ID we considered, regardless of cap). `ids` is the cap-bounded
+  // subset returned to the caller. `cappedCount` is computed post-hoc
+  // as `seen.size - ids.size` — accurate even when role expansion is
+  // the source of the overflow.
+  const seen = new Set();
   const ids = new Set();
   const invalidTokens = [];
   const senderId = interaction.user?.id;
   const guild = interaction.guild;
+  const cap = config.QURL_SEND_MAX_RECIPIENTS;
+
+  // Mark an ID as considered. Returns true if it's net-new to the
+  // candidate set (caller uses this to drive "role contributed
+  // anything" detection).
+  function consider(id) {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    if (ids.size < cap) ids.add(id);
+    return true;
+  }
 
   for (const m of input.matchAll(USER_MENTION_RE)) {
     const id = m[1];
@@ -124,20 +141,14 @@ function parseRecipientMentions(raw, interaction) {
     // this layer being lossy is acceptable.
     const member = guild?.members?.cache?.get(id);
     if (member?.user?.bot) continue;
-    ids.add(id);
+    consider(id);
   }
 
   // Role expansion: missing role / empty role / DM-context guild lands
   // the raw role token in `invalidTokens` so the caller can surface
   // "couldn't resolve @role" rather than silently produce a smaller
   // recipient list.
-  const cap = config.QURL_SEND_MAX_RECIPIENTS;
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
-    // Short-circuit if we're already at/past the cap. The trim happens
-    // later, but iterating a 5000-member role here just to throw them
-    // away wastes worker time on the request path. Direct mentions
-    // already ran (pass 1), so this only skips role-expansion work.
-    if (ids.size >= cap) break;
     const roleId = m[1];
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
@@ -151,24 +162,18 @@ function parseRecipientMentions(raw, interaction) {
       invalidTokens.push(m[0]);
       continue;
     }
-    // `added` counts loop iterations that passed the sender + bot
-    // filters, NOT net-new additions to `ids` (a member already added
-    // by a direct mention will still count here). Used only to drive
-    // the "no usable members" branch — what we want there is "did the
-    // role contribute anything," and prior dedupe is a contribution.
-    let added = 0;
+    // `usable` counts post-filter members the role exposed (whether
+    // or not they were new to `seen`). Used to detect "all filtered"
+    // vs "role contributed but we'd already counted them" — dedupe
+    // is still a contribution.
+    let usable = 0;
     for (const [memberId, member] of members) {
-      // Inner break: a single role with 50k members would otherwise
-      // run 50k Set.add calls before the post-loop slice trims them
-      // back to the cap. Re-check on every iteration so a fat-roled
-      // input bails as soon as we've collected enough.
-      if (ids.size >= cap) break;
       if (memberId === senderId) continue;
       if (member?.user?.bot) continue;
-      ids.add(memberId);
-      added++;
+      usable++;
+      consider(memberId);
     }
-    if (added === 0) {
+    if (usable === 0) {
       // Role had members but they were all filtered (sender + bots).
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains you / bots."
@@ -203,24 +208,22 @@ function parseRecipientMentions(raw, interaction) {
     invalidTokens.push(tok.replace(/@(everyone|here)/g, '@\u200b$1'));
   }
 
-  // Apply the per-send recipient cap. The cap is enforced by the
-  // back-half too, but we want the user-visible feedback to say
-  // "I capped at N" before they hit Send — not as a back-half error.
-  // Config validates QURL_SEND_MAX_RECIPIENTS via intEnv minPositive
-  // (see src/config.js), so trust the invariant — no paranoid guards.
-  let finalIds = [...ids];
-  let cappedCount = 0;
-  if (finalIds.length > cap) {
-    cappedCount = finalIds.length - cap;
+  // Cap was enforced inline during the two passes (`ids` never
+  // exceeds `cap`; over-cap candidates live in `seen` but not `ids`).
+  // The back-half re-enforces the cap too; surfacing `cappedCount`
+  // here lets the caller say "I kept N of M — drop these or split"
+  // before they hit Send rather than waiting for the back-half error.
+  const finalIds = [...ids];
+  const cappedCount = seen.size - ids.size;
+  if (cappedCount > 0) {
     // Massive over-cap (>2× the limit) signals user confusion —
     // probably pasted a list they didn't trim. Surface at warn so
     // oncall sees the pattern. Modest overshoot is normal-ish
     // (typed too many) and stays at debug.
-    const logFn = finalIds.length > cap * 2 ? logger.warn : logger.debug;
+    const logFn = seen.size > cap * 2 ? logger.warn : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      raw_count: finalIds.length, cap,
+      raw_count: seen.size, cap,
     });
-    finalIds = finalIds.slice(0, cap);
   }
 
   return { ids: finalIds, invalidTokens, cappedCount };
