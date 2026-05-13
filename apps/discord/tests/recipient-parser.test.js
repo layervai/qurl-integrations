@@ -259,6 +259,24 @@ describe('parseRecipientMentions — invalid tokens', () => {
       .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere'], cappedCount: 0 });
   });
 
+  test('@everyone with trailing punctuation is also escaped (single-token residue)', () => {
+    // The strip-pass split class `[\s,;|/]+` does NOT include `.`,
+    // `:`, `!`, `?`, `-`, so `@everyone!` and `@everyone.fix` survive
+    // as single tokens. Exact-match escape would slip these past the
+    // guard. Pin that the regex-based escape catches them.
+    const int = makeInteraction({ users: { '111': {} } });
+    expect(parseRecipientMentions('@everyone! <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@​everyone!'], cappedCount: 0 });
+    expect(parseRecipientMentions('@everyone.fix <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@​everyone.fix'], cappedCount: 0 });
+    expect(parseRecipientMentions('@here: <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@​here:'], cappedCount: 0 });
+    // Embedded mid-token (paste artifact). Regex replaces ALL
+    // occurrences so no `@everyone` / `@here` substring escapes.
+    expect(parseRecipientMentions('here@everyone <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['here@​everyone'], cappedCount: 0 });
+  });
+
   test('newline characters separate tokens (split regex includes \\n)', () => {
     // Discord slash-command option strings can contain literal
     // newlines (paste-from-multi-line). Pin that the split regex
@@ -318,6 +336,31 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(input).toHaveLength(MAX_INPUT_LENGTH);
     const int = makeInteraction({ users: { '777': {} } });
     expect(parseRecipientMentions(input, int).ids).toEqual(['777']);
+  });
+
+  test('cappedCount reflects POST-dedupe count, not raw mention count', () => {
+    // Cap fires AFTER dedupe (`finalIds = [...ids]`). Pin the order
+    // so a future refactor that swapped cap-before-dedupe would
+    // surface: paste 60 mentions with heavy duplicates that
+    // dedupe to 28 unique → cappedCount should be 3 (= 28 - 25),
+    // NOT 35 (= 60 - 25).
+    const users = {};
+    const mentions = [];
+    for (let i = 0; i < 28; i++) {
+      const id = `${2000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    // Duplicate every mention to push raw count to 56, which still
+    // dedupes to 28 unique. Then add 4 more dupes of the first to
+    // push the raw count even higher without growing the unique set.
+    const dupedInput = mentions.concat(mentions).concat([
+      `<@${2000000000}>`, `<@${2000000000}>`, `<@${2000000000}>`, `<@${2000000000}>`,
+    ]).join(' ');
+    const int = makeInteraction({ users });
+    const res = parseRecipientMentions(dupedInput, int);
+    expect(res.ids).toHaveLength(25);
+    expect(res.cappedCount).toBe(3);  // 28 unique - 25 cap
   });
 
   test('cap and invalidTokens are populated independently in the same call', () => {

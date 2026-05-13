@@ -13,7 +13,9 @@
 //   - User mentions:  <@123456> or <@!123456>   → user ID 123456
 //   - Role mentions:  <@&987654>                → expand to current
 //                                                 guild members of that role
-//   - Whitespace + commas as separators (lenient — the user typed it)
+//   - Whitespace, commas, semicolons, pipes, and slashes as
+//     separators (lenient — covers free-form paste from contact
+//     lists / CSV-ish formats)
 //
 // What we reject (returned in `invalidTokens`):
 //   - Channel mentions <#...>
@@ -156,6 +158,11 @@ function parseRecipientMentions(raw, interaction) {
     // role contribute anything," and prior dedupe is a contribution.
     let added = 0;
     for (const [memberId, member] of members) {
+      // Inner break: a single role with 50k members would otherwise
+      // run 50k Set.add calls before the post-loop slice trims them
+      // back to the cap. Re-check on every iteration so a fat-roled
+      // input bails as soon as we've collected enough.
+      if (ids.size >= cap) break;
       if (memberId === senderId) continue;
       if (member?.user?.bot) continue;
       ids.add(memberId);
@@ -188,11 +195,12 @@ function parseRecipientMentions(raw, interaction) {
     // fan-out-ping the channel. Insert a zero-width-space after `@`
     // — the rendered glyph is identical, but Discord's tokenizer
     // sees a different word and won't trigger the mass mention.
-    if (tok === '@everyone' || tok === '@here') {
-      invalidTokens.push(`@\u200b${tok.slice(1)}`);
-    } else {
-      invalidTokens.push(tok);
-    }
+    // Use a regex (not exact-match) because `@everyone!`,
+    // `@everyone:`, `@everyone.fix` etc. are single tokens after
+    // the strip pass (residue split class doesn't include
+    // punctuation) and would otherwise slip through. Replace all
+    // occurrences so a token like `here@everyone` is fully fenced.
+    invalidTokens.push(tok.replace(/@(everyone|here)/g, '@\u200b$1'));
   }
 
   // Apply the per-send recipient cap. The cap is enforced by the
