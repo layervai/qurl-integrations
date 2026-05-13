@@ -146,10 +146,13 @@ function parseRecipientMentions(raw, interaction) {
   for (const m of input.matchAll(USER_MENTION_RE)) {
     const id = m[1];
     if (id === senderId) continue;
-    // Bot filter — best-effort via cache. A cache miss leaves the bot
-    // in the result; downstream send-pipeline has its own bot check
-    // (see existing form's `Cannot send to a bot` warning path) so
-    // this layer being lossy is acceptable.
+    // Bot filter — best-effort via cache. A cache miss (cold cache,
+    // partial cache without GUILD_MEMBERS intent, or DM-context with
+    // `guild === undefined`) leaves the bot in the result; downstream
+    // send-pipeline has its own bot check (see existing form's
+    // `Cannot send to a bot` warning path) so this layer being lossy
+    // is acceptable. 7b.2 wiring should NOT assume the parser
+    // filtered bots.
     const member = guild?.members?.cache?.get(id);
     if (member?.user?.bot) continue;
     consider(id);
@@ -158,19 +161,33 @@ function parseRecipientMentions(raw, interaction) {
   // Role expansion: missing role / empty role / DM-context guild lands
   // the raw role token in `invalidTokens` so the caller can surface
   // "couldn't resolve @role" rather than silently produce a smaller
-  // recipient list.
+  // recipient list. NOTE on perf: discord.js's `Role.members` getter
+  // filters the full guild member cache per call, so N role mentions
+  // = N O(guild_size) scans. Bounded by the 4000-char input cap and
+  // by Discord's slash-option max — worth knowing for 7b.2 wiring
+  // in large guilds but not a hot-path concern today.
+  const invalidRoleIds = new Set();
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
+    // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
+    // an unknown role yields one invalidTokens entry, not two. The
+    // strip-pass's residue-tokens already dedupe naturally via input
+    // grouping; this set restores the same property for role errors.
+    const pushIfNew = () => {
+      if (invalidRoleIds.has(roleId)) return;
+      invalidRoleIds.add(roleId);
+      invalidTokens.push(m[0]);
+    };
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
-      invalidTokens.push(m[0]);
+      pushIfNew();
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
     // a role with no current members in the cache; same treatment.
     const members = role.members;
     if (!members || members.size === 0) {
-      invalidTokens.push(m[0]);
+      pushIfNew();
       continue;
     }
     // `usable` counts post-filter members the role exposed (whether
@@ -188,7 +205,7 @@ function parseRecipientMentions(raw, interaction) {
       // Role had members but they were all filtered (sender + bots).
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains you / bots."
-      invalidTokens.push(m[0]);
+      pushIfNew();
     }
   }
 

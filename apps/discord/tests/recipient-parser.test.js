@@ -23,6 +23,7 @@ jest.mock('../src/config', () => ({
 }));
 
 const { parseRecipientMentions, MAX_INPUT_LENGTH } = require('../src/recipient-parser');
+const logger = require('../src/logger');
 
 // Build a synthetic interaction with the cache shape the parser reads.
 // Pass `users` as { id → { bot } } and `roles` as
@@ -197,6 +198,48 @@ describe('parseRecipientMentions — role mentions', () => {
       .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
+  test('repeated invalid role mention dedupes in invalidTokens', () => {
+    // `<@&999> <@&999>` against a guild missing role 999 must yield
+    // ONE invalidTokens entry, not two. Without the role-id dedupe,
+    // matchAll iterates each input occurrence and pushes the raw
+    // token each time — a caller's "couldn't parse: X, X" embed is
+    // user-hostile. The residue strip pass already dedupes naturally
+    // via input grouping; this test pins the same property for the
+    // role-error path.
+    const int = makeInteraction({});  // no role 999
+    expect(parseRecipientMentions('<@&999> <@&999> <@&999>', int))
+      .toEqual({ ids: [], invalidTokens: ['<@&999>'], cappedCount: 0 });
+  });
+
+  test('direct mentions always win the cap over role-expansion members', () => {
+    // Pass 1 (user mentions) runs before pass 2 (role expansion), so
+    // direct mentions are inserted into `ids` first and survive the
+    // cap. A future refactor that swapped pass order — or interleaved
+    // mention/role parsing — could silently displace direct mentions
+    // by large role expansions. Pin the invariant.
+    const roleMembers = [];
+    const users = {};
+    // 5 direct-mention users (distinct snowflake range so we can
+    // assert presence without ambiguity).
+    const directIds = ['8000000001', '8000000002', '8000000003', '8000000004', '8000000005'];
+    for (const id of directIds) users[id] = {};
+    for (let i = 0; i < 50; i++) {
+      const id = `${5000000000 + i}`;
+      users[id] = {};
+      roleMembers.push(id);
+    }
+    const int = makeInteraction({ users, roles: { '7000': roleMembers } });
+    // Role mention FIRST in input order; direct mentions follow.
+    // With cap=25, the 5 direct mentions must all survive — the
+    // role's overflow goes to cappedCount, not the direct slots.
+    const directMentions = directIds.map(id => `<@${id}>`).join(' ');
+    const res = parseRecipientMentions(`<@&7000> ${directMentions}`, int);
+    expect(res.ids).toHaveLength(25);
+    expect(res.ids).toEqual(expect.arrayContaining(directIds));
+    // 55 unique candidates - 25 cap = 30 dropped.
+    expect(res.cappedCount).toBe(30);
+  });
+
   test('user listed BOTH directly AND via a role mention appears once in ids', () => {
     // The "merges role expansion with direct user mentions" test
     // above exercises this implicitly (user 101 is in role 7000 AND
@@ -293,8 +336,8 @@ describe('parseRecipientMentions — invalid tokens', () => {
   test('newline characters separate tokens (split regex includes \\n)', () => {
     // Discord slash-command option strings can contain literal
     // newlines (paste-from-multi-line). Pin that the split regex
-    // `/[\s,]+/` includes \n — a regression that switched to
-    // `/[ \t,]+/` would silently merge "alice\nbob" into one
+    // `/[\s,;|/]+/` includes \n — a regression that switched to
+    // `/[ \t,;|/]+/` would silently merge "alice\nbob" into one
     // bare-name token.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111>\n<#456>\n\nstray', int))
@@ -442,5 +485,41 @@ describe('parseRecipientMentions — cap + length safety', () => {
     // surfaces as one invalid token after the strip. The KEY
     // assertion is the partial-mention residue isn't ALSO there.
     expect(res.invalidTokens.every(t => !t.startsWith('<@'))).toBe(true);
+  });
+
+  test('cap-overshoot logging escalates to warn past 2x the cap', () => {
+    // Modest overshoot (≤ 2× cap) signals "user typed too many" and
+    // stays at debug; massive overshoot signals "user pasted an
+    // untrimmed list" and surfaces at warn so oncall sees the pattern.
+    // Pin the threshold so a future refactor that flipped the
+    // comparison or moved the multiplier silently regresses the
+    // oncall signal.
+    const users = {};
+    const mentions = [];
+    // 26 unique = cap+1 = modest overshoot → debug
+    for (let i = 0; i < 26; i++) {
+      const id = `${6000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    let int = makeInteraction({ users });
+    logger.debug.mockClear();
+    logger.warn.mockClear();
+    parseRecipientMentions(mentions.join(' '), int);
+    expect(logger.debug).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    // 51 unique = 2× cap + 1 = massive overshoot → warn
+    for (let i = 26; i < 51; i++) {
+      const id = `${6000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    int = makeInteraction({ users });
+    logger.debug.mockClear();
+    logger.warn.mockClear();
+    parseRecipientMentions(mentions.join(' '), int);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.debug).not.toHaveBeenCalled();
   });
 });
