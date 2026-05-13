@@ -233,8 +233,8 @@ function makeInteraction(overrides = {}) {
 // across every entry-gate describe block below. Each gate test
 // passes `{ [field]: value }` to vary exactly one field; everything
 // else stays at the canonical baseline. Adding a new pipeline param
-// (e.g. when PR 7b lands `/qurl file`) is now a one-line edit here
-// instead of touching every gate's describe block.
+// is a one-line edit here instead of touching every gate's
+// describe block.
 function makePipelineParams(overrides = {}) {
   return {
     apiKey: 'apikey',
@@ -1411,10 +1411,8 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     }
   });
 
-  // The pipeline never reaches any downstream call because the
-  // gate is at function entry — mocks below don't need to be
-  // configured. Uses the file-scope makePipelineParams; pass
-  // `{ isVoiceContext }` to vary just that field.
+  // Gate is at function entry — mocks below don't need to be
+  // configured because the pipeline never reaches a downstream call.
 
   test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
     const interaction = makeInteraction();
