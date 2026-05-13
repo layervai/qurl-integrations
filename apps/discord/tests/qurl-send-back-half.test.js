@@ -1373,6 +1373,20 @@ describe('mintLinksInBatches', () => {
 // schema can't drop the boolean in serialization and silently land
 // a voice-context send on text-channel wording.
 describe('executeSendPipeline — isVoiceContext strict gate', () => {
+  // sendCooldowns is module-private state; the cooldown-cleanup test
+  // sets it for a unique user id and relies on the gate's
+  // clearCooldown call to undo. If a future edit moves the throw
+  // ahead of clearCooldown (the exact regression that test pins),
+  // the unique-id strategy would still let other tests pass — but
+  // the residual entry would leak across describes. Explicit
+  // afterEach reset closes that hatch.
+  afterEach(() => {
+    const { clearCooldown } = _test;
+    if (typeof clearCooldown === 'function') {
+      clearCooldown('cooldown-gate-test-user');
+    }
+  });
+
   // Minimal params object that would otherwise satisfy the destructure
   // — only isVoiceContext varies per case. The pipeline never reaches
   // any downstream call because the gate is at function entry, so the

@@ -796,6 +796,14 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //   - `attachment` — non-null when `resourceType === RESOURCE_TYPES.FILE`;
 //     carries `{ url, name, contentType }`. The Discord CDN URL is
 //     leak-equivalent-to-the-file; encrypt before persisting.
+//     **SSRF: `attachment.url` is assumed pre-validated** against
+//     `isAllowedSourceUrl` (today: handleSend's Step-2 file-acceptance
+//     gate before reaching this pipeline). A PR 7b caller that
+//     reconstructs `attachment` from a `flow_state` payload row MUST
+//     re-validate before invoking — otherwise an attacker who edited
+//     the DDB row between create and execute could redirect the
+//     `downloadAndUpload` call to an internal target. The pipeline
+//     itself does not re-check.
 //   - `locationUrl` / `locationName` — non-null on a location send;
 //     forwarded as a `google-map` JSON payload to the connector.
 //   - `recipients` — resolved final list, filtered (sender + bots
@@ -917,12 +925,14 @@ async function executeSendPipeline(interaction, {
   // exists for PR 7b's handleSendFormSend.
   if (typeof isVoiceContext !== 'boolean') {
     clearCooldown(interaction.user.id);
-    // `String(undefined)` → "undefined" (not stringified `undefined`
-    // which JSON.stringify drops entirely, producing the awkward
-    // "got undefined: undefined" rendering the round-7 cr flagged).
-    // For non-serializable values String() also avoids the
-    // JSON.stringify-throws-on-BigInt edge case.
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got ${typeof isVoiceContext}: ${String(isVoiceContext)})`);
+    // Render `typeof=` + `value=` separately so a prod-log reader
+    // doesn't have to disambiguate `(got object: null)` (where
+    // "object" describes the typeof and "null" is the value — a
+    // common foot-gun since `typeof null === 'object'`). The
+    // String() call keeps `undefined` visible (JSON.stringify
+    // drops it) and avoids the JSON.stringify-throws-on-BigInt
+    // edge case.
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext)})`);
   }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
@@ -4637,6 +4647,7 @@ module.exports = {
       isAllowedFileType,
       isOnCooldown,
       setCooldown,
+      clearCooldown,
       batchSettled,
       expiryToISO,
       sendCooldowns,
