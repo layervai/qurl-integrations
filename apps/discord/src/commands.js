@@ -31,8 +31,8 @@ const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
-const { createFlow, deleteFlow } = require('./flow-state');
-const { flowIdForInteraction, registerFlow } = require('./flow-dispatch');
+const { createFlow, deleteFlow, transitionFlow, loadFlow } = require('./flow-state');
+const { flowIdForInteraction, registerFlow, safeReply } = require('./flow-dispatch');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -2789,6 +2789,338 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   });
 }
 
+// /qurl setup — legacy modal-paste path conversion. See
+// docs/zero-downtime-design.md Pillar 1 for the two-stage shape:
+//
+//   /qurl setup (slash)          createFlow(awaiting_setup_button)
+//       → reply with [Configure qURL] button
+//   button click (dispatcher)    transitionFlow → awaiting_setup_modal
+//       → showModal()                              (set_expires_at extends TTL)
+//   modal submit (dispatcher)    validate + persist + deleteFlow(terminal)
+//       → editReply(success)
+//
+// The OAuth path (when AUTH0_* is configured) is NOT flow-state-
+// backed — its persistence is the signed state token + pending_links
+// SQLite table, and there's no `await*` in process to convert.
+const SETUP_STAGE_AWAITING_BUTTON = 'awaiting_setup_button';
+const SETUP_STAGE_AWAITING_MODAL = 'awaiting_setup_modal';
+const SETUP_BUTTON_CUSTOM_ID = 'qurl_setup_button';
+const SETUP_MODAL_CUSTOM_ID = 'qurl_setup_modal';
+const SETUP_MODAL_FIELD_API_KEY = 'api_key';
+
+// Two-stage TTL budget. The button-stage window covers "click the
+// button" — short enough that an abandoned button is naturally
+// superseded, long enough that a mobile admin who app-switches to
+// a password manager doesn't come back to an expired button. The
+// modal-stage window is the real budget for finding and pasting
+// the key.
+const SETUP_BUTTON_TTL_SECONDS = 120;
+const SETUP_MODAL_TTL_SECONDS = 300;
+
+// TODO(upstream-rebrand): regex + setMaxLength below mirror the
+// upstream qurl-service key-format spec. A future rebrand or
+// JWT-shaped key format must update both in lockstep — grep with
+// `git grep TODO(upstream-rebrand)` lands every mirroring site.
+const SETUP_API_KEY_REGEX = /^lv_(live|test)_[A-Za-z0-9_-]{20,}$/;
+// Length floor + ceiling for the modal's TextInput, paired with
+// SETUP_API_KEY_REGEX above. The floor (28) derives from
+// `lv_live_`-prefix (8 chars) + the regex suffix floor of 20 chars;
+// the ceiling (64) is a defense-in-depth cap for pathological
+// pastes (Discord's default is 4000). Every member of the trio
+// must move in lockstep — a future JWT-shaped key format that
+// exceeds the ceiling would silently truncate at the modal and
+// surface as a misleading "Invalid API key format" reply. Keeping
+// the constants adjacent makes the lockstep impossible to update
+// independently.
+const SETUP_API_KEY_MIN_LENGTH = 28;
+const SETUP_API_KEY_MAX_LENGTH = 64;
+
+// User-visible success message on successful setup. Exported via
+// _test so test assertions read the production string instead of
+// hardcoding a copy that drifts.
+const SETUP_SUCCESS_MSG =
+  '✅ **qURL is now configured for this server!**\n\n'
+  + 'Your team can use `/qurl send` to share files and locations securely.\n'
+  + 'All qURL usage will be billed to your API key.';
+
+// Sibling-flow → message map for the post-supersede-retry-failure
+// disambiguation in handleSetup. Each entry says: "if the surviving
+// row at this flow_id is at THIS stage, tell the admin what to do
+// about it." The forgot-to-add-an-entry footgun is real once more
+// flows land — the dispatcher-side test in
+// commands-comprehensive.test.js pins both the known-stage and
+// generic-fallback branches.
+//
+// Future PRs (e.g. /qurl send) should add their awaiting_* entry
+// here as they ship.
+const SIBLING_FLOW_MESSAGES = {
+  [REVOKE_STAGE_AWAITING_SELECT]:
+    'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
+};
+function siblingMessageForStage(stage) {
+  return SIBLING_FLOW_MESSAGES[stage] ?? null;
+}
+
+// Button-stage handler. Routed by flow-dispatch when the admin
+// clicks the [Configure qURL] button rendered by handleSetup.
+//
+// Sequence: transitionFlow first (it's the OCC primitive that
+// rejects concurrent button clicks), then showModal as the ACK on
+// the success branch. `showModal` MUST be the interaction's first
+// response — we cannot deferReply ahead of it — so the DDB round-
+// trip happens inside Discord's 3 s ACK window. UpdateItem latency
+// is typically 50–200 ms; if a DDB outage pushes it close to the
+// wall, the user sees Discord's "interaction failed" notice and
+// can re-click. Acceptable tradeoff vs. losing OCC dedup.
+//
+// `set_expires_at` extends the row's TTL from the 120s button window
+// (SETUP_BUTTON_TTL_SECONDS) to the 300s modal window
+// (SETUP_MODAL_TTL_SECONDS), giving the admin a fresh budget from
+// the moment the modal opens. This trips the `extended: true` audit
+// flag on the FLOW_TRANSITION event — correct: the deadline really
+// was extended.
+async function handleSetupButton(interaction, { flow_id, row }) {
+  const result = await transitionFlow(flow_id, row.version, {
+    stage_to: SETUP_STAGE_AWAITING_MODAL,
+    terminal: false,
+    set_expires_at: Math.floor(Date.now() / 1000) + SETUP_MODAL_TTL_SECONDS,
+  });
+
+  // Early-return branches below use `interaction.reply` directly
+  // (not safeReply): we haven't deferReply'd, so replied/deferred
+  // are false on entry. Matches handleRevokeSelect's shape.
+  if (result.result === 'conflict') {
+    // Two concurrent button clicks. The OCC loser must NOT call
+    // showModal — the winner will (or already did), and a duplicate
+    // showModal on the same parent interaction surfaces as a
+    // confusing Discord error.
+    return interaction.reply({
+      content: 'Another setup attempt is in progress — finish or close it, then retry.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  if (result.result === 'not_found') {
+    // Flow row vanished between the dispatcher's loadFlow and the
+    // transitionFlow Update (TTL reap or a concurrent
+    // admin_cleanup). Tell the user to rerun.
+    return interaction.reply({
+      content: 'This setup session expired or was replaced — please run `/qurl setup` again.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Success — show the modal. It becomes the interaction's ACK.
+  // (Non-CCFE transitionFlow failures throw and propagate to the
+  // dispatcher's safety net; see flow-state.js for the contract.)
+  const modal = new ModalBuilder()
+    .setCustomId(SETUP_MODAL_CUSTOM_ID)
+    .setTitle('Configure qURL');
+  const keyInput = new TextInputBuilder()
+    .setCustomId(SETUP_MODAL_FIELD_API_KEY)
+    .setLabel('qURL API Key')
+    .setPlaceholder('lv_live_your_key_here')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    // TODO(upstream-rebrand): min+max mirror upstream qurl-service's
+    // key-format bounds. Both constants live next to SETUP_API_KEY_REGEX
+    // so the lockstep trio is impossible to update independently.
+    .setMinLength(SETUP_API_KEY_MIN_LENGTH)
+    .setMaxLength(SETUP_API_KEY_MAX_LENGTH);
+  modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
+
+  // Roll back the OCC transition if showModal throws. Without the
+  // delete, the row sits at awaiting_setup_modal until TTL and the
+  // admin's /qurl setup rerun trips the loadFlow-peek into the
+  // misleading "you already have a modal open" branch. If the
+  // rollback itself also fails (DDB region outage), both errors
+  // log at error-level — admin recovery is the SETUP_MODAL_TTL_SECONDS
+  // (5 min) wait.
+  //
+  // TODO(supersede-race) #272: the rollback delete uses
+  // stage='awaiting_setup_modal' (matching the just-committed
+  // transition). A concurrent /qurl setup rerun whose loadFlow
+  // peek lands in the narrow window AFTER the transition committed
+  // but BEFORE this rollback fires will surface the misleading
+  // "you already have a modal open" message. Window is bounded by
+  // a single DDB round-trip; not worth closing with an additional
+  // OCC primitive yet, but greppable for future readers.
+  //
+  // No spurious error log if a concurrent supersede ALSO cleared
+  // this row first — CCFE in deleteFlow returns `{deleted: false}`
+  // rather than throwing (flow-state.js), so the .catch below never
+  // fires on that path.
+  try {
+    await interaction.showModal(modal);
+  } catch (err) {
+    // warn-level: the dominant cause is Discord token expiry /
+    // transient REST blips that are fully recoverable by user
+    // rerun. error-level is reserved for the rollback-also-failed
+    // branch below, which is the genuine "this admin is stuck for
+    // up to SETUP_MODAL_TTL_SECONDS" condition that warrants paging.
+    logger.warn('handleSetupButton: showModal failed after transitionFlow committed', {
+      flow_id, error: err && err.message,
+    });
+    await deleteFlow(flow_id, {
+      stage: SETUP_STAGE_AWAITING_MODAL,
+      reason: 'abort',
+    }).catch((rollbackErr) => {
+      // `metric: 'setup_rollback_failed'` is the stable selector
+      // for the CloudWatch alarm filter. Keying on the message
+      // string instead would break the moment a copy tweak lands.
+      logger.error('handleSetupButton: rollback deleteFlow failed', {
+        flow_id,
+        error: rollbackErr && rollbackErr.message,
+        metric: 'setup_rollback_failed',
+      });
+    });
+    // The "run /qurl setup again" guidance is accurate when the
+    // rollback succeeded (clean state, rerun works). If the rollback
+    // ALSO failed (rare double-DDB-failure logged just above), the
+    // rerun will hit the "you already have a modal open" branch
+    // until SETUP_MODAL_TTL_SECONDS elapses — the admin's recovery
+    // is just to wait. Distinguishing the two cases in the message
+    // would require reading the rollback outcome into a variable
+    // (the .catch swallows it), and the wait-vs-retry distinction
+    // is marginal UX in an already-rare error path; keep the
+    // simpler wording.
+    //
+    // Use safeReply (followUp vs reply based on interaction state)
+    // rather than a bare .reply.catch — showModal may have partially
+    // acked before throwing, leaving interaction.replied=true; a
+    // bare .reply would then throw InteractionAlreadyReplied and
+    // silently swallow, leaving the admin with no feedback.
+    await safeReply(
+      interaction,
+      'Could not open the configuration form — please run `/qurl setup` again.',
+    );
+  }
+}
+
+// Modal-submit handler. Routed by flow-dispatch when the admin
+// submits the modal opened by handleSetupButton. The flow row's
+// stage is already validated (`awaiting_setup_modal`) by the
+// dispatcher.
+//
+// `deleteFlow` runs BEFORE the qURL API validation so the dedup
+// gate fires on the OCC primitive — a duplicate modal submit
+// (Discord retry, double-click) sees `deleted: false` and exits
+// without burning a qURL API key validation call. Same ordering
+// rationale as handleRevokeSelect.
+async function handleSetupModal(interaction, { flow_id }) {
+  // Modal-stage flow_state delete is terminal — the user committed
+  // the form, the flow has lifecycled out.
+  const { deleted } = await deleteFlow(flow_id, {
+    stage: SETUP_STAGE_AWAITING_MODAL,
+    reason: 'terminal',
+  });
+  if (!deleted) {
+    // `deleted: false` collapses three real causes: TTL'd between
+    // modal open and submit, concurrent admin_cleanup, and a duplicate
+    // submit from Discord retry. The TTL case is the most plausible
+    // (admin walks away mid-paste past the 300 s budget), so the
+    // wording covers both "expired" and "already processed."
+    return interaction.reply({
+      content: 'This setup session has expired or was already processed — run `/qurl setup` again.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Structured-log fields shared across every validation failure
+  // branch. A guild that hits "Invalid API key" 50 times in a row
+  // (admin keeps re-pasting the wrong key, or a credential rotation
+  // broke them) needs to surface in ops dashboards — that's only
+  // possible if every failure logs guild_id + configured_by.
+  // Bare reply paths (no .catch on the malformed-key `interaction.reply`
+  // and the validation-failure `interaction.editReply` branches below)
+  // are intentional: the flow row is already deleted by this point,
+  // so a Discord throw propagates to the dispatcher's safety net
+  // which replies "run again" — which IS the correct UX for these
+  // branches (admin really should rerun). Contrast the success-
+  // path .catch a few lines down, where "run again" would mislead
+  // because the key was already persisted.
+  //
+  // Exception: the `!deleted` early-return above DOES .catch — the
+  // dedup-loser path means another worker already replied to the
+  // user, and a second "run again" from the safety net would
+  // visually duplicate. The bare-reply rule applies only to the
+  // post-deleteFlow validation branches.
+  const logFields = {
+    guild_id: interaction.guildId,
+    configured_by: interaction.user.id,
+  };
+
+  // `String(...)` coerces any non-string return shape (a hypothetical
+  // Discord SDK contract change) into a string before .trim(). A
+  // null/undefined coerces to 'null'/'undefined', which the regex
+  // format check below cleanly rejects as malformed — the defense's
+  // job is just to keep .trim() from throwing, not to validate.
+  // The flow row is already deleted by this point, so an uncaught
+  // throw here would surface as "Something went wrong" AFTER the
+  // row is gone — asymmetrically expensive vs. this one-token wrap.
+  const submittedKey = String(
+    interaction.fields.getTextInputValue(SETUP_MODAL_FIELD_API_KEY),
+  ).trim();
+  // Probable client-side truncation: the key landed exactly at the
+  // setMaxLength ceiling. The regex check below will likely reject
+  // (current `lv_*` keys are well under 64 chars), but if it ever
+  // accepts a 64-char value the warn surfaces the truncation
+  // candidate to ops — an upstream key-format change that exceeds
+  // the cap would otherwise look like a guild-side "Invalid API
+  // key format" loop with no trail back to this constant.
+  if (submittedKey.length === SETUP_API_KEY_MAX_LENGTH) {
+    logger.warn('validate-key probable truncation (key landed at SETUP_API_KEY_MAX_LENGTH)', {
+      ...logFields,
+      key_length: submittedKey.length,
+    });
+  }
+  if (!SETUP_API_KEY_REGEX.test(submittedKey)) {
+    logger.warn('validate-key rejected (bad format)', logFields);
+    return interaction.reply({
+      content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters. Run `/qurl setup` again to retry.',
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  try {
+    const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
+      headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (resp.status === 401 || resp.status === 403) {
+      logger.warn('validate-key rejected by qURL API', { ...logFields, status: resp.status });
+      return interaction.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
+    }
+    if (!resp.ok) {
+      logger.warn('validate-key non-2xx from qURL API', { ...logFields, status: resp.status });
+      return interaction.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
+    }
+  } catch (err) {
+    // Don't reflect err.message to Discord — network errors can
+    // contain internal hostnames/IPs (e.g. "connect ECONNREFUSED
+    // 10.0.0.5:8080") that should not leak to a guild admin's
+    // screen. Same redaction shape as the pre-conversion code.
+    logger.error('validate-key request failed', { ...logFields, error: err.message });
+    return interaction.editReply({
+      content: '❌ **Could not validate key.** Please try again in a moment.',
+    });
+  }
+
+  await db.setGuildApiKey(interaction.guildId, submittedKey, interaction.user.id);
+  logger.info('Guild API key configured', logFields);
+  // Swallow Discord errors on the post-persist editReply. If the
+  // editReply throws AFTER setGuildApiKey commits, letting it
+  // propagate would fire the dispatcher's universal safety-net
+  // reply ("Something went wrong — please run the command again"),
+  // which is actively wrong: the key IS saved. Admin can confirm
+  // with /qurl status; the saved-but-no-confirmation case is rare
+  // and recoverable, the misleading-error case is not.
+  return interaction.editReply({
+    content: SETUP_SUCCESS_MSG,
+  }).catch(logIgnoredDiscordErr);
+}
+
 // Pure rendering / wording logic lives in `./revoke-render` so the
 // e2e smoke test can require it without pulling in `discord.js`.
 const {
@@ -3650,67 +3982,135 @@ const commands = [
             ephemeral: true,
           });
         }
-        // Use a modal to collect the API key — modal inputs are NOT recorded in Discord audit logs
-        // Nonce the customId so two concurrent /qurl setup flows don't consume each other's submissions.
-        const setupNonce = crypto.randomBytes(8).toString('hex');
-        const setupModalId = `qurl_setup_modal_${setupNonce}`;
-        const modal = new ModalBuilder()
-          .setCustomId(setupModalId)
-          .setTitle('Configure qURL');
-        const keyInput = new TextInputBuilder()
-          .setCustomId('api_key')
-          .setLabel('qURL API Key')
-          .setPlaceholder('lv_live_your_key_here')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMinLength(28);
-        modal.addComponents(new ActionRowBuilder().addComponents(keyInput));
-        await interaction.showModal(modal);
 
-        let modalSubmit;
-        try {
-          modalSubmit = await interaction.awaitModalSubmit({ filter: (i) => i.customId === setupModalId && i.user.id === interaction.user.id, time: 120000 });
-        } catch {
-          return; // Modal dismissed or timed out
-        }
-        const submittedKey = modalSubmit.fields.getTextInputValue('api_key').trim();
-        if (!/^lv_(live|test)_[A-Za-z0-9_-]{20,}$/.test(submittedKey)) {
-          return modalSubmit.reply({
-            content: 'Invalid API key format. Keys start with `lv_live_` or `lv_test_` and are at least 28 characters.',
-            ephemeral: true,
-          });
-        }
-        // Validate key by making a lightweight GET — no resource creation
-        await modalSubmit.deferReply({ ephemeral: true });
-        try {
-          const resp = await fetch(`${config.QURL_ENDPOINT}/v1/qurls?limit=1`, {
-            headers: { 'Authorization': `Bearer ${submittedKey}`, 'Accept': 'application/json' },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (resp.status === 401 || resp.status === 403) {
-            return modalSubmit.editReply({ content: '❌ **Invalid API key.** Double-check your key at **https://layerv.ai**.' });
+        // Open the flow row + render the button. The actual modal is
+        // shown on button-click by handleSetupButton (see
+        // dispatcher-side handlers above), which lets a deploy
+        // between command and modal still resume cleanly — the
+        // button is a persistent message component, not an
+        // in-process Promise.
+        //
+        // Supersede semantics: deleteFlow's stage gate makes a
+        // second /qurl setup a no-op when the prior flow is already
+        // mid-modal (the deleteFlow returns deleted:false on the
+        // stage mismatch and the retry createFlow then also fails,
+        // surfacing "could not start"). When the prior flow is
+        // pre-modal — i.e. the admin walked away from the button —
+        // supersede + recreate gives them a fresh button.
+        await interaction.deferReply({ ephemeral: true });
+        const setupFlowId = flowIdForInteraction(interaction);
+        const setupCreated = await createFlow({
+          flow_id: setupFlowId,
+          stage: SETUP_STAGE_AWAITING_BUTTON,
+          payload: null,
+          expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
+        });
+        if (!setupCreated.created) {
+          // Within the supersede branch, deleteFlow + retry createFlow
+          // share one try-envelope so a DDB throttle / IAM blip on
+          // either gets the recoverable "could not start" message.
+          // The FIRST createFlow above is intentionally NOT wrapped —
+          // its throw bubbles to handleCommand's outer envelope.
+          // Pinned by:
+          //   - "propagates the throw when the first createFlow fails"
+          //   - "handleCommand wraps the createFlow throw into a generic
+          //      user-visible reply"
+          //
+          // Race-edge #272: two same-user supersede calls from
+          // different clients within the deleteFlow round-trip can
+          // have the second deleteFlow stomp the first retry's
+          // fresh row (no OCC on deleteFlow). Worst case is "admin
+          // reruns," and /qurl setup is admin-only + same-user so
+          // the window is vanishingly small — not worth an OCC
+          // primitive yet, tracked in #272 if/when it bites.
+          let setupRetry;
+          try {
+            await deleteFlow(setupFlowId, {
+              stage: SETUP_STAGE_AWAITING_BUTTON,
+              reason: 'admin_cleanup',
+            });
+            setupRetry = await createFlow({
+              flow_id: setupFlowId,
+              stage: SETUP_STAGE_AWAITING_BUTTON,
+              payload: null,
+              // Recompute expires_at after the deleteFlow round-trip
+              // so the retried row gets a full SETUP_BUTTON_TTL_SECONDS
+              // budget, not a sub-second-truncated one.
+              expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
+            });
+          } catch (err) {
+            logger.warn('handleSetup: supersede deleteFlow+createFlow threw', {
+              flow_id: setupFlowId, error: err && err.message,
+            });
+            return interaction.editReply({
+              content: 'Could not start a setup session — please try again.',
+            });
           }
-          if (!resp.ok) {
-            return modalSubmit.editReply({ content: `❌ **qURL API error** (${resp.status}). Try again later.` });
+          if (!setupRetry.created) {
+            // Retry create can fail for three distinct reasons:
+            //   (a) stage gate refused admin_cleanup because the
+            //       prior row is mid-modal → tell admin to finish
+            //       their existing modal.
+            //   (b) sibling flow type lives at this flow_id (e.g.
+            //       in-flight revoke) → don't claim a modal is
+            //       open; use the generic "could not start" wording.
+            //   (c) two races in a row → also generic wording.
+            // Disambiguate with a loadFlow peek. Adds one DDB read
+            // on a rare error path; cheap relative to telling the
+            // user about a modal that doesn't exist.
+            logger.warn('handleSetup: createFlow racy after admin_cleanup', {
+              flow_id: setupFlowId,
+            });
+            // TODO(stuck-orphan-#273): loadFlow filters logically-
+            // expired rows to null. If the orphan row is past its
+            // logical TTL but not yet physically reaped (DDB reap
+            // is async, minutes-to-hours), the peek returns null
+            // and we fall through to the generic "could not start"
+            // message — leaving the admin stuck until physical
+            // reap. /qurl revoke doesn't hit this because its
+            // supersede stage gate matches the orphan's own stage.
+            // Tracked in #273; mitigation likely a
+            // loadFlow({include_expired: true}) opt-in plus a
+            // matching deleteFlow against the expired stage.
+            const surviving = await loadFlow(setupFlowId).catch((err) => {
+              // Preserve observability — a DDB outage here silently
+              // degrades the user-visible wording from actionable
+              // ("you have a /qurl revoke menu open") to generic
+              // ("try again"). Without this warn, an intermittent
+              // read-side regression would be invisible to ops.
+              logger.warn('handleSetup: loadFlow peek failed (post-supersede disambiguation)', {
+                flow_id: setupFlowId, error: err && err.message,
+              });
+              return null;
+            });
+            if (surviving?.stage === SETUP_STAGE_AWAITING_MODAL) {
+              return interaction.editReply({
+                content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
+              });
+            }
+            // Sibling-flow message lookup. A known sibling stage
+            // (revoke today, send/etc tomorrow) gets actionable
+            // wording naming the command the admin should finish
+            // or cancel first; an unknown stage / row-vanished
+            // case falls through to the generic "try again."
+            const siblingMsg = siblingMessageForStage(surviving?.stage);
+            if (siblingMsg) {
+              return interaction.editReply({ content: siblingMsg });
+            }
+            return interaction.editReply({
+              content: 'Could not start a setup session — please try again.',
+            });
           }
-        } catch (err) {
-          // Don't reflect err.message to Discord — network errors can contain
-          // internal hostnames/IPs (e.g. "connect ECONNREFUSED 10.0.0.5:8080")
-          // that should not leak to a guild admin's screen.
-          logger.error('validate-key request failed', { error: err.message });
-          return modalSubmit.editReply({
-            content: '❌ **Could not validate key.** Please try again in a moment.',
-          });
         }
 
-        const guildId = interaction.guildId;
-        await db.setGuildApiKey(guildId, submittedKey, interaction.user.id);
-        logger.info('Guild API key configured', { guild_id: guildId, configured_by: interaction.user.id });
-        return modalSubmit.editReply({
-          content: '✅ **qURL is now configured for this server!**\n\n' +
-            'Your team can use `/qurl send` to share files and locations securely.\n' +
-            'All qURL usage will be billed to your API key.',
-          ephemeral: true,
+        const setupButton = new ButtonBuilder()
+          .setCustomId(SETUP_BUTTON_CUSTOM_ID)
+          .setLabel('Configure qURL')
+          .setStyle(ButtonStyle.Primary);
+        return interaction.editReply({
+          content: '🔐 **Connect qURL to this server**\n\n'
+            + 'Click below to open the API-key form. Inputs are NOT recorded in Discord audit logs.',
+          components: [new ActionRowBuilder().addComponents(setupButton)],
         });
       }
 
@@ -4105,14 +4505,24 @@ registerFlow(REVOKE_SELECT_CUSTOM_ID, {
   expectedStage: REVOKE_STAGE_AWAITING_SELECT,
   handler: handleRevokeSelect,
 });
+registerFlow(SETUP_BUTTON_CUSTOM_ID, {
+  expectedStage: SETUP_STAGE_AWAITING_BUTTON,
+  handler: handleSetupButton,
+});
+registerFlow(SETUP_MODAL_CUSTOM_ID, {
+  expectedStage: SETUP_STAGE_AWAITING_MODAL,
+  handler: handleSetupModal,
+});
 
 module.exports = {
   commands,
   registerCommands,
   handleCommand,
   // Exported for the dispatcher's unit tests. Production code reaches
-  // it via flow-dispatch's registry, not this export.
+  // these via flow-dispatch's registry, not these exports.
   handleRevokeSelect,
+  handleSetupButton,
+  handleSetupModal,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -4159,6 +4569,17 @@ module.exports = {
       // alarm — table-driven tests pin every shape so a silent regex
       // breakage can't slip through.
       isAckTimeoutError,
+      // Setup-flow constants — exposed so tests assert against
+      // production values, not stale duplicates that would silently
+      // pass when the constants are tuned. The regex export lets
+      // future tests assert format shape directly rather than via
+      // VALID_KEY round-tripping.
+      SETUP_BUTTON_TTL_SECONDS,
+      SETUP_MODAL_TTL_SECONDS,
+      SETUP_API_KEY_REGEX,
+      SETUP_API_KEY_MIN_LENGTH,
+      SETUP_API_KEY_MAX_LENGTH,
+      SETUP_SUCCESS_MSG,
     },
   }),
 };

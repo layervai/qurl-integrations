@@ -204,6 +204,15 @@ async function safeReply(interaction, content) {
 module.exports = {
   registerFlow,
   flowIdForInteraction,
+  // Best-effort reply helper that picks followUp vs reply based on
+  // interaction.replied/deferred state. Part of the handler-author
+  // contract (not just dispatch-internal): handlers reaching a reply
+  // point with ambiguous ack state — e.g. `showModal` that may have
+  // partially acked before throwing — should call safeReply instead
+  // of `interaction.reply().catch(...)` to avoid silently swallowing
+  // an InteractionAlreadyReplied. See handleSetupButton's rollback
+  // path for the canonical consumer.
+  safeReply,
   handleFlowInteraction,
   // Exported for tests so they can assert the supersede wording
   // without duplicating the string.
