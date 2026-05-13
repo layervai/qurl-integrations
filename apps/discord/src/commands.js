@@ -910,7 +910,7 @@ async function executeSendPipeline(interaction, {
   // parameter sprawl at the call sites. The `@returns {never}`
   // annotation lets static analysis treat the call as terminating.
   /**
-   * @param {ErrorConstructor} ErrorCtor
+   * @param {new (msg: string) => Error} ErrorCtor
    * @param {string} msg
    * @returns {never}
    */
