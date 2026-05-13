@@ -60,7 +60,15 @@ function classifyMintFailure(error) {
   // as timeouts. See PR #300 review (Justin).
   if (error.name === 'AbortError') {
     const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
-    if (/timeout/i.test(causeStr)) return 'timeout';
+    // Word-anchored to drop strange concatenations like "rtimeout" or
+    // "timeouted" — but it does NOT defend against "not due to timeout"
+    // because "timeout" is still a complete word in that string. The
+    // false-positive class for negation-containing causes is acceptable
+    // because real timeout-driven aborts in undici raise TimeoutError
+    // (handled above) rather than AbortError; this branch is a defense
+    // against libraries that use controller.abort('timeout') as their
+    // deadline signal, where the cause is the deliberate marker string.
+    if (/\btimed?\s*out\b/i.test(causeStr)) return 'timeout';
     return 'unknown';
   }
   // libuv socket codes + undici/fetch TimeoutError DOMException — all
@@ -74,7 +82,7 @@ function classifyMintFailure(error) {
       error.name === 'TimeoutError') {
     return 'timeout';
   }
-  const status = error.status || 0;
+  const status = error.status ?? 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';
   if (status >= 400 && status < 500) return 'upstream_4xx';
   return 'unknown';
@@ -2697,7 +2705,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         const msg = isExpired
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
-        logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
+        logger.error('addRecipients file re-upload failed', {
+          sendId, error: err.message, apiCode: err.apiCode, status: err.status, isExpired,
+        });
         // quota_exceeded skip lives inside emitMintFailureAudit.
         emitMintFailureAudit(err, { sendId, kind: 'file' });
         return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
@@ -2751,7 +2761,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       preparedKinds.push('location');
     }
   } catch (error) {
-    logger.error('Failed to create links for additional recipients', { error: error.message });
+    logger.error('Failed to create links for additional recipients', {
+      sendId, error: error.message, apiCode: error.apiCode, status: error.status,
+    });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
