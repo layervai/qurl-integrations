@@ -777,116 +777,62 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   return allLinks;
 }
 
-// executeSendPipeline — back-half of the /qurl send lifecycle, extracted
-// from handleSend during PR 7a. Pure refactor: every behavior pinned by
-// qurl-send.test.js, qurl-send-state-machine.test.js,
-// qurl-send-back-half.test.js, and commands-comprehensive.test.js
-// passes unchanged. The closure-captured state from the legacy
-// handleSend's Step-3 form-fill becomes explicit destructured params
-// here so PR 7b's flow_state-backed form can be the second caller (its
-// handleSendFormSend will construct the params object from the
-// flow_state row's decrypted payload and invoke this function).
+// executeSendPipeline — back-half of the /qurl send lifecycle. The
+// destructure signature is the authoritative param surface; the
+// notes below capture only non-obvious contract guarantees that a
+// reader couldn't infer from the call sites alone.
 //
-// Caller contract — full param surface (the destructure list is the
-// authoritative signature; this prose calls out the non-obvious bits):
+// Caller contract (non-obvious bits — what the signature can't say):
 //
-//   - `apiKey` — resolved guild API key (or env fallback).
-//   - `resourceType` — `RESOURCE_TYPES.FILE` or location kind; branches
-//     the upload path and lands in DB rows + audit events.
-//   - `attachment` — non-null when `resourceType === RESOURCE_TYPES.FILE`;
-//     carries `{ url, name, contentType }`. The Discord CDN URL is
-//     leak-equivalent-to-the-file; encrypt before persisting.
-//     **SSRF: `attachment.url` is assumed pre-validated** against
-//     `isAllowedSourceUrl` (today: handleSend's Step-2 file-acceptance
-//     gate before reaching this pipeline). A PR 7b caller that
-//     reconstructs `attachment` from a `flow_state` payload row MUST
-//     re-validate before invoking — otherwise an attacker who edited
-//     the DDB row between create and execute could redirect the
-//     `downloadAndUpload` call to an internal target. The pipeline
-//     itself does not re-check.
-//   - `locationUrl` / `locationName` — non-null on a location send;
-//     forwarded as a `google-map` JSON payload to the connector.
-//   - `recipients` — resolved final list, filtered (sender + bots
-//     excluded), capped at `config.QURL_SEND_MAX_RECIPIENTS`. **The
-//     pipeline MUTATES this array** on the Add Recipients post-send
-//     branch (deduped push). Callers reconstructing the list from a
-//     persisted source (flow_state payload, retry, etc.) should treat
-//     it as transferred ownership for the lifetime of the call, not as
-//     a snapshot.
-//   - `target` — `'user' | 'channel'`; gates the channel-announce
-//     message and lands as `targetType` in the DB row. The voice-vs-
-//     text-channel discrimination is on `isVoiceContext`, NOT on
-//     `target` (a voice-context send still has `target: 'channel'`).
-//     Setting `target: 'voice'` would silently suppress the channel-
-//     announce because the gate at the announce site is strict
-//     equality on `'channel'`.
-//   - `isVoiceContext` — REQUIRED boolean; selects the voice-flavored
-//     wording in the channel-announce blurb. Strictly validated at
-//     entry — a caller that omits it (or passes a non-boolean) throws
-//     a `TypeError` rather than silently landing on the text-channel
-//     branch. This is the strongest forcing function against the
-//     silent-wrong-branch failure mode: a voice-context send that
-//     loses this signal in serialization (e.g. PR 7b's flow_state
-//     payload schema dropping it) fails loudly at the boundary
-//     instead of mis-rendering the channel announce.
-//   - `expiresIn` — canonical expiry token ('1h' / '24h' / '7d' / etc.);
-//     fed through `expiryToISO` and `expiryToMs`.
-//   - `selfDestructSeconds` — `null` for no timer, otherwise a positive
-//     finite integer matching one of `SELF_DESTRUCT_PRESETS.seconds`.
-//     Threaded to every (re)upload so Add Recipients honors the same TTL.
-//   - `personalMessage` — sanitized note (or null) embedded in each
-//     recipient's DM.
-//   - `sendNonce` — logging-breadcrumb only; keeps continuity with the
-//     caller's earlier log lines on the same flow.
+//   - `attachment.url` is assumed PRE-VALIDATED against
+//     `isAllowedSourceUrl`. The pipeline does NOT re-check; an
+//     attacker-controlled URL reaching `downloadAndUpload` here
+//     would bypass the SSRF defense. Callers reconstructing this
+//     from a persisted source MUST re-validate before invoking.
 //
-// Resolved value: the function awaits to completion and returns
-// `undefined`. The early-exit `return interaction.editReply(...)` paths
-// resolve to the editReply Promise's value, but no caller inspects it
-// (handleSend's `return executeSendPipeline(...)` discards it, and
-// `execute()` in turn ignores handleSend's resolved value). A future
-// caller that needs a structured result (e.g. for a programmatic retry)
-// would have to extend this contract.
+//   - `recipients` is MUTATED in-place on the Add Recipients post-
+//     send branch (deduped push of new IDs). Treat as transferred
+//     ownership for the lifetime of the call, not as a snapshot.
+//     A caller that reuses the same array across retries will see
+//     silent double-adds.
 //
-// Required `interaction` shape: the pipeline reads these fields and
-// expects them to be valid. A synthetic interaction missing any of
-// these will fail loudly at the corresponding call site:
-//   - `interaction.user.id`          — sender's discord ID; lands as
-//                                       `senderDiscordId` on every
-//                                       qurl_sends row + audit event,
-//                                       and as the cooldown bucket key.
-//   - `interaction.channelId`        — written to `qurl_sends.channel_id`
-//                                       on every row. A flow_state-backed
-//                                       caller that drops this lands
-//                                       null channel_ids in DDB that
-//                                       won't show up in audit queries.
-//   - `interaction.channel`          — read for the non-ephemeral
-//                                       channel-announce on `target ===
-//                                       'channel'`. Already null-guarded
-//                                       — a missing channel object just
-//                                       drops the announce, doesn't
-//                                       throw.
-//   - `interaction.member?.displayName` (+ `user.username` fallback) —
-//                                       resolved via `resolveSenderAlias`
-//                                       into the DM embed AND the
-//                                       channel-announce blurb.
-//   - `interaction.guild?.members?.fetch` — optionally consumed by the
-//                                       recipient-alias resolver for
-//                                       members that aren't already
-//                                       in cache. Best-effort.
-//   - `interaction.editReply`        — every user-visible status update
-//                                       on the pipeline's primary
-//                                       message goes through this.
-//                                       Must be a Promise-returning
-//                                       function.
-//   - `interaction.channel.send`     — only invoked on `target ===
-//                                       'channel' && delivered > 0`.
-//                                       Logged-and-swallowed on failure
-//                                       — a missing "Send Messages"
-//                                       perm doesn't fail the send.
-// Same forcing-function rationale as the `isVoiceContext` boolean gate:
-// PR 7b's `handleSendFormSend` will reconstruct an interaction surface
-// from a Discord component-event payload and a decrypted flow_state
-// row; whatever fields it omits will silently regress in production.
+//   - `target` is `'user' | 'channel'` ONLY — voice/text channel
+//     discrimination is on `isVoiceContext`, NOT on `target`.
+//     Setting `target: 'voice'` would silently suppress the
+//     channel-announce (the gate at the announce site is strict
+//     equality on `'channel'`).
+//
+//   - `isVoiceContext` is REQUIRED and strictly validated as a
+//     boolean (see entry-point assertion). A silent default would
+//     mis-render the channel-announce blurb for a voice-context
+//     send whose flag got dropped in serialization — exactly the
+//     silent-regression shape every other param avoids by landing
+//     in a grep-discoverable DB column or failing loudly inside
+//     the upload/mint stack.
+//
+// Required `interaction` surface (fail loudly at the corresponding
+// call site if missing):
+//
+//   - `interaction.user.id`            (cooldown key + senderDiscordId
+//                                       on every DB row + audit event)
+//   - `interaction.channelId`          (qurl_sends.channel_id)
+//   - `interaction.channel`            (null-guarded; nullable just
+//                                       drops the channel-announce)
+//   - `interaction.member?.displayName` + `user.username` fallback
+//                                      (resolveSenderAlias → DM embed
+//                                       + channel-announce wording)
+//   - `interaction.guild?.members?.fetch` (best-effort, recipient-
+//                                       alias resolution for cold cache)
+//   - `interaction.editReply`          (every user-visible status
+//                                       update on the primary message)
+//   - `interaction.channel.send`       (only on `target === 'channel'
+//                                       && delivered > 0`; logged-
+//                                       and-swallowed on failure)
+//
+// Resolved value is unused — both terminal completion and the
+// early-exit `return interaction.editReply(...)` paths discard
+// observable result; the function exists for its user-visible
+// side-effects (editReply + DM fan-out + channel-announce).
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -925,6 +871,18 @@ async function executeSendPipeline(interaction, {
   // exists for PR 7b's handleSendFormSend.
   if (typeof isVoiceContext !== 'boolean') {
     clearCooldown(interaction.user.id);
+    // Clear whatever stale ephemeral the caller's button handler
+    // left on screen ("Preparing send…" is the canonical case)
+    // BEFORE throwing. Fire-and-forget — the throw is the
+    // load-bearing signal (test pins + logger.error in
+    // handleCommand's outer catch), so a failed editReply here
+    // must not become the observable outcome. Without this, the
+    // user sees a persistent stale message alongside the generic
+    // "There was an error" followUp the outer catch will add.
+    interaction.editReply({
+      content: '❌ Internal error — send cancelled. Please rerun the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
     // Render `typeof=` + `value=` separately so a prod-log reader
     // doesn't have to disambiguate `(got object: null)` (where
     // "object" describes the typeof and "null" is the value — a

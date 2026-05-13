@@ -1419,16 +1419,33 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     const rejection = executeSendPipeline(interaction, makePipelineParams(undefined));
     await expect(rejection).rejects.toThrow(TypeError);
     await expect(rejection).rejects.toThrow(/isVoiceContext must be a boolean/);
-    // Gate fires BEFORE the "Preparing links..." editReply that would
-    // otherwise be the first user-visible signal — confirm no editReply.
-    expect(interaction.editReply).not.toHaveBeenCalled();
+    // Gate clears the caller's stale ephemeral with an explicit error
+    // ephemeral BEFORE throwing. Pin the call — without it the user
+    // would see the caller's stale "Preparing send..." alongside the
+    // top-level catch's generic "There was an error" followUp.
+    // The "Preparing links..." editReply that lives later in the
+    // pipeline still never fires (the gate throws before reaching it),
+    // so any failed regression test that DOES see two editReplies is
+    // also caught: the cancellation edit is the only legitimate call.
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+        components: [],
+      }),
+    );
   });
 
   test('throws TypeError when isVoiceContext is a string (most-likely miscoding shape)', async () => {
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams('true')))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
-    expect(interaction.editReply).not.toHaveBeenCalled();
+    // Same user-facing cancellation behavior as the undefined case.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
   });
 
   test('throws TypeError for null isVoiceContext (typeof null === "object" foot-gun)', async () => {
