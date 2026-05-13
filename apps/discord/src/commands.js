@@ -812,11 +812,15 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     Setting `target: 'voice'` would silently suppress the channel-
 //     announce because the gate at the announce site is strict
 //     equality on `'channel'`.
-//   - `isVoiceContext` — boolean; selects the voice-flavored wording in
-//     the channel-announce blurb. Defaults to `false` in the destructure
-//     so a caller that omits it (e.g. PR 7b reconstructing from a
-//     flow_state payload) lands on the text-channel wording rather
-//     than `undefined ? ... : ...` returning the false branch silently.
+//   - `isVoiceContext` — REQUIRED boolean; selects the voice-flavored
+//     wording in the channel-announce blurb. Strictly validated at
+//     entry — a caller that omits it (or passes a non-boolean) throws
+//     a `TypeError` rather than silently landing on the text-channel
+//     branch. This is the strongest forcing function against the
+//     silent-wrong-branch failure mode: a voice-context send that
+//     loses this signal in serialization (e.g. PR 7b's flow_state
+//     payload schema dropping it) fails loudly at the boundary
+//     instead of mis-rendering the channel announce.
 //   - `expiresIn` — canonical expiry token ('1h' / '24h' / '7d' / etc.);
 //     fed through `expiryToISO` and `expiryToMs`.
 //   - `selfDestructSeconds` — `null` for no timer, otherwise a positive
@@ -844,15 +848,26 @@ async function executeSendPipeline(interaction, {
   // this array (see docstring's "transferred ownership" note).
   recipients,
   target,
-  // Defaults to text-channel wording on a missing/undefined value;
-  // PR 7b should validate at the flow_state-payload schema layer to
-  // catch a voice-context send that lost this signal in serialization.
-  isVoiceContext = false,
+  // REQUIRED — validated at entry (see assertion below). NO default
+  // value: an omitted-or-non-boolean caller fails loudly instead of
+  // silently landing on text-channel wording for a voice-context send.
+  isVoiceContext,
   expiresIn,
   selfDestructSeconds,
   personalMessage,
   sendNonce,
 }) {
+  // Strict input gate on the one param whose silent default would
+  // misrender the channel-announce blurb. Other params either land
+  // in DB rows where corruption is grep-discoverable (resourceType,
+  // target, expiresIn) or fail loudly inside the upload/mint
+  // pipeline (attachment, locationUrl). isVoiceContext is unique:
+  // a wrong value here surfaces only as a subtle copy mismatch in
+  // a non-ephemeral channel post — exactly the silent-regression
+  // shape the round-4 cr review flagged.
+  if (typeof isVoiceContext !== 'boolean') {
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got ${typeof isVoiceContext}: ${JSON.stringify(isVoiceContext)})`);
+  }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
   const sendId = crypto.randomUUID();
