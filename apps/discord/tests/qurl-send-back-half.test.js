@@ -1734,8 +1734,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
 describe('executeSendPipeline — recipients shape + cap gates', () => {
   // Read the cap once from the same config module the gate consults
   // so the tests don't drift if the cap is bumped. Hoisting out of
-  // the individual tests (round-6 cr nit) keeps the `require` cost
-  // off the per-test path and centralizes the drift-anchor.
+  // the individual tests centralizes the drift-anchor.
   const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
 
   function makePipelineParams(recipients) {
@@ -1782,21 +1781,21 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['plain object', {}, /typeof=object/],
     ['empty array', [], /typeof=object, value=<empty array>/],
   ])('rejection message distinguishes %s in the value-detail field', async (_label, recipients, detailRe) => {
-    // Round-2 cr nit: rendering both `null` and `{}` as
-    // `typeof=object` would force a prod-log reader to guess
-    // which one tripped the gate. Pin that the value-detail
-    // field disambiguates the realistic miscoding shapes.
+    // Rendering both `null` and `{}` as `typeof=object` would
+    // force a prod-log reader to guess which one tripped the
+    // gate. Pin that the value-detail field disambiguates the
+    // realistic miscoding shapes.
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
       .rejects.toThrow(detailRe);
   });
 
   test('rejection message truncates pathological values with `…` marker', async () => {
-    // Round-4 cr nit: a future caller handing a 1MB string would
-    // otherwise dump the whole blob into the rejection message
-    // AND into the prod logger.error. truncForLog slices at 64
-    // chars and appends `…` so a reader can tell "the caller
-    // passed exactly these 64 chars" from "we cut a longer value."
+    // A future caller handing a 1MB string would otherwise dump
+    // the whole blob into the rejection message AND into the
+    // prod logger.error. truncForLog slices at 64 chars and
+    // appends `…` so a reader can tell "the caller passed
+    // exactly these 64 chars" from "we cut a longer value."
     const interaction = makeInteraction();
     const oneKB = 'x'.repeat(1024);
     await expect(executeSendPipeline(interaction, makePipelineParams(oneKB)))
@@ -1815,12 +1814,12 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // "Cannot convert object to primitive value" — the exact
     // worse-than-original-error shape the gate exists to prevent.
     ['throws on toString', { toString() { throw new Error('nope'); } }],
-    // Round-7 cr nit: Object.create(null) is the more realistic
-    // miscoding shape — a deserialized payload with prototype
-    // detached has no @@toPrimitive / toString, so `String(v)`
-    // throws "Cannot convert object to primitive value". Pin that
-    // the catch branch handles this shape too, not just the
-    // explicitly-hostile toString case.
+    // Object.create(null) is the realistic miscoding shape — a
+    // deserialized payload with prototype detached has no
+    // @@toPrimitive / toString, so `String(v)` throws "Cannot
+    // convert object to primitive value". Pin that the catch
+    // branch handles this shape too, not just the explicitly-
+    // hostile toString case.
     ['null-prototype object', Object.create(null)],
   ])('rejection message falls back to <unrepresentable> when String() throws (%s)', async (_label, value) => {
     const interaction = makeInteraction();
@@ -1829,14 +1828,14 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 
   test('truncation slices on code points, not UTF-16 code units (astral-char safety)', async () => {
-    // Round-5 cr nit: `slice(0, 64)` on code units would split a
-    // high-surrogate at position 63 from its low-surrogate at 64,
-    // producing a malformed UTF-16 pair before the `…`. Iterating
-    // via [...s] (the string iterator) operates on code points,
-    // so an emoji at the boundary stays intact. Build a string
-    // with 64 emoji (each 2 code units) — under code-unit slicing
-    // this would surface as 32 intact emoji + a lone high-surrogate;
-    // under code-point slicing it surfaces as 64 intact emoji.
+    // `slice(0, 64)` on code units would split a high-surrogate
+    // at position 63 from its low-surrogate at 64, producing a
+    // malformed UTF-16 pair before the `…`. Iterating via [...s]
+    // (the string iterator) operates on code points, so an emoji
+    // at the boundary stays intact. Build a string with 64 emoji
+    // (each 2 code units) — under code-unit slicing this would
+    // surface as 32 intact emoji + a lone high-surrogate; under
+    // code-point slicing it surfaces as 64 intact emoji.
     const interaction = makeInteraction();
     const sixtyFourEmoji = '🚀'.repeat(64);
     await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFourEmoji)))

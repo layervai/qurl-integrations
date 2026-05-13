@@ -850,19 +850,11 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // early-exit `return interaction.editReply(...)` paths discard
 // observable result; the function exists for its user-visible
 // side-effects (editReply + DM fan-out + channel-announce).
-// Shared throw-message renderer for the entry-gate family. Bounds the
-// stringified value at 64 code points and appends `…` when truncation
-// happened, so a prod-log reader can tell "the caller passed exactly
-// these 64 chars" from "the value was longer and we cut it." The
-// String() coercion may itself throw on a pathological value with a
-// throwing Symbol.toPrimitive / toString — fall back to a sentinel so
-// the gate's intended throw isn't itself replaced by an opaque error
-// from the renderer.
-//
-// Slice on code points (via the string iterator), NOT code units, so
-// the 64th character can't land on a high surrogate and produce a
-// malformed UTF-16 pair before the `…`. Cosmetic for log readability
-// but matches "do the boring thing right" for the gate family.
+// Bounded value-renderer for entry-gate throw messages. `String()` is
+// wrapped because a hostile @@toPrimitive / toString would otherwise
+// replace the gate's intended TypeError with the renderer's opaque
+// throw. Code-point (not code-unit) slicing avoids splitting a
+// surrogate pair across the `…` boundary.
 function truncForLog(v) {
   let s;
   try {
@@ -870,14 +862,11 @@ function truncForLog(v) {
   } catch {
     return '<unrepresentable>';
   }
-  // Bound the spread cost. A 1MB input would otherwise materialize a
-  // 1M-entry code-point array just to take the first 64. 128 code
-  // units is a safe over-budget that covers any 64-code-point prefix
-  // even if every code point uses a surrogate pair (each pair = 2
-  // code units). `truncated` is the authoritative truncation signal
-  // because a string of exactly 65 surrogate pairs (130 code units)
-  // has head-cps.length === 64 — relying on cps.length alone would
-  // silently drop the `…` marker on that shape.
+  // Pre-slice bounds the [...head] spread cost on pathological inputs
+  // (1MB string → 128-element array, not 1M). `truncated` is the
+  // authoritative truncation signal because 65 surrogate pairs (130
+  // code units) yields head-cps.length === 64 — relying on cps.length
+  // alone would silently drop the `…` on that shape.
   const truncated = s.length > 128;
   const head = truncated ? s.slice(0, 128) : s;
   const cps = [...head];
