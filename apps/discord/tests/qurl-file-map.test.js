@@ -453,6 +453,25 @@ describe('renderRecipientWarnings', () => {
     expect(out).toMatch(/\+5 more/);
   });
 
+  test('invalidTokens with embedded backticks are stripped so the code-fence stays intact', () => {
+    // recipient-parser.js explicitly does NOT escape invalidTokens —
+    // the caller must defend. A token containing ``` would otherwise
+    // close the fence early and let a masked link or @-mention reach
+    // the Discord renderer.
+    const tokens = ['```\n[evil](https://phish.example)\n```', '`code`', 'plain'];
+    const out = renderRecipientWarnings({
+      invalidTokens: tokens, cappedCount: 0, unresolvedIds: [],
+      droppedBots: 0, droppedSelf: 0,
+    });
+    // Backticks must not appear in the rendered tokens themselves —
+    // they'd terminate the surrounding fence.
+    const fenceContent = out.split('```')[1] || '';
+    expect(fenceContent).not.toMatch(/`/);
+    // The non-backtick content survives.
+    expect(out).toContain('plain');
+    expect(out).toContain('[evil](https://phish.example)');
+  });
+
   test('combines all signals', () => {
     const out = renderRecipientWarnings({
       invalidTokens: ['<#999>'], cappedCount: 2,
@@ -522,6 +541,17 @@ describe('renderConfirmCardContent', () => {
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: long });
     // 80 chars of x + ellipsis
     expect(out).toMatch(/x{80}…/);
+  });
+
+  test('personal-message renders pre-sanitized input verbatim (no double-escape)', () => {
+    // sanitizeMessage already escapes markdown at the slash-option
+    // boundary — a `**bold**` input becomes `\*\*bold\*\*` in the
+    // payload. The card must NOT escape again or the user sees
+    // `\\\*\\\*bold\\\*\\\*`.
+    const presanitized = '\\*\\*emphasis\\*\\*';
+    const out = renderConfirmCardContent({ ...baseProps, personalMessage: presanitized });
+    expect(out).toContain(`"${presanitized}"`);
+    expect(out).not.toMatch(/\\\\\*/);
   });
 
   test('warningsBlock prepended', () => {
@@ -836,17 +866,32 @@ describe('handleSendConfirmClick', () => {
     }));
   });
 
-  test('deleteFlow dedup loser → "already processed" reply, no pipeline call', async () => {
+  test('deleteFlow dedup loser → version-fenced "Recipients changed" reply, no pipeline call', async () => {
+    // `deleted: false` now collapses BOTH duplicate dispatch (Discord
+    // retry / SQS at-least-once redelivery) AND mid-flight picker
+    // mutation (UserSelect transitioned the row between dispatcher's
+    // loadFlow and our deleteFlow). Same user recovery either way.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/already processed/),
+      content: expect.stringMatching(/Recipients changed|re-click Send/i),
       ephemeral: true,
     }));
     expect(int.update).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing/),
+    }));
+  });
+
+  test('deleteFlow is version-gated to fence the picker-then-Send race', async () => {
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 7 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: 7,
     }));
   });
 
@@ -934,12 +979,26 @@ describe('handleSendUserSelect', () => {
   };
 
   test('valid pick → transitionFlow with new recipientIds + update', async () => {
+    const beforeSecs = Math.floor(Date.now() / 1000);
     const int = makeSelectInteraction();
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: expect.objectContaining({ recipientIds: [u1] }),
+      terminal: false,
+      // TTL refresh is the whole point of staying at the same stage —
+      // picker churn must not let the row TTL out from under the user
+      // mid-flow.
+      set_expires_at: expect.any(Number),
     }));
+    const callArgs = mockTransitionFlow.mock.calls[0][2];
+    // ±5s clock-skew tolerance keeps the assertion from flaking on
+    // slow CI runners while still catching gross drift (e.g., a
+    // refactor that forgot to add SEND_FLOW_TTL_SECONDS to nowSecs,
+    // or a `set_expires_at: 0` regression).
+    const SKEW = 5;
+    expect(callArgs.set_expires_at).toBeGreaterThanOrEqual(beforeSecs + SEND_FLOW_TTL_SECONDS - SKEW);
+    expect(callArgs.set_expires_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS + SKEW);
     expect(int.update).toHaveBeenCalled();
     const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Sending file/);

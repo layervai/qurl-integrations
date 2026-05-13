@@ -3541,11 +3541,14 @@ function renderRecipientWarnings({ invalidTokens, cappedCount, unresolvedIds, dr
     lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
   }
   if (invalidTokens.length > 0) {
-    // Code-fence the raw tokens so any residual markdown / mention
-    // shapes the parser couldn't fully neutralize render as literals.
-    // Cap the listed count at 10 so a pathological list doesn't blow
-    // the Discord content budget.
-    const shown = invalidTokens.slice(0, 10);
+    // recipient-parser.js's docstring is explicit: invalidTokens are
+    // NOT markdown-escaped — callers wrap or escape. We code-fence
+    // for literal rendering, but a token containing ``` would close
+    // the fence early and inject markdown / masked-links into the
+    // ephemeral. Strip backticks from each token before joining;
+    // also cap the listed count at 10 so a pathological list can't
+    // blow the Discord content budget.
+    const shown = invalidTokens.slice(0, 10).map((t) => t.replace(/`/g, ''));
     const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
     lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
   }
@@ -3599,8 +3602,13 @@ function renderConfirmCardContent({
     content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
   }
   if (personalMessage) {
+    // `personalMessage` is pre-sanitized: sanitizeMessage already
+    // ran markdown-escape + @-mention strip at the slash-option
+    // boundary. Re-escaping here would render `\*\*bold\*\*`
+    // literals on the card. Same shape /qurl send's Step-3
+    // formContent uses (commands.js:~2164).
     const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
-    content += `**Note:** "${escapeDiscordMarkdown(preview)}"\n`;
+    content += `**Note:** "${preview}"\n`;
   }
   content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
   return content;
@@ -3642,7 +3650,7 @@ function renderConfirmCardRows({ needsPicker, sendDisabled }) {
 //   locationUrl:  string | null                          (map path)
 //   locationName: string | null                          (map path)
 //   resourceLabel: string                                (rendered on card)
-async function _handleQurlSlashSend(interaction, apiKey, params) {
+async function handleQurlSlashSend(interaction, apiKey, params) {
   if (!interaction.guildId || !interaction.guild) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
@@ -3837,7 +3845,7 @@ async function handleQurlFile(interaction, apiKey) {
     });
   }
 
-  return _handleQurlSlashSend(interaction, apiKey, {
+  return handleQurlSlashSend(interaction, apiKey, {
     resourceType: RESOURCE_TYPES.FILE,
     attachment: {
       url: attachment.url,
@@ -3872,7 +3880,7 @@ async function handleQurlMap(interaction, apiKey) {
   }
   if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
 
-  return _handleQurlSlashSend(interaction, apiKey, {
+  return handleQurlSlashSend(interaction, apiKey, {
     resourceType: RESOURCE_TYPES.MAPS,
     attachment: null,
     locationUrl,
@@ -3989,16 +3997,28 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // so a duplicate dispatch's redundant call is harmless. Same
   // safety rule handleRevokeSelect documents (parallelize ONLY with
   // idempotent reads).
+  //
+  // `expectedVersion: row.version` fences the picker-then-Send race:
+  // if a UserSelectMenu interaction landed and transitioned the flow
+  // between the dispatcher's loadFlow (which fed `row` here) and our
+  // deleteFlow, the version would have advanced. Without the version
+  // gate, we'd deleteFlow successfully and call executeSendPipeline
+  // with the STALE recipientIds captured in `payload` above — exactly
+  // the silent-divergence shape handleSetupButton uses expectedVersion
+  // to fence (commands.js:~3196). `deleted: false` here now collapses
+  // duplicate dispatch AND mid-flight picker mutation; both map to the
+  // same user recovery ("the card moved under you, re-click Send").
   const [guildApiKey, deleteResult] = await Promise.all([
     interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
     deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
+      expectedVersion: row.version,
     }),
   ]);
   if (!deleteResult.deleted) {
     return interaction.reply({
-      content: 'This send was already processed.',
+      content: 'Recipients changed before Send fired — re-check the card and click Send again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
