@@ -285,6 +285,7 @@ function parseRecipientMentions(raw, interaction) {
     .replace(USER_MENTION_RE, ' ')
     .replace(ROLE_MENTION_RE, ' ');
   const leftover = stripped.split(/[\s,;|/]+/).filter(Boolean);
+  const residueSeen = new Set();
   for (const tok of leftover) {
     // Pre-escape `@everyone` / `@here` so a caller interpolating
     // `invalidTokens` into a user-visible message can't accidentally
@@ -307,6 +308,12 @@ function parseRecipientMentions(raw, interaction) {
     if (escaped.length > MAX_INVALID_TOKEN_LENGTH) {
       escaped = `${escaped.slice(0, MAX_INVALID_TOKEN_LENGTH)}\u2026`;
     }
+    // Dedupe residue tokens by the post-escape rendered form so
+    // `<#456> <#456>` or `alice alice` produces ONE entry, not two.
+    // Symmetric with the role-error dedup path (pushRoleErrorIfNew
+    // above) \u2014 a caller's "couldn't parse: X, X" embed is hostile.
+    if (residueSeen.has(escaped)) continue;
+    residueSeen.add(escaped);
     invalidTokens.push(escaped);
   }
 

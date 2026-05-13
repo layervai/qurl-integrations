@@ -232,14 +232,23 @@ describe('parseRecipientMentions — role mentions', () => {
       .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
+  test('repeated residue tokens dedupe in invalidTokens (symmetric with role-error dedup)', () => {
+    // `<#456> <#456>` previously surfaced two entries; now dedupes
+    // via `residueSeen` (parallel to the role-error path's
+    // `invalidRoleIds`). Caller's "couldn't parse: X, X" embed
+    // isn't user-hostile.
+    const int = makeInteraction({ users: { '111': {} } });
+    expect(parseRecipientMentions('<@111> <#456> <#456>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
+    expect(parseRecipientMentions('<@111> alice alice bob alice', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
+  });
+
   test('repeated invalid role mention dedupes in invalidTokens', () => {
     // `<@&999> <@&999>` against a guild missing role 999 must yield
     // ONE invalidTokens entry, not two. Without the role-id dedupe,
     // matchAll iterates each input occurrence and pushes the raw
-    // token each time — a caller's "couldn't parse: X, X" embed is
-    // user-hostile. The residue strip pass already dedupes naturally
-    // via input grouping; this test pins the same property for the
-    // role-error path.
+    // token each time. Symmetric with the residue dedupe above.
     const int = makeInteraction({});  // no role 999
     expect(parseRecipientMentions('<@&999> <@&999> <@&999>', int))
       .toEqual({ ids: [], invalidTokens: ['<@&999>'], cappedCount: 0 });
