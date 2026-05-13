@@ -840,8 +840,13 @@ async function executeSendPipeline(interaction, {
   attachment,
   locationUrl,
   locationName,
+  // MUTATES: the Add Recipients post-send branch dedupe-pushes into
+  // this array (see docstring's "transferred ownership" note).
   recipients,
   target,
+  // Defaults to text-channel wording on a missing/undefined value;
+  // PR 7b should validate at the flow_state-payload schema layer to
+  // catch a voice-context send that lost this signal in serialization.
   isVoiceContext = false,
   expiresIn,
   selfDestructSeconds,
@@ -978,7 +983,10 @@ async function executeSendPipeline(interaction, {
   } catch (error) {
     logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
     clearCooldown(interaction.user.id); // allow retry on failure
-    releaseSlot();
+    // Slot release lives in the `finally` block below — it ALWAYS runs
+    // after a return-from-catch, and `releaseSlot` is idempotent via
+    // the `fileSendSlotClaimed` flag. Dropping the duplicate call here
+    // keeps the single-release-path invariant visible at a glance.
     // Surface a specific message for known upstream failure codes so the
     // user knows what to do (re-upload to refresh the per-resource quota)
     // instead of seeing a generic "try again" that won't help.
@@ -2313,9 +2321,12 @@ async function handleSend(interaction, apiKey) {
 
   // --- Step 4: Process and send (back-half — extracted to executeSendPipeline). ---
   // `return await` (not bare `await`) so the docstring's "Resolved value"
-  // contract matches the call shape — and the tail call propagates a
-  // throw with one less microtask hop than a bare-await + implicit
-  // undefined return.
+  // contract matches the call shape. `return await` keeps the async
+  // frame on the stack until the awaited promise settles, which
+  // preserves the executeSendPipeline frame in rejection traces —
+  // `return promise` (no await) would detach it, costing forensic
+  // signal. There's a ~1-microtask perf cost vs the no-await form;
+  // negligible at this scale, worth the better traces.
   return await executeSendPipeline(interaction, {
     apiKey,
     resourceType,
@@ -4576,6 +4587,12 @@ module.exports = {
       REVOKE_TRUNC_LIMIT,
       mintLinksInBatches,
       activeMonitors,
+      // The top-level back-half driver. Exported here so PR 7b's
+      // tests (and the follow-up direct unit spec in #278) can pin
+      // its contract against a constructed param object — without
+      // re-driving handleSend's Step-1-through-Step-3 wizard or the
+      // future flow_state-backed form-fill.
+      executeSendPipeline,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
