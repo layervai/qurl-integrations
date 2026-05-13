@@ -322,15 +322,15 @@ describe('parseRecipientMentions — invalid tokens', () => {
     // guard. Pin that the regex-based escape catches them.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('@everyone! <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@​everyone!'], cappedCount: 0 });
+      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone!'], cappedCount: 0 });
     expect(parseRecipientMentions('@everyone.fix <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@​everyone.fix'], cappedCount: 0 });
+      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone.fix'], cappedCount: 0 });
     expect(parseRecipientMentions('@here: <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@​here:'], cappedCount: 0 });
+      .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere:'], cappedCount: 0 });
     // Embedded mid-token (paste artifact). Regex replaces ALL
     // occurrences so no `@everyone` / `@here` substring escapes.
     expect(parseRecipientMentions('here@everyone <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['here@​everyone'], cappedCount: 0 });
+      .toEqual({ ids: ['111'], invalidTokens: ['here@\u200beveryone'], cappedCount: 0 });
   });
 
   test('newline characters separate tokens (split regex includes \\n)', () => {

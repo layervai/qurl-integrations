@@ -99,6 +99,14 @@ function parseRecipientMentions(raw, interaction) {
   if (raw == null || typeof raw !== 'string') {
     return { ids: [], invalidTokens: [], cappedCount: 0 };
   }
+  // Mirror the `raw` guard for `interaction` so a null/undefined
+  // caller-bug surfaces as an empty result instead of a TypeError
+  // at the `interaction.user?.id` deref below. The back-half has
+  // a clearer crash site for "no caller context"; the parser
+  // doesn't gain anything by failing here.
+  if (interaction == null) {
+    return { ids: [], invalidTokens: [], cappedCount: 0 };
+  }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
   // pathological repetitions still allocate per-match strings. This
@@ -166,28 +174,28 @@ function parseRecipientMentions(raw, interaction) {
   // = N O(guild_size) scans. Bounded by the 4000-char input cap and
   // by Discord's slash-option max — worth knowing for 7b.2 wiring
   // in large guilds but not a hot-path concern today.
+  // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
+  // an unknown role yields one invalidTokens entry, not two. The
+  // strip-pass's residue-tokens already dedupe naturally via input
+  // grouping; this set restores the same property for role errors.
   const invalidRoleIds = new Set();
+  function pushRoleErrorIfNew(roleId, rawToken) {
+    if (invalidRoleIds.has(roleId)) return;
+    invalidRoleIds.add(roleId);
+    invalidTokens.push(rawToken);
+  }
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
-    // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
-    // an unknown role yields one invalidTokens entry, not two. The
-    // strip-pass's residue-tokens already dedupe naturally via input
-    // grouping; this set restores the same property for role errors.
-    const pushIfNew = () => {
-      if (invalidRoleIds.has(roleId)) return;
-      invalidRoleIds.add(roleId);
-      invalidTokens.push(m[0]);
-    };
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
-      pushIfNew();
+      pushRoleErrorIfNew(roleId, m[0]);
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
     // a role with no current members in the cache; same treatment.
     const members = role.members;
     if (!members || members.size === 0) {
-      pushIfNew();
+      pushRoleErrorIfNew(roleId, m[0]);
       continue;
     }
     // `usable` counts post-filter members the role exposed (whether
@@ -205,7 +213,7 @@ function parseRecipientMentions(raw, interaction) {
       // Role had members but they were all filtered (sender + bots).
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains you / bots."
-      pushIfNew();
+      pushRoleErrorIfNew(roleId, m[0]);
     }
   }
 
@@ -250,7 +258,7 @@ function parseRecipientMentions(raw, interaction) {
     // (typed too many) and stays at debug.
     const logFn = seen.size > cap * 2 ? logger.warn : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      raw_count: seen.size, cap,
+      unique_count: seen.size, cap,
     });
   }
 
