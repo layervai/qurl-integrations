@@ -865,7 +865,17 @@ async function executeSendPipeline(interaction, {
   // a wrong value here surfaces only as a subtle copy mismatch in
   // a non-ephemeral channel post — exactly the silent-regression
   // shape the round-4 cr review flagged.
+  //
+  // Clear cooldown BEFORE the throw so the caller's setCooldown-
+  // in-flight doesn't lock the user out for the cooldown window
+  // (~30s) with no user-visible feedback. clearCooldown is a no-op
+  // when no cooldown is set, so this is safe for callers that
+  // haven't reached the cooldown branch yet — and it matches
+  // handleSend's existing convention of clearing on every error
+  // path. Today's caller never reaches the throw; the cleanup
+  // exists for PR 7b's handleSendFormSend.
   if (typeof isVoiceContext !== 'boolean') {
+    clearCooldown(interaction.user.id);
     throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got ${typeof isVoiceContext}: ${JSON.stringify(isVoiceContext)})`);
   }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);

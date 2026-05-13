@@ -1420,5 +1420,54 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     await expect(executeSendPipeline(interaction, makePipelineParams(null)))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
   });
+
+  test.each([0, 1])('throws TypeError for numeric %s (JS-y caller miscoding)', async (n) => {
+    // A caller writing `isVoiceContext: channel.type === 2 ? 1 : 0`
+    // (treating it as a truthy flag rather than a strict boolean)
+    // hits this branch. Pin both 0 and 1 — `Number(true) === 1`
+    // looks deceptively boolean-compatible but trips the typeof
+    // check.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(n)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+
+  // eslint-disable-next-line no-new-wrappers
+  test('throws TypeError for Boolean wrapper object (typeof is "object", not "boolean")', async () => {
+    // `new Boolean(true)` is `typeof === 'object'` per JS spec —
+    // would silently coerce to truthy in a `?:` ternary while
+    // failing the strict gate. Worth pinning so a future reader
+    // debugging the gate doesn't get confused by the wrapper
+    // edge case.
+    const interaction = makeInteraction();
+    // eslint-disable-next-line no-new-wrappers
+    const wrapperTrue = new Boolean(true);
+    await expect(executeSendPipeline(interaction, makePipelineParams(wrapperTrue)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+
+  test('clears cooldown before throwing so caller is not locked out', async () => {
+    // Caller-side convention (see handleSend): setCooldown fires
+    // before the pipeline call so a rapid second invocation gets
+    // a "wait" reply. If the pipeline throws BEFORE clearing the
+    // cooldown, the user is locked out for the full window with
+    // no feedback — exactly the silent-failure shape the gate
+    // is meant to avoid amplifying. The post-throw isOnCooldown
+    // assertion below leaves no stray state for adjacent tests:
+    // the gate's clearCooldown call IS the cleanup.
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    // Use a unique sender id so a parallel test's cooldown state
+    // can't leak into this assertion. sendCooldowns is a module-
+    // private Map so the read/write surface is exposed only via
+    // the helpers above.
+    interaction.user = { id: 'cooldown-gate-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(TypeError);
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+  });
 });
 
