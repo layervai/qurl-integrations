@@ -425,10 +425,13 @@ function parseLocationInput(rawInput) {
     else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
     return { locationUrl: detectedUrl, locationName: name };
   }
-  // Either no Maps URL detected, OR a candidate URL failed
-  // `isGoogleMapsURL` re-validation (path/host check). Either way,
-  // wrap the raw input in a maps-search URL and use it as both URL
-  // and name.
+  // Pre-extraction the legacy /qurl send handler had TWO separate
+  // branches here ("detectedUrl but not Google Maps" vs "no
+  // detectedUrl"), each producing the same synthesized-search URL +
+  // raw-input name. The consolidated single branch below is
+  // intentional, NOT dead code — both prior cases collapse to the
+  // same behavior, so a maintainer is welcome to leave the
+  // simplification as-is.
   return {
     locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
     locationName: rawInput,
@@ -3680,7 +3683,14 @@ function renderConfirmCardRows({ attachPicker, sendDisabled }) {
 //   locationUrl:  string | null                          (map path)
 //   locationName: string | null                          (map path)
 //   resourceLabel: string                                (rendered on card)
-async function handleQurlSlashSend(interaction, apiKey, params) {
+// apiKey is INTENTIONALLY not threaded through the front-half.
+// handleSendConfirmClick re-fetches the guild API key at Send time
+// — the key may rotate during the confirm card's 3-min TTL, and the
+// dispatcher's gate at the slash-command entry point only proves the
+// key was present at that single moment. Re-fetching at click time
+// is the durable check. The dispatcher's gate (SEND_LIKE_SUBCOMMANDS
+// set) still runs to fail fast on the no-key-at-all case.
+async function handleQurlSlashSend(interaction, params) {
   if (!interaction.guildId || !interaction.guild) {
     return interaction.reply({
       content: 'This command can only be used in a server, not in DMs.',
@@ -3853,7 +3863,7 @@ async function handleQurlSlashSend(interaction, apiKey, params) {
   }
 }
 
-async function handleQurlFile(interaction, apiKey) {
+async function handleQurlFile(interaction) {
   // UX fast-fail. The real concurrency-slot claim happens inside
   // executeSendPipeline (commands.js:~1043); this pre-check is best-
   // effort — by Send-click time the cap state can have shifted, in
@@ -3896,7 +3906,7 @@ async function handleQurlFile(interaction, apiKey) {
     });
   }
 
-  return handleQurlSlashSend(interaction, apiKey, {
+  return handleQurlSlashSend(interaction, {
     resourceType: RESOURCE_TYPES.FILE,
     attachment: {
       url: attachment.url,
@@ -3914,7 +3924,7 @@ async function handleQurlFile(interaction, apiKey) {
   });
 }
 
-async function handleQurlMap(interaction, apiKey) {
+async function handleQurlMap(interaction) {
   const locationValue = interaction.options.getString('location', true).trim();
   const locationNameRaw = interaction.options.getString('location-name');
   if (locationValue.length === 0) {
@@ -3935,7 +3945,7 @@ async function handleQurlMap(interaction, apiKey) {
   }
   if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
 
-  return handleQurlSlashSend(interaction, apiKey, {
+  return handleQurlSlashSend(interaction, {
     resourceType: RESOURCE_TYPES.MAPS,
     attachment: null,
     locationUrl,
@@ -4001,14 +4011,17 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Recompute warnings against the new pick (bots-on-pick is the only
-  // signal that can flip here; cappedCount / invalidTokens were string-
-  // path-only). droppedBots / droppedSelf above already short-circuited
-  // on zero-valid; if we got here, both are best-effort UI cues only.
+  // Recompute warnings against the new pick. `droppedBots` AND
+  // `droppedSelf` can flip here — Discord's UserSelectMenu doesn't
+  // exclude the invoker, so a user picking themselves bumps
+  // droppedSelf; bots present in the picker bump droppedBots.
+  // `cappedCount` / `invalidTokens` / unresolved / transient buckets
+  // are string-path-only (parser never ran on the picker selection),
+  // so they stay empty here. The earlier zero-valid short-circuit
+  // already handled the empty case; what's left below is the
+  // partial-pick UX where SOME picked users are valid but the
+  // warning still surfaces the dropped ones.
   const warningsBlock = renderRecipientWarnings({
-    invalidTokens: [],
-    cappedCount: 0,
-    unresolvedIds: [],
     droppedBots,
     droppedSelf,
   });
@@ -4041,17 +4054,39 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 async function handleSendConfirmClick(interaction, { flow_id, row }) {
   const payload = row.payload || {};
   // Re-fetch users at click time — defensive against members leaving
-  // the guild between confirm and Send. `partialDropCount` carries
-  // unresolved IDs forward so the Send-success path can surface a
-  // followUp explaining why N recipients won't receive their DM.
-  // The forensic log escalates to info (not debug) — oncall benefits
-  // from grep-discoverable signal on guild churn mid-flow without
-  // having to lower log verbosity.
-  const { users, unresolvedIds } = await resolveRecipientUsers(interaction, payload.recipientIds || []);
-  const partialDropCount = unresolvedIds.length;
-  if (partialDropCount > 0) {
-    logger.info('handleSendConfirmClick: dropping unresolved IDs at click time', {
-      flow_id, count: partialDropCount,
+  // the guild between confirm and Send. Both unresolved buckets
+  // (10007 + transient fetch failure) reduce the delivered count,
+  // so both are surfaced to the sender via followUp below — without
+  // the split, a 429 / gateway blip would silently shrink the
+  // delivered set with no signal.
+  //
+  // resolveRecipientUsers is wrapped in try/catch because the dispatcher's
+  // outer catch only logs + replies generic-superseded; a click-time
+  // lookup throw should give the user a directly actionable message
+  // without committing the dedup deleteFlow.
+  let resolved;
+  try {
+    resolved = await resolveRecipientUsers(interaction, payload.recipientIds || []);
+  } catch (err) {
+    logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
+      flow_id, error: err && err.message,
+    });
+    // `interaction.reply` (not safeReply / editReply) is intentional —
+    // this is a button-click dispatched by flow-dispatch, the
+    // interaction is in the unacked state at this point. A refactor
+    // that swaps in deferReply earlier in the handler would need to
+    // flip this to editReply too.
+    return interaction.reply({
+      content: '❌ Could not look up recipients right now. Try **Send** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  const { users, unresolvedIds, transientFailureIds } = resolved;
+  const partialLeftCount = unresolvedIds.length;
+  const partialTransientCount = transientFailureIds.length;
+  if (partialLeftCount > 0 || partialTransientCount > 0) {
+    logger.info('handleSendConfirmClick: partial drop at click time', {
+      flow_id, left: partialLeftCount, transient: partialTransientCount,
     });
   }
   const { valid } = partitionRecipients(users, interaction.user.id);
@@ -4118,14 +4153,24 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // shape at commands.js:~2307.
   await interaction.update({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
 
-  // Surface the partial-drop (members who left the guild between
-  // confirm and Send) as a separate ephemeral followUp BEFORE the
-  // back-half takes over the main reply. Without this the user
-  // would see "Sent to N users" with no signal that N != the count
-  // shown on the card.
-  if (partialDropCount > 0) {
+  // Surface partial drops (members who left the guild between confirm
+  // and Send, OR who failed lookup transiently) as a separate
+  // ephemeral followUp BEFORE the back-half takes over the main
+  // reply. Without this the user would see "Sent to N users" with no
+  // signal that N != the count shown on the card. Distinct wording
+  // for the two buckets — "left the server" is stable, "lookup
+  // blipped" encourages a fresh /qurl file rerun if they want to
+  // include the missed recipients.
+  if (partialLeftCount > 0 || partialTransientCount > 0) {
+    const parts = [];
+    if (partialLeftCount > 0) {
+      parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
+    }
+    if (partialTransientCount > 0) {
+      parts.push(`${partialTransientCount} couldn't be looked up just now (rerun /qurl file to retry them)`);
+    }
     await interaction.followUp({
-      content: `ℹ\u{FE0F} ${partialDropCount} recipient${partialDropCount === 1 ? '' : 's'} had left the server between **Send** and now — sending to the remaining ${valid.length}.`,
+      content: `ℹ\u{FE0F} ${parts.join('; ')} — sending to the remaining ${valid.length}.`,
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -5290,8 +5335,13 @@ const commands = [
       // sometimes clone/serialize interactions) and a security smell for
       // secret-bearing values.
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
-      if (sub === 'file') return handleQurlFile(interaction, resolvedApiKey);
-      if (sub === 'map') return handleQurlMap(interaction, resolvedApiKey);
+      // /qurl file and /qurl map deliberately don't accept the
+      // dispatcher-resolved apiKey — handleSendConfirmClick re-fetches
+      // at Send time so a mid-flow rotation still uses the live key.
+      // The dispatcher's SEND_LIKE_SUBCOMMANDS gate above is the
+      // fail-fast presence check.
+      if (sub === 'file') return handleQurlFile(interaction);
+      if (sub === 'map') return handleQurlMap(interaction);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it

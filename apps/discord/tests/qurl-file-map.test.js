@@ -614,7 +614,7 @@ describe('handleQurlFile — slash entry', () => {
       guildId: null,
       options: { attachment: VALID_ATTACHMENT },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/in a server/),
       ephemeral: true,
@@ -625,7 +625,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, url: 'https://evil.com/x.png' } },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/source not allowed/),
       ephemeral: true,
@@ -636,7 +636,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, contentType: 'application/x-evil-macroenabled' } },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/File type not allowed/),
     }));
@@ -646,7 +646,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, size: 999_999_999 } },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/too large/),
     }));
@@ -662,7 +662,7 @@ describe('handleQurlFile — slash entry', () => {
       },
       guildMembers: { [u1]: {}, [u2]: {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.deferReply).toHaveBeenCalled();
     expect(mockSupersedeOrCreate).toHaveBeenCalledWith(expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
@@ -685,7 +685,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Pick recipients/);
@@ -701,7 +701,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${u1}> <@${u2}>` },
       guildMembers: { [u1]: { bot: true }, [u2]: { bot: true } },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
@@ -714,7 +714,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${SENDER_ID}>` },
       guildMembers: { [SENDER_ID]: {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
@@ -729,7 +729,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { [known]: {} },
       guildFetchByID: { [gone]: 'unknown' },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.recipientIds).toEqual([known]);
@@ -745,7 +745,7 @@ describe('handleQurlFile — slash entry', () => {
     // Force cooldown
     sendCooldowns.set(SENDER_ID, Date.now());
     expect(isOnCooldown(SENDER_ID)).toBe(true);
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/wait before sending/),
     }));
@@ -761,7 +761,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/revoke.*menu open/);
   });
@@ -777,7 +777,7 @@ describe('handleQurlFile — slash entry', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.expiresIn).toBe('7d');
@@ -790,7 +790,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>', 'expires-in': '99y' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Unrecognized expiry/);
@@ -823,7 +823,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: {},  // ALL cache-miss
       guildFetchByID: fetchByID,
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
@@ -842,7 +842,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(isOnCooldown(SENDER_ID)).toBe(false);
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Could not start a send/);
@@ -865,7 +865,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     int.deferReply.mockRejectedValueOnce(new Error('token expired'));
-    await handleQurlFile(int, 'apikey');
+    await handleQurlFile(int);
     expect(isOnCooldown(SENDER_ID)).toBe(false);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/unexpected throw/),
@@ -887,7 +887,7 @@ describe('handleQurlMap — slash entry', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlMap(int, 'apikey');
+    await handleQurlMap(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.resourceType).toBe('maps');
@@ -903,7 +903,7 @@ describe('handleQurlMap — slash entry', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlMap(int, 'apikey');
+    await handleQurlMap(int);
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.locationUrl).toBe('https://www.google.com/maps/search/Central%20Park%2C%20NYC');
     expect(payload.locationName).toMatch(/Central Park/);
@@ -918,7 +918,7 @@ describe('handleQurlMap — slash entry', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlMap(int, 'apikey');
+    await handleQurlMap(int);
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.locationName).toBe('Custom Label');
   });
@@ -927,7 +927,7 @@ describe('handleQurlMap — slash entry', () => {
     const int = makeInteraction({
       options: { location: '   ', recipients: '<@100000000000000001>' },
     });
-    await handleQurlMap(int, 'apikey');
+    await handleQurlMap(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/empty/),
     }));
@@ -938,7 +938,7 @@ describe('handleQurlMap — slash entry', () => {
       guildId: null,
       options: { location: 'Eiffel', recipients: '<@100000000000000001>' },
     });
-    await handleQurlMap(int, 'apikey');
+    await handleQurlMap(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/in a server/),
     }));
@@ -1065,10 +1065,71 @@ describe('handleSendConfirmClick', () => {
     }));
     // Forensic log at INFO (escalated from debug per cr round 3) —
     // oncall can grep for mid-flight guild churn without dialing
-    // verbosity up.
+    // verbosity up. Round 5 split the bucket so the log fields
+    // distinguish left-the-server (10007) from transient.
     expect(logger.info).toHaveBeenCalledWith(
-      expect.stringMatching(/dropping unresolved/),
-      expect.objectContaining({ count: 1 }),
+      expect.stringMatching(/partial drop at click time/),
+      expect.objectContaining({ left: 1, transient: 0 }),
+    );
+  });
+
+  test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy', async () => {
+    // cr round 5: transientFailureIds were previously dropped silently
+    // at click time. They must be surfaced with retry-encouraging
+    // copy (NOT "left the server" wording) — the buckets are now
+    // split + threaded.
+    const flaky = '100000000000000099';
+    const payloadWithFlaky = { ...validPayload, recipientIds: [u1, flaky] };
+    const int = makeInteraction({
+      guildMembers: { [u1]: {} },
+      guildFetchByID: { [flaky]: 'ratelimit' },
+    });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithFlaky, version: 1 } });
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Preparing send/),
+    }));
+    // followUp distinguishes transient from "left" — retry copy.
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/1 couldn't be looked up.*rerun \/qurl file/),
+      ephemeral: true,
+    }));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringMatching(/partial drop at click time/),
+      expect.objectContaining({ left: 0, transient: 1 }),
+    );
+  });
+
+  test('resolveRecipientUsers throw at click time → ephemeral retry message, NO deleteFlow', async () => {
+    // cr round 5: handleSendConfirmClick previously had no try/catch
+    // around the click-time resolution. A throw would propagate to the
+    // dispatcher's outer catch and leave the user staring at the
+    // unchanged card. Targeted catch now surfaces a recoverable
+    // ephemeral reply and DOES NOT commit the dedup deleteFlow so the
+    // card stays alive for the 3-min TTL.
+    const int = makeInteraction({
+      guildMembers: {},
+      // Force a throw out of `members.fetch` (not a return-value error,
+      // a real `throw new Error(...)`).
+    });
+    int.guild.members.fetch = jest.fn().mockRejectedValue(new Error('catastrophic'));
+    // Need to bypass batchSettled's swallow path: rejection inside the
+    // callback is caught by Promise.allSettled, then resolveRecipientUsers's
+    // own try/catch handles it. A real throw from BEFORE the try (e.g.
+    // guild === null) is what we want here. Simulate by deleting guild.
+    // Actually simpler — make the entire interaction.guild throw on read.
+    Object.defineProperty(int, 'guild', {
+      get() { throw new Error('cache exploded'); },
+    });
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not look up recipients/),
+      ephemeral: true,
+    }));
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/resolveRecipientUsers threw/),
+      expect.objectContaining({ flow_id: 'fid' }),
     );
   });
 });
