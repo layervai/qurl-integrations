@@ -3607,7 +3607,7 @@ function renderRecipientWarnings({
 function renderConfirmCardContent({
   resourceType, resourceLabel, validRecipients,
   expiresIn, selfDestructSeconds, personalMessage,
-  warningsBlock, needsPicker,
+  warningsBlock, needsPicker, interaction,
 }) {
   let content = warningsBlock || '';
   // Explicit branch per RESOURCE_TYPES value — a future resource
@@ -3628,11 +3628,14 @@ function renderConfirmCardContent({
       + ' users), then click **Send**.\n';
   } else {
     // First-N preview keeps the card scannable when a paste resolves
-    // to many users. Discord-name display via resolveRecipientAlias
-    // matches the post-send confirmation wording.
+    // to many users. resolveRecipientAlias prefers nickname > globalName >
+    // username (NFKC + bidi/zero-width strip baked in), matching the
+    // post-send confirmation wording exactly. The escapeDiscordMarkdown
+    // wrap is still required — resolveRecipientAlias returns the PLAIN
+    // form (its docstring at commands.js:~305 calls this out).
     const PREVIEW = 5;
     const previewNames = validRecipients.slice(0, PREVIEW)
-      .map((u) => escapeDiscordMarkdown(u.username))
+      .map((u) => escapeDiscordMarkdown(resolveRecipientAlias(u, interaction)))
       .join(', ');
     const more = validRecipients.length > PREVIEW ? `, +${validRecipients.length - PREVIEW} more` : '';
     content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
@@ -3661,23 +3664,34 @@ function renderConfirmCardContent({
 
 // Truncate the pre-sanitized message to 80 chars MAX, then back off
 // to the last completed markdown-escape so a slice doesn't leave a
-// lone trailing `\`. The blockquote prefix (`> `) is rendered by
-// Discord as a left-bar offset.
+// lone trailing `\`. Embedded `\n` is collapsed to a single space —
+// Discord blockquotes are per-LINE (only the line starting with `> `
+// gets the left-bar), so a multi-line message would render with a
+// quoted first line and flush-left subsequent lines. The single-line
+// preview also keeps the card's vertical rhythm predictable.
 //
 // The "back off" handles the case where `sanitizeMessage` emitted a
 // `\` immediately before the slice boundary (e.g. `\*` becomes `\`
 // at index 79, `*` at index 80 — slicing at 80 leaves a dangling
 // `\` that Discord would render as a literal backslash). Trimming
 // to index 79 in that case is the conservative fix.
+// Newlines and Unicode line/paragraph separators (U+2028, U+2029) all
+// render as line breaks in Discord — collapse the lot to single spaces
+// so the blockquote preview stays a single rendered line. Built via
+// `new RegExp(...)` (instead of a literal) so the \uXXXX escapes go
+// through string parsing — keeps the source ASCII-only and avoids
+// editor/tool-chain confusion over raw line-separator codepoints in a
+// regex literal. Same pattern STRIP_RE in utils/sanitize.js uses.
+const NEWLINE_COLLAPSE_RE = new RegExp('[\\r\\n\\u2028\\u2029]+', 'g');
+
 function formatPersonalMessagePreview(message) {
-  if (message.length <= 80) return `> ${message}`;
+  const oneLine = message.replace(NEWLINE_COLLAPSE_RE, ' ');
+  if (oneLine.length <= 80) return `> ${oneLine}`;
   let cut = 80;
-  if (message[cut - 1] === '\\' && message[cut - 2] !== '\\') {
-    // The would-be cut sits ON an escape char. Back off so the
-    // truncation lands BEFORE the escape, not in the middle of it.
+  if (oneLine[cut - 1] === '\\' && oneLine[cut - 2] !== '\\') {
     cut -= 1;
   }
-  return `> ${message.slice(0, cut)}…`;
+  return `> ${oneLine.slice(0, cut)}…`;
 }
 
 // Build the ActionRow set for the confirm card. When `attachPicker`,
@@ -3879,6 +3893,7 @@ async function handleQurlSlashSend(interaction, params) {
       personalMessage,
       warningsBlock,
       needsPicker,
+      interaction,
     });
     const rows = renderConfirmCardRows({
       attachPicker: needsPicker,
@@ -4136,6 +4151,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     personalMessage: payload.personalMessage,
     warningsBlock,
     needsPicker: false,
+    interaction,
   });
   return interaction.update({
     content,
@@ -4162,6 +4178,24 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // deferred state and `.reply` would throw); main-message updates
   // switch from `interaction.update` to `interaction.editReply`.
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  // Bot-kicked-between-confirm-and-Send: `interaction.guild` is null.
+  // Without this guard the user sees "all recipients left the server"
+  // (the all-unresolved branch's copy below) — misleading, because
+  // the bot left, not the recipients. Delete the flow row so a
+  // future re-invite + rerun starts fresh.
+  if (!interaction.guild) {
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on bot-kicked failed', {
+      flow_id, error: err && err.message,
+    }));
+    return interaction.editReply({
+      content: '❌ qURL bot is no longer in this server. Re-invite the bot and re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
 
   const payload = row.payload || {};
   // Re-fetch users at click time — defensive against members leaving

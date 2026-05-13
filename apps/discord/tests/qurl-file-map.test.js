@@ -643,6 +643,40 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/\*\*bob\*\*/);
     expect(out).toMatch(/\\\*\\\*bob\\\*\\\*/);
   });
+
+  test('preview prefers guild member displayName over username when interaction is supplied', () => {
+    // cr round 9: a previous round's comment claimed
+    // resolveRecipientAlias was used, but the code path was raw
+    // `u.username`. Pin the alias path so a future refactor can't
+    // silently drift back to username-only.
+    const u = makeUser('100000000000000001', { username: 'alice' });
+    const int = {
+      guild: {
+        members: {
+          cache: new Map([[u.id, { displayName: 'Alice in Wonderland', user: u }]]),
+        },
+      },
+    };
+    const out = renderConfirmCardContent({ ...baseProps, validRecipients: [u], interaction: int });
+    expect(out).toMatch(/Alice in Wonderland/);
+    expect(out).not.toMatch(/\balice\b/);
+  });
+
+  test('personal-message blockquote collapses embedded newlines + unicode line/paragraph separators to spaces', () => {
+    // cr round 9: Discord blockquotes are per-LINE — only the line
+    // starting with `> ` gets the left-bar. A multi-line message
+    // would render with a quoted first line and flush-left subsequent
+    // lines. formatPersonalMessagePreview collapses `\n` / `\r\n` /
+    // U+2028 (line sep) / U+2029 (paragraph sep) into single spaces
+    // so the preview is a clean one-liner. The Unicode separators
+    // matter because Discord renders them as line breaks too (per
+    // simplify round 10 review).
+    const out = renderConfirmCardContent({
+      ...baseProps,
+      personalMessage: 'first line\nsecond\r\nthird fourth fifth',
+    });
+    expect(out).toContain('> first line second third fourth fifth\n');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -1247,10 +1281,11 @@ describe('handleSendConfirmClick', () => {
     int.guild.members.fetch = jest.fn().mockRejectedValue(new Error('catastrophic'));
     // Need to bypass batchSettled's swallow path: rejection inside the
     // callback is caught by Promise.allSettled, then resolveRecipientUsers's
-    // own try/catch handles it. A real throw from BEFORE the try (e.g.
-    // guild === null) is what we want here. Simulate by deleting guild.
-    // Actually simpler — make the entire interaction.guild throw on read.
-    Object.defineProperty(int, 'guild', {
+    // own try/catch handles it. Simulate a synchronous blow-up inside
+    // resolveRecipientUsers by making `interaction.guild.members`
+    // throw on read — that lands *after* handleSendConfirmClick's
+    // bot-kicked guard (which only checks `interaction.guild`).
+    Object.defineProperty(int.guild, 'members', {
       get() { throw new Error('cache exploded'); },
     });
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
@@ -1263,6 +1298,30 @@ describe('handleSendConfirmClick', () => {
       expect.stringMatching(/resolveRecipientUsers threw/),
       expect.objectContaining({ flow_id: 'fid' }),
     );
+  });
+
+  test('bot kicked between confirm and Send → distinct ephemeral, flow row deleted', async () => {
+    // cr round 9: when the bot is removed from the guild between
+    // confirm and Send, `interaction.guild` is null. Without an
+    // explicit guard, resolveRecipientUsers returns every recipientId
+    // in unresolvedIds and the user sees "recipients left the server"
+    // — misleading. Pin the dedicated copy + deleteFlow so the flow
+    // row doesn't linger.
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    int.guild = null;
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/bot is no longer in this server/i),
+      components: [],
+    }));
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
+    // The misleading "left the server" copy must NOT fire here.
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/no longer reachable/i),
+    }));
   });
 });
 
