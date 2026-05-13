@@ -3901,6 +3901,21 @@ async function handleQurlSlashSend(interaction, params) {
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
+      // Transient-only: every mentioned ID hit a 429 / gateway blip in
+      // members.fetch. Generic "no valid recipients" misleads — the
+      // user's mentions were valid, the lookup just failed. Encourage
+      // retry instead of asking them to re-pick.
+      const transientOnly = resolved.transientFailureIds.length > 0
+        && resolved.unresolvedIds.length === 0
+        && droppedBots === 0
+        && droppedSelf === 0
+        && parsed.invalidTokens.length === 0
+        && parsed.cappedCount === 0;
+      if (transientOnly) {
+        return interaction.editReply({
+          content: warningsBlock + '❌ **Could not look up recipients right now.** Try again in a moment.',
+        });
+      }
       // Parser silently strips bots + the sender from `<@id>` mentions
       // when the cache reports them (recipient-parser.js:205, 214) —
       // those IDs never reach `partitionRecipients`. If post-parse `ids`
@@ -4248,8 +4263,10 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     logger.debug('handleSendUserSelect: all-invalid pick', {
       flow_id, dropped_bots: droppedBots, dropped_self: droppedSelf,
     });
-    return rejectPick('⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
-      + ' Re-pick recipients below.\n\n');
+    const reasons = [];
+    if (droppedBots > 0) reasons.push('Cannot send to bots');
+    if (droppedSelf > 0) reasons.push('cannot send to yourself');
+    return rejectPick(`⚠\u{FE0F} ${reasons.join('; ')}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
   // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,

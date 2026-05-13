@@ -470,6 +470,30 @@ describe('parseLocationInput', () => {
   test('malformed %-encoding in the input does not throw', () => {
     expect(() => parseLocationInput('https://www.google.com/maps/place/%ZZ-broken')).not.toThrow();
   });
+
+  test('spoofed host (google.com.evil.com) fails the regex AND falls through to synth-search', () => {
+    // Defense-in-depth contract: MAPS_URL_PATTERNS pins the literal
+    // `google.com/` token (slash forces an end-of-host boundary), so a
+    // spoofed host like `google.com.evil.com/maps/place/x` cannot match
+    // any pattern. parseLocationInput therefore takes the synth-search
+    // fall-through with the entire raw input as the search query —
+    // isGoogleMapsURL never gets a chance to look at the spoofed host.
+    // The conditional `if (detectedUrl && isGoogleMapsURL(detectedUrl))`
+    // remains as defense-in-depth in case a future pattern relaxes the
+    // host pin; this test pins the current contract.
+    const spoofed = 'https://google.com.evil.com/maps/place/Eiffel-Tower';
+    const r = parseLocationInput(spoofed);
+    // The synth-search URL's HOST is google.com (the search domain),
+    // not the spoofed host. The spoofed input lands URL-encoded INSIDE
+    // the search query, not as the rendered link's host.
+    const parsed = new URL(r.locationUrl);
+    expect(parsed.hostname).toBe('www.google.com');
+    expect(parsed.pathname.startsWith('/maps/search/')).toBe(true);
+    // The raw spoofed input is the search query — recipient embeds
+    // render that as text on a google.com link, not as a clickable
+    // link to the spoofed host.
+    expect(r.locationName).toBe(spoofed);
+  });
 });
 
 describe('safeDecodeURIComponent', () => {
@@ -984,6 +1008,25 @@ describe('handleQurlFile — slash entry', () => {
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
     expect(reply.content).toMatch(/bots and your own user are skipped/);
+  });
+
+  test('all mentioned recipients hit transient lookup failure → retry copy, not "no valid recipients"', async () => {
+    // transient-only path: the user's mentions were VALID but every
+    // members.fetch hit a 429 or gateway blip. Generic "no valid
+    // recipients" misleads — they didn't make any mistake. Encourage
+    // retry instead.
+    const flaky1 = '100000000000000099';
+    const flaky2 = '100000000000000098';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `<@${flaky1}> <@${flaky2}>` },
+      guildMembers: {},
+      guildFetchByID: { [flaky1]: 'ratelimit', [flaky2]: 'ratelimit' },
+    });
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/Could not look up recipients right now.*Try again/i);
+    expect(reply.content).not.toMatch(/No valid recipients to send to/);
   });
 
   test('unknown-member ID surfaced as warning but valid users still proceed', async () => {
@@ -1736,6 +1779,23 @@ describe('handleSendUserSelect', () => {
     });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(deferAckedBeforeTransition).toBe(true);
+  });
+
+  test('all-invalid pick combining bots AND self → message lists BOTH reasons (not just bot-only)', async () => {
+    // Previous wording collapsed to bot-only via a ternary. A pick of
+    // [bot, sender] is BOTH "cannot send to bots" AND "cannot send to
+    // yourself"; the user deserves to see both reasons so they know
+    // why removing only the bot wouldn't be enough.
+    const bot1 = '100000000000000099';
+    const int = makeSelectInteraction({
+      users: [makeUser(bot1, { bot: true }), makeUser(SENDER_ID)],
+    });
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/bots/);
+    expect(updated.content).toMatch(/yourself/i);
+    expect(updated.content).toMatch(/Sending file/);
   });
 
   test('all bots picked → re-prompt warning prepended to full confirm card (resource header preserved)', async () => {
