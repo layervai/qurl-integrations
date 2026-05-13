@@ -212,6 +212,7 @@ const {
   handleAddRecipients,
   mintLinksInBatches,
   activeMonitors,
+  executeSendPipeline,
 } = _test;
 
 // ---------------------------------------------------------------------------
@@ -1363,3 +1364,363 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).not.toHaveBeenCalled();
   });
 });
+
+// Strict input gate added in PR #277 (round-4 cr fix). isVoiceContext
+// is the one param whose silent default would mis-render the channel-
+// announce blurb — every other param either lands in DB rows where
+// corruption is grep-discoverable, or fails loudly inside the upload/
+// mint pipeline. Pin the gate here so PR 7b's flow_state-payload
+// schema can't drop the boolean in serialization and silently land
+// a voice-context send on text-channel wording.
+describe('executeSendPipeline — isVoiceContext strict gate', () => {
+  // sendCooldowns is module-private state; the cooldown-cleanup test
+  // sets it for a unique user id and relies on the gate's
+  // clearCooldown call to undo. If a future edit moves the throw
+  // ahead of clearCooldown (the exact regression that test pins),
+  // the unique-id strategy would still let other tests pass — but
+  // the residual entry would leak across describes. Explicit
+  // afterEach reset closes that hatch.
+  afterEach(() => {
+    const { clearCooldown } = _test;
+    if (typeof clearCooldown === 'function') {
+      clearCooldown('cooldown-gate-test-user');
+    }
+  });
+
+  // Minimal params object that would otherwise satisfy the destructure
+  // — only isVoiceContext varies per case. The pipeline never reaches
+  // any downstream call because the gate is at function entry, so the
+  // mocks below don't need to be configured.
+  function makePipelineParams(isVoiceContext) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
+    const interaction = makeInteraction();
+    // Single invocation captured into a promise so both the type + the
+    // message assertion observe the SAME rejection. The previous pattern
+    // (two await-expects, two pipeline invocations) is harmless today —
+    // the gate is idempotent — but would surface a double-fire bug if a
+    // future change adds side effects (audit emission, etc.) ahead of
+    // the throw.
+    const rejection = executeSendPipeline(interaction, makePipelineParams(undefined));
+    await expect(rejection).rejects.toThrow(TypeError);
+    await expect(rejection).rejects.toThrow(/isVoiceContext must be a boolean/);
+    // Gate clears the caller's stale ephemeral with an explicit error
+    // ephemeral BEFORE throwing. Pin the call — without it the user
+    // would see the caller's stale "Preparing send..." alongside the
+    // top-level catch's generic "There was an error" followUp.
+    // The "Preparing links..." editReply that lives later in the
+    // pipeline still never fires (the gate throws before reaching it),
+    // so any failed regression test that DOES see two editReplies is
+    // also caught: the cancellation edit is the only legitimate call.
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+        components: [],
+      }),
+    );
+  });
+
+  test('throws TypeError when isVoiceContext is a string (most-likely miscoding shape)', async () => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams('true')))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+    // Same user-facing cancellation behavior as the undefined case.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('throws TypeError for null isVoiceContext (typeof null === "object" foot-gun)', async () => {
+    // `typeof null === 'object'`, NOT 'boolean' — pin that null is
+    // rejected. A flow_state payload that serialized `false` as
+    // missing-vs-null could hit this without the test.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(null)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+
+  test.each([0, 1])('throws TypeError for numeric %s (JS-y caller miscoding)', async (n) => {
+    // A caller writing `isVoiceContext: channel.type === 2 ? 1 : 0`
+    // (treating it as a truthy flag rather than a strict boolean)
+    // hits this branch. Pin both 0 and 1 — `Number(true) === 1`
+    // looks deceptively boolean-compatible but trips the typeof
+    // check.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(n)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+
+  // eslint-disable-next-line no-new-wrappers
+  test('throws TypeError for Boolean wrapper object (typeof is "object", not "boolean")', async () => {
+    // `new Boolean(true)` is `typeof === 'object'` per JS spec —
+    // would silently coerce to truthy in a `?:` ternary while
+    // failing the strict gate. Worth pinning so a future reader
+    // debugging the gate doesn't get confused by the wrapper
+    // edge case.
+    const interaction = makeInteraction();
+    // eslint-disable-next-line no-new-wrappers
+    const wrapperTrue = new Boolean(true);
+    await expect(executeSendPipeline(interaction, makePipelineParams(wrapperTrue)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+
+  test('clears cooldown before throwing so caller is not locked out', async () => {
+    // Caller-side convention (see handleSend): setCooldown fires
+    // before the pipeline call so a rapid second invocation gets
+    // a "wait" reply. If the pipeline throws BEFORE clearing the
+    // cooldown, the user is locked out for the full window with
+    // no feedback — exactly the silent-failure shape the gate
+    // is meant to avoid amplifying. The post-throw isOnCooldown
+    // assertion below leaves no stray state for adjacent tests:
+    // the gate's clearCooldown call IS the cleanup.
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown } = _test;
+    // Use a unique sender id so a parallel test's cooldown state
+    // can't leak into this assertion. sendCooldowns is a module-
+    // private Map so the read/write surface is exposed only via
+    // the helpers above.
+    interaction.user = { id: 'cooldown-gate-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(TypeError);
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+  });
+});
+
+// Symmetric to the isVoiceContext gate — pins target and
+// attachment.url at entry so a tampered persisted payload or a
+// future caller mis-coding cannot reach the upload/announce path.
+describe('executeSendPipeline — target allowed-set gate', () => {
+  function makePipelineParams(target) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target,
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['voice (silent-suppress shape — docstring warns about this)', 'voice'],
+    ['empty string', ''],
+    ['unknown future value', 'group'],
+  ])('throws TypeError for target=%s', async (_label, target) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(target)))
+      .rejects.toThrow(/target must be 'user' or 'channel'/);
+    // Cancel-edit fires before the throw — same shape as the
+    // isVoiceContext gate.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('throws TypeError for non-string target (undefined / null)', async () => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(/target must be 'user' or 'channel'/);
+  });
+
+  test.each(['user', 'channel'])('accepts the allowed value: %s', async (target) => {
+    // The downstream upload mocks aren't configured here, so accept-
+    // case observability is: did the gate let us PAST it? We rely on
+    // the rejection message NOT matching 'target must be' — anything
+    // else (e.g. downstream mint failures) is a different concern.
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(target));
+    } catch (err) {
+      expect(err.message).not.toMatch(/target must be/);
+      return;
+    }
+    // If the call resolved without throwing (mock-chain lined up
+    // perfectly somehow), that's also acceptable — the gate let us
+    // through, which is what this test checks.
+  });
+});
+
+describe('executeSendPipeline — attachment.url SSRF re-validation gate', () => {
+  function makePipelineParams(attachmentOverrides) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: attachmentOverrides,
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['null attachment', null],
+    ['attachment with no url field', { name: 'x.png', contentType: 'image/png' }],
+    ['attachment with non-string url', { url: 12345, name: 'x.png' }],
+    ['internal localhost URL (SSRF target)', { url: 'http://localhost/internal', name: 'x.png' }],
+    ['internal 127.0.0.1 URL', { url: 'http://127.0.0.1:8080/api', name: 'x.png' }],
+    ['internal AWS metadata endpoint', { url: 'http://169.254.169.254/latest/meta-data/', name: 'x.png' }],
+  ])('throws on %s when resourceType=file', async (_label, attachment) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(attachment)))
+      .rejects.toThrow(/attachment\.url failed SSRF re-validation/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('SSRF gate is skipped when resourceType is NOT file (location sends carry no user URL)', async () => {
+    const interaction = makeInteraction();
+    // Bogus attachment.url that WOULD fail isAllowedSourceUrl — but
+    // resourceType is 'location' so the gate is bypassed. The pipeline
+    // will fail later downstream (mocks aren't configured for the
+    // location path), but NOT with the SSRF gate message.
+    const params = {
+      apiKey: 'apikey',
+      resourceType: 'location',
+      attachment: { url: 'http://localhost/whatever', name: 'x.png' },
+      locationUrl: 'https://google.com/maps/search/x',
+      locationName: 'X',
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+    try {
+      await executeSendPipeline(interaction, params);
+    } catch (err) {
+      expect(err.message).not.toMatch(/SSRF re-validation/);
+      return;
+    }
+  });
+});
+
+describe('executeSendPipeline — expiresIn allowed-set gate', () => {
+  function makePipelineParams(expiresIn) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn,
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['off-set numeric-style', '25h'],
+    ['totally bogus', 'never'],
+    ['empty string', ''],
+    ['undefined', undefined],
+    ['number (not string)', 24],
+  ])('throws on expiresIn=%s', async (_label, expiresIn) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(expiresIn)))
+      .rejects.toThrow(/expiresIn must be one of/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(expiresIn));
+    } catch (err) {
+      expect(err.message).not.toMatch(/expiresIn must be one of/);
+      return;
+    }
+  });
+});
+
+describe('executeSendPipeline — personalMessage shape gate', () => {
+  function makePipelineParams(personalMessage) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['object', { text: 'oops' }],
+    ['array', ['oops']],
+    ['number', 42],
+    ['boolean', true],
+  ])('throws on non-string non-null personalMessage (%s) — would render [object Object] in DM otherwise', async (_label, personalMessage) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(personalMessage)))
+      .rejects.toThrow(/personalMessage must be null or string/);
+  });
+
+  test.each([
+    ['null', null],
+    ['empty string', ''],
+    ['short note', 'See you at 5pm.'],
+  ])('accepts the allowed shape: %s', async (_label, personalMessage) => {
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(personalMessage));
+    } catch (err) {
+      expect(err.message).not.toMatch(/personalMessage must be null or string/);
+      return;
+    }
+  });
+});
+
