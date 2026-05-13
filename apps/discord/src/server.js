@@ -10,6 +10,7 @@ const oauthRouter = require('./routes/oauth');
 const qurlOAuthRouter = require('./routes/qurl-oauth');
 const discordInstallRouter = require('./routes/discord-install');
 const webhooksRouter = require('./routes/webhooks');
+const canaryRouter = require('./routes/canary');
 
 const app = express();
 
@@ -84,6 +85,43 @@ if (config.isOpenNHPActive) {
       req.rawBody = buf;
     }
   }));
+}
+
+// Canary mount — parser, scoped error handler, router, and boot
+// warns colocated. MUST be registered before the global
+// express.json() below so /canary inherits the 4 KB cap (route
+// body shape is small JSON; 1 MB would silently widen the surface).
+// LOAD-BEARING: canaryEnabled (= config.isOpenNHPActive) trusts
+// that NHP is actually fronting the process at the network layer —
+// the route does no app-layer auth (NHP's per-knock OpenTime IS
+// the auth). If a future env flips this flag without NHP in front
+// of the listener, /canary/exec is unauthenticated. Tracked in #216.
+const canaryEnabled = config.isOpenNHPActive;
+
+if (canaryEnabled) {
+  app.use('/canary', express.json({ limit: '4kb' }));
+  // Scoped parser-error handler: parse failures + oversized bodies
+  // return JSON in the route's canonical envelope, not the HTML
+  // error page from the global 4-arg handler at the bottom of this
+  // file. Keeps the canary's response contract uniform for the
+  // Lambda's CloudWatch parser.
+  app.use('/canary', (err, req, res, next) => {
+    if (err && err.type === 'entity.parse.failed') {
+      return res.status(400).json({ ok: false, error: 'invalid_json' });
+    }
+    if (err && err.type === 'entity.too.large') {
+      return res.status(413).json({ ok: false, error: 'body_too_large' });
+    }
+    return next(err);
+  });
+  app.use('/canary', canaryRouter);
+  logger.info('Canary endpoint mounted at /canary/exec (NHP-knock authenticated)');
+  if (!config.QURL_API_KEY) {
+    logger.warn('Canary endpoint mounted but QURL_API_KEY is unset — every request will return 503 no_api_key until QURL_API_KEY is set.');
+  }
+  if (!Array.isArray(config.CANARY_RECIPIENT_USER_IDS) || config.CANARY_RECIPIENT_USER_IDS.length === 0) {
+    logger.warn('Canary endpoint mounted but CANARY_RECIPIENT_USER_IDS is empty — all requests will return 503 canary_recipients_unconfigured.');
+  }
 }
 
 app.use(express.json({ limit: '1mb' }));
