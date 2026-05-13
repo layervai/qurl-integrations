@@ -782,13 +782,24 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // notes below capture only non-obvious contract guarantees that a
 // reader couldn't infer from the call sites alone.
 //
+// Entry gates (fire-and-forget cancel-edit + throw):
+//   - `isVoiceContext` must be a strict boolean.
+//   - `target` must be `'user'` or `'channel'`.
+//   - `attachment.url` re-validated against `isAllowedSourceUrl`
+//     when `resourceType === RESOURCE_TYPES.FILE`.
+// Each gate clears the caller's stale ephemeral with a cancel-
+// edit then throws — the user still sees the outer catch's
+// generic followUp, but the gate's specific cancel replaces
+// the stale "Preparing send..." rather than co-existing with it.
+//
 // Caller contract (non-obvious bits — what the signature can't say):
 //
-//   - `attachment.url` is assumed PRE-VALIDATED against
-//     `isAllowedSourceUrl`. The pipeline does NOT re-check; an
-//     attacker-controlled URL reaching `downloadAndUpload` here
-//     would bypass the SSRF defense. Callers reconstructing this
-//     from a persisted source MUST re-validate before invoking.
+//   - `attachment.url` re-validated at entry against
+//     `isAllowedSourceUrl` — defense-in-depth, but callers
+//     SHOULD still validate at their boundary (the entry gate
+//     is the second line, not the first). A tampered persisted
+//     payload reaching the gate produces a generic "Internal
+//     error" cancel without leaking the SSRF detail.
 //
 //   - `recipients` is MUTATED in-place on the Add Recipients post-
 //     send branch (deduped push of new IDs). Treat as transferred
@@ -869,20 +880,22 @@ async function executeSendPipeline(interaction, {
   // handleSend's existing convention of clearing on every error
   // path. Today's caller never reaches the throw; the cleanup
   // exists for PR 7b's handleSendFormSend.
+  // Shared cancel-edit shape for all three entry gates. Fire-and-
+  // forget so a failed edit doesn't become the observable outcome —
+  // the throw is the load-bearing signal (test pins + logger.error
+  // in handleCommand's outer catch). The outer catch will still
+  // append a generic "There was an error" followUp; this edit
+  // replaces the caller's stale ephemeral so the user sees a
+  // specific cancel alongside the generic followUp, not a stale
+  // "Preparing send..." alongside it.
+  const cancelEdit = () => interaction.editReply({
+    content: '❌ Internal error — send cancelled. Please rerun the command.',
+    components: [],
+  }).catch(logIgnoredDiscordErr);
+
   if (typeof isVoiceContext !== 'boolean') {
     clearCooldown(interaction.user.id);
-    // Clear whatever stale ephemeral the caller's button handler
-    // left on screen ("Preparing send…" is the canonical case)
-    // BEFORE throwing. Fire-and-forget — the throw is the
-    // load-bearing signal (test pins + logger.error in
-    // handleCommand's outer catch), so a failed editReply here
-    // must not become the observable outcome. Without this, the
-    // user sees a persistent stale message alongside the generic
-    // "There was an error" followUp the outer catch will add.
-    interaction.editReply({
-      content: '❌ Internal error — send cancelled. Please rerun the command.',
-      components: [],
-    }).catch(logIgnoredDiscordErr);
+    cancelEdit();
     // Render `typeof=` + `value=` separately so a prod-log reader
     // doesn't have to disambiguate `(got object: null)` (where
     // "object" describes the typeof and "null" is the value — a
@@ -891,6 +904,38 @@ async function executeSendPipeline(interaction, {
     // drops it) and avoids the JSON.stringify-throws-on-BigInt
     // edge case.
     throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext)})`);
+  }
+  // `target` allowed-set gate. Same silent-mis-render shape as
+  // isVoiceContext: an unrecognized value (e.g. `'voice'`) would
+  // silently suppress the channel-announce (the announce site's
+  // gate is strict equality on `'channel'`). The gate makes the
+  // failure mode loud at the boundary.
+  if (target !== 'user' && target !== 'channel') {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${String(target)})`);
+  }
+  // SSRF re-validation gate. Parallels the `isVoiceContext` gate
+  // but the failure mode is a security boundary, not a copy
+  // mismatch: a tampered DDB payload row could redirect
+  // downloadAndUpload to an internal target if no caller along
+  // the path re-checks. Today handleSend's Step-2 validates
+  // BEFORE calling the pipeline — this defense-in-depth gate
+  // catches a future caller that forgets. RESOURCE_TYPES.FILE-
+  // only because location sends don't carry an attacker-
+  // controlled URL (the locationUrl is built from sanitized
+  // user-text via google.com/maps/search).
+  if (resourceType === RESOURCE_TYPES.FILE) {
+    if (!attachment || typeof attachment.url !== 'string' || !isAllowedSourceUrl(attachment.url)) {
+      clearCooldown(interaction.user.id);
+      cancelEdit();
+      logger.warn('executeSendPipeline: attachment.url failed isAllowedSourceUrl gate', {
+        user_id: interaction.user.id,
+        send_nonce: sendNonce,
+        host: attachment?.url && safeUrlHost(attachment.url),
+      });
+      throw new Error(`executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`);
+    }
   }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 

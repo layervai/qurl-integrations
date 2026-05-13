@@ -1507,3 +1507,130 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
   });
 });
 
+// Symmetric to the isVoiceContext gate — pins target and
+// attachment.url at entry so a tampered persisted payload or a
+// future caller mis-coding cannot reach the upload/announce path.
+describe('executeSendPipeline — target allowed-set gate', () => {
+  function makePipelineParams(target) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target,
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['voice (silent-suppress shape — docstring warns about this)', 'voice'],
+    ['empty string', ''],
+    ['unknown future value', 'group'],
+  ])('throws TypeError for target=%s', async (_label, target) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(target)))
+      .rejects.toThrow(/target must be 'user' or 'channel'/);
+    // Cancel-edit fires before the throw — same shape as the
+    // isVoiceContext gate.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('throws TypeError for non-string target (undefined / null)', async () => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(/target must be 'user' or 'channel'/);
+  });
+
+  test.each(['user', 'channel'])('accepts the allowed value: %s', async (target) => {
+    // The downstream upload mocks aren't configured here, so accept-
+    // case observability is: did the gate let us PAST it? We rely on
+    // the rejection message NOT matching 'target must be' — anything
+    // else (e.g. downstream mint failures) is a different concern.
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(target));
+    } catch (err) {
+      expect(err.message).not.toMatch(/target must be/);
+      return;
+    }
+    // If the call resolved without throwing (mock-chain lined up
+    // perfectly somehow), that's also acceptable — the gate let us
+    // through, which is what this test checks.
+  });
+});
+
+describe('executeSendPipeline — attachment.url SSRF re-validation gate', () => {
+  function makePipelineParams(attachmentOverrides) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: attachmentOverrides,
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['null attachment', null],
+    ['attachment with no url field', { name: 'x.png', contentType: 'image/png' }],
+    ['attachment with non-string url', { url: 12345, name: 'x.png' }],
+    ['internal localhost URL (SSRF target)', { url: 'http://localhost/internal', name: 'x.png' }],
+    ['internal 127.0.0.1 URL', { url: 'http://127.0.0.1:8080/api', name: 'x.png' }],
+    ['internal AWS metadata endpoint', { url: 'http://169.254.169.254/latest/meta-data/', name: 'x.png' }],
+  ])('throws on %s when resourceType=file', async (_label, attachment) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(attachment)))
+      .rejects.toThrow(/attachment\.url failed SSRF re-validation/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('SSRF gate is skipped when resourceType is NOT file (location sends carry no user URL)', async () => {
+    const interaction = makeInteraction();
+    // Bogus attachment.url that WOULD fail isAllowedSourceUrl — but
+    // resourceType is 'location' so the gate is bypassed. The pipeline
+    // will fail later downstream (mocks aren't configured for the
+    // location path), but NOT with the SSRF gate message.
+    const params = {
+      apiKey: 'apikey',
+      resourceType: 'location',
+      attachment: { url: 'http://localhost/whatever', name: 'x.png' },
+      locationUrl: 'https://google.com/maps/search/x',
+      locationName: 'X',
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+    try {
+      await executeSendPipeline(interaction, params);
+    } catch (err) {
+      expect(err.message).not.toMatch(/SSRF re-validation/);
+      return;
+    }
+  });
+});
+
