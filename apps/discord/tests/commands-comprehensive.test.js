@@ -1183,10 +1183,10 @@ describe('/qurl help subcommand', () => {
     // (3) Terms block disambiguates "protected resource" from "qURL"
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
-    // (4) Help text doesn't leak internal jargon. The legacy
-    // "Large servers" copy described /qurl send's voice/channel
-    // fanout modes; removed in 7b.2 round 6 (cr-flagged) because
-    // /qurl file / /qurl map have no equivalent fanout target.
+    // (4) Help text doesn't leak internal jargon. The "Large servers"
+    // section explains the /qurl send fanout caveat to end-users
+    // without naming the underlying GUILD_PRESENCES intent. That
+    // section goes away when 7b.3 deletes /qurl send.
     expect(content).not.toContain('GUILD_PRESENCES');
   });
 });

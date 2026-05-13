@@ -1817,6 +1817,29 @@ describe('handleSendUserSelect', () => {
       content: expect.stringMatching(/expired/),
     }));
   });
+
+  test('transitionFlow throw → targeted ephemeral retry, NOT generic "superseded" copy', async () => {
+    // Without the targeted catch, a DDB blip during transitionFlow
+    // bubbles to the dispatcher's outer catch which surfaces a
+    // generic "superseded" message — wrong, since nothing was actually
+    // superseded. Symmetric with handleSendConfirmClick /
+    // handleSendCancelClick's DDB-call guards.
+    mockTransitionFlow.mockRejectedValueOnce(new Error('ddb gone'));
+    const int = makeSelectInteraction();
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save your pick/i),
+      ephemeral: true,
+    }));
+    // Generic "superseded" copy must NOT fire here.
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/transitionFlow threw/),
+      expect.objectContaining({ flow_id: 'fid' }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

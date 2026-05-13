@@ -276,6 +276,10 @@ function softenCooldown(userId, residualMs) {
   const target = Date.now() - Math.max(0, config.QURL_SEND_COOLDOWN_MS - residualMs);
   const existing = sendCooldowns.get(userId);
   if (target < existing) {
+    // delete-then-set re-inserts at the end of Map iteration order so
+    // the bulk eviction in setCooldown (line ~248) preserves active
+    // users. Matches the same LRU pattern setCooldown uses; a bare
+    // `set` on an existing key would NOT re-order.
     sendCooldowns.delete(userId);
     sendCooldowns.set(userId, target);
   }
@@ -3449,6 +3453,12 @@ const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
 // whichever entry point they use.
 const SEND_FLOW_TTL_SECONDS = 180;
 
+// On a successful Cancel, soften (don't clear) the cooldown so 5s of
+// throttle remain — defuses the rapid /qurl file → Cancel → /qurl file
+// → Cancel spam vector (which would otherwise rack up supersedeOrCreate
+// DDB writes with zero throttle).
+const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
+
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
@@ -4251,12 +4261,28 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   }
 
   const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
-  const result = await transitionFlow(flow_id, row.version, {
-    stage_to: SEND_STAGE_AWAITING_CONFIRM,
-    payload: newPayload,
-    terminal: false,
-    set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
-  });
+  // Targeted catch around transitionFlow mirrors the same shape
+  // handleSendConfirmClick / handleSendCancelClick use around their
+  // DDB calls. A throw here would otherwise bubble to the dispatcher's
+  // outer catch which surfaces a generic "superseded" message —
+  // wrong, since nothing was actually superseded on a DDB blip.
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleSendUserSelect: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your pick right now. Try selecting recipients again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
   if (result.result === 'conflict') {
     return interaction.editReply({
       content: 'Send was superseded — re-run the command.',
@@ -4591,7 +4617,7 @@ async function handleSendCancelClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  softenCooldown(interaction.user.id, 5000);
+  softenCooldown(interaction.user.id, CANCEL_SOFTEN_RESIDUAL_MS);
   return interaction.editReply({
     content: 'Send cancelled.',
     components: [],
@@ -5690,6 +5716,16 @@ const commands = [
 
       // Gate: require guild API key for send/file/map/revoke.
       // SEND_LIKE_SUBCOMMANDS hoisted to module scope.
+      //
+      // For /qurl file + /qurl map this read is a fail-fast presence
+      // check — the resolved value is intentionally NOT threaded
+      // through to the back-half. handleSendConfirmClick re-fetches at
+      // Send-click time so a key rotation during the 3-minute confirm-
+      // card window is honored. Threading resolvedApiKey through here
+      // would break that rotation-safety property: a future optimization
+      // pass that "saves the redundant DDB read" would silently
+      // re-introduce stale-key dispatches. The handleQurlSlashSend
+      // docstring documents the contract explicitly.
       let resolvedApiKey = null;
       if (SEND_LIKE_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
