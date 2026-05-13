@@ -1826,7 +1826,9 @@ describe('handleAddRecipients', () => {
     expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
       send_id: 'send-fail',
       kind: 'file',
-      reason: expect.any(String),
+      // 'Connector down' has no status/code/name → classifyMintFailure
+      // falls through to 'unknown'. Pin the exact category, not any-string.
+      reason: 'unknown',
     }));
   });
 
@@ -1936,7 +1938,8 @@ describe('handleAddRecipients', () => {
     expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
       send_id: 'send-allfail',
       kind: 'location',
-      reason: expect.any(String),
+      // 'Connector upload failed' has no status/code/name → 'unknown'.
+      reason: 'unknown',
     }));
   });
 

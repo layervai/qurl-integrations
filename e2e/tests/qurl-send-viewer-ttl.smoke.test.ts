@@ -77,17 +77,19 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
       { viewerTtlSeconds: 30 },
     );
 
-    // Connector contract on success: hash + resource_id + qurl_link.
+    // Connector /upload contract: hash + resource_id (NOT qurl_link —
+    // minting is a separate /mint-link call; the bot's connector.js
+    // confirms /upload never returns qurl_link).
+    //
     // The 2026-05-13 incident shape (4xx from qurl-service) is caught
-    // *implicitly* via uploadFile's `!res.ok → throw` at qurl-api.ts:51
-    // — Jest fails the test on the thrown "Upload failed: 400 ..." and
+    // *implicitly* via uploadFile's `!res.ok → throw` at qurl-api.ts:51:
+    // Jest fails the test on the thrown "Upload failed: 400 ..." and
     // the connector regression is surfaced. We do NOT assert on
     // result.error here because the helper never returns with that
     // field set; if qurl-service ever changes the regression shape to
     // 200-with-error-body, uploadFile would need to be widened too.
     expect(result.hash).toMatch(/^[0-9a-f]{32}$/);
-    expect(result.qurl_link).toBeDefined();
-    expect(result.qurl_link).toMatch(/^https?:\/\//);
+    expect(result.resource_id).toBeDefined();
   });
 
   test('connector accepts no viewer_ttl_seconds (control case)', async () => {
@@ -107,6 +109,6 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
       env.QURL_API_KEY,
     );
     expect(result.hash).toMatch(/^[0-9a-f]{32}$/);
-    expect(result.qurl_link).toBeDefined();
+    expect(result.resource_id).toBeDefined();
   });
 });

@@ -61,21 +61,20 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ name: 'AbortError', cause: 'user-cancelled' })).toBe('unknown');
     });
 
-    test('AbortError with timeout-shaped message + no cause → unknown (ordering fence)', () => {
-      // Round-9 regression fence: the message-regex `/timeout/i` runs
-      // AFTER the AbortError branch. Pre-fix, an AbortError whose
-      // message happened to contain "timeout" would short-circuit
-      // through the regex and bypass the cause check — defeating the
-      // user-cancel disambiguation. Pin that bare AbortError + timeout-
-      // worded message still requires cause-corroboration.
+    test('AbortError with timeout-shaped message + no cause → unknown', () => {
+      // AbortError still requires cause-corroboration to bucket as
+      // timeout, regardless of the message string. Pinned for explicit
+      // coverage — the message-regex branch was removed in round 11
+      // so this is also implicitly covered by "no message-regex".
       expect(classifyMintFailure({ name: 'AbortError', message: 'aborted due to timeout' })).toBe('unknown');
     });
 
-    test('message-string fallback', () => {
-      // Some HTTP libs surface "timeout" only in the error message
-      // without a code/name. The regex catches those.
-      expect(classifyMintFailure({ message: 'request timeout exceeded' })).toBe('timeout');
-      expect(classifyMintFailure({ message: 'Timeout while waiting for response' })).toBe('timeout');
+    test('message-string fallback removed (round 11) — bare message → unknown', () => {
+      // The message-regex /timeout/i was removed because it over-matched
+      // ("not a timeout related error" used to bucket as timeout). The
+      // name/code paths above cover every real shape we've seen.
+      expect(classifyMintFailure({ message: 'request timeout exceeded' })).toBe('unknown');
+      expect(classifyMintFailure({ message: 'Timeout while waiting for response' })).toBe('unknown');
     });
   });
 
@@ -100,12 +99,13 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ message: 'something else broke' })).toBe('unknown');
     });
 
-    test('message containing the substring "timeout" in negative context still buckets as timeout', () => {
-      // Documents a known false-positive of the /timeout/i message regex:
-      // any substring match flips to `timeout`. Not exploitable today (no
-      // known upstream surfaces "not a timeout" messages), but pinning
-      // the boundary keeps the regex from drifting on a future tweak.
-      expect(classifyMintFailure({ message: 'not a timeout related error' })).toBe('timeout');
+    test('message-only error with no name/code → unknown (round-11 false-positive fix)', () => {
+      // Pre-round-11 this bucketed as `timeout` due to the /timeout/i
+      // substring match — the fix dropped the message-regex branch
+      // entirely. A bare message-only error now correctly resolves to
+      // `unknown`, preventing dashboard contamination from a future
+      // upstream message like "completed after timeout retry".
+      expect(classifyMintFailure({ message: 'not a timeout related error' })).toBe('unknown');
     });
 
     test('2xx status (should never happen in this code path, but pinned)', () => {

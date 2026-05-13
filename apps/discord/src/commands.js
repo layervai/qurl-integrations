@@ -67,10 +67,14 @@ function classifyMintFailure(error) {
     return 'unknown';
   }
   // libuv socket codes + undici/fetch TimeoutError DOMException — all
-  // unambiguous deadline-shaped failures.
+  // unambiguous deadline-shaped failures. The message-regex branch was
+  // removed (round 11): `/timeout/i.test(error.message)` over-matched
+  // any string containing the substring "timeout" (e.g. "not a timeout
+  // related error") and a future upstream message like "completed
+  // after timeout retry" would mis-bucket. The name/code paths above
+  // cover every real shape we've seen.
   if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
-      error.name === 'TimeoutError' ||
-      /timeout/i.test(error.message || '')) {
+      error.name === 'TimeoutError') {
     return 'timeout';
   }
   const status = error.status || 0;
@@ -2751,13 +2755,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    // `?? 'unknown'` is defensive against a future refactor that adds
-    // throwable work BEFORE either branch sets activeKind (e.g. a
-    // sendConfig validation step). Today this fallback is unreachable
-    // because activeKind is set on entry to each hasFile/hasLocation
-    // block; preserves the audit-event invariant that `kind` is always
-    // populated.
-    emitMintFailureAudit(error, { sendId, kind: activeKind ?? 'unknown' });
+    // activeKind is set on entry to each hasFile/hasLocation block, so
+    // it's guaranteed populated by the time the catch fires — no
+    // fallback needed. If a future refactor adds throwable work before
+    // the branches, the audit emission will land with kind=null and
+    // surface in CloudWatch (discoverable, not silent).
+    emitMintFailureAudit(error, { sendId, kind: activeKind });
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
