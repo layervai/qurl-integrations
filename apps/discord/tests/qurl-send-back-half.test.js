@@ -1625,8 +1625,11 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
       'executeSendPipeline: attachment.url failed isAllowedSourceUrl gate',
       expect.objectContaining({ user_id: expect.any(String) }),
     );
-    // Anchor `[0]` to a single observable editReply call — the SSRF
-    // gate fires before the "Preparing links…" edit on line 1014.
+    // Anchor `[0]` to a single observable call on each side. The
+    // SSRF gate fires before the "Preparing links for…" edit, so
+    // logger.warn fires exactly once (the SSRF breadcrumb) and
+    // editReply fires exactly once (cancelEdit's underlying call).
+    expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(interaction.editReply).toHaveBeenCalledTimes(1);
     const warnOrder = logger.warn.mock.invocationCallOrder[0];
     const editReplyOrder = interaction.editReply.mock.invocationCallOrder[0];
