@@ -327,6 +327,20 @@ describe('parseRecipientMentions — invalid tokens', () => {
       .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere'], cappedCount: 0 });
   });
 
+  test('@Everyone / @Here (capitalized) are NOT escaped — Discord parser is lowercase-only', () => {
+    // Discord's mass-mention tokenizer is itself case-sensitive
+    // (lowercase only). The parser's escape regex is `/@(everyone|here)/g`
+    // — INTENTIONALLY no `/i` flag. Widening to case-insensitive
+    // would needlessly mangle legitimate `@Everyone` paste artifacts.
+    // Pin the invariant so a future "defensive hardening" PR can't
+    // silently widen the regex without flipping this test.
+    const int = makeInteraction({ users: { '111': {} } });
+    expect(parseRecipientMentions('@Everyone <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@Everyone'], cappedCount: 0 });
+    expect(parseRecipientMentions('@Here <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@Here'], cappedCount: 0 });
+  });
+
   test('@everyone with trailing punctuation is also escaped (single-token residue)', () => {
     // The strip-pass split class `[\s,;|/]+` does NOT include `.`,
     // `:`, `!`, `?`, `-`, so `@everyone!` and `@everyone.fix` survive

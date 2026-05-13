@@ -69,6 +69,11 @@ const logger = require('./logger');
 // 1+ digit run) so a future ID-width change doesn't silently drop
 // real IDs. The format-validation that matters is "is this actually
 // a user/role Discord knows about" — fetched lazily on resolution.
+// Module-scope `/g` regexes are safe to share across calls: `matchAll`
+// clones the regex per-iteration, and `String.prototype.replace`
+// doesn't mutate `lastIndex`. (The `lastIndex` footgun applies only
+// to `RegExp.prototype.exec` / `RegExp.prototype.test` on the same
+// regex instance.)
 const USER_MENTION_RE = /<@!?(\d+)>/g;
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
 
@@ -126,6 +131,14 @@ function parseRecipientMentions(raw, interaction) {
   // the user didn't actually mistype. Gate strictly on `truncated` —
   // a naturally-MAX-length input with a stray `<` mid-string is
   // legitimate content that the strip-pass should surface as-is.
+  //
+  // The `lastOpen > lastClose` heuristic is intentionally one-sided:
+  // false-positive-resistant on residue (won't manufacture a fake
+  // token from a clean cut), lossy by design on legitimate content
+  // past the cut (e.g. `<literal>` in a paste). Acceptable since
+  // truncation only fires past MAX, and 7b.2 should narrow the
+  // slash-option's max_length so this branch is defense-in-depth
+  // rather than a user-visible loss.
   if (truncated) {
     const lastOpen = input.lastIndexOf('<');
     const lastClose = input.lastIndexOf('>');
@@ -250,6 +263,12 @@ function parseRecipientMentions(raw, interaction) {
     // the strip pass (residue split class doesn't include
     // punctuation) and would otherwise slip through. Replace all
     // occurrences so a token like `here@everyone` is fully fenced.
+    //
+    // INTENTIONALLY case-sensitive (no `/i` flag) \u2014 Discord's mass-
+    // mention parser is itself lowercase-only, so `@Everyone` is
+    // already inert. Widening would needlessly mangle legitimate
+    // `@Everyone` paste artifacts. The `@Everyone-not-escaped`
+    // test pins this invariant.
     invalidTokens.push(tok.replace(/@(everyone|here)/g, '@\u200b$1'));
   }
 
