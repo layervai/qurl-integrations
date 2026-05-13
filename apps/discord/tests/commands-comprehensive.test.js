@@ -441,6 +441,73 @@ describe('handleCommand', () => {
     const logger = require('../src/logger');
     expect(logger.error).toHaveBeenCalled();
   });
+
+  // ── /qurl send_file + /qurl send_location shortcut dispatcher ──
+  // The shortcuts route through handleSend with a `prefill` argument.
+  // Until the Step 3 share-flow refactor lands, handleSend's prefill
+  // branch acknowledges with a stub message and exits BEFORE the
+  // cooldown is set. These tests pin both contracts.
+
+  it('/qurl send_file routes to handleSend stub with prefill ack', async () => {
+    mockDb.getGuildApiKey.mockResolvedValueOnce('test-api-key');
+    const fakeAttachment = { id: 'att-1', name: 'demo.png', size: 1024, url: 'https://cdn.discordapp.com/x' };
+    const interaction = makeInteraction({
+      options: {
+        getSubcommand: jest.fn(() => 'send_file'),
+        getString: jest.fn(() => null),
+        getUser: jest.fn(() => null),
+        getAttachment: jest.fn((name, required) => {
+          if (name === 'file') return fakeAttachment;
+          return null;
+        }),
+        getInteger: jest.fn(() => null),
+        getFocused: jest.fn(() => ({ name: '', value: '' })),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('`/qurl send_file`'),
+      ephemeral: true,
+    }));
+  });
+
+  it('/qurl send_location routes to handleSend stub with prefill ack', async () => {
+    mockDb.getGuildApiKey.mockResolvedValueOnce('test-api-key');
+    const interaction = makeInteraction({
+      options: {
+        getSubcommand: jest.fn(() => 'send_location'),
+        getString: jest.fn(() => null),
+        getUser: jest.fn(() => null),
+        getAttachment: jest.fn(() => null),
+        getInteger: jest.fn(() => null),
+        getFocused: jest.fn(() => ({ name: '', value: '' })),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('`/qurl send_location`'),
+      ephemeral: true,
+    }));
+  });
+
+  it('shortcut stub does NOT set cooldown — spam-clicking shortcut must not lock the working /qurl send', async () => {
+    mockDb.getGuildApiKey.mockResolvedValueOnce('test-api-key');
+    const { sendCooldowns } = require('../src/commands')._test;
+    const interaction = makeInteraction({
+      user: { id: 'cooldown-test-user', username: 'CT' },
+      options: {
+        getSubcommand: jest.fn(() => 'send_location'),
+        getString: jest.fn(() => null),
+        getUser: jest.fn(() => null),
+        getAttachment: jest.fn(() => null),
+        getInteger: jest.fn(() => null),
+        getFocused: jest.fn(() => ({ name: '', value: '' })),
+      },
+    });
+    await handleCommand(interaction);
+    expect(sendCooldowns.has('cooldown-test-user')).toBe(false);
+  });
+
 });
 
 // Phase 1 monitoring — handleCommand emits a single audit event per
