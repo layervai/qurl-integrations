@@ -850,6 +850,24 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // early-exit `return interaction.editReply(...)` paths discard
 // observable result; the function exists for its user-visible
 // side-effects (editReply + DM fan-out + channel-announce).
+// Shared throw-message renderer for the entry-gate family. Bounds the
+// stringified value at 64 chars and appends `…` when truncation
+// happened, so a prod-log reader can tell "the caller passed exactly
+// these 64 chars" from "the value was longer and we cut it." The
+// String() coercion may itself throw on a pathological value with a
+// throwing Symbol.toPrimitive / toString — fall back to a sentinel so
+// the gate's intended throw isn't itself replaced by an opaque error
+// from the renderer.
+function truncForLog(v) {
+  let s;
+  try {
+    s = String(v);
+  } catch {
+    return '<unrepresentable>';
+  }
+  return s.length > 64 ? `${s.slice(0, 64)}…` : s;
+}
+
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -897,8 +915,10 @@ async function executeSendPipeline(interaction, {
     // keeps `undefined` visible (JSON.stringify drops it) and
     // avoids the JSON.stringify-throws-on-BigInt edge case.
     // Slice keeps the message bounded if a future caller hands
-    // a pathological value (1MB string, etc.).
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext).slice(0, 64)})`);
+    // a pathological value (1MB string, etc.). The `…` marker
+    // signals truncation to a prod-log reader so they don't
+    // assume the rendered value was the full payload.
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${truncForLog(isVoiceContext)})`);
   }
 
   // `target` allowed-set gate. Same silent-mis-render shape: an
@@ -971,12 +991,11 @@ async function executeSendPipeline(interaction, {
     // `null` from `{}` from `undefined` from `'u1'`. For the
     // empty-array branch, the value adds nothing (`[]` is the
     // observable shape), so render just "empty array".
-    // Slice the rendered value to 64 chars so a future caller
-    // that hands a pathological argument (1MB string, etc.)
-    // doesn't dump the whole blob into the rejection message.
+    // Same rendering rationale as the isVoiceContext gate above
+    // (typeof + truncated value with `…` marker on truncation).
     const detail = Array.isArray(recipients)
       ? 'empty array'
-      : `typeof=${typeof recipients}, value=${String(recipients).slice(0, 64)}`;
+      : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
     throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
   }
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {

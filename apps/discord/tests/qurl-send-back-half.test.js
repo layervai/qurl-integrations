@@ -1785,6 +1785,36 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       .rejects.toThrow(detailRe);
   });
 
+  test('rejection message truncates pathological values with `…` marker', async () => {
+    // Round-4 cr nit: a future caller handing a 1MB string would
+    // otherwise dump the whole blob into the rejection message
+    // AND into the prod logger.error. truncForLog slices at 64
+    // chars and appends `…` so a reader can tell "the caller
+    // passed exactly these 64 chars" from "we cut a longer value."
+    const interaction = makeInteraction();
+    const oneKB = 'x'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makePipelineParams(oneKB)))
+      .rejects.toThrow(/value=x{64}…/);
+    // Negative pin: a 64-char value should NOT have the marker
+    // (otherwise we can't distinguish exact-fit from truncated).
+    const exact64 = 'y'.repeat(64);
+    await expect(executeSendPipeline(interaction, makePipelineParams(exact64)))
+      .rejects.toThrow(/value=y{64}\)/);
+  });
+
+  test('rejection message falls back to <unrepresentable> if String() throws', async () => {
+    // Pathological caller-shape protection. Without the try/catch
+    // in truncForLog, the throw-message renderer would itself
+    // throw, replacing the gate's TypeError with an opaque
+    // "Cannot convert object to primitive value" — the exact
+    // worse-than-the-original-error shape the gate exists to
+    // prevent. Realistically unreachable from any honest caller.
+    const interaction = makeInteraction();
+    const hostile = { toString() { throw new Error('nope'); } };
+    await expect(executeSendPipeline(interaction, makePipelineParams(hostile)))
+      .rejects.toThrow(/value=<unrepresentable>/);
+  });
+
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
     // Read the cap via the same config module the gate consults so
     // the test doesn't drift if the cap is bumped.
