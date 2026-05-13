@@ -15,7 +15,7 @@
 //                                                 guild members of that role
 //   - Whitespace + commas as separators (lenient — the user typed it)
 //
-// What we reject (returned in `invalid_tokens`):
+// What we reject (returned in `invalidTokens`):
 //   - Channel mentions <#...>
 //   - Custom emoji <:name:id>
 //   - Bare plaintext (no `<@...>` wrapping) — there's no reliable way
@@ -23,7 +23,7 @@
 //     and silently dropping it would mask user typos.
 //
 // Output shape:
-//   { ids: [<user_id>, ...], invalid_tokens: [<raw_token>, ...] }
+//   { ids: [<user_id>, ...], invalidTokens: [<raw_token>, ...] }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
 // same per-send cap the in-channel form enforces), and excludes the
@@ -32,7 +32,7 @@
 // Role expansion uses interaction.guild.members.cache. If the cache is
 // cold (DM context, bot just restarted) the role expansion silently
 // resolves to no members for that role — the role mention lands in
-// `invalid_tokens` so the caller can surface "couldn't expand @team-blue,
+// `invalidTokens` so the caller can surface "couldn't expand @team-blue,
 // pick users from the menu instead." This matches the existing form's
 // posture (fall through to the picker rather than 404 a slash command).
 
@@ -55,8 +55,8 @@ const MAX_INPUT_LENGTH = 4000;
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / etc.) to
 // a flat user-ID list with the cap + self/bot filters applied. Returns
-// `{ ids, invalid_tokens }`; never throws on parse errors — invalid
-// tokens always land in `invalid_tokens` for caller-side surfacing.
+// `{ ids, invalidTokens }`; never throws on parse errors — invalid
+// tokens always land in `invalidTokens` for caller-side surfacing.
 //
 // `interaction` is the slash-command interaction; we need it for:
 //   - interaction.user.id  → exclude the sender from recipients
@@ -68,23 +68,31 @@ function parseRecipientMentions(raw, interaction) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalid_tokens: [] };
+    return { ids: [], invalidTokens: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
-  // pathological repetitions still allocate per-match strings.
-  const input = raw.length > MAX_INPUT_LENGTH ? raw.slice(0, MAX_INPUT_LENGTH) : raw;
+  // pathological repetitions still allocate per-match strings. If the
+  // cut lands inside a `<...>` token, drop the trailing partial so the
+  // strip-pass doesn't surface a manufactured "invalid token" the user
+  // didn't actually type wrong.
+  let input = raw.length > MAX_INPUT_LENGTH ? raw.slice(0, MAX_INPUT_LENGTH) : raw;
+  if (input.length === MAX_INPUT_LENGTH) {
+    const lastOpen = input.lastIndexOf('<');
+    const lastClose = input.lastIndexOf('>');
+    if (lastOpen > lastClose) {
+      input = input.slice(0, lastOpen);
+    }
+  }
   if (input.length === 0) {
-    return { ids: [], invalid_tokens: [] };
+    return { ids: [], invalidTokens: [] };
   }
 
   const ids = new Set();
-  const invalid_tokens = [];
+  const invalidTokens = [];
   const senderId = interaction.user?.id;
   const guild = interaction.guild;
 
-  // Pass 1: direct user mentions. Use `matchAll` (not `match`) so we
-  // get capture groups for every hit, not just a flat string list.
   for (const m of input.matchAll(USER_MENTION_RE)) {
     const id = m[1];
     if (id === senderId) continue;
@@ -97,23 +105,22 @@ function parseRecipientMentions(raw, interaction) {
     ids.add(id);
   }
 
-  // Pass 2: role mentions. Expand each role to its current member set
-  // and merge. A missing role / empty role / DM-context guild lands
-  // the raw role token in `invalid_tokens` so the caller can surface
+  // Role expansion: missing role / empty role / DM-context guild lands
+  // the raw role token in `invalidTokens` so the caller can surface
   // "couldn't resolve @role" rather than silently produce a smaller
   // recipient list.
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
-      invalid_tokens.push(m[0]);
+      invalidTokens.push(m[0]);
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
     // a role with no current members in the cache; same treatment.
     const members = role.members;
     if (!members || members.size === 0) {
-      invalid_tokens.push(m[0]);
+      invalidTokens.push(m[0]);
       continue;
     }
     let added = 0;
@@ -127,43 +134,40 @@ function parseRecipientMentions(raw, interaction) {
       // Role had members but they were all filtered (sender + bots).
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains you / bots."
-      invalid_tokens.push(m[0]);
+      invalidTokens.push(m[0]);
     }
   }
 
-  // Pass 3: detect non-mention tokens the user typed but we can't act
-  // on (channel mentions, custom emoji, bare names). Stripping the
-  // valid mentions and checking what's left lets us emit one invalid
-  // entry per stray token. Intentionally lossy on subtle parsing —
-  // the goal is "tell the user we didn't understand THIS bit", not
-  // a perfect tokenizer.
+  // Detect non-mention residue (channel mentions, custom emoji, bare
+  // names) by stripping valid mentions and surfacing what's left.
+  // Intentionally lossy on subtle parsing — the goal is "tell the user
+  // we didn't understand THIS bit", not a perfect tokenizer.
   const stripped = input
     .replace(USER_MENTION_RE, ' ')
     .replace(ROLE_MENTION_RE, ' ');
-  // Split on whitespace + commas; keep non-empty residue.
   const leftover = stripped.split(/[\s,]+/).filter(Boolean);
   for (const tok of leftover) {
-    invalid_tokens.push(tok);
+    invalidTokens.push(tok);
   }
 
   // Apply the per-send recipient cap. The cap is enforced by the
   // back-half too, but we want the user-visible feedback to say
   // "I capped at N" before they hit Send — not as a back-half error.
+  // Config validates QURL_SEND_MAX_RECIPIENTS via intEnv minPositive
+  // (see src/config.js), so trust the invariant — no paranoid guards.
   const cap = config.QURL_SEND_MAX_RECIPIENTS;
-  let final_ids = [...ids];
-  if (typeof cap === 'number' && Number.isFinite(cap) && cap > 0 && final_ids.length > cap) {
+  let finalIds = [...ids];
+  if (finalIds.length > cap) {
     logger.debug('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      raw_count: final_ids.length, cap,
+      raw_count: finalIds.length, cap,
     });
-    final_ids = final_ids.slice(0, cap);
+    finalIds = finalIds.slice(0, cap);
   }
 
-  return { ids: final_ids, invalid_tokens };
+  return { ids: finalIds, invalidTokens };
 }
 
 module.exports = {
   parseRecipientMentions,
-  // Exported for tests so they can assert the cap behavior without
-  // mutating config. Not intended for production callers.
-  __MAX_INPUT_LENGTH: MAX_INPUT_LENGTH,
+  MAX_INPUT_LENGTH,
 };
