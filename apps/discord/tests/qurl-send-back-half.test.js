@@ -1732,6 +1732,12 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
 // trip would surface deep inside mintLinksInBatches as "Failed
 // to create any links" with no caller-side breadcrumb.
 describe('executeSendPipeline — recipients shape + cap gates', () => {
+  // Read the cap once from the same config module the gate consults
+  // so the tests don't drift if the cap is bumped. Hoisting out of
+  // the individual tests (round-6 cr nit) keeps the `require` cost
+  // off the per-test path and centralizes the drift-anchor.
+  const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
+
   function makePipelineParams(recipients) {
     return {
       apiKey: 'apikey',
@@ -1835,11 +1841,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
-    // Read the cap via the same config module the gate consults so
-    // the test doesn't drift if the cap is bumped.
-    const cfg = require('../src/config');
-    const cap = cfg.QURL_SEND_MAX_RECIPIENTS;
-    const oversized = Array.from({ length: cap + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
       .rejects.toThrow(/recipients\.length .* exceeds QURL_SEND_MAX_RECIPIENTS/);
@@ -1872,8 +1874,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // calls is caught by exactly one test failing.
     const interaction = makeInteraction();
     const { setCooldown, isOnCooldown } = _test;
-    const cfg = require('../src/config');
-    const oversized = Array.from({ length: cfg.QURL_SEND_MAX_RECIPIENTS + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
     interaction.user = { id: 'recipients-oversized-test-user', username: 'test' };
     setCooldown(interaction.user.id);
     expect(isOnCooldown(interaction.user.id)).toBe(true);
@@ -1889,9 +1890,8 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // Boundary case: pin that `length === cap` is accepted (the
     // gate uses `>`, not `>=`). A future typo flipping `>` to
     // `>=` would otherwise only show up if a real send happened
-    // to hit exactly the cap. Compute the cap-sized array via
-    // the same config the gate reads, so a cap bump doesn't drift.
-    ['exactly at the cap', Array.from({ length: require('../src/config').QURL_SEND_MAX_RECIPIENTS }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
+    // to hit exactly the cap.
+    ['exactly at the cap', Array.from({ length: RECIPIENT_CAP }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
   ])('accepts the allowed shape: %s', async (_label, recipients) => {
     // Same shape as the other accept-path tests in this file:
     // assert the gate didn't reject. The pipeline mocks aren't

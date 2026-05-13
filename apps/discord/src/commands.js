@@ -971,7 +971,10 @@ async function executeSendPipeline(interaction, {
   // `personalMessage` shape gate. The DM-embed renderer expects
   // null OR string. A non-string object would silently stringify
   // to `[object Object]` in the recipient's DM — exact silent-
-  // regression shape the other gates fence.
+  // regression shape the other gates fence. Intentionally renders
+  // only `typeof`, NOT the value (no truncForLog), since a string
+  // here would be user-authored DM prose; we don't want even a
+  // truncated 64-char prefix of that landing in prod logs.
   if (personalMessage !== null && typeof personalMessage !== 'string') {
     clearCooldown(interaction.user.id);
     cancelEdit();
