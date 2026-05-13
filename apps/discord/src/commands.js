@@ -99,9 +99,10 @@ function emitMintFailureAudit(error, { sendId, kind }) {
   logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
     send_id: sendId,
     reason: classifyMintFailure(error),
-    // `?? null` (not `|| null`) preserves a legitimate `0` status (e.g.
-    // fetch-on-DNS-failure surfaces 0) or empty-string `apiCode` —
-    // collapsing those to null would lose a dimension silently.
+    // `?? null` (not `|| null`) preserves an empty-string `apiCode` —
+    // `|| null` would collapse it to null and lose a forensic dimension.
+    // (Status 0 doesn't apply: native fetch throws on transport errors
+    // rather than returning a 0-status response.)
     api_code: error?.apiCode ?? null,
     status_code: error?.status ?? null,
     kind,

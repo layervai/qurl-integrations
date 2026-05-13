@@ -10,8 +10,10 @@
  * session_duration → qurl-service contract entirely.
  *
  * This test pins the contract: an upload with viewer_ttl_seconds=30
- * must succeed and return a qurl_link. Closes that coverage gap so the
- * next regression of this shape doesn't ship green.
+ * must succeed (HTTP 2xx) and return hash + resource_id. Closes that
+ * coverage gap so the next regression of this shape doesn't ship green.
+ * (The /upload endpoint does NOT return qurl_link — minting is a
+ * separate /mint-link call; the smoke pins the upload contract only.)
  *
  * What this catches:
  *   - qurl-service tightens its session_duration floor again
