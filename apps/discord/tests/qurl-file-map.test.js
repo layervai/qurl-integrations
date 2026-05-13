@@ -549,6 +549,16 @@ describe('renderConfirmCardContent', () => {
     expect(out).toMatch(/Eiffel Tower/);
   });
 
+  test('unknown resourceType throws — forces an explicit branch for future types', () => {
+    // Round-7 (cr) added an explicit else-throw so a future resource
+    // type (audio, contact card, etc.) can't silently render as a
+    // location. Pins the contract.
+    expect(() => renderConfirmCardContent({
+      ...baseProps,
+      resourceType: 'audio',
+    })).toThrow(/unknown resourceType.*audio/);
+  });
+
   test('shows recipient preview (first 5) + remainder count', () => {
     const users = Array.from({ length: 7 }, (_, i) => makeUser(`10000000000000000${i + 1}`, { username: `u${i}` }));
     const out = renderConfirmCardContent({ ...baseProps, validRecipients: users });
@@ -1018,18 +1028,24 @@ describe('handleSendConfirmClick', () => {
     sendNonce: 'nonce-1',
   };
 
-  test('happy path → deleteFlow + executeSendPipeline invoked', async () => {
+  test('happy path → deferUpdate + deleteFlow + editReply "Preparing"', async () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    // The pipeline itself isn't reachable without heavy connector mocking,
-    // so we just assert deleteFlow fired AND update() landed on 'Preparing'.
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    // Defer-ack within the 3s window before any awaits — round-7 (cr)
+    // added this so resolveRecipientUsers + getGuildApiKey + deleteFlow
+    // can't blow Discord's hard ack deadline on a cold cache.
+    expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM, reason: 'terminal',
     }));
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
+    // After deferUpdate, the handler must NOT call .update directly
+    // (would double-ack). Verify by confirming the legacy update
+    // mock got no main-message updates.
+    expect(int.update).not.toHaveBeenCalled();
   });
 
   test('deleteFlow dedup loser → version-fenced "Recipients changed" reply, no pipeline call', async () => {
@@ -1041,11 +1057,11 @@ describe('handleSendConfirmClick', () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Recipients changed|re-click Send/i),
       ephemeral: true,
     }));
-    expect(int.update).not.toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing/),
     }));
   });
@@ -1070,7 +1086,7 @@ describe('handleSendConfirmClick', () => {
     // before the Promise.all that resolves the guild API key.
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/no longer reachable/),
     }));
   });
@@ -1086,7 +1102,7 @@ describe('handleSendConfirmClick', () => {
     jest.replaceProperty(config, 'QURL_API_KEY', null);
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/not configured|setup/i),
     }));
   });
@@ -1108,7 +1124,7 @@ describe('handleSendConfirmClick', () => {
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithGhost, version: 1 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
     // followUp announces the drop to the sender so they know the
@@ -1140,7 +1156,7 @@ describe('handleSendConfirmClick', () => {
     });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithFlaky, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
     // followUp distinguishes transient from "left" — retry copy.
@@ -1161,7 +1177,7 @@ describe('handleSendConfirmClick', () => {
     mockDb.getGuildApiKey.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up the qURL API key/),
       ephemeral: true,
     }));
@@ -1194,7 +1210,7 @@ describe('handleSendConfirmClick', () => {
       get() { throw new Error('cache exploded'); },
     });
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up recipients/),
       ephemeral: true,
     }));
@@ -1221,7 +1237,7 @@ describe('handleSendCancelClick', () => {
       expectedVersion: 3,
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(false);
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/cancelled/),
     }));
   });
@@ -1236,7 +1252,7 @@ describe('handleSendCancelClick', () => {
     sendCooldowns.set(SENDER_ID, cooldownAt);
     const int = makeInteraction();
     await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/already processed|card moved/),
       ephemeral: true,
     }));

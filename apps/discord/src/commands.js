@@ -3541,8 +3541,12 @@ async function resolveRecipientUsers(interaction, ids) {
 // and post-filter valid=[]. The user sees "all recipients dropped" and
 // has to re-run with bots removed. Acceptable since (a) it requires a
 // pathological mention list to trip, (b) the failure mode is loud
-// rather than silent. A future refactor can resolve-then-cap if this
-// becomes a real complaint.
+// rather than silent. Cost dimension worth flagging: 25 cache-miss
+// bot mentions still hit `members.fetch` 25 times (via batchSettled's
+// 5-at-a-time fan-out, in 5 rate-limit-budget burns) before partition
+// drops them all — small absolute cost but burns per-guild rate-limit
+// budget that legitimate ops elsewhere could use. The durable fix is
+// the v2 resolve-then-cap refactor tracked in #304.
 function partitionRecipients(users, senderId) {
   const valid = [];
   let droppedBots = 0;
@@ -3613,10 +3617,17 @@ function renderConfirmCardContent({
   warningsBlock, needsPicker,
 }) {
   let content = warningsBlock || '';
+  // Explicit branch per RESOURCE_TYPES value — a future resource
+  // type (audio, contact card, etc.) MUST add its own branch here.
+  // Throwing on unknown beats silently rendering the new type as a
+  // location, which would propagate the misdirection into every
+  // confirm card the new type ever shows.
   if (resourceType === RESOURCE_TYPES.FILE) {
     content += `📁 **Sending file:** ${resourceLabel}\n`;
-  } else {
+  } else if (resourceType === RESOURCE_TYPES.MAPS) {
     content += `🗺\u{FE0F} **Sending location:** ${resourceLabel}\n`;
+  } else {
+    throw new TypeError(`renderConfirmCardContent: unknown resourceType ${JSON.stringify(resourceType)}`);
   }
   if (needsPicker) {
     content += '\n**Pick recipients below** (1–'
@@ -4119,6 +4130,22 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 // dedup primitive (duplicate dispatch under future SQS at-least-once
 // must not double-send). Mirrors handleRevokeSelect's ordering.
 async function handleSendConfirmClick(interaction, { flow_id, row }) {
+  // `deferUpdate` at the very top so the chain
+  // `resolveRecipientUsers → getGuildApiKey → deleteFlow → editReply`
+  // can take more than Discord's 3-second hard ack deadline without
+  // surfacing as an "interaction failed" toast to the user. Cold
+  // cache + 25 cache-miss `members.fetch` calls in `resolveRecipientUsers`
+  // alone can chew through the budget. The .catch swallows the
+  // (rare) race where Discord's gateway already acked the
+  // interaction; a duplicate defer there throws InteractionAlreadyReplied
+  // and the subsequent editReply still works.
+  //
+  // All ephemeral error-replies below switch from `interaction.reply`
+  // to `interaction.followUp` (the interaction is now in the
+  // deferred state and `.reply` would throw); main-message updates
+  // switch from `interaction.update` to `interaction.editReply`.
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
   const payload = row.payload || {};
   // Re-fetch users at click time — defensive against members leaving
   // the guild between confirm and Send. Both unresolved buckets
@@ -4138,12 +4165,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
       flow_id, error: err && err.message,
     });
-    // `interaction.reply` (not safeReply / editReply) is intentional —
-    // this is a button-click dispatched by flow-dispatch, the
-    // interaction is in the unacked state at this point. A refactor
-    // that swaps in deferReply earlier in the handler would need to
-    // flip this to editReply too.
-    return interaction.reply({
+    return interaction.followUp({
       content: '❌ Could not look up recipients right now. Try **Send** again in a moment.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
@@ -4167,7 +4189,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
       flow_id, error: err && err.message,
     }));
-    return interaction.update({
+    return interaction.editReply({
       content: '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
@@ -4206,7 +4228,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     logger.error('handleSendConfirmClick: getGuildApiKey threw', {
       flow_id, error: err && err.message,
     });
-    return interaction.reply({
+    return interaction.followUp({
       content: '❌ Could not look up the qURL API key right now. Try **Send** again in a moment.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
@@ -4217,7 +4239,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     expectedVersion: row.version,
   });
   if (!deleteResult.deleted) {
-    return interaction.reply({
+    return interaction.followUp({
       content: 'Recipients changed before Send fired — re-check the card and click Send again.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
@@ -4225,7 +4247,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 
   const apiKey = guildApiKey || config.QURL_API_KEY;
   if (!apiKey) {
-    return interaction.update({
+    return interaction.editReply({
       content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
       components: [],
     }).catch(logIgnoredDiscordErr);
@@ -4234,7 +4256,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // Ack with a "Preparing send…" placeholder; executeSendPipeline
   // takes over the editReply from here. Matches handleSend's hand-off
   // shape at commands.js:~2307.
-  await interaction.update({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
+  await interaction.editReply({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
 
   // Surface partial drops (members who left the guild between confirm
   // and Send, OR who failed lookup transiently) as a separate
@@ -4290,19 +4312,24 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 // `clearCooldown` is gated on `deleted: true` so the cooldown stays
 // honored on the Cancel-loser branch.
 async function handleSendCancelClick(interaction, { flow_id, row }) {
+  // Defer-ack within the 3s window. The single deleteFlow call below
+  // is fast in the happy path, but a DDB blip or slow region could
+  // still blow the budget. Same pattern handleSendConfirmClick uses
+  // (deferUpdate at top, editReply / followUp downstream).
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const { deleted } = await deleteFlow(flow_id, {
     stage: SEND_STAGE_AWAITING_CONFIRM,
     reason: 'terminal',
     expectedVersion: row.version,
   });
   if (!deleted) {
-    return interaction.reply({
+    return interaction.followUp({
       content: 'This send was already processed or the card moved — re-check it.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
   clearCooldown(interaction.user.id);
-  return interaction.update({
+  return interaction.editReply({
     content: 'Send cancelled.',
     components: [],
   }).catch(logIgnoredDiscordErr);
@@ -5756,6 +5783,12 @@ registerFlow(SEND_USER_SELECT_CUSTOM_ID, {
   handler: handleSendUserSelect,
   siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
 });
+// siblingMessage intentionally omitted on the SEND + CANCEL custom-
+// id registrations below — flow-dispatch's `siblingMessages` map is
+// keyed by stage (not by customId), so the message registered on
+// USER_SELECT above is reachable from any of the three customIds
+// at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
+// test in qurl-file-map.test.js pins this contract.
 registerFlow(SEND_CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleSendConfirmClick,
