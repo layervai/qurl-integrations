@@ -985,6 +985,50 @@ describe('handleQurlMap — slash entry', () => {
     }));
   });
 
+  test('locationName strips bidi/zero-width control chars (RLO spoof defense)', async () => {
+    // Round-8 (cr): /qurl map's slash option is a new attack surface
+    // that bypasses the modal's natural friction. A crafted U+202E
+    // (RLO) in `location-name` would otherwise flip text direction
+    // in the rendered confirm card. sanitizeContentLabel strips it
+    // via NFKC + bidi/ZWS regex before markdown-escape.
+    const int = makeInteraction({
+      options: {
+        location: 'https://www.google.com/maps/place/Cafe',
+        // U+202E + visible text — bidi-reversed in any naive renderer.
+        'location-name': '‮Backwards Cafe',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.locationName).toBe('Backwards Cafe');
+    expect(payload.locationName).not.toContain('‮');
+  });
+
+  test('locationName 256-cap is codepoint-aware (no surrogate split)', async () => {
+    // Build a 257-char string whose char at index 254 is the first
+    // half of a surrogate pair. Naive .slice(0, 256) would land on
+    // the high surrogate alone and produce invalid UTF-16. The new
+    // sanitizeContentLabel uses Array.from + slice by codepoint.
+    // 4-byte emoji (e.g. 😀 = U+1F600) is a surrogate pair in UTF-16.
+    const name = 'a'.repeat(254) + '😀' + 'extra';  // 254 + 2 surrogates + 5 = 261 code units
+    const int = makeInteraction({
+      options: {
+        location: 'https://www.google.com/maps/place/Cafe',
+        'location-name': name,
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    // Result must NOT contain a lone surrogate. Validity check:
+    // Buffer encoding round-trips clean only when surrogates pair.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    expect(payload.locationName).not.toMatch(lone);
+  });
+
   test('forged interaction missing required `location` → actionable ephemeral, no flow row', async () => {
     // Discord enforces required options server-side; only a forged
     // interaction can hit the `getString('location', true)` throw.
@@ -1268,6 +1312,28 @@ describe('handleSendCancelClick', () => {
       expectedVersion: 11,
     }));
   });
+
+  test('deleteFlow throw → ephemeral retry, cooldown preserved (Send may still be in flight)', async () => {
+    // Round-8 (cr) added a targeted catch around the Cancel deleteFlow
+    // for symmetry with handleSendConfirmClick. A DDB blip during a
+    // Cancel click now surfaces an actionable ephemeral instead of
+    // the dispatcher's generic safety net. Cooldown stays set on the
+    // throw path — Send may still be in flight, the user's cooldown
+    // should honor the original Send invocation.
+    mockDeleteFlow.mockRejectedValueOnce(new Error('ddb gone'));
+    sendCooldowns.set(SENDER_ID, Date.now());
+    const int = makeInteraction();
+    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not cancel right now/),
+      ephemeral: true,
+    }));
+    expect(isOnCooldown(SENDER_ID)).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/deleteFlow threw/),
+      expect.objectContaining({ flow_id: 'fid' }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -1336,6 +1402,23 @@ describe('handleSendUserSelect', () => {
     }));
   });
 
+  test('defense-in-depth: cap-exceeded pick rejected even though picker setMaxValues makes it unreachable today', async () => {
+    // The picker's setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
+    // QURL_SEND_MAX_RECIPIENTS=25) = 10, so production users physically
+    // can't pick more than 25. But a future bump to either constant
+    // (or a forged interaction) could trip this branch — pin the
+    // guard so a refactor that drops it produces a visible failure.
+    // QURL_SEND_MAX_RECIPIENTS = 25 in the mocked config; build a
+    // pick of 26 to exceed it.
+    const users = Array.from({ length: 26 }, (_, i) => makeUser(`1000000000000000${String(i).padStart(2, '0')}`));
+    const int = makeSelectInteraction({ users });
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Pick at most/),
+    }));
+  });
+
   test('partial-bot pick → transitionFlow with non-bot users + warning surfaces on card', async () => {
     // Live picker UX: user selects 3 real users + 1 bot. Partition
     // drops the bot, valid=[u1,u2,u3], droppedBots=1. transitionFlow
@@ -1385,11 +1468,19 @@ describe('handleSendUserSelect', () => {
 // ──────────────────────────────────────────────────────────────
 
 describe('constants + exports', () => {
-  test('SEND_FLOW_TTL_SECONDS = 180', () => {
-    expect(SEND_FLOW_TTL_SECONDS).toBe(180);
-  });
-
-  test('all customIds are stable string prefixes', () => {
+  // customId pins catch wire-protocol drift. They look tautological
+  // (the constants are imported AND asserted against literals here)
+  // but the value is the string Discord routes button clicks to —
+  // a rename in production would invalidate every confirm card that
+  // shipped before the redeploy. The literal pin makes that
+  // breaking-change visible at test time. We do NOT pin
+  // SEND_FLOW_TTL_SECONDS / SEND_STAGE_AWAITING_CONFIRM as literals
+  // because those values are internal (not exposed to Discord) and
+  // the behavioral assertions in the handler describe blocks
+  // (`expect(mockSupersedeOrCreate).toHaveBeenCalledWith({stage:
+  // SEND_STAGE_AWAITING_CONFIRM, ...})`) already pin them by
+  // contract.
+  test('customIds match the wire-protocol values Discord routes against', () => {
     expect(SEND_USER_SELECT_CUSTOM_ID).toBe('qurl_send_user_select');
     expect(SEND_CONFIRM_SEND_CUSTOM_ID).toBe('qurl_send_confirm_send');
     expect(SEND_CONFIRM_CANCEL_CUSTOM_ID).toBe('qurl_send_confirm_cancel');
@@ -1398,18 +1489,6 @@ describe('constants + exports', () => {
   test('all customIds unique', () => {
     const ids = new Set([SEND_USER_SELECT_CUSTOM_ID, SEND_CONFIRM_SEND_CUSTOM_ID, SEND_CONFIRM_CANCEL_CUSTOM_ID]);
     expect(ids.size).toBe(3);
-  });
-
-  test('SEND_STAGE_AWAITING_CONFIRM = "awaiting_send_confirm"', () => {
-    expect(SEND_STAGE_AWAITING_CONFIRM).toBe('awaiting_send_confirm');
-  });
-
-  test('handlers are functions', () => {
-    expect(typeof handleQurlFile).toBe('function');
-    expect(typeof handleQurlMap).toBe('function');
-    expect(typeof handleSendUserSelect).toBe('function');
-    expect(typeof handleSendConfirmClick).toBe('function');
-    expect(typeof handleSendCancelClick).toBe('function');
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {

@@ -40,13 +40,39 @@ const STRIP_RE = new RegExp(
   'g',
 );
 
-function stripControlAndBidi(s) {
+// `maxCodepoints` defaults to 64 (display-name budget). Larger
+// surfaces (locationName, attachment.name → 256) pass their own
+// cap; the strip + NFKC + codepoint-slice contract is identical.
+// Empty / undefined input returns the 'Someone' fallback for the
+// display-name caller; surface-specific callers should branch on
+// the empty case themselves rather than render "Someone".
+function stripControlAndBidi(s, maxCodepoints = 64) {
   const cleaned = String(s ?? 'Someone').normalize('NFKC').replace(STRIP_RE, '');
   // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
-  // code units, so a 64-char cap on a name like `'A'.repeat(63) + emoji`
+  // code units, so a cap on a name like `'A'.repeat(63) + emoji`
   // would split a surrogate pair and Discord would render the lone high
   // surrogate as tofu. `Array.from(str)` iterates by codepoint.
-  return Array.from(cleaned).slice(0, 64).join('') || 'Someone';
+  return Array.from(cleaned).slice(0, maxCodepoints).join('') || 'Someone';
+}
+
+/**
+ * Sanitize a user-controlled label that lands inside Discord message
+ * content (NOT a display-name slot): strip bidi / zero-width / control
+ * chars (RLO spoofing defense), NFKC-normalize, codepoint-slice to
+ * `maxCodepoints`, then escape markdown so a crafted label can't
+ * inject `**bold**` / `[masked-link](https://evil)` / spoilers.
+ *
+ * Callers: /qurl map's `locationName`, /qurl file's
+ * `attachment.name`-derived `resourceLabel`. Returns '' on empty /
+ * all-strip-char input (NOT the 'Someone' display-name fallback) so
+ * the caller can render its own empty-state.
+ */
+function sanitizeContentLabel(s, maxCodepoints = 256) {
+  if (s == null || s === '') return '';
+  const cleaned = String(s).normalize('NFKC').replace(STRIP_RE, '');
+  if (!cleaned) return '';
+  const sliced = Array.from(cleaned).slice(0, maxCodepoints).join('');
+  return escapeDiscordMarkdown(sliced);
 }
 
 /**
@@ -84,4 +110,4 @@ function sanitizeDisplayNamePlain(s) {
   return stripControlAndBidi(s);
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain };
+module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel };

@@ -135,7 +135,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -425,13 +425,6 @@ function parseLocationInput(rawInput) {
     else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
     return { locationUrl: detectedUrl, locationName: name };
   }
-  // Pre-extraction the legacy /qurl send handler had TWO separate
-  // branches here ("detectedUrl but not Google Maps" vs "no
-  // detectedUrl"), each producing the same synthesized-search URL +
-  // raw-input name. The consolidated single branch below is
-  // intentional, NOT dead code — both prior cases collapse to the
-  // same behavior, so a maintainer is welcome to leave the
-  // simplification as-is.
   return {
     locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
     locationName: rawInput,
@@ -3979,11 +3972,13 @@ async function handleQurlFile(interaction) {
     },
     locationUrl: null,
     locationName: null,
-    // 256-char cap mirrors the map-path `locationName` cap so a future
-    // upload-pipeline change that loosens Discord's filename ceiling
-    // can't bloat the confirm card. String() coerces in case a
-    // hypothetical future caller hands a non-string name.
-    resourceLabel: escapeDiscordMarkdown(String(attachment.name).slice(0, 256)),
+    // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
+    // codepoint-aware 256-cap + markdown-escape. The codepoint slice
+    // prevents UTF-16 surrogate splits at the 256 boundary; the bidi
+    // strip defends against U+202E spoofing in filenames (a crafted
+    // upload could otherwise visually fake a different filename in
+    // the confirm card).
+    resourceLabel: sanitizeContentLabel(attachment.name),
   });
 }
 
@@ -4021,7 +4016,14 @@ async function handleQurlMap(interaction) {
   if (locationNameRaw && locationNameRaw.trim().length > 0) {
     locationName = locationNameRaw.trim();
   }
-  if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
+  // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
+  // codepoint-aware 256-cap + markdown-escape. The bidi strip is
+  // load-bearing here — /qurl map's slash option is a new
+  // attack surface (no modal friction) and a crafted U+202E in
+  // `location-name` would otherwise let the sender visually spoof
+  // a Maps URL inside the rendered confirm card. Also handles the
+  // UTF-16 surrogate-split risk at the 256 boundary.
+  if (locationName) locationName = sanitizeContentLabel(locationName);
 
   return handleQurlSlashSend(interaction, {
     resourceType: RESOURCE_TYPES.MAPS,
@@ -4037,10 +4039,25 @@ async function handleQurlMap(interaction) {
 // refreshes the TTL, so repeated picker churn doesn't expire the row
 // while the user is still deciding.
 async function handleSendUserSelect(interaction, { flow_id, row }) {
+  // `interaction.users` is a discord.js Collection in production,
+  // duck-typed as a Map in tests — both support `.values()` so the
+  // iteration here is interchangeable. A future test refactor that
+  // switches to Collection-only methods (`.first()`, `.filter()`)
+  // would break the test harness without breaking prod; keep the
+  // Map-compatible API surface.
   const selected = [...interaction.users.values()];
   if (selected.length === 0) {
     return interaction.deferUpdate().catch(logIgnoredDiscordErr);
   }
+  // `interaction.user.id` IS the original sender's ID — Discord
+  // enforces "only the user who triggered an ephemeral interaction
+  // can click its components" at the gateway level, so the clicker
+  // === the sender. This invariant is LOAD-BEARING: partitioning
+  // by clicker also drops the SENDER from the pick (droppedSelf),
+  // and a future refactor that flips the confirm card to
+  // non-ephemeral would need to thread the original sender ID
+  // through the flow payload + read it here instead.
+  //
   // No `resolveRecipientUsers` re-fetch here — Discord's
   // UserSelectMenu only surfaces users visible to the bot in this
   // guild, so picked User IDs are guild-bounded at the gateway-event
@@ -4317,11 +4334,28 @@ async function handleSendCancelClick(interaction, { flow_id, row }) {
   // still blow the budget. Same pattern handleSendConfirmClick uses
   // (deferUpdate at top, editReply / followUp downstream).
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
-  const { deleted } = await deleteFlow(flow_id, {
-    stage: SEND_STAGE_AWAITING_CONFIRM,
-    reason: 'terminal',
-    expectedVersion: row.version,
-  });
+  // Targeted catch around deleteFlow mirrors handleSendConfirmClick's
+  // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
+  // DDB throw propagates to the dispatcher's outer catch which
+  // surfaces a generic "superseded" message — wrong for Cancel
+  // (the user wanted to abort; the flow row may still be alive
+  // and Send may still be in flight, so cooldown stays set).
+  let deleted;
+  try {
+    ({ deleted } = await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: row.version,
+    }));
+  } catch (err) {
+    logger.error('handleSendCancelClick: deleteFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not cancel right now — try clicking **Cancel** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
   if (!deleted) {
     return interaction.followUp({
       content: 'This send was already processed or the card moved — re-check it.',
