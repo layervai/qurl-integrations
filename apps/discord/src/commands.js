@@ -4042,8 +4042,12 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // to fence (commands.js:~3196). `deleted: false` here now collapses
   // duplicate dispatch AND mid-flight picker mutation; both map to the
   // same user recovery ("the card moved under you, re-click Send").
+  // `interaction.guildId` is guaranteed non-null at this point —
+  // handleQurlSlashSend rejects DM invocations BEFORE the flow row
+  // is created, so a row at SEND_STAGE_AWAITING_CONFIRM only ever
+  // belongs to a guild interaction. No conditional fallback.
   const [guildApiKey, deleteResult] = await Promise.all([
-    interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
+    db.getGuildApiKey(interaction.guildId),
     deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
@@ -5268,7 +5272,8 @@ const commands = [
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
             '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n' +
-            '  2. Optionally `recipients:@a @b @role` — leave blank to pick from a menu\n' +
+            '  2. Optionally `recipients:@a @b @role` (up to 25 users via @mentions or role expansion) — '
+              + 'leave blank to pick from a menu (up to 10 at a time)\n' +
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +

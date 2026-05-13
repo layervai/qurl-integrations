@@ -761,6 +761,43 @@ describe('handleQurlFile — slash entry', () => {
     expect(reply.content).toMatch(/Unrecognized expiry/);
   });
 
+  test('all-bots cap-skew: cache-miss bots eat cap, real users get squeezed out', async () => {
+    // recipient-parser.js:214 strips bots ONLY when the cache reports
+    // them. Cache-MISS bots reach members.fetch, get resolved, then
+    // partitionRecipients drops them — but they've already eaten cap
+    // slots in the parser's `ids` array.
+    //
+    // Scenario: 26 mentions = 25 cache-miss bots + 1 real user. Parser
+    // caps at 25 (QURL_SEND_MAX_RECIPIENTS) → keeps the FIRST 25 IDs.
+    // 25 bots get fetched, partition drops them all, user1 was past
+    // the cap and never made it.
+    //
+    // This is the documented v1 cap-skew limitation
+    // (commands.js:partitionRecipients comment). Pin the failure mode
+    // so a future refactor that flips resolve-then-cap ordering can't
+    // silently "fix" it without consciously updating the comment.
+    const mkId = (n) => '1000000000000' + String(n).padStart(6, '0');
+    const realUser = mkId(25);  // beyond the cap
+    const bots = Array.from({ length: 25 }, (_, i) => mkId(i));
+    const mentions = [...bots, realUser].map((id) => `<@${id}>`).join(' ');
+    const fetchByID = {};
+    for (const id of bots) fetchByID[id] = makeUser(id, { bot: true });
+    fetchByID[realUser] = makeUser(realUser);  // resolves cleanly, but past cap
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: mentions },
+      guildMembers: {},  // ALL cache-miss
+      guildFetchByID: fetchByID,
+    });
+    await handleQurlFile(int, 'apikey');
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/No valid recipients/);
+    // 25 cache-miss bots passed the parser (consumed the cap), got
+    // resolved via fetch, then partition dropped them — droppedBots
+    // breakdown should surface.
+    expect(reply.content).toMatch(/bot/);
+  });
+
   test('inner catch on supersedeOrCreate throw clears cooldown + surfaces specific error', async () => {
     // The supersedeOrCreate-specific inner catch is the dominant
     // failure-path test for cooldown release — verifies the canonical
@@ -964,6 +1001,33 @@ describe('handleSendConfirmClick', () => {
       content: expect.stringMatching(/not configured|setup/i),
     }));
   });
+
+  test('partial-resolve at Send click — Send proceeds with remaining users, dropped IDs logged at debug', async () => {
+    // Mid-flight guild churn: row.payload.recipientIds = [u1, gone],
+    // at click time gone left the guild. resolveRecipientUsers returns
+    // {users:[u1's user], unresolvedIds:[gone]}. partitionRecipients
+    // keeps u1. Send should fire executeSendPipeline with the
+    // remaining valid user (NOT abort), with the silent-drop logged
+    // at debug level for forensic trail.
+    const gone = '100000000000000099';
+    const payloadWithGhost = { ...validPayload, recipientIds: [u1, gone] };
+    const int = makeInteraction({
+      guildMembers: { [u1]: {} },
+      guildFetchByID: { [gone]: 'unknown' },
+    });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithGhost, version: 1 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Preparing send/),
+    }));
+    // The silent-drop forensic log fires at debug level (not warn)
+    // because mid-flight guild churn is expected/normal behavior.
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/dropping unresolved/),
+      expect.objectContaining({ count: 1 }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -1078,6 +1142,31 @@ describe('handleSendUserSelect', () => {
     expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/bots/),
     }));
+  });
+
+  test('partial-bot pick → transitionFlow with non-bot users + warning surfaces on card', async () => {
+    // Live picker UX: user selects 3 real users + 1 bot. Partition
+    // drops the bot, valid=[u1,u2,u3], droppedBots=1. transitionFlow
+    // commits the new ids, the re-rendered card shows the warning
+    // line so the user knows the bot didn't make the cut.
+    const u2 = '100000000000000002';
+    const u3 = '100000000000000003';
+    const bot1 = '100000000000000099';
+    const int = makeSelectInteraction({
+      users: [
+        makeUser(u1),
+        makeUser(u2),
+        makeUser(u3),
+        makeUser(bot1, { bot: true }),
+      ],
+    });
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ recipientIds: [u1, u2, u3] }),
+    }));
+    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/bot/);
+    expect(updated.content).toMatch(/Sending file/);
   });
 
   test('transitionFlow conflict → superseded message', async () => {

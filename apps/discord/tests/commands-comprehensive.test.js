@@ -69,18 +69,11 @@ const makeEmbed = () => {
 };
 
 jest.mock('discord.js', () => {
-  // Option-builder chainable. Each option type (string/attachment/etc.)
-  // exposes the same surface; the mock returns a single shape so a new
-  // method added at the discord.js layer only needs one update here.
-  const makeOptionBuilder = () => ({
-    setName: jest.fn().mockReturnThis(),
-    setDescription: jest.fn().mockReturnThis(),
-    setRequired: jest.fn().mockReturnThis(),
-    setMaxLength: jest.fn().mockReturnThis(),
-    setMinLength: jest.fn().mockReturnThis(),
-    addChoices: jest.fn().mockReturnThis(),
-    setAutocomplete: jest.fn().mockReturnThis(),
-  });
+  // Shared option-builder chainable. Centralized so a new chained
+  // method at the discord.js layer (setMaxLength, addChoices, etc.)
+  // touches one site for the whole test suite — PR #301 regression
+  // surfaced this exact gap when setMaxLength was added.
+  const { makeOptionBuilder } = require('./helpers/discord-mock');
   return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
     const subBuilder = () => ({
