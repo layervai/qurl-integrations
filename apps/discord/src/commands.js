@@ -955,7 +955,10 @@ async function executeSendPipeline(interaction, {
   locationUrl,
   locationName,
   // MUTATES: the Add Recipients post-send branch dedupe-pushes into
-  // this array (see docstring's "transferred ownership" note).
+  // this array (see docstring's "transferred ownership" note). The
+  // initial `recipients` is already deduped + bot/sender-filtered by
+  // partitionRecipients (see contract pin at commands.js:~3552):
+  // upstream owns dedup, this function does NOT re-dedup the initial set.
   recipients,
   target,
   // REQUIRED — validated at entry (see assertion below). NO default
@@ -4052,14 +4055,19 @@ async function handleQurlFile(interaction) {
     });
   }
   if (!isAllowedFileType(attachment.contentType)) {
+    // Honest user error (picked the wrong file in the OS dialog); not
+    // an abuse signal. Unlock so retry with a valid file is immediate.
+    // SSRF rejection above stays throttled — probing the allow-list is
+    // an abuse signal, type/size rejections are not.
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: `❌ File type not allowed: \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\`.`,
       ephemeral: true,
     });
   }
   if (attachment.size > MAX_FILE_SIZE) {
-    // Match /qurl send's MB formatting at commands.js:~1994 so users
-    // see the same readable cap across all three entry points.
+    // Same shape as the file-type rejection — honest user error.
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: `❌ File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
       ephemeral: true,
@@ -4488,15 +4496,17 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // reply. Without this the user would see "Sent to N users" with no
   // signal that N != the count shown on the card. Distinct wording
   // for the two buckets — "left the server" is stable, "lookup
-  // blipped" encourages a fresh /qurl file rerun if they want to
-  // include the missed recipients.
+  // blipped" encourages a fresh rerun if they want to include the
+  // missed recipients. The rerun hint names the actual subcommand
+  // they invoked (resourceType drives /qurl file vs /qurl map).
   if (partialLeftCount > 0 || partialTransientCount > 0) {
+    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl file';
     const parts = [];
     if (partialLeftCount > 0) {
       parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
     }
     if (partialTransientCount > 0) {
-      parts.push(`${partialTransientCount} couldn't be looked up just now (rerun /qurl file to retry them)`);
+      parts.push(`${partialTransientCount} couldn't be looked up just now (rerun ${rerunCommand} to retry them)`);
     }
     await interaction.followUp({
       // "Attempting to" (not "sending to") so a downstream pipeline
@@ -5750,6 +5760,9 @@ const commands = [
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
+            '**Large servers (~1000+ members):** `/qurl send` with **Everyone in this channel** ' +
+            'or **Everyone in your voice channel** may skip members who appear offline in Discord. ' +
+            'If you need to reach a specific person for sure, prefer `/qurl file` or `/qurl map` with an explicit @mention.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });

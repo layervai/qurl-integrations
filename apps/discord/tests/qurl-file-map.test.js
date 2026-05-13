@@ -879,7 +879,7 @@ describe('handleQurlFile — slash entry', () => {
     }));
   });
 
-  test('rejects when attachment.url is not Discord CDN (SSRF gate)', async () => {
+  test('rejects when attachment.url is not Discord CDN (SSRF gate) — cooldown PRESERVED (probing defense)', async () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, url: 'https://evil.com/x.png' } },
     });
@@ -888,9 +888,12 @@ describe('handleQurlFile — slash entry', () => {
       content: expect.stringMatching(/source not allowed/),
       ephemeral: true,
     }));
+    // SSRF gate is the one rejection that KEEPS the cooldown — probing
+    // the allow-list is an abuse signal, not an honest user error.
+    expect(isOnCooldown(SENDER_ID)).toBe(true);
   });
 
-  test('rejects disallowed file type', async () => {
+  test('rejects disallowed file type — cooldown CLEARED (honest user error, not abuse)', async () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, contentType: 'application/x-evil-macroenabled' } },
     });
@@ -898,9 +901,12 @@ describe('handleQurlFile — slash entry', () => {
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/File type not allowed/),
     }));
+    // Honest user error → unlock retry immediately. Don't strand the
+    // user for 30s on a wrong-file-extension mistake.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
-  test('rejects file over size cap', async () => {
+  test('rejects file over size cap — cooldown CLEARED (honest user error)', async () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, size: 999_999_999 } },
     });
@@ -908,6 +914,7 @@ describe('handleQurlFile — slash entry', () => {
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/too large/),
     }));
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('happy path with recipients string — supersedeOrCreate called + confirm card rendered', async () => {
@@ -1407,7 +1414,7 @@ describe('handleSendConfirmClick', () => {
     );
   });
 
-  test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy', async () => {
+  test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy (/qurl file)', async () => {
     // transientFailureIds must be surfaced with retry-encouraging
     // copy (NOT "left the server" wording) — the buckets are split
     // + threaded so a 429/gateway blip doesn't read as "they're gone".
@@ -1422,7 +1429,8 @@ describe('handleSendConfirmClick', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
-    // followUp distinguishes transient from "left" — retry copy.
+    // followUp distinguishes transient from "left" — retry copy. The
+    // rerun command name is derived from payload.resourceType.
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/1 couldn't be looked up.*rerun \/qurl file/),
       ephemeral: true,
@@ -1431,6 +1439,37 @@ describe('handleSendConfirmClick', () => {
       expect.stringMatching(/partial drop at click time/),
       expect.objectContaining({ left: 0, transient: 1 }),
     );
+  });
+
+  test('partial transient lookup at Send click — /qurl map payload produces /qurl map rerun hint', async () => {
+    // The same handler serves /qurl file and /qurl map. A user who
+    // invoked /qurl map should NOT be told to "rerun /qurl file" in
+    // the transient-lookup followUp. resourceType=MAPS in the payload
+    // drives the hint.
+    const flaky = '100000000000000099';
+    const mapPayload = {
+      ...validPayload,
+      resourceType: 'maps',
+      attachment: null,
+      locationUrl: 'https://google.com/maps/place/x',
+      locationName: 'x',
+      resourceLabel: 'x',
+      recipientIds: [u1, flaky],
+    };
+    const int = makeInteraction({
+      guildMembers: { [u1]: {} },
+      guildFetchByID: { [flaky]: 'ratelimit' },
+    });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/rerun \/qurl map/),
+      ephemeral: true,
+    }));
+    // Must NOT say /qurl file when the user invoked /qurl map.
+    expect(int.followUp).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/rerun \/qurl file/),
+    }));
   });
 
   test('getGuildApiKey throw at click time → ephemeral retry, NO deleteFlow (row stays alive), cooldown cleared', async () => {
