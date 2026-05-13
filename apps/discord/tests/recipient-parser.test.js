@@ -95,6 +95,18 @@ describe('parseRecipientMentions — basic shape', () => {
       .toEqual({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
   });
 
+  test('cappedCount is 0 when input has no mentions (no false-positive cap signal)', () => {
+    // Empty-input tests above pin null/undefined/'' paths; this pins
+    // the "input had content but no mentions" case explicitly so a
+    // future caller reading `cappedCount > 0` to infer "user pasted
+    // too many" can't accidentally fire on plain bare-name input.
+    const int = makeInteraction();
+    const res = parseRecipientMentions('alice bob carol', int);
+    expect(res.ids).toEqual([]);
+    expect(res.cappedCount).toBe(0);
+    expect(res.invalidTokens).toEqual(['alice', 'bob', 'carol']);
+  });
+
   test('handles whitespace + comma + mixed separators', () => {
     const int = makeInteraction({
       users: { '111': {}, '222': {}, '333': {} },

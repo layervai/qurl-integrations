@@ -82,10 +82,17 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // than the user-visible truncation point.
 const MAX_INPUT_LENGTH = 4000;
 
+// Cap-overshoot logging threshold: above this multiple of the cap,
+// escalate the log level from `debug` to `warn`. The signal is "user
+// pasted an untrimmed list" (vs the more common "typed too many"),
+// which oncall benefits from seeing as a pattern.
+const MASSIVE_OVERSHOOT_MULTIPLIER = 2;
+
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / etc.) to
 // a flat user-ID list with the cap + self/bot filters applied. Returns
-// `{ ids, invalidTokens }`; never throws on parse errors — invalid
-// tokens always land in `invalidTokens` for caller-side surfacing.
+// `{ ids, invalidTokens, cappedCount }`; never throws on parse errors —
+// invalid tokens always land in `invalidTokens` for caller-side
+// surfacing.
 //
 // `interaction` is the slash-command interaction; we need it for:
 //   - interaction.user.id  → exclude the sender from recipients
@@ -192,7 +199,9 @@ function parseRecipientMentions(raw, interaction) {
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
-    // a role with no current members in the cache; same treatment.
+    // a role with no current members in the cache; treated like an
+    // unknown role (lands in invalidTokens so the caller can surface
+    // "couldn't expand @role").
     const members = role.members;
     if (!members || members.size === 0) {
       pushRoleErrorIfNew(roleId, m[0]);
@@ -252,13 +261,11 @@ function parseRecipientMentions(raw, interaction) {
   const finalIds = [...ids];
   const cappedCount = seen.size - ids.size;
   if (cappedCount > 0) {
-    // Massive over-cap (>2× the limit) signals user confusion —
-    // probably pasted a list they didn't trim. Surface at warn so
-    // oncall sees the pattern. Modest overshoot is normal-ish
-    // (typed too many) and stays at debug.
-    const logFn = seen.size > cap * 2 ? logger.warn : logger.debug;
+    const logFn = seen.size > cap * MASSIVE_OVERSHOOT_MULTIPLIER
+      ? logger.warn
+      : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      unique_count: seen.size, cap,
+      unique_count: seen.size, cap, capped_count: cappedCount,
     });
   }
 
