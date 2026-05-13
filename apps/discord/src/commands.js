@@ -906,12 +906,14 @@ async function executeSendPipeline(interaction, {
     components: [],
   }).catch(logIgnoredDiscordErr);
 
-  // Shared bookkeeping for every entry-gate failure. Nested so it
-  // closes over `interaction` + `cancelEdit` without parameter
-  // sprawl at the call sites. Always throws — a future control-
-  // flow change here (e.g. removing the throw) would surface as
-  // fall-through past every gate and trip the downstream
-  // invariants the gates exist to guard.
+  // Nested so it closes over `interaction` + `cancelEdit` without
+  // parameter sprawl at the call sites. The `@returns {never}`
+  // annotation lets static analysis treat the call as terminating.
+  /**
+   * @param {ErrorConstructor} ErrorCtor
+   * @param {string} msg
+   * @returns {never}
+   */
   function failGate(ErrorCtor, msg) {
     clearCooldown(interaction.user.id);
     cancelEdit();
