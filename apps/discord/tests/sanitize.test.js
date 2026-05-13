@@ -4,7 +4,7 @@
  * masked-link phishing in embeds, so adversarial coverage matters.
  */
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeContentLabel } = require('../src/utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeContentLabel, stripBidiAndControls } = require('../src/utils/sanitize');
 
 describe('sanitizeFilename', () => {
   it('strips path traversal', () => {
@@ -121,5 +121,40 @@ describe('sanitizeContentLabel', () => {
     // locationName/resourceLabel empty branch then renders nothing
     // or a default).
     expect(sanitizeContentLabel('​‌‍')).toBe('');
+  });
+});
+
+describe('stripBidiAndControls', () => {
+  it('strips RLO / ZWSP / control codepoints without escaping markdown', () => {
+    const rlo = String.fromCharCode(0x202E);
+    const zwsp = String.fromCharCode(0x200B);
+    const out = stripBidiAndControls(`Hello${rlo}World${zwsp}!`);
+    expect(out).toBe('HelloWorld!');
+  });
+
+  it('does NOT escape markdown chars (sanitizeContentLabel does, this helper does not)', () => {
+    // The personal-message path needs to layer bidi-strip BEFORE its
+    // own markdown escape; this helper must not pre-escape.
+    expect(stripBidiAndControls('**bold**')).toBe('**bold**');
+    expect(stripBidiAndControls('[link](url)')).toBe('[link](url)');
+  });
+
+  it('NFKC-normalizes before strip', () => {
+    // U+FEFF (BOM) and a few other strip codepoints are only matched
+    // against canonical forms after NFKC normalization.
+    const bom = String.fromCharCode(0xFEFF);
+    expect(stripBidiAndControls(`x${bom}y`)).toBe('xy');
+  });
+
+  it('returns empty for null/undefined input (no Someone fallback)', () => {
+    expect(stripBidiAndControls(null)).toBe('');
+    expect(stripBidiAndControls(undefined)).toBe('');
+  });
+
+  it('has no length cap (unlike stripControlAndBidi)', () => {
+    // sanitizeMessage owns its own 500-char cap downstream; this
+    // helper must not pre-truncate.
+    const big = 'a'.repeat(2000);
+    expect(stripBidiAndControls(big)).toBe(big);
   });
 });

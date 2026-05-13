@@ -135,7 +135,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -145,17 +145,26 @@ function safeUrlHost(url) {
 }
 
 function sanitizeMessage(msg) {
-  // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
-  // would otherwise be escaped and the mention regex wouldn't match). Then
-  // escape Discord markdown so a crafted message like
-  // `[Free Prizes](https://phishing.com)` can't render as a masked link.
-  // The `[mention]` literal we insert below is re-applied post-escape as a
-  // plain substitution so the brackets stay visible to the user.
-  // Sentinel survives the markdown-escape pass unchanged: it contains no
-  // chars in the escape regex ([\*~`>|\[\]()\\_]). Suffix/prefix of random
-  // hex so it can't collide with anything a user would plausibly type.
+  // Order matters:
+  //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
+  //     (stripBidiAndControls) \u2014 defends against U+202E RLO spoofing in
+  //     the recipient's DM body AND the sender's confirm-card preview.
+  //     Without this, a crafted personal-message containing U+202E
+  //     flips text direction in the rendered embed/blockquote.
+  //  2. Strip @-mention abuse next (the closing `>` of `<@123>` would
+  //     otherwise be escaped by step 3 and the mention regex wouldn't
+  //     match).
+  //  3. Escape Discord markdown so a crafted message like
+  //     `[Free Prizes](https://phishing.com)` can't render as a masked
+  //     link.
+  // The `[mention]` literal is re-applied post-escape as a plain
+  // substitution so the brackets stay visible to the user.
+  // Sentinel survives the markdown-escape pass unchanged: it contains
+  // no chars in the escape regex ([\*~`>|\[\]()\\_]). Suffix/prefix of
+  // random hex so it can't collide with anything a user would
+  // plausibly type.
   const MENTION_SENTINEL = 'XMENTIONX74caf3b0e79aXMENTIONX';
-  const stripped = msg
+  const stripped = stripBidiAndControls(msg)
     .replace(/@(everyone|here)/gi, '@\u200b$1')
     .replace(/<@[!&]?\d+>/g, MENTION_SENTINEL);
   return escapeDiscordMarkdown(stripped)
@@ -4051,7 +4060,9 @@ async function handleQurlFile(interaction) {
   // required server-side, so production interactions can't trip
   // these; a forged interaction is the only way. The targeted catch
   // produces an actionable ephemeral rather than letting the throw
-  // hit the dispatcher's generic safety net.
+  // hit the dispatcher's generic safety net. Cooldown stays set —
+  // forged interactions are abuse-aligned, same shape as the SSRF
+  // gate below.
   let attachment;
   try {
     attachment = interaction.options.getAttachment('attachment', true);
@@ -4065,6 +4076,9 @@ async function handleQurlFile(interaction) {
     });
   }
   if (!attachment || typeof attachment.url !== 'string') {
+    // Malformed attachment payload — Discord won't ship one, so this
+    // is forged-interaction territory. Cooldown stays set (abuse-
+    // aligned, same shape as SSRF).
     return interaction.reply({
       content: '❌ Attachment is missing or malformed.',
       ephemeral: true,
@@ -4140,7 +4154,8 @@ async function handleQurlMap(interaction) {
   // `getString('location', true)` throws on a missing option. Discord
   // enforces required server-side; only a forged interaction can hit
   // this. Targeted catch matches handleQurlFile's required-option
-  // guard for symmetry + actionable user-visible copy.
+  // guard for symmetry + actionable user-visible copy. Cooldown stays
+  // set on the forged-interaction throw branch — abuse-aligned.
   let locationValue;
   try {
     // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
@@ -4160,6 +4175,10 @@ async function handleQurlMap(interaction) {
   }
   const locationNameRaw = interaction.options.getString('location-name');
   if (locationValue.length === 0) {
+    // Honest user error (pasted only whitespace, or empty string) —
+    // unlock retry. Same shape as the file-type / size cap branches
+    // in handleQurlFile.
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Location is empty.',
       ephemeral: true,
@@ -4376,6 +4395,14 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // (the all-unresolved branch's copy below) — misleading, because
   // the bot left, not the recipients. Delete the flow row so a
   // future re-invite + rerun starts fresh.
+  //
+  // No `expectedVersion` on this deleteFlow (unlike the happy-path /
+  // empty-recipients / all-unresolved branches): if the bot has been
+  // kicked, every subsequent interaction for this guild is dead
+  // (Discord won't deliver further events to this bot for this guild)
+  // — there's no concurrent path that could bump the version. The
+  // version-gate fences picker-vs-Send and Cancel-vs-Send races; both
+  // require an active gateway session that bot-kicked has terminated.
   if (!interaction.guild) {
     await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,

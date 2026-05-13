@@ -288,6 +288,31 @@ describe('Helper functions', () => {
       expect(sanitizeMessage('@Everyone')).toContain('@\u200b');
       expect(sanitizeMessage('@HERE')).toContain('@\u200b');
     });
+
+    it('strips bidi / zero-width / control codepoints (RLO spoofing defense)', () => {
+      // U+202E (RLO) flips text direction in Discord renders \u2014 a
+      // crafted personal-message could visually spoof phishing in the
+      // recipient's DM body AND the sender's confirm-card preview.
+      const rlo = String.fromCharCode(0x202E);
+      const zwsp = String.fromCharCode(0x200B);
+      const result = sanitizeMessage(`Hello${rlo}gnitsihP${zwsp}world`);
+      expect(result).not.toMatch(/[\u202e\u200b]/);
+      expect(result).toContain('Hello');
+      expect(result).toContain('gnitsihP');
+      expect(result).toContain('world');
+    });
+
+    it('strips zero-width chars that would otherwise obfuscate @-mentions', () => {
+      // ZWSP between `@` and `everyone` previously slipped past the
+      // @-mention regex because the literal sequence didn't match.
+      // sanitizeMessage now strips bidi/zero-width FIRST, so the
+      // @-mention defense catches the obfuscated form too.
+      const obfuscated = '@every\u200bone heads up';
+      const result = sanitizeMessage(obfuscated);
+      // ZWSP stripped, @everyone caught + neutered with \u200b INSERTED
+      // by the @-mention defense (different position).
+      expect(result).toMatch(/@\u200beveryone/i);
+    });
   });
 
   // -----------------------------------------------------------------------

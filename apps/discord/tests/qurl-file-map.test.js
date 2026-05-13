@@ -1258,7 +1258,7 @@ describe('handleQurlMap — slash entry', () => {
     expect(payload.locationName).toBe('Custom Label');
   });
 
-  test('empty location string → ephemeral error', async () => {
+  test('empty location string → ephemeral error, cooldown CLEARED (honest user error)', async () => {
     const int = makeInteraction({
       options: { location: '   ', recipients: '<@100000000000000001>' },
     });
@@ -1266,6 +1266,10 @@ describe('handleQurlMap — slash entry', () => {
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/empty/),
     }));
+    // Honest user error (whitespace-only paste) — don't strand them
+    // for 30s. Same shape as the file-type / size-cap branches in
+    // handleQurlFile.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('rejects in DM context', async () => {

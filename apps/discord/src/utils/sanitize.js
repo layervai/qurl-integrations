@@ -110,4 +110,21 @@ function sanitizeDisplayNamePlain(s) {
   return stripControlAndBidi(s);
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel };
+/**
+ * Strip bidi / zero-width / control / line-separator codepoints from
+ * a user-controlled message body without any length cap, NFKC pass,
+ * or markdown escape. Used by sanitizeMessage to layer the same RLO
+ * spoofing defense onto the personal-message surface that
+ * sanitizeContentLabel applies to labels — without disrupting
+ * sanitizeMessage's own slice / markdown-escape ordering.
+ *
+ * NFKC IS applied first because U+FEFF (BOM) and a few other strip
+ * codepoints are only matched against canonical forms after NFKC.
+ * No fallback string — empty input returns empty output (the
+ * sanitizeMessage caller has its own empty-message handling).
+ */
+function stripBidiAndControls(s) {
+  return String(s ?? '').normalize('NFKC').replace(STRIP_RE, '');
+}
+
+module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls };
