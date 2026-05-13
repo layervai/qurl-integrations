@@ -789,6 +789,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     when `resourceType === RESOURCE_TYPES.FILE`.
 //   - `expiresIn` must be a key of `EXPIRY_LABELS`.
 //   - `personalMessage` must be `null` or `string`.
+//   - `recipients` must be a non-empty array of length
+//     ≤ `config.QURL_SEND_MAX_RECIPIENTS`.
 // Each gate clears the caller's stale ephemeral with a cancel-
 // edit then throws — the user still sees the outer catch's
 // generic followUp, but the gate's specific cancel replaces
@@ -945,6 +947,27 @@ async function executeSendPipeline(interaction, {
     cancelEdit();
     throw new TypeError(`executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
   }
+
+  // `recipients` shape + cap gates. The docstring's "non-empty,
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by handleSend's
+  // front-half today; this is defense-in-depth for a future caller
+  // (deserialized payload, programmatic retry, admin tool) that
+  // skips those checks. Trips here would otherwise surface deep
+  // inside mintLinksInBatches as "Failed to create any links" with
+  // no caller-side breadcrumb. The non-empty check ALSO fences
+  // line 948's `recipients.length` read — a non-array reaching
+  // that line would crash on `.length` lookup against undefined.
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${Array.isArray(recipients) ? 'empty array' : `typeof=${typeof recipients}`})`);
+  }
+  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new RangeError(`executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+  }
+
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
   const sendId = crypto.randomUUID();

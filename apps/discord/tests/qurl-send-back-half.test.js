@@ -1724,3 +1724,99 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
   });
 });
 
+// Defensive guards for the `recipients` invariants — non-empty and
+// ≤ config.QURL_SEND_MAX_RECIPIENTS. handleSend's front-half
+// already enforces these before the pipeline call; the gates are
+// defense-in-depth for a future caller (deserialized payload,
+// programmatic retry) that skips those checks. Without them, a
+// trip would surface deep inside mintLinksInBatches as "Failed
+// to create any links" with no caller-side breadcrumb.
+describe('executeSendPipeline — recipients shape + cap gates', () => {
+  function makePipelineParams(recipients) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients,
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['empty array', []],
+    ['null', null],
+    ['undefined', undefined],
+    ['plain object (not array-like)', {}],
+    ['string (not array)', 'u1'],
+    ['number', 42],
+  ])('throws TypeError on non-array-or-empty recipients (%s)', async (_label, recipients) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+      .rejects.toThrow(/recipients must be a non-empty array/);
+    // Cancel-edit fires before the throw — same shape as the other
+    // entry gates.
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
+    // Read the cap via the same config module the gate consults so
+    // the test doesn't drift if the cap is bumped.
+    const cfg = require('../src/config');
+    const cap = cfg.QURL_SEND_MAX_RECIPIENTS;
+    const oversized = Array.from({ length: cap + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+      .rejects.toThrow(/recipients\.length .* exceeds QURL_SEND_MAX_RECIPIENTS/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test('clears cooldown on the recipients-empty path (same convention as other gates)', async () => {
+    const interaction = makeInteraction();
+    const { setCooldown, isOnCooldown, clearCooldown } = _test;
+    interaction.user = { id: 'recipients-empty-test-user', username: 'test' };
+    setCooldown(interaction.user.id);
+    expect(isOnCooldown(interaction.user.id)).toBe(true);
+
+    await expect(executeSendPipeline(interaction, makePipelineParams([])))
+      .rejects.toThrow(TypeError);
+    expect(isOnCooldown(interaction.user.id)).toBe(false);
+
+    if (typeof clearCooldown === 'function') {
+      clearCooldown(interaction.user.id);
+    }
+  });
+
+  test.each([
+    ['one recipient', [{ id: 'u1', username: 'u1' }]],
+    ['several recipients', Array.from({ length: 5 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
+  ])('accepts the allowed shape: %s', async (_label, recipients) => {
+    // Same shape as the other accept-path tests: assert the gate
+    // didn't reject. The pipeline mocks aren't fully wired here,
+    // so anything past the gate is fine (it'll fail downstream
+    // with a different message).
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(recipients));
+    } catch (err) {
+      expect(err.message).not.toMatch(/recipients must be a non-empty array/);
+      expect(err.message).not.toMatch(/exceeds QURL_SEND_MAX_RECIPIENTS/);
+      return;
+    }
+  });
+});
+
