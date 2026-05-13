@@ -447,12 +447,24 @@ describe('parseLocationInput', () => {
     expect(r.locationName).toBe('Eiffel Tower, Paris');
   });
 
-  test('URL that matches a pattern but fails isGoogleMapsURL falls through to synth-search', () => {
-    // A URL hosted at a non-Google domain that happens to match the
-    // shape — must be handled by isGoogleMapsURL re-validation, not the
-    // pattern match alone.
+  test('plain non-URL text falls through to synth-search', () => {
     const r = parseLocationInput('not a url just plain text input');
     expect(r.locationUrl).toContain('google.com/maps/search');
+  });
+
+  test('https URL that does NOT match MAPS_URL_PATTERNS is treated as plain text and synth-searched', () => {
+    // The MAPS_URL_PATTERNS regexes are quite specific (host + path
+    // shape). A non-Google https URL fails them all, so parseLocationInput
+    // falls through to the plain-text branch and synth-searches with
+    // the raw input as the search query. isGoogleMapsURL re-validation
+    // applies inside parseLocationInput when an extracted URL pattern
+    // matches — the fall-through covers the "doesn't even match the
+    // regex" case directly.
+    const r = parseLocationInput('https://evil.example.com/maps/place/x');
+    expect(r.locationUrl).toContain('google.com/maps/search');
+    // The original URL is encoded into the search query, not used as
+    // the locationUrl.
+    expect(r.locationUrl).not.toContain('evil.example.com/maps/place');
   });
 
   test('malformed %-encoding in the input does not throw', () => {
@@ -1340,7 +1352,7 @@ describe('handleSendConfirmClick', () => {
     }));
   });
 
-  test('no apiKey resolved → tells user setup is needed', async () => {
+  test('no apiKey resolved → tells user setup is needed, cooldown cleared (admin action recovers)', async () => {
     mockDb.getGuildApiKey.mockResolvedValueOnce(null);
     // jest.replaceProperty restores automatically on test teardown
     // and is parallel-test-safe — beats hand-rolled
@@ -1350,10 +1362,14 @@ describe('handleSendConfirmClick', () => {
     const config = require('../src/config');
     jest.replaceProperty(config, 'QURL_API_KEY', null);
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    sendCooldowns.set(SENDER_ID, Date.now());
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/not configured|setup/i),
     }));
+    // Admin action required to recover → don't strand the user for
+    // 30s after `/qurl setup` completes.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('partial-resolve at Send click — Send proceeds with remaining users, drop surfaced via followUp + info log', async () => {
@@ -1417,12 +1433,14 @@ describe('handleSendConfirmClick', () => {
     );
   });
 
-  test('getGuildApiKey throw at click time → ephemeral retry, NO deleteFlow (row stays alive)', async () => {
+  test('getGuildApiKey throw at click time → ephemeral retry, NO deleteFlow (row stays alive), cooldown cleared', async () => {
     // getGuildApiKey runs BEFORE deleteFlow so a DDB blip doesn't
     // burn the flow row. User can re-click Send within the 3-min TTL
-    // once the blip clears.
+    // once the blip clears. clearCooldown unlocks retry so the user
+    // isn't stranded for the full 30s window on a transient blip.
     mockDb.getGuildApiKey.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    sendCooldowns.set(SENDER_ID, Date.now());
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up the qURL API key/),
@@ -1433,6 +1451,8 @@ describe('handleSendConfirmClick', () => {
       expect.stringMatching(/getGuildApiKey threw/),
       expect.objectContaining({ flow_id: 'fid' }),
     );
+    // Zero side effects → cooldown cleared for immediate retry.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('resolveRecipientUsers throw at click time → ephemeral retry message, NO deleteFlow', async () => {
@@ -1456,6 +1476,7 @@ describe('handleSendConfirmClick', () => {
     Object.defineProperty(int.guild, 'members', {
       get() { throw new Error('cache exploded'); },
     });
+    sendCooldowns.set(SENDER_ID, Date.now());
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up recipients/),
@@ -1466,6 +1487,8 @@ describe('handleSendConfirmClick', () => {
       expect.stringMatching(/resolveRecipientUsers threw/),
       expect.objectContaining({ flow_id: 'fid' }),
     );
+    // Zero side effects → cooldown cleared for immediate retry.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('forged Send click with empty recipientIds → distinct copy + deleteFlow (not the "all left" copy)', async () => {
@@ -1492,15 +1515,17 @@ describe('handleSendConfirmClick', () => {
     }));
   });
 
-  test('bot kicked between confirm and Send → distinct ephemeral, flow row deleted', async () => {
+  test('bot kicked between confirm and Send → distinct ephemeral, flow row deleted, cooldown cleared', async () => {
     // When the bot is removed from the guild between confirm and
     // Send, `interaction.guild` is null. Without an explicit guard,
     // resolveRecipientUsers returns every recipientId in unresolvedIds
     // and the user sees "recipients left the server" — misleading.
     // Pin the dedicated copy + deleteFlow so the flow row doesn't
-    // linger.
+    // linger. Cooldown clears so the user can re-run immediately
+    // after the admin re-invites the bot.
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     int.guild = null;
+    sendCooldowns.set(SENDER_ID, Date.now());
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/bot is no longer in this server/i),
@@ -1510,6 +1535,7 @@ describe('handleSendConfirmClick', () => {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
     }));
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
     // The misleading "left the server" copy must NOT fire here.
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/no longer reachable/i),

@@ -3987,31 +3987,36 @@ async function handleQurlSlashSend(interaction, params) {
 }
 
 async function handleQurlFile(interaction) {
-  // Cooldown gate at the EARLIEST entry point so invalid inputs
-  // (malformed attachment, SSRF host, wrong type, oversize) are
-  // throttled too — matches handleSend's pattern at commands.js:~1677.
-  // setCooldown is shared with /qurl send and /qurl map via the
-  // sendCooldowns Map; tests pin the cross-command contract.
-  if (interaction.guildId && interaction.guild) {
-    if (isOnCooldown(interaction.user.id)) {
-      return interaction.reply({
-        content: 'Please wait before sending again.',
-        ephemeral: true,
-      });
-    }
-    setCooldown(interaction.user.id);
+  // DM rejection first — no cooldown burned on a guild-only invocation
+  // attempted from DMs.
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
   }
 
-  // UX fast-fail. The real concurrency-slot claim happens inside
-  // executeSendPipeline (commands.js:~1043); this pre-check is best-
-  // effort — by Send-click time the cap state can have shifted, in
-  // which case the back-half's guard fires instead.
+  // UX fast-fail BEFORE setCooldown — "bot too busy" is server-side
+  // backpressure, not user fault; locking the user out for 30s on a
+  // capacity rejection would be punitive.
   if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
     return interaction.reply({
       content: 'The bot is processing too many file sends right now. Please try again in a moment.',
       ephemeral: true,
     });
   }
+
+  // Cooldown gate at entry — after capacity backpressure but BEFORE
+  // any input-validation so invalid inputs (malformed attachment,
+  // SSRF host, wrong type, oversize) still throttle. Matches the
+  // pattern at commands.js:~1677.
+  if (isOnCooldown(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before sending again.',
+      ephemeral: true,
+    });
+  }
+  setCooldown(interaction.user.id);
 
   // Required-option lookups via `getAttachment(..., true)` /
   // `getString(..., true)` throw on a missing option. Discord enforces
@@ -4082,18 +4087,22 @@ async function handleQurlFile(interaction) {
 }
 
 async function handleQurlMap(interaction) {
-  // Cooldown gate at entry — same pattern handleQurlFile uses.
-  // Cross-command bucket (sendCooldowns) shared with /qurl send and
-  // /qurl file; tests pin the contract.
-  if (interaction.guildId && interaction.guild) {
-    if (isOnCooldown(interaction.user.id)) {
-      return interaction.reply({
-        content: 'Please wait before sending again.',
-        ephemeral: true,
-      });
-    }
-    setCooldown(interaction.user.id);
+  // DM rejection first — no cooldown burned on a DM invocation.
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
   }
+  // Cooldown gate — cross-command bucket shared with /qurl send and
+  // /qurl file (sendCooldowns Map). Tests pin the contract.
+  if (isOnCooldown(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before sending again.',
+      ephemeral: true,
+    });
+  }
+  setCooldown(interaction.user.id);
 
   // `getString('location', true)` throws on a missing option. Discord
   // enforces required server-side; only a forged interaction can hit
@@ -4323,6 +4332,9 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on bot-kicked failed', {
       flow_id, error: err && err.message,
     }));
+    // Zero side effects (no DMs sent, no API calls) — unlock retry
+    // immediately after re-invite without paying the cooldown window.
+    clearCooldown(interaction.user.id);
     return interaction.editReply({
       content: '❌ qURL bot is no longer in this server. Re-invite the bot and re-run the command.',
       components: [],
@@ -4368,6 +4380,9 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
       flow_id, error: err && err.message,
     });
+    // Zero side effects — unlock retry so the user can re-click Send
+    // immediately after the transient blip clears.
+    clearCooldown(interaction.user.id);
     return interaction.followUp({
       content: '❌ Could not look up recipients right now. Try **Send** again in a moment.',
       ephemeral: true,
@@ -4431,6 +4446,9 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     logger.error('handleSendConfirmClick: getGuildApiKey threw', {
       flow_id, error: err && err.message,
     });
+    // Flow row stays alive; unlock retry so the user isn't stranded
+    // for 30s waiting for a DDB blip to clear.
+    clearCooldown(interaction.user.id);
     return interaction.followUp({
       content: '❌ Could not look up the qURL API key right now. Try **Send** again in a moment.',
       ephemeral: true,
@@ -4450,6 +4468,9 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 
   const apiKey = guildApiKey || config.QURL_API_KEY;
   if (!apiKey) {
+    // Admin action required to recover (`/qurl setup`); unlock retry so
+    // the user isn't stranded for 30s after the admin completes setup.
+    clearCooldown(interaction.user.id);
     return interaction.editReply({
       content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
       components: [],
