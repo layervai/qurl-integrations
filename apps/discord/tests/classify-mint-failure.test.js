@@ -70,6 +70,14 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ message: 'something else broke' })).toBe('unknown');
     });
 
+    test('message containing the substring "timeout" in negative context still buckets as timeout', () => {
+      // Documents a known false-positive of the /timeout/i message regex:
+      // any substring match flips to `timeout`. Not exploitable today (no
+      // known upstream surfaces "not a timeout" messages), but pinning
+      // the boundary keeps the regex from drifting on a future tweak.
+      expect(classifyMintFailure({ message: 'not a timeout related error' })).toBe('timeout');
+    });
+
     test('2xx status (should never happen in this code path, but pinned)', () => {
       // The catch block only fires on thrown errors, but if a caller
       // somehow synthesized a 2xx error object, it should NOT bucket

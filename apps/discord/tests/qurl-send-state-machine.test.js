@@ -2072,8 +2072,13 @@ describe('handleSend — additional branch coverage', () => {
     }));
   });
 
-  // C14 — quota_exceeded on the file path uses the "re-upload" copy.
-  it('quota_exceeded on the file path tells the user to re-upload', async () => {
+  // C14 — quota_exceeded on the file path uses the "re-upload" copy
+  // AND must NOT emit qurl_send_create_link_failure (viral upload is a
+  // normal product condition; emitting would page on-call). Removing the
+  // `if (error.apiCode !== 'quota_exceeded')` guard in commands.js
+  // catch-block would silently regress to paging on every viral upload —
+  // the assertion below pins that.
+  it('quota_exceeded on the file path tells the user to re-upload AND skips QURL_SEND_CREATE_LINK_FAILURE', async () => {
     const err = new Error('upstream quota');
     err.apiCode = 'quota_exceeded';
     mockDownloadAndUpload.mockRejectedValueOnce(err);
@@ -2090,6 +2095,35 @@ describe('handleSend — additional branch coverage', () => {
     await cmd.execute(interaction);
     expect(interaction.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringContaining('re-upload the file'),
+    }));
+    const auditCalls = logger.audit.mock.calls.filter(
+      c => c[0] === 'qurl_send_create_link_failure',
+    );
+    expect(auditCalls).toHaveLength(0);
+  });
+
+  // C14b — non-quota mint failure DOES emit qurl_send_create_link_failure
+  // with the right reason/kind/status_code. Pairs with C14: together they
+  // pin both branches of the catch-block's quota_exceeded guard.
+  it('non-quota mint failure emits QURL_SEND_CREATE_LINK_FAILURE with reason=upstream_5xx', async () => {
+    const err = new Error('upstream 503');
+    err.status = 503;
+    mockDownloadAndUpload.mockRejectedValueOnce(err);
+    const fileInit = makeCompInt(ids.initFile);
+    const targetChannel = makeCompInt(ids.targetSelect, { values: ['channel'] });
+    mockGetChannelMembers.mockReturnValue([{ id: 'u2', username: 'Alice' }]);
+    const sendBtn = makeCompInt(ids.sendBtn);
+    const attachment = { name: 'doc.pdf', contentType: 'application/pdf', size: 1024, url: 'https://cdn.discordapp.com/doc.pdf' };
+    const awaitMessages = jest.fn().mockResolvedValue(makeAttachmentMessage(attachment));
+    const interaction = makeInteraction({
+      awaitQueue: [fileInit, targetChannel, sendBtn],
+      awaitMessages,
+    });
+    await cmd.execute(interaction);
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      reason: 'upstream_5xx',
+      status_code: 503,
+      kind: 'file',
     }));
   });
 
