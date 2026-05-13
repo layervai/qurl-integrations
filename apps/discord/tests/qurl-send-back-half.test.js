@@ -1917,10 +1917,11 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 });
 
-// Pin that truncForLog applies to ALL value-rendering gates in
-// the entry-gate family, not just the two introduced in round 4.
-// A future caller handing a 1MB string as `target` or `expiresIn`
-// would otherwise dump the whole blob into the rejection message.
+// Pin that truncForLog applies to ALL value-rendering gates in the
+// entry-gate family, not just the recipients gate that introduces
+// it. A future caller handing a 1MB string as `isVoiceContext`,
+// `target`, or `expiresIn` would otherwise dump the whole blob
+// into the rejection message.
 describe('executeSendPipeline — truncForLog applies to all value-rendering gates', () => {
   function makeParams(overrides) {
     return {
@@ -1939,6 +1940,13 @@ describe('executeSendPipeline — truncForLog applies to all value-rendering gat
       ...overrides,
     };
   }
+
+  test('isVoiceContext rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'w'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ isVoiceContext: huge })))
+      .rejects.toThrow(/isVoiceContext must be a boolean .* value=w{64}…\)/);
+  });
 
   test('target rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
