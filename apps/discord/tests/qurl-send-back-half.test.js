@@ -1396,10 +1396,15 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
 
   test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
-      .rejects.toThrow(TypeError);
-    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
-      .rejects.toThrow(/isVoiceContext must be a boolean/);
+    // Single invocation captured into a promise so both the type + the
+    // message assertion observe the SAME rejection. The previous pattern
+    // (two await-expects, two pipeline invocations) is harmless today —
+    // the gate is idempotent — but would surface a double-fire bug if a
+    // future change adds side effects (audit emission, etc.) ahead of
+    // the throw.
+    const rejection = executeSendPipeline(interaction, makePipelineParams(undefined));
+    await expect(rejection).rejects.toThrow(TypeError);
+    await expect(rejection).rejects.toThrow(/isVoiceContext must be a boolean/);
     // Gate fires BEFORE the "Preparing links..." editReply that would
     // otherwise be the first user-visible signal — confirm no editReply.
     expect(interaction.editReply).not.toHaveBeenCalled();

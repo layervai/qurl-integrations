@@ -838,6 +838,47 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // `execute()` in turn ignores handleSend's resolved value). A future
 // caller that needs a structured result (e.g. for a programmatic retry)
 // would have to extend this contract.
+//
+// Required `interaction` shape: the pipeline reads these fields and
+// expects them to be valid. A synthetic interaction missing any of
+// these will fail loudly at the corresponding call site:
+//   - `interaction.user.id`          — sender's discord ID; lands as
+//                                       `senderDiscordId` on every
+//                                       qurl_sends row + audit event,
+//                                       and as the cooldown bucket key.
+//   - `interaction.channelId`        — written to `qurl_sends.channel_id`
+//                                       on every row. A flow_state-backed
+//                                       caller that drops this lands
+//                                       null channel_ids in DDB that
+//                                       won't show up in audit queries.
+//   - `interaction.channel`          — read for the non-ephemeral
+//                                       channel-announce on `target ===
+//                                       'channel'`. Already null-guarded
+//                                       — a missing channel object just
+//                                       drops the announce, doesn't
+//                                       throw.
+//   - `interaction.member?.displayName` (+ `user.username` fallback) —
+//                                       resolved via `resolveSenderAlias`
+//                                       into the DM embed AND the
+//                                       channel-announce blurb.
+//   - `interaction.guild?.members?.fetch` — optionally consumed by the
+//                                       recipient-alias resolver for
+//                                       members that aren't already
+//                                       in cache. Best-effort.
+//   - `interaction.editReply`        — every user-visible status update
+//                                       on the pipeline's primary
+//                                       message goes through this.
+//                                       Must be a Promise-returning
+//                                       function.
+//   - `interaction.channel.send`     — only invoked on `target ===
+//                                       'channel' && delivered > 0`.
+//                                       Logged-and-swallowed on failure
+//                                       — a missing "Send Messages"
+//                                       perm doesn't fail the send.
+// Same forcing-function rationale as the `isVoiceContext` boolean gate:
+// PR 7b's `handleSendFormSend` will reconstruct an interaction surface
+// from a Discord component-event payload and a decrypted flow_state
+// row; whatever fields it omits will silently regress in production.
 async function executeSendPipeline(interaction, {
   apiKey,
   resourceType,
@@ -876,7 +917,12 @@ async function executeSendPipeline(interaction, {
   // exists for PR 7b's handleSendFormSend.
   if (typeof isVoiceContext !== 'boolean') {
     clearCooldown(interaction.user.id);
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got ${typeof isVoiceContext}: ${JSON.stringify(isVoiceContext)})`);
+    // `String(undefined)` → "undefined" (not stringified `undefined`
+    // which JSON.stringify drops entirely, producing the awkward
+    // "got undefined: undefined" rendering the round-7 cr flagged).
+    // For non-serializable values String() also avoids the
+    // JSON.stringify-throws-on-BigInt edge case.
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got ${typeof isVoiceContext}: ${String(isVoiceContext)})`);
   }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
