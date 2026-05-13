@@ -1634,3 +1634,93 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
   });
 });
 
+describe('executeSendPipeline — expiresIn allowed-set gate', () => {
+  function makePipelineParams(expiresIn) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn,
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['off-set numeric-style', '25h'],
+    ['totally bogus', 'never'],
+    ['empty string', ''],
+    ['undefined', undefined],
+    ['number (not string)', 24],
+  ])('throws on expiresIn=%s', async (_label, expiresIn) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(expiresIn)))
+      .rejects.toThrow(/expiresIn must be one of/);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringMatching(/Internal error — send cancelled/),
+      }),
+    );
+  });
+
+  test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(expiresIn));
+    } catch (err) {
+      expect(err.message).not.toMatch(/expiresIn must be one of/);
+      return;
+    }
+  });
+});
+
+describe('executeSendPipeline — personalMessage shape gate', () => {
+  function makePipelineParams(personalMessage) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test.each([
+    ['object', { text: 'oops' }],
+    ['array', ['oops']],
+    ['number', 42],
+    ['boolean', true],
+  ])('throws on non-string non-null personalMessage (%s) — would render [object Object] in DM otherwise', async (_label, personalMessage) => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(personalMessage)))
+      .rejects.toThrow(/personalMessage must be null or string/);
+  });
+
+  test.each([
+    ['null', null],
+    ['empty string', ''],
+    ['short note', 'See you at 5pm.'],
+  ])('accepts the allowed shape: %s', async (_label, personalMessage) => {
+    const interaction = makeInteraction();
+    try {
+      await executeSendPipeline(interaction, makePipelineParams(personalMessage));
+    } catch (err) {
+      expect(err.message).not.toMatch(/personalMessage must be null or string/);
+      return;
+    }
+  });
+});
+

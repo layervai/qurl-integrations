@@ -787,6 +787,8 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //   - `target` must be `'user'` or `'channel'`.
 //   - `attachment.url` re-validated against `isAllowedSourceUrl`
 //     when `resourceType === RESOURCE_TYPES.FILE`.
+//   - `expiresIn` must be a key of `EXPIRY_LABELS`.
+//   - `personalMessage` must be `null` or `string`.
 // Each gate clears the caller's stale ephemeral with a cancel-
 // edit then throws — the user still sees the outer catch's
 // generic followUp, but the gate's specific cancel replaces
@@ -863,68 +865,52 @@ async function executeSendPipeline(interaction, {
   personalMessage,
   sendNonce,
 }) {
-  // Strict input gate on the one param whose silent default would
-  // misrender the channel-announce blurb. Other params either land
-  // in DB rows where corruption is grep-discoverable (resourceType,
-  // target, expiresIn) or fail loudly inside the upload/mint
-  // pipeline (attachment, locationUrl). isVoiceContext is unique:
-  // a wrong value here surfaces only as a subtle copy mismatch in
-  // a non-ephemeral channel post — exactly the silent-regression
-  // shape the round-4 cr review flagged.
-  //
-  // Clear cooldown BEFORE the throw so the caller's setCooldown-
-  // in-flight doesn't lock the user out for the cooldown window
-  // (~30s) with no user-visible feedback. clearCooldown is a no-op
-  // when no cooldown is set, so this is safe for callers that
-  // haven't reached the cooldown branch yet — and it matches
-  // handleSend's existing convention of clearing on every error
-  // path. Today's caller never reaches the throw; the cleanup
-  // exists for PR 7b's handleSendFormSend.
-  // Shared cancel-edit shape for all three entry gates. Fire-and-
-  // forget so a failed edit doesn't become the observable outcome —
-  // the throw is the load-bearing signal (test pins + logger.error
-  // in handleCommand's outer catch). The outer catch will still
-  // append a generic "There was an error" followUp; this edit
-  // replaces the caller's stale ephemeral so the user sees a
-  // specific cancel alongside the generic followUp, not a stale
-  // "Preparing send..." alongside it.
+  // Shared cancel-edit for every entry gate. Fire-and-forget — the
+  // throw is the load-bearing signal (test pins + logger.error in
+  // handleCommand's outer catch). The outer catch will still append
+  // a generic followUp; this edit replaces the caller's stale
+  // ephemeral so the user sees a specific cancel alongside the
+  // generic followUp, not a stale "Preparing send..." alongside it.
   const cancelEdit = () => interaction.editReply({
     content: '❌ Internal error — send cancelled. Please rerun the command.',
     components: [],
   }).catch(logIgnoredDiscordErr);
 
+  // `isVoiceContext` strict-boolean gate. Unique among the params
+  // because a wrong value surfaces only as a subtle copy mismatch
+  // in the non-ephemeral channel-announce — the silent-regression
+  // shape every other input either lands in a grep-discoverable
+  // DB column or fails loudly inside the upload/mint stack. The
+  // clearCooldown ahead of the throw matches handleSend's "clear
+  // on every error path" convention so a caller that hit the
+  // gate doesn't strand the user in a cooldown window.
   if (typeof isVoiceContext !== 'boolean') {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    // Render `typeof=` + `value=` separately so a prod-log reader
-    // doesn't have to disambiguate `(got object: null)` (where
-    // "object" describes the typeof and "null" is the value — a
-    // common foot-gun since `typeof null === 'object'`). The
-    // String() call keeps `undefined` visible (JSON.stringify
-    // drops it) and avoids the JSON.stringify-throws-on-BigInt
-    // edge case.
+    // `typeof=` + `value=` rendered separately because
+    // `typeof null === 'object'` is a classic foot-gun in
+    // a single-field "(got object: null)" rendering. `String()`
+    // keeps `undefined` visible (JSON.stringify drops it) and
+    // avoids the JSON.stringify-throws-on-BigInt edge case.
     throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext)})`);
   }
-  // `target` allowed-set gate. Same silent-mis-render shape as
-  // isVoiceContext: an unrecognized value (e.g. `'voice'`) would
-  // silently suppress the channel-announce (the announce site's
-  // gate is strict equality on `'channel'`). The gate makes the
-  // failure mode loud at the boundary.
+
+  // `target` allowed-set gate. Same silent-mis-render shape: an
+  // unrecognized value (e.g. `'voice'`) would silently suppress
+  // the channel-announce — the announce site gates on strict
+  // equality with `'channel'`.
   if (target !== 'user' && target !== 'channel') {
     clearCooldown(interaction.user.id);
     cancelEdit();
     throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${String(target)})`);
   }
-  // SSRF re-validation gate. Parallels the `isVoiceContext` gate
-  // but the failure mode is a security boundary, not a copy
-  // mismatch: a tampered DDB payload row could redirect
-  // downloadAndUpload to an internal target if no caller along
-  // the path re-checks. Today handleSend's Step-2 validates
-  // BEFORE calling the pipeline — this defense-in-depth gate
-  // catches a future caller that forgets. RESOURCE_TYPES.FILE-
-  // only because location sends don't carry an attacker-
-  // controlled URL (the locationUrl is built from sanitized
-  // user-text via google.com/maps/search).
+
+  // Defense-in-depth SSRF re-check. handleSend's Step-2 validates
+  // attachment.url against isAllowedSourceUrl BEFORE calling the
+  // pipeline; this gate catches a future caller that forgets.
+  // FILE-only because location sends carry no attacker-controlled
+  // URL (locationUrl is built from sanitized user-text via
+  // google.com/maps/search).
   if (resourceType === RESOURCE_TYPES.FILE) {
     if (!attachment || typeof attachment.url !== 'string' || !isAllowedSourceUrl(attachment.url)) {
       clearCooldown(interaction.user.id);
@@ -936,6 +922,28 @@ async function executeSendPipeline(interaction, {
       });
       throw new Error(`executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`);
     }
+  }
+
+  // `expiresIn` allowed-set gate. Today only handleSend's
+  // expiry-select dropdown can supply it, so the set is closed.
+  // A future caller reconstructing from a persisted payload could
+  // ship an off-set value (`'25h'`, `'bogus'`) that lands in the
+  // DB and trips downstream when `expiryToISO` / `expiryToMs`
+  // hit it. Validate at the boundary instead.
+  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${String(expiresIn)})`);
+  }
+
+  // `personalMessage` shape gate. The DM-embed renderer expects
+  // null OR string. A non-string object would silently stringify
+  // to `[object Object]` in the recipient's DM — exact silent-
+  // regression shape the other gates fence.
+  if (personalMessage !== null && typeof personalMessage !== 'string') {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new TypeError(`executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
   }
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
 
