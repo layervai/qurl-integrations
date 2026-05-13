@@ -3444,13 +3444,22 @@ const SELF_DESTRUCT_CHOICES = [
 // Map the slash option's string value to a seconds integer or null.
 // Mirrors `selfDestructSelectValueToSeconds` in utils/time but for the
 // slash-option value space (which uses 'none' instead of the form's
-// SELF_DESTRUCT_NO_TIMER_VALUE). Wrong values fall back to null (no
-// timer) so a future option-list drift can't crash the handler.
+// SELF_DESTRUCT_NO_TIMER_VALUE).
+//
+// Defense-in-depth: validate against the SELF_DESTRUCT_PRESETS closed
+// set the same way handleQurlSlashSend validates `expiresIn` against
+// EXPIRY_LABELS. Discord enforces the choice set server-side, but a
+// forged interaction could pass `'999999999'` and that value would
+// otherwise land unchecked in the flow payload + connector upload.
+// Wrong values fall back to null (no timer) so the failure is safe.
+const SELF_DESTRUCT_PRESET_SECONDS = new Set(SELF_DESTRUCT_PRESETS.map((p) => p.seconds));
 function selfDestructOptionToSeconds(value) {
   if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return Math.floor(n);
+  const floored = Math.floor(n);
+  if (!SELF_DESTRUCT_PRESET_SECONDS.has(floored)) return null;
+  return floored;
 }
 
 // Resolve a list of recipient IDs to User-shaped objects via the guild
@@ -3634,11 +3643,37 @@ function renderConfirmCardContent({
     // boundary. Re-escaping here would render `\*\*bold\*\*`
     // literals on the card. Same shape /qurl send's Step-3
     // formContent uses (commands.js:~2164).
-    const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
-    content += `**Note:** "${preview}"\n`;
+    //
+    // Quote-block syntax `> ` (instead of `"..."` wraps) avoids the
+    // ragged-look failure mode when the message itself contains a
+    // literal `"` character. Discord renders `> ` as a left-bar
+    // blockquote which visually offsets the preview from the rest
+    // of the card.
+    content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
   }
   content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
   return content;
+}
+
+// Truncate the pre-sanitized message to 80 chars MAX, then back off
+// to the last completed markdown-escape so a slice doesn't leave a
+// lone trailing `\`. The blockquote prefix (`> `) is rendered by
+// Discord as a left-bar offset.
+//
+// The "back off" handles the case where `sanitizeMessage` emitted a
+// `\` immediately before the slice boundary (e.g. `\*` becomes `\`
+// at index 79, `*` at index 80 — slicing at 80 leaves a dangling
+// `\` that Discord would render as a literal backslash). Trimming
+// to index 79 in that case is the conservative fix.
+function formatPersonalMessagePreview(message) {
+  if (message.length <= 80) return `> ${message}`;
+  let cut = 80;
+  if (message[cut - 1] === '\\' && message[cut - 2] !== '\\') {
+    // The would-be cut sits ON an escape char. Back off so the
+    // truncation lands BEFORE the escape, not in the middle of it.
+    cut -= 1;
+  }
+  return `> ${message.slice(0, cut)}…`;
 }
 
 // Build the ActionRow set for the confirm card. When `attachPicker`,
@@ -3875,7 +3910,24 @@ async function handleQurlFile(interaction) {
     });
   }
 
-  const attachment = interaction.options.getAttachment('attachment', true);
+  // Required-option lookups via `getAttachment(..., true)` /
+  // `getString(..., true)` throw on a missing option. Discord enforces
+  // required server-side, so production interactions can't trip
+  // these; a forged interaction is the only way. The targeted catch
+  // produces an actionable ephemeral rather than letting the throw
+  // hit the dispatcher's generic safety net.
+  let attachment;
+  try {
+    attachment = interaction.options.getAttachment('attachment', true);
+  } catch (err) {
+    logger.warn('handleQurlFile: required attachment option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    return interaction.reply({
+      content: '❌ The `attachment:` option is required. Re-run with a file attached.',
+      ephemeral: true,
+    });
+  }
   if (!attachment || typeof attachment.url !== 'string') {
     return interaction.reply({
       content: '❌ Attachment is missing or malformed.',
@@ -3925,7 +3977,22 @@ async function handleQurlFile(interaction) {
 }
 
 async function handleQurlMap(interaction) {
-  const locationValue = interaction.options.getString('location', true).trim();
+  // `getString('location', true)` throws on a missing option. Discord
+  // enforces required server-side; only a forged interaction can hit
+  // this. Targeted catch matches handleQurlFile's required-option
+  // guard for symmetry + actionable user-visible copy.
+  let locationValue;
+  try {
+    locationValue = interaction.options.getString('location', true).trim();
+  } catch (err) {
+    logger.warn('handleQurlMap: required location option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    return interaction.reply({
+      content: '❌ The `location:` option is required. Re-run with a Google Maps URL or address.',
+      ephemeral: true,
+    });
+  }
   const locationNameRaw = interaction.options.getString('location-name');
   if (locationValue.length === 0) {
     return interaction.reply({
@@ -4125,14 +4192,30 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // handleQurlSlashSend rejects DM invocations BEFORE the flow row
   // is created, so a row at SEND_STAGE_AWAITING_CONFIRM only ever
   // belongs to a guild interaction. No conditional fallback.
-  const [guildApiKey, deleteResult] = await Promise.all([
-    db.getGuildApiKey(interaction.guildId),
-    deleteFlow(flow_id, {
-      stage: SEND_STAGE_AWAITING_CONFIRM,
-      reason: 'terminal',
-      expectedVersion: row.version,
-    }),
-  ]);
+  //
+  // Sequence: getGuildApiKey BEFORE deleteFlow. If the DDB read
+  // throws (rare — region outage, IAM revocation), the row stays
+  // alive and the user can re-click Send within the TTL once the
+  // blip clears. Burning the flow row first would strand the user
+  // on a dead card with the dispatcher's generic-superseded message
+  // and force a full /qurl file rerun.
+  let guildApiKey;
+  try {
+    guildApiKey = await db.getGuildApiKey(interaction.guildId);
+  } catch (err) {
+    logger.error('handleSendConfirmClick: getGuildApiKey threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.reply({
+      content: '❌ Could not look up the qURL API key right now. Try **Send** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  const deleteResult = await deleteFlow(flow_id, {
+    stage: SEND_STAGE_AWAITING_CONFIRM,
+    reason: 'terminal',
+    expectedVersion: row.version,
+  });
   if (!deleteResult.deleted) {
     return interaction.reply({
       content: 'Recipients changed before Send fired — re-check the card and click Send again.',
@@ -5347,7 +5430,7 @@ const commands = [
         // Section order: user-facing flow first (Getting started → How it
         // works), then admin-only setup (now the OAuth-redirect flow per
         // PR #177), then glossary (Terms), then operational caveat
-        // (Large servers). The "Setting up" section pivots based on
+        // The "Setting up" section pivots based on
         // whether OAuth is configured — when it is, we describe the
         // /qurl setup OAuth flow + the "Add to Discord" install-flow
         // entry point. When unset (sandbox before Auth0 secrets land),
@@ -5386,9 +5469,6 @@ const commands = [
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
-            '**Large servers (~1000+ members):** `/qurl send` with **Everyone in this channel** ' +
-            'or **Everyone in your voice channel** may skip members who appear offline in Discord. ' +
-            'If you need to reach a specific person for sure, prefer `/qurl file` or `/qurl map` with an explicit @mention.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });

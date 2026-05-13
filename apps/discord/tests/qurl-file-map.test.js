@@ -301,19 +301,32 @@ beforeEach(() => {
 // ──────────────────────────────────────────────────────────────
 
 describe('selfDestructOptionToSeconds', () => {
+  // SELF_DESTRUCT_PRESETS (utils/time.js): 0.5, 1, 5, 30, 300, 1800, 3600.
+  // Anything else falls back to null per the defense-in-depth gate
+  // added in round 6 (cr-flagged: forged interactions could otherwise
+  // smuggle '999999999' past Discord's server-side choice enforcement).
   test.each([
     ['none', null],
     [SELF_DESTRUCT_NO_TIMER_CHOICE, null],
     [null, null],
     [undefined, null],
     ['', null],
-    ['60', 60],
+    // Preset values pass through:
+    ['5', 5],
+    ['30', 30],
+    ['300', 300],
+    ['1800', 1800],
     ['3600', 3600],
+    // Off-set values fall back to null (defense-in-depth):
+    ['60', null],
+    ['7200', null],
+    ['999999999', null],
+    // Edge cases:
     ['0', null],
     ['-5', null],
     ['NaN', null],
     ['bogus', null],
-    ['1.5', 1],
+    ['1.5', 1],  // Math.floor(1.5)=1 IS a preset
   ])('value=%j → seconds=%j', (input, expected) => {
     expect(selfDestructOptionToSeconds(input)).toBe(expected);
   });
@@ -556,11 +569,31 @@ describe('renderConfirmCardContent', () => {
     expect(out).toMatch(/Self-destruct/);
   });
 
-  test('personal-message preview cap at 80 chars', () => {
+  test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
     const long = 'x'.repeat(120);
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: long });
-    // 80 chars of x + ellipsis
-    expect(out).toMatch(/x{80}…/);
+    // Round-6 (cr) switched from `"..."` to `> ` blockquote so literal
+    // `"` chars in the message can't make the rendering look ragged.
+    expect(out).toMatch(/> x{80}…/);
+    // The previous `"..."` wrap is gone.
+    expect(out).not.toMatch(/"x{80}…"/);
+  });
+
+  test('personal-message preview backs off the cut when it would land on a markdown escape', () => {
+    // sanitizeMessage emits `\*` etc. If a slice lands the cut at a
+    // boundary between `\` and `*`, the rendered preview shows a
+    // dangling `\`. Round-6 (cr) backs the cut off by 1 when the
+    // 80th char is a `\` not preceded by another `\`.
+    //
+    // Build a 90-char message where char[79] is '\\' and char[80] is '*'.
+    // Confirm the truncation drops the trailing `\` before the ellipsis.
+    const safePrefix = 'a'.repeat(79);  // 79 chars
+    const message = safePrefix + '\\*' + 'rest'.repeat(10);  // 79+2+40 = 121 chars
+    const out = renderConfirmCardContent({ ...baseProps, personalMessage: message });
+    // The truncated preview ends with 79 chars (no trailing `\`)
+    // followed by the ellipsis. Backed-off cut: index 79.
+    expect(out).toContain(`> ${safePrefix}…`);
+    expect(out).not.toMatch(/\\…/);
   });
 
   test('personal-message renders pre-sanitized input verbatim (no double-escape)', () => {
@@ -570,7 +603,7 @@ describe('renderConfirmCardContent', () => {
     // `\\\*\\\*bold\\\*\\\*`.
     const presanitized = '\\*\\*emphasis\\*\\*';
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: presanitized });
-    expect(out).toContain(`"${presanitized}"`);
+    expect(out).toContain(`> ${presanitized}`);
     expect(out).not.toMatch(/\\\\\*/);
   });
 
@@ -581,9 +614,7 @@ describe('renderConfirmCardContent', () => {
     // must NOT themselves become `\\\\` in the card.
     const presanitized = '\\*\\*bold\\*\\* \\\\n \\[link\\]\\(https://evil\\)';
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: presanitized });
-    // The substring renders exactly as supplied — no markdown-escape
-    // pass turns `\\` into `\\\\`.
-    expect(out).toContain(`"${presanitized}"`);
+    expect(out).toContain(`> ${presanitized}`);
     // Defense: no `\\\\` (four backslashes) appears — that'd be the
     // unambiguous double-escape regression signature.
     expect(out).not.toMatch(/\\\\\\\\/);
@@ -943,6 +974,29 @@ describe('handleQurlMap — slash entry', () => {
       content: expect.stringMatching(/in a server/),
     }));
   });
+
+  test('forged interaction missing required `location` → actionable ephemeral, no flow row', async () => {
+    // Discord enforces required options server-side; only a forged
+    // interaction can hit the `getString('location', true)` throw.
+    // Round-6 (cr) added a targeted catch so the user sees an
+    // actionable message instead of the dispatcher's generic safety
+    // net.
+    const int = makeInteraction({ options: {} });
+    int.options.getString = jest.fn((name, required) => {
+      if (name === 'location' && required) {
+        const err = new Error('CommandInteractionOptionNotFound');
+        err.code = 'CommandInteractionOptionNotFound';
+        throw err;
+      }
+      return null;
+    });
+    await handleQurlMap(int);
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/`location:` option is required/),
+      ephemeral: true,
+    }));
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -1097,6 +1151,24 @@ describe('handleSendConfirmClick', () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringMatching(/partial drop at click time/),
       expect.objectContaining({ left: 0, transient: 1 }),
+    );
+  });
+
+  test('getGuildApiKey throw at click time → ephemeral retry, NO deleteFlow (row stays alive)', async () => {
+    // Round-6 (cr) reordering: getGuildApiKey runs BEFORE deleteFlow
+    // so a DDB blip doesn't burn the flow row. User can re-click
+    // Send within the 3-min TTL once the blip clears.
+    mockDb.getGuildApiKey.mockRejectedValueOnce(new Error('ddb gone'));
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not look up the qURL API key/),
+      ephemeral: true,
+    }));
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/getGuildApiKey threw/),
+      expect.objectContaining({ flow_id: 'fid' }),
     );
   });
 
