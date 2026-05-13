@@ -262,6 +262,33 @@ function makePipelineParams(overrides = {}) {
   };
 }
 
+// Accept-path verifier: pin that the named gate did NOT reject the
+// given params. Two branches both count as success:
+//   - executeSendPipeline throws something downstream → assert the
+//     throw message doesn't match any of the gate-specific rejection
+//     regexes. A non-matching downstream throw is fine; what we're
+//     pinning is "we got PAST the gate."
+//   - executeSendPipeline resolves cleanly → also fine; the gate
+//     didn't reject.
+// `expect.hasAssertions()` forces both branches to produce at least
+// one observation, so a future test-setup tightening that lets the
+// await silently resolve doesn't turn this into a vacuous pass
+// (was the issue #291 surfaced).
+async function expectGateAccepts(params, ...gateRejectionRegexes) {
+  expect.hasAssertions();
+  const interaction = makeInteraction();
+  try {
+    await executeSendPipeline(interaction, params);
+    // Resolved cleanly — gate accepted. Pin one assertion so
+    // hasAssertions() is satisfied on this branch too.
+    expect(true).toBe(true);
+  } catch (err) {
+    for (const re of gateRejectionRegexes) {
+      expect(err.message).not.toMatch(re);
+    }
+  }
+}
+
 // monitorLinkStatus polls at max(15s, min(60s, expiryMs/10)).
 // Tests use '1m' expiry → expiryMs/10 = 6s → max(15s, 6s) = 15s. So one
 // POLL_INTERVAL tick fires the setInterval body once.
@@ -1550,20 +1577,7 @@ describe('executeSendPipeline — target allowed-set gate', () => {
   });
 
   test.each(['user', 'channel'])('accepts the allowed value: %s', async (target) => {
-    // The downstream upload mocks aren't configured here, so accept-
-    // case observability is: did the gate let us PAST it? We rely on
-    // the rejection message NOT matching 'target must be' — anything
-    // else (e.g. downstream mint failures) is a different concern.
-    const interaction = makeInteraction();
-    try {
-      await executeSendPipeline(interaction, makePipelineParams({ target }));
-    } catch (err) {
-      expect(err.message).not.toMatch(/target must be/);
-      return;
-    }
-    // If the call resolved without throwing (mock-chain lined up
-    // perfectly somehow), that's also acceptable — the gate let us
-    // through, which is what this test checks.
+    await expectGateAccepts(makePipelineParams({ target }), /target must be/);
   });
 });
 
@@ -1617,7 +1631,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
   });
 
   test('SSRF gate is skipped when resourceType is NOT file (location sends carry no user URL)', async () => {
-    const interaction = makeInteraction();
     // Bogus attachment.url that WOULD fail isAllowedSourceUrl — but
     // resourceType is 'location' so the gate is bypassed. The pipeline
     // will fail later downstream (mocks aren't configured for the
@@ -1628,12 +1641,7 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
       locationUrl: 'https://google.com/maps/search/x',
       locationName: 'X',
     });
-    try {
-      await executeSendPipeline(interaction, params);
-    } catch (err) {
-      expect(err.message).not.toMatch(/SSRF re-validation/);
-      return;
-    }
+    await expectGateAccepts(params, /SSRF re-validation/);
   });
 });
 
@@ -1656,13 +1664,7 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
   });
 
   test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
-    const interaction = makeInteraction();
-    try {
-      await executeSendPipeline(interaction, makePipelineParams({ expiresIn }));
-    } catch (err) {
-      expect(err.message).not.toMatch(/expiresIn must be one of/);
-      return;
-    }
+    await expectGateAccepts(makePipelineParams({ expiresIn }), /expiresIn must be one of/);
   });
 });
 
@@ -1683,13 +1685,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
     ['empty string', ''],
     ['short note', 'See you at 5pm.'],
   ])('accepts the allowed shape: %s', async (_label, personalMessage) => {
-    const interaction = makeInteraction();
-    try {
-      await executeSendPipeline(interaction, makePipelineParams({ personalMessage }));
-    } catch (err) {
-      expect(err.message).not.toMatch(/personalMessage must be null or string/);
-      return;
-    }
+    await expectGateAccepts(makePipelineParams({ personalMessage }), /personalMessage must be null or string/);
   });
 });
 
@@ -1851,21 +1847,11 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // to hit exactly the cap.
     ['exactly at the cap', Array.from({ length: RECIPIENT_CAP }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
   ])('accepts the allowed shape: %s', async (_label, recipients) => {
-    // Same shape as the other accept-path tests in this file:
-    // assert the gate didn't reject. The pipeline mocks aren't
-    // fully wired here, so anything past the gate is fine — it
-    // either throws downstream with a different message, or
-    // resolves cleanly if the mock chain happens to line up.
-    // The shared vacuous-pass concern across all four accept-
-    // path tests in this file is tracked in #291.
-    const interaction = makeInteraction();
-    try {
-      await executeSendPipeline(interaction, makePipelineParams({ recipients }));
-    } catch (err) {
-      expect(err.message).not.toMatch(/recipients must be a non-empty array/);
-      expect(err.message).not.toMatch(/exceeds QURL_SEND_MAX_RECIPIENTS/);
-      return;
-    }
+    await expectGateAccepts(
+      makePipelineParams({ recipients }),
+      /recipients must be a non-empty array/,
+      /exceeds QURL_SEND_MAX_RECIPIENTS/,
+    );
   });
 });
 
