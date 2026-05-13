@@ -222,15 +222,24 @@ jest.mock('../src/places', () => ({
 
 // flow-state is the DDB-backed harness consumed by /qurl revoke
 // post-conversion (PR 5). Mock it here rather than hit DDB.
+//
+// `supersedeOrCreate` is the consolidated primitive (post-harness-PR)
+// used by slash-command paths to open a fresh row, claiming over a
+// stale predecessor at the same stage. The harness-internal
+// orchestration (createFlow → loadFlow → version-gated deleteFlow →
+// retry) is pinned by flow-state.test.js, not here; commands-side
+// tests just drive its public return shape.
 const mockCreateFlow = jest.fn().mockResolvedValue({ created: true, version: 1 });
 const mockLoadFlow = jest.fn();
 const mockDeleteFlow = jest.fn().mockResolvedValue({ deleted: true });
 const mockTransitionFlow = jest.fn();
+const mockSupersedeOrCreate = jest.fn().mockResolvedValue({ created: true, version: 1 });
 jest.mock('../src/flow-state', () => ({
   createFlow: (...args) => mockCreateFlow(...args),
   loadFlow: (...args) => mockLoadFlow(...args),
   deleteFlow: (...args) => mockDeleteFlow(...args),
   transitionFlow: (...args) => mockTransitionFlow(...args),
+  supersedeOrCreate: (...args) => mockSupersedeOrCreate(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -1180,8 +1189,7 @@ describe('/qurl help subcommand', () => {
 // `handleRevokeSelect (dispatcher)` describe below.
 describe('/qurl revoke subcommand', () => {
   beforeEach(() => {
-    mockCreateFlow.mockResolvedValue({ created: true, version: 1 });
-    mockDeleteFlow.mockResolvedValue({ deleted: true });
+    mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   });
 
   it('shows no recent sends message', async () => {
@@ -1202,7 +1210,7 @@ describe('/qurl revoke subcommand', () => {
     );
     // No flow row should be opened when there's nothing to revoke —
     // an early no-op shouldn't poison the SLI's create-count.
-    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
   });
 
   it('opens a flow row and renders the select menu', async () => {
@@ -1229,12 +1237,12 @@ describe('/qurl revoke subcommand', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateFlow).toHaveBeenCalledTimes(1);
-    const createArgs = mockCreateFlow.mock.calls[0][0];
-    expect(createArgs.stage).toBe('awaiting_revoke_select');
-    expect(createArgs.payload).toBeNull();
-    expect(createArgs.flow_id).toMatch(/^0:1#guild-1#ch-1#user-1$/);
-    expect(createArgs.expires_at).toEqual(expect.any(Number));
+    expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
+    const args = mockSupersedeOrCreate.mock.calls[0][0];
+    expect(args.stage).toBe('awaiting_revoke_select');
+    expect(args.payload).toBeNull();
+    expect(args.flow_id).toMatch(/^0:1#guild-1#ch-1#user-1$/);
+    expect(args.ttl_seconds).toEqual(expect.any(Number));
 
     // Menu was rendered to the user.
     const menuCall = interaction.editReply.mock.calls.find(
@@ -1244,13 +1252,13 @@ describe('/qurl revoke subcommand', () => {
     expect(menuCall[0].content).toMatch(/Select a send to revoke/);
   });
 
-  it('supersedes a prior in-flight revoke flow', async () => {
-    // First createFlow loses the OCC race (existing row from a
-    // previous /qurl revoke call); admin_cleanup + retry must
-    // win, and the menu still renders.
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: true, version: 1 });
+  it('renders the menu when supersedeOrCreate claims the slot from a stale predecessor', async () => {
+    // supersedeOrCreate encapsulates the create → load → delete →
+    // retry orchestration. From the caller's view, a successful
+    // claim looks identical to a fresh create — both return
+    // { created: true, version: ... }. The harness-internal
+    // orchestration is pinned by flow-state.test.js, not here.
+    mockSupersedeOrCreate.mockResolvedValueOnce({ created: true, version: 1 });
     mockDb.getRecentSends.mockReturnValue([
       {
         send_id: 'send-1',
@@ -1274,23 +1282,132 @@ describe('/qurl revoke subcommand', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateFlow).toHaveBeenCalledTimes(2);
-    expect(mockDeleteFlow).toHaveBeenCalledTimes(1);
-    expect(mockDeleteFlow.mock.calls[0][1]).toEqual({
-      stage: 'awaiting_revoke_select',
-      reason: 'admin_cleanup',
-    });
-    // Menu should still be rendered after supersede.
+    expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
+    // Menu rendered after supersede claim.
     const menuCall = interaction.editReply.mock.calls.find(
       (c) => c[0]?.components?.length > 0,
     );
     expect(menuCall).toBeDefined();
   });
 
-  it('surfaces an error when supersede + retry both lose the race', async () => {
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: false });
+  it('names a sibling setup-modal flow when revoke supersede cannot claim', async () => {
+    // supersedeOrCreate returns the surviving row when a non-revoke
+    // flow owns this flow_id. The handler resolves the user-visible
+    // wording via the dispatcher's siblingMessageForStage registry
+    // (populated at registerFlow time).
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: { stage: 'awaiting_setup_modal', version: 1 },
+    });
+    mockDb.getRecentSends.mockReturnValue([
+      {
+        send_id: 'send-1',
+        resource_type: 'file',
+        target_type: 'user',
+        recipient_count: 1,
+        delivered_count: 1,
+        expires_in: '24h',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    // Sibling-flow message names the in-flight setup modal — not
+    // a generic "could not start" fallback.
+    const siblingCall = interaction.editReply.mock.calls.find(
+      (c) => /qurl setup/.test(c[0]?.content || ''),
+    );
+    expect(siblingCall).toBeDefined();
+  });
+
+  it('names a sibling setup-button flow when revoke supersede finds one in the channel', async () => {
+    // Cross-flow collision: /qurl revoke colliding with an unclicked
+    // /qurl setup button at the same flow_id. The setup-button stage
+    // has its own registered siblingMessage (different from modal),
+    // so revoke sees the "click the button or wait" wording rather
+    // than the generic "try again."
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: { stage: 'awaiting_setup_button', version: 1 },
+    });
+    mockDb.getRecentSends.mockReturnValue([
+      {
+        send_id: 'send-1',
+        resource_type: 'file',
+        target_type: 'user',
+        recipient_count: 1,
+        delivered_count: 1,
+        expires_in: '24h',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const siblingCall = interaction.editReply.mock.calls.find(
+      (c) => /qurl setup.*button/.test(c[0]?.content || ''),
+    );
+    expect(siblingCall).toBeDefined();
+  });
+
+  it('falls through to generic error when the surviving row is at an unregistered stage', async () => {
+    // No siblingMessage registered for this fictional stage — the
+    // handler should NOT invent wording, just fall through to the
+    // generic recoverable message.
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: { stage: 'unknown_future_stage', version: 1 },
+    });
+    mockDb.getRecentSends.mockReturnValue([
+      {
+        send_id: 'send-1',
+        resource_type: 'file',
+        target_type: 'user',
+        recipient_count: 1,
+        delivered_count: 1,
+        expires_in: '24h',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'revoke'),
+      },
+    });
+
+    await cmd.execute(interaction);
+
+    const errorCall = interaction.editReply.mock.calls.find(
+      (c) => /Could not start a revoke session/.test(c[0]?.content || ''),
+    );
+    expect(errorCall).toBeDefined();
+  });
+
+  it('surfaces an error when supersedeOrCreate throws', async () => {
+    mockSupersedeOrCreate.mockRejectedValueOnce(new Error('DDB throttle'));
     mockDb.getRecentSends.mockReturnValue([
       {
         send_id: 'send-1',
@@ -1447,8 +1564,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     else process.env.AUTH0_DOMAIN = originalAuthDomain;
   });
   beforeEach(() => {
-    mockCreateFlow.mockResolvedValue({ created: true, version: 1 });
-    mockDeleteFlow.mockResolvedValue({ deleted: true });
+    mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   });
 
   function makeSetupInteraction() {
@@ -1468,11 +1584,12 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateFlow).toHaveBeenCalledTimes(1);
-    const createArgs = mockCreateFlow.mock.calls[0][0];
-    expect(createArgs.stage).toBe('awaiting_setup_button');
-    expect(createArgs.payload).toBeNull();
-    expect(createArgs.flow_id).toBe('0:1#guild-1#ch-1#user-1');
+    expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
+    const args = mockSupersedeOrCreate.mock.calls[0][0];
+    expect(args.stage).toBe('awaiting_setup_button');
+    expect(args.payload).toBeNull();
+    expect(args.flow_id).toBe('0:1#guild-1#ch-1#user-1');
+    expect(args.ttl_seconds).toEqual(expect.any(Number));
 
     const buttonCall = interaction.editReply.mock.calls.find(
       (c) => c[0]?.components?.length > 0,
@@ -1489,7 +1606,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
       const interaction = makeSetupInteraction();
       await cmd.execute(interaction);
 
-      expect(mockCreateFlow).not.toHaveBeenCalled();
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({
           content: expect.stringContaining('KEY_ENCRYPTION_KEY'),
@@ -1507,7 +1624,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('server, not in DMs'),
@@ -1522,7 +1639,7 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
 
     await cmd.execute(interaction);
 
-    expect(mockCreateFlow).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     expect(interaction.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining('administrators'),
@@ -1530,68 +1647,61 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     );
   });
 
-  it('supersedes a stale pre-modal flow', async () => {
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: true, version: 1 });
+  it('renders the button when supersedeOrCreate claims the slot from a stale predecessor', async () => {
+    // supersedeOrCreate encapsulates the create → load →
+    // version-gated delete → retry orchestration. From the caller's
+    // view a successful claim is identical to a fresh create —
+    // { created: true, version: ... }. The internal orchestration
+    // is pinned by flow-state.test.js, not here.
+    mockSupersedeOrCreate.mockResolvedValueOnce({ created: true, version: 1 });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
     await cmd.execute(interaction);
 
-    expect(mockDeleteFlow).toHaveBeenCalledWith(
-      '0:1#guild-1#ch-1#user-1',
-      { stage: 'awaiting_setup_button', reason: 'admin_cleanup' },
-    );
-    expect(mockCreateFlow).toHaveBeenCalledTimes(2);
+    expect(mockSupersedeOrCreate).toHaveBeenCalledTimes(1);
     const buttonCall = interaction.editReply.mock.calls.find(
       (c) => c[0]?.components?.length > 0,
     );
     expect(buttonCall).toBeDefined();
   });
 
-  it('blocks when a mid-modal flow is in progress (supersede fails on stage gate)', async () => {
-    // Harness-level guarantee: deleteFlow with stage='awaiting_setup_button'
-    // returns deleted:false when the row is actually in
-    // 'awaiting_setup_modal'. The retry createFlow then conflicts on
-    // the existing row, and the loadFlow peek confirms the prior
-    // flow is mid-modal so the user-visible message names the modal.
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: false });
-    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
-    mockLoadFlow.mockResolvedValueOnce({
-      flow_id: '0:1#guild-1#ch-1#user-1',
-      stage: 'awaiting_setup_modal',
-      version: 2,
+  it('blocks with the modal-open message when a mid-modal flow is in progress', async () => {
+    // supersedeOrCreate cannot claim because the surviving row is
+    // at awaiting_setup_modal (different stage). It returns the
+    // surviving row; the dispatcher's siblingMessageForStage
+    // registry resolves the modal-open wording. The registry is
+    // populated at registerFlow time — confirmed by this test.
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        stage: 'awaiting_setup_modal',
+        version: 2,
+      },
     });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
     await cmd.execute(interaction);
 
-    // Pin the slash-path block message specifically — not the
-    // button-handler conflict message which also contains "modal".
     const blockedCall = interaction.editReply.mock.calls.find(
       (c) => /already have a `\/qurl setup` modal open/.test(c[0]?.content || ''),
     );
     expect(blockedCall).toBeDefined();
   });
 
-  it('names the sibling revoke flow when retry fails because revoke is in-flight', async () => {
-    // The post-failure loadFlow peek discriminates known sibling
-    // stages: if the surviving row is awaiting_revoke_select, the
-    // user sees actionable wording telling them to finish/cancel
-    // their revoke first — instead of "try again" which would loop
-    // forever until the revoke's TTL fires.
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: false });
-    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
-    mockLoadFlow.mockResolvedValueOnce({
-      flow_id: '0:1#guild-1#ch-1#user-1',
-      stage: 'awaiting_revoke_select',
-      version: 1,
+  it('names the sibling revoke flow when supersede surfaces an in-flight revoke menu', async () => {
+    // If the surviving row is awaiting_revoke_select the user sees
+    // actionable wording naming the revoke menu instead of generic
+    // "try again" which would loop until the revoke's TTL fires.
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        stage: 'awaiting_revoke_select',
+        version: 1,
+      },
     });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
@@ -1608,18 +1718,11 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     expect(modalMsgCall).toBeUndefined();
   });
 
-  it('falls back to generic wording for an unknown sibling stage / two-races-in-a-row', async () => {
-    // If the surviving row is at a stage the dispatcher doesn't
-    // recognize as a known sibling (e.g. an in-flight flow type
-    // added in a future PR before its stage gets a sibling-message
-    // entry, OR the row vanished entirely between the retry and
-    // the peek), the user gets the generic "could not start"
-    // wording. Better than naming a flow that doesn't fit.
-    mockCreateFlow
-      .mockResolvedValueOnce({ created: false })
-      .mockResolvedValueOnce({ created: false });
-    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
-    mockLoadFlow.mockResolvedValueOnce(null); // row vanished
+  it('falls back to generic wording when surviving is null (vanished between collide and peek)', async () => {
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: null,
+    });
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
@@ -1631,47 +1734,45 @@ describe('/qurl setup subcommand (legacy modal-paste path)', () => {
     expect(genericCall).toBeDefined();
   });
 
-  it('propagates the throw when the first createFlow fails (caught by handleCommand)', async () => {
-    // The slash-path's first createFlow has no try/catch — a throw
-    // there propagates to handleCommand's outer error envelope
-    // (commands.js handleCommand try/catch), which replies the
-    // generic "There was an error executing this command." Pin
-    // here that cmd.execute lets the throw bubble; if a future
-    // refactor adds a try/catch around the first createFlow and
-    // accidentally swallows it (no user-visible error), this test
-    // trips instead of regressing silently.
-    mockCreateFlow.mockRejectedValueOnce(new Error('DDB region timeout'));
+  it('falls back to generic wording when surviving stage has no registered siblingMessage', async () => {
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: {
+        flow_id: '0:1#guild-1#ch-1#user-1',
+        stage: 'awaiting_future_unregistered_stage',
+        version: 1,
+      },
+    });
+
+    const cmd = commands.find(c => c.data.name === 'qurl');
+    const interaction = makeSetupInteraction();
+    await cmd.execute(interaction);
+
+    const genericCall = interaction.editReply.mock.calls.find(
+      (c) => /Could not start a setup session/.test(c[0]?.content || ''),
+    );
+    expect(genericCall).toBeDefined();
+  });
+
+  it('surfaces a recoverable error when supersedeOrCreate throws', async () => {
+    // supersedeOrCreate already retried internally — a thrown
+    // exception at this layer is a real DDB/IAM failure. The
+    // handler catches it (one shared try-envelope) and surfaces
+    // "could not start" rather than letting it propagate to
+    // handleCommand's generic envelope, so the user sees an
+    // actionable rerun hint instead of "an error executing this
+    // command."
+    mockSupersedeOrCreate.mockRejectedValueOnce(new Error('DDB region timeout'));
 
     const cmd = commands.find(c => c.data.name === 'qurl');
     const interaction = makeSetupInteraction();
 
-    await expect(cmd.execute(interaction)).rejects.toThrow('DDB region timeout');
-    expect(mockDeleteFlow).not.toHaveBeenCalled();
-  });
+    await cmd.execute(interaction);
 
-  it('handleCommand wraps the createFlow throw into a generic user-visible reply', async () => {
-    // Integration-style pin: drive the same throw THROUGH handleCommand
-    // (not just cmd.execute) and assert the outer try/catch in
-    // handleCommand surfaces the recoverable "There was an error"
-    // message. Closes the gap between "cmd.execute throws" and
-    // "user sees an error" — a future refactor that swallows the
-    // envelope reply would break user-visible UX without tripping
-    // the bare cmd.execute test above.
-    mockCreateFlow.mockRejectedValueOnce(new Error('DDB region timeout'));
-
-    const interaction = makeSetupInteraction();
-    await handleCommand(interaction);
-
-    // handleCommand uses followUp when interaction is deferred/replied
-    // (deferReply fired inside the setup branch before the throw).
-    const replyCalls = [
-      ...interaction.followUp.mock.calls,
-      ...interaction.reply.mock.calls,
-    ];
-    const errorReply = replyCalls.find(
-      (c) => /There was an error executing this command/.test(c[0]?.content || ''),
+    const genericCall = interaction.editReply.mock.calls.find(
+      (c) => /Could not start a setup session/.test(c[0]?.content || ''),
     );
-    expect(errorReply).toBeDefined();
+    expect(genericCall).toBeDefined();
   });
 });
 
@@ -1801,9 +1902,15 @@ describe('handleSetupButton (dispatcher path)', () => {
     // before showModal fires. If showModal throws (Discord token
     // expiry, REST blip), leaving the row in that stage would force
     // the admin to wait out the full TTL — `/qurl setup` rerun
-    // would see the loadFlow peek find awaiting_setup_modal and
+    // would see the supersede peek find awaiting_setup_modal and
     // surface the misleading "you already have a modal open"
     // wording. Recovery requires the handler to delete the row.
+    //
+    // expectedVersion gates the rollback on the specific version
+    // the transitionFlow just committed (post-bump = 2 from initial
+    // version=1). A concurrent supersede that advanced the row past
+    // version 2 would fail this delete by design — at that point
+    // the row at flow_id is no longer ours to clean up.
     mockTransitionFlow.mockResolvedValueOnce({ result: 'success', version: 2 });
     const showModalErr = new Error('Unknown interaction (token expired during ACK)');
     const interaction = makeButtonInteraction({
@@ -1818,7 +1925,11 @@ describe('handleSetupButton (dispatcher path)', () => {
     expect(interaction.showModal).toHaveBeenCalledTimes(1);
     expect(mockDeleteFlow).toHaveBeenCalledWith(
       '0:1#guild-1#ch-1#user-1',
-      { stage: 'awaiting_setup_modal', reason: 'abort' },
+      {
+        stage: 'awaiting_setup_modal',
+        reason: 'abort',
+        expectedVersion: 2,
+      },
     );
     // Best-effort reply attempted (may fail itself; that's logged).
     expect(interaction.reply).toHaveBeenCalledWith(

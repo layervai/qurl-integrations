@@ -42,14 +42,33 @@ const logger = require('./logger');
 // the table is read-only after boot. No concurrency hazard.
 const handlers = new Map();
 
+// stage → user-visible message map. Populated alongside the routing
+// table by `registerFlow`'s optional `siblingMessage`. Each entry
+// describes the REGISTERING handler's own stage — i.e. "if a caller
+// found a surviving row at this stage, here is the actionable thing
+// to tell the user." Co-locating this with the routing registration
+// closes the forgot-to-add-an-entry footgun that an external
+// SIBLING_FLOW_MESSAGES map (the pre-#274 shape) carried.
+const siblingMessages = new Map();
+
 // Register a flow handler. `customId` is matched exactly against
 // `interaction.customId` (not startsWith — see module header).
 // `expectedStage` is what `loadFlow(flow_id).stage` must equal for
 // the handler to fire; mismatches yield a "superseded" reply.
 //
+// `siblingMessage` (optional) is the user-visible string a DIFFERENT
+// flow's supersede peek should surface when it finds a surviving
+// row at THIS stage. Co-located with the routing registration so
+// adding a new two-stage flow doesn't require updating a parallel
+// map (the pre-#274 shape had that map in commands.js, easy to
+// miss when adding a new flow). When omitted, peers that find a
+// row at this stage fall through to their generic "could not start"
+// wording — appropriate for stages that are too short-lived or too
+// sibling-irrelevant to merit a dedicated message.
+//
 // Throws on duplicate registration — silently overwriting a handler
 // would mask a real bug (two modules claiming the same customId).
-function registerFlow(customId, { expectedStage, handler }) {
+function registerFlow(customId, { expectedStage, handler, siblingMessage }) {
   if (typeof customId !== 'string' || customId.length === 0) {
     throw new TypeError('flow-dispatch.registerFlow: customId must be a non-empty string');
   }
@@ -59,10 +78,40 @@ function registerFlow(customId, { expectedStage, handler }) {
   if (typeof handler !== 'function') {
     throw new TypeError('flow-dispatch.registerFlow: handler must be a function');
   }
+  if (siblingMessage !== undefined && (typeof siblingMessage !== 'string' || siblingMessage.length === 0)) {
+    throw new TypeError('flow-dispatch.registerFlow: siblingMessage must be a non-empty string when provided');
+  }
   if (handlers.has(customId)) {
     throw new Error(`flow-dispatch.registerFlow: customId ${JSON.stringify(customId)} is already registered`);
   }
   handlers.set(customId, { expectedStage, handler });
+  // The same `expectedStage` could be registered by multiple
+  // customIds (e.g. a flow with parallel input components both at
+  // the same stage). Last-wins is fine because the message
+  // describes the stage, not the customId — but a TYPE mismatch
+  // (one registration sets siblingMessage, another omits it)
+  // would silently flip the lookup behavior depending on
+  // registration order. Reject inconsistency upfront.
+  if (siblingMessage !== undefined) {
+    const existing = siblingMessages.get(expectedStage);
+    if (existing !== undefined && existing !== siblingMessage) {
+      throw new Error(`flow-dispatch.registerFlow: stage ${JSON.stringify(expectedStage)} already has a different siblingMessage registered`);
+    }
+    siblingMessages.set(expectedStage, siblingMessage);
+  }
+}
+
+// Look up the actionable user-visible message for a stage. Returns
+// null when no flow registered a siblingMessage for that stage —
+// the caller (a different flow's supersede peek) should then fall
+// through to generic "could not start" wording.
+//
+// Pure reverse-lookup over the registry — there is no module-level
+// state to maintain across registerFlow calls beyond what
+// registerFlow itself wrote.
+function siblingMessageForStage(stage) {
+  if (typeof stage !== 'string' || stage.length === 0) return null;
+  return siblingMessages.get(stage) ?? null;
 }
 
 // Derive the canonical flow_id for an interaction from its trusted
@@ -203,6 +252,7 @@ async function safeReply(interaction, content) {
 
 module.exports = {
   registerFlow,
+  siblingMessageForStage,
   flowIdForInteraction,
   // Best-effort reply helper that picks followUp vs reply based on
   // interaction.replied/deferred state. Part of the handler-author

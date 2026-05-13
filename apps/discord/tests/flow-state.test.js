@@ -87,11 +87,12 @@ beforeEach(() => {
 });
 
 describe('flow-state — module sanity', () => {
-  test('exposes the four lifecycle methods', () => {
+  test('exposes the five lifecycle methods', () => {
     expect(typeof flowState.createFlow).toBe('function');
     expect(typeof flowState.loadFlow).toBe('function');
     expect(typeof flowState.transitionFlow).toBe('function');
     expect(typeof flowState.deleteFlow).toBe('function');
+    expect(typeof flowState.supersedeOrCreate).toBe('function');
   });
 
   test('computes the canonical table name from DDB_TABLE_PREFIX', () => {
@@ -418,6 +419,60 @@ describe('flow-state.loadFlow', () => {
       .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
     await expect(flowState.loadFlow('id', { grace_seconds: -3600 }))
       .rejects.toThrow(/grace_seconds must be a non-negative finite number/);
+  });
+
+  test('include_expired:true surfaces a logically-expired row (stuck-orphan recovery)', async () => {
+    // The supersede-and-retry path on two-stage flows needs to
+    // observe the orphan's stored stage to issue a matching
+    // deleteFlow — but DDB physical reap is async (~48h) and the
+    // default loadFlow filter would return null for any logically-
+    // expired row, leaving the supersede unable to recover.
+    // include_expired:true is the opt-in that unblocks the path.
+    const pastExpiry = Math.floor(Date.now() / 1000) - 60;
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        flow_id: 'id',
+        stage: 'awaiting_setup_modal',
+        version: 3,
+        payload: null,
+        expires_at: pastExpiry,
+        created_at: 100,
+        updated_at: 200,
+      },
+    });
+
+    // Default behavior unchanged: expired row → null.
+    expect(await flowState.loadFlow('id')).toBeNull();
+
+    // Opt-in: surfaces the row with its stored stage + version.
+    const row = await flowState.loadFlow('id', { include_expired: true });
+    expect(row).not.toBeNull();
+    expect(row.stage).toBe('awaiting_setup_modal');
+    expect(row.version).toBe(3);
+    expect(row.expires_at).toBe(pastExpiry);
+  });
+
+  test('include_expired:true STILL filters corrupted rows (missing expires_at)', async () => {
+    // A row with no expires_at cannot be safely surfaced even
+    // under include_expired — its stage isn't a trustworthy
+    // basis for any harness operation. Fail-safe wins over the
+    // opt-in here, matching the warn+null contract of the
+    // default path.
+    ddbMock.on(GetCommand).resolves({
+      Item: { flow_id: 'id', stage: 's', version: 1, payload: null },
+    });
+    expect(await flowState.loadFlow('id', { include_expired: true })).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/missing or non-numeric expires_at/),
+      expect.any(Object),
+    );
+  });
+
+  test('rejects non-boolean include_expired', async () => {
+    await expect(flowState.loadFlow('id', { include_expired: 'yes' }))
+      .rejects.toThrow(/include_expired must be a boolean/);
+    await expect(flowState.loadFlow('id', { include_expired: 1 }))
+      .rejects.toThrow(/include_expired must be a boolean/);
   });
 });
 
@@ -949,6 +1004,77 @@ describe('flow-state.deleteFlow', () => {
     await expect(flowState.deleteFlow('id', { stage: '', reason: 'terminal' }))
       .rejects.toThrow(/stage must be a non-empty string/);
   });
+
+  test('with expectedVersion: condition includes version gate', async () => {
+    // OCC opt-in. Without it, two concurrent supersedes could each
+    // delete-by-stage-only and stomp each other's freshly-created
+    // replacements. With it, only the caller that observed the
+    // specific version wins the claim.
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const res = await flowState.deleteFlow('id', {
+      stage: 'awaiting_setup_button',
+      reason: 'admin_cleanup',
+      expectedVersion: 4,
+    });
+    expect(res).toEqual({ deleted: true });
+
+    const call = ddbMock.commandCalls(DeleteCommand)[0];
+    expect(call.args[0].input.ConditionExpression)
+      .toBe('attribute_exists(flow_id) AND #s = :stage AND #v = :expected');
+    expect(call.args[0].input.ExpressionAttributeNames).toEqual({
+      '#s': 'stage', '#v': 'version',
+    });
+    expect(call.args[0].input.ExpressionAttributeValues).toEqual({
+      ':stage': 'awaiting_setup_button', ':expected': 4,
+    });
+  });
+
+  test('with expectedVersion: returns deleted:false when version mismatch (concurrent advance)', async () => {
+    // A peer caller already advanced this row past our observed
+    // version. The right answer is "didn't claim it" — the prior
+    // flow is still active (just at a later version), so we leave
+    // it alone.
+    ddbMock.on(DeleteCommand).rejects(ccfe());
+    ddbMock.on(GetCommand).resolves({
+      Item: { flow_id: 'id', stage: 'awaiting_setup_button', version: 5 },
+    });
+
+    const res = await flowState.deleteFlow('id', {
+      stage: 'awaiting_setup_button',
+      reason: 'admin_cleanup',
+      expectedVersion: 4,
+    });
+    expect(res).toEqual({ deleted: false });
+    expect(logger.audit).not.toHaveBeenCalled();
+  });
+
+  test('rejects non-integer expectedVersion when provided', async () => {
+    await expect(flowState.deleteFlow('id', {
+      stage: 's', reason: 'terminal', expectedVersion: 1.5,
+    })).rejects.toThrow(/expectedVersion must be a positive integer/);
+    await expect(flowState.deleteFlow('id', {
+      stage: 's', reason: 'terminal', expectedVersion: 0,
+    })).rejects.toThrow(/expectedVersion must be a positive integer/);
+    await expect(flowState.deleteFlow('id', {
+      stage: 's', reason: 'terminal', expectedVersion: '1',
+    })).rejects.toThrow(/expectedVersion must be a positive integer/);
+  });
+
+  test('omitting expectedVersion preserves the pre-existing stage-gate-only contract', async () => {
+    // Defensively pin the additive nature of the new parameter:
+    // existing terminal-delete callers (handleRevokeSelect,
+    // handleSetupModal) MUST observe the exact same DDB call
+    // shape as before — no #v in names, no :expected in values.
+    ddbMock.on(DeleteCommand).resolves({});
+    await flowState.deleteFlow('id', { stage: 's', reason: 'terminal' });
+
+    const call = ddbMock.commandCalls(DeleteCommand)[0];
+    expect(call.args[0].input.ConditionExpression)
+      .toBe('attribute_exists(flow_id) AND #s = :stage');
+    expect(call.args[0].input.ExpressionAttributeNames).toEqual({ '#s': 'stage' });
+    expect(call.args[0].input.ExpressionAttributeValues).toEqual({ ':stage': 's' });
+  });
 });
 
 describe('flow-state — payload corruption resilience', () => {
@@ -996,5 +1122,266 @@ describe('flow-state — payload corruption resilience', () => {
       expect.stringMatching(/payload JSON\.parse failed/),
       expect.any(Object),
     );
+  });
+});
+
+describe('flow-state.supersedeOrCreate', () => {
+  // The consolidated supersede-and-retry primitive. Tests pin the
+  // five distinct outcome shapes:
+  //   - first-try create succeeds (no predecessor)
+  //   - predecessor at SAME stage, same version → claim wins
+  //   - predecessor at DIFFERENT stage (sibling flow) → surfaced unchanged
+  //   - predecessor advanced between peek and delete → not claimed
+  //   - row vanishes between conflict and peek → retry create
+
+  test('first-try create succeeds when no row exists at flow_id', async () => {
+    // Happy path: no collision, single PutCommand to DDB.
+    ddbMock.on(PutCommand).resolves({});
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res).toEqual({ created: true, version: 1 });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    // No supersede-side reads or deletes when there's nothing to supersede.
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+    expect(logger.audit).toHaveBeenCalledWith(AUDIT_EVENTS.FLOW_CREATED, expect.objectContaining({
+      flow_id: FLOW_ID, stage: 'awaiting_setup_button',
+    }));
+  });
+
+  test('claims a same-stage predecessor via version-gated delete + retry create', async () => {
+    // 1) PutCommand #1 conflicts on the existing row.
+    // 2) GetCommand (loadFlow include_expired:true) returns the
+    //    predecessor with its stage + version.
+    // 3) DeleteCommand with both stage AND version gates wins.
+    // 4) PutCommand #2 succeeds for the fresh row.
+    const priorRow = {
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      version: 3,
+      payload: null,
+      expires_at: futureExpiry(),
+    };
+    ddbMock.on(PutCommand)
+      .rejectsOnce(ccfe())
+      .resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: priorRow });
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res).toEqual({ created: true, version: 1 });
+
+    // The DeleteCommand must include the version gate.
+    const delCall = ddbMock.commandCalls(DeleteCommand)[0];
+    expect(delCall.args[0].input.ConditionExpression)
+      .toBe('attribute_exists(flow_id) AND #s = :stage AND #v = :expected');
+    expect(delCall.args[0].input.ExpressionAttributeValues[':expected']).toBe(3);
+    expect(delCall.args[0].input.ExpressionAttributeValues[':stage']).toBe('awaiting_setup_button');
+  });
+
+  test('returns surviving (no claim) when predecessor is at a DIFFERENT stage (sibling flow)', async () => {
+    // /qurl setup colliding with an in-flight /qurl revoke menu:
+    // the surviving row is at awaiting_revoke_select. We must NOT
+    // delete it (cross-flow safety) — return it unchanged so the
+    // caller can surface the sibling-message wording.
+    const siblingRow = {
+      flow_id: FLOW_ID,
+      stage: 'awaiting_revoke_select',
+      version: 1,
+      payload: null,
+      expires_at: futureExpiry(),
+    };
+    ddbMock.on(PutCommand).rejects(ccfe());
+    ddbMock.on(GetCommand).resolves({ Item: siblingRow });
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res.created).toBe(false);
+    expect(res.surviving.stage).toBe('awaiting_revoke_select');
+    expect(res.surviving.version).toBe(1);
+    // No delete attempted — the sibling flow stays untouched.
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+
+  test('uses include_expired:true on the peek so stuck-orphans (logically expired, not reaped) are observable', async () => {
+    // Without include_expired, the peek would return null for a
+    // row past its logical TTL but not yet physically reaped — and
+    // the caller would fall through to generic "try again" instead
+    // of recovering the orphan. Pin that the peek sees a past-
+    // expires_at row.
+    const pastExpiry = Math.floor(Date.now() / 1000) - 120;
+    const orphanRow = {
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_modal',
+      version: 2,
+      payload: null,
+      expires_at: pastExpiry,
+    };
+    ddbMock.on(PutCommand).rejects(ccfe());
+    ddbMock.on(GetCommand).resolves({ Item: orphanRow });
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    // Surfaced as surviving even though logically expired. The
+    // caller branches on .stage (sibling vs same-stage) before
+    // attempting any delete.
+    expect(res.created).toBe(false);
+    expect(res.surviving).not.toBeNull();
+    expect(res.surviving.stage).toBe('awaiting_setup_modal');
+    expect(res.surviving.expires_at).toBe(pastExpiry);
+  });
+
+  test('returns surviving (no claim) when predecessor advances between peek and delete (OCC race)', async () => {
+    // We observed version=3 but by the time our DeleteCommand
+    // fires, a concurrent transitionFlow has bumped to version=4.
+    // The version-gated delete fails by design. Re-peek surfaces
+    // the post-advance state for the caller.
+    const observedRow = {
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      version: 3,
+      payload: null,
+      expires_at: futureExpiry(),
+    };
+    const advancedRow = {
+      ...observedRow,
+      stage: 'awaiting_setup_modal',
+      version: 4,
+    };
+    ddbMock.on(PutCommand).rejects(ccfe());
+    // First Get: peek before delete — sees version=3.
+    // Second Get: post-CCFE recheck inside deleteFlow → sees
+    //   version=4 (project-only on stage/version, fine).
+    // Third Get: re-peek after delete failed → returns advanced row.
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: observedRow })
+      .resolvesOnce({ Item: { stage: 'awaiting_setup_modal', version: 4 } })
+      .resolves({ Item: advancedRow });
+    ddbMock.on(DeleteCommand).rejects(ccfe());
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res.created).toBe(false);
+    expect(res.surviving.version).toBe(4);
+    // Only one PutCommand — we did not attempt a retry create
+    // after losing the OCC race.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test('retries create when the row vanishes between conflict and peek (TTL reap or peer cleanup)', async () => {
+    // First Put conflicts (something exists), but by the time we
+    // peek, the row is gone — a parallel cleanup beat us to it.
+    // The right move is to retry the create as if we never saw a
+    // collision.
+    ddbMock.on(PutCommand)
+      .rejectsOnce(ccfe())
+      .resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res).toEqual({ created: true, version: 1 });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+
+  test('surfaces surviving:null when both attempts collide and the peek then sees nothing', async () => {
+    // Two collisions in a row + a final empty peek. Caller
+    // disambiguates "couldn't claim" vs "stuck-orphan" via
+    // .surviving (null here means "row evaporated").
+    ddbMock.on(PutCommand)
+      .rejectsOnce(ccfe()) // first create
+      .rejectsOnce(ccfe()); // retry create after vanished-peek
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+    const res = await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+
+    expect(res).toEqual({ created: false, surviving: null });
+  });
+
+  test('recomputes expires_at on the retry create (full TTL budget after deleteFlow RTT)', async () => {
+    // A subtle correctness property: if supersedeOrCreate reused
+    // the first attempt's expires_at, the retry row's lifetime
+    // would be sub-second-truncated by the deleteFlow round-trip.
+    // Pin that the second PutCommand's expires_at is independently
+    // computed from now+ttl_seconds.
+    const priorRow = {
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      version: 1,
+      payload: null,
+      expires_at: futureExpiry(),
+    };
+    ddbMock.on(PutCommand)
+      .rejectsOnce(ccfe())
+      .resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: priorRow });
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const beforeSec = Math.floor(Date.now() / 1000);
+    await flowState.supersedeOrCreate({
+      flow_id: FLOW_ID,
+      stage: 'awaiting_setup_button',
+      payload: null,
+      ttl_seconds: 120,
+    });
+    const afterSec = Math.floor(Date.now() / 1000);
+
+    const putCalls = ddbMock.commandCalls(PutCommand);
+    const retryPut = putCalls[1].args[0].input.Item;
+    expect(retryPut.expires_at).toBeGreaterThanOrEqual(beforeSec + 120);
+    expect(retryPut.expires_at).toBeLessThanOrEqual(afterSec + 120);
+  });
+
+  test('rejects invalid arguments at entry', async () => {
+    await expect(flowState.supersedeOrCreate({
+      flow_id: '', stage: 's', payload: null, ttl_seconds: 60,
+    })).rejects.toThrow(/flow_id must be a non-empty string/);
+    await expect(flowState.supersedeOrCreate({
+      flow_id: FLOW_ID, stage: '', payload: null, ttl_seconds: 60,
+    })).rejects.toThrow(/stage must be a non-empty string/);
+    await expect(flowState.supersedeOrCreate({
+      flow_id: FLOW_ID, stage: 's', payload: null, ttl_seconds: 0,
+    })).rejects.toThrow(/ttl_seconds must be a positive integer/);
+    await expect(flowState.supersedeOrCreate({
+      flow_id: FLOW_ID, stage: 's', payload: null, ttl_seconds: 60.5,
+    })).rejects.toThrow(/ttl_seconds must be a positive integer/);
   });
 });

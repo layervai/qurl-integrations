@@ -31,8 +31,8 @@ const { requireAdmin } = require('./utils/admin');
 const { signQurlOAuthState } = require('./utils/qurl-oauth-state');
 const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
-const { createFlow, deleteFlow, transitionFlow, loadFlow } = require('./flow-state');
-const { flowIdForInteraction, registerFlow, safeReply } = require('./flow-dispatch');
+const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
+const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -2626,10 +2626,10 @@ async function handleRevoke(interaction, apiKey) {
     return interaction.editReply({ content: 'No recent sends to revoke.' });
   }
 
-  // Open the flow row BEFORE rendering the menu. If createFlow fails
-  // (DDB outage, IAM regression), we want the user to see an error
-  // immediately rather than a clickable menu whose selection would
-  // then 404 against the dispatcher.
+  // Open the flow row BEFORE rendering the menu. If the harness
+  // fails (DDB outage, IAM regression), we want the user to see an
+  // error immediately rather than a clickable menu whose selection
+  // would then 404 against the dispatcher.
   //
   // Supersede semantics: a user with an existing in-flight revoke
   // flow who runs `/qurl revoke` again gets the old flow torn down
@@ -2642,61 +2642,50 @@ async function handleRevoke(interaction, apiKey) {
   // the menu is a stateless listing and the second invocation is
   // idempotent, so blocking it would just confuse users who can't
   // remember whether they cancelled the prior menu.
+  //
+  // supersedeOrCreate (flow-state.js) encapsulates the create →
+  // load → version-gated delete → retry sequence shared by all
+  // two-stage flows; the only flow-specific shape here is the
+  // sibling-flow disambiguation when a non-revoke row owns the
+  // flow_id.
   const flow_id = flowIdForInteraction(interaction);
-  const expires_at = Math.floor(Date.now() / 1000) + REVOKE_FLOW_TTL_SECONDS;
-  const created = await createFlow({
-    flow_id,
-    stage: REVOKE_STAGE_AWAITING_SELECT,
-    payload: null,
-    expires_at,
-  });
-  if (!created.created) {
-    // Existing row from a prior /qurl revoke. Tear it down (the
-    // stage gate on deleteFlow ensures we won't admin_cleanup a
-    // sibling flow at the same flow_id, e.g. an in-flight setup
-    // modal) and try again. The admin_cleanup reason marks this as
-    // an out-of-band delete rather than a terminal completion —
-    // keeps the SLI's silently_dropped count honest (the prior
-    // flow never reached its own terminal).
-    //
-    // If deleteFlow returns deleted:false the row at this flow_id
-    // belongs to a different flow type; the retry createFlow will
-    // then also return created:false and the user gets the generic
-    // "could not start" message. That's correct — we don't want to
-    // bulldoze a sibling flow.
-    await deleteFlow(flow_id, {
+  let supersede;
+  try {
+    supersede = await supersedeOrCreate({
+      flow_id,
       stage: REVOKE_STAGE_AWAITING_SELECT,
-      reason: 'admin_cleanup',
+      payload: null,
+      ttl_seconds: REVOKE_FLOW_TTL_SECONDS,
     });
-    let retry;
-    try {
-      retry = await createFlow({
-        flow_id,
-        stage: REVOKE_STAGE_AWAITING_SELECT,
-        payload: null,
-        expires_at,
-      });
-    } catch (err) {
-      // DDB throttle / IAM blip on the retry — the prior flow row
-      // is gone but we couldn't open a new one. Surface a
-      // recoverable error rather than letting it propagate to the
-      // generic "error executing command" reply.
-      logger.warn('handleRevoke: createFlow retry threw after admin_cleanup', {
-        flow_id, error: err && err.message,
-      });
-      return interaction.editReply({
-        content: 'Could not start a revoke session — please try again.',
-      });
+  } catch (err) {
+    // DDB throttle / IAM blip — surface as recoverable rather than
+    // letting it propagate to the generic "error executing command"
+    // reply. supersedeOrCreate internally already retried once, so
+    // throws here are real (not transient OCC churn).
+    logger.warn('handleRevoke: supersedeOrCreate threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.editReply({
+      content: 'Could not start a revoke session — please try again.',
+    });
+  }
+  if (!supersede.created) {
+    // A sibling flow owns this flow_id (or we lost two OCC races
+    // in a row). Look up the sibling-message via the dispatcher's
+    // registry — known sibling stage (setup-modal etc.) gets
+    // actionable wording naming the command the user should
+    // finish or cancel first; an unknown or vanished surviving
+    // row falls through to the generic "try again."
+    logger.warn('handleRevoke: supersedeOrCreate did not claim slot', {
+      flow_id, surviving_stage: supersede.surviving?.stage ?? null,
+    });
+    const siblingMsg = siblingMessageForStage(supersede.surviving?.stage);
+    if (siblingMsg) {
+      return interaction.editReply({ content: siblingMsg });
     }
-    if (!retry.created) {
-      // Two races in a row (or a sibling flow blocking us). Surface
-      // as an error rather than loop — the user can retry the
-      // command, or finish their other in-flight flow.
-      logger.warn('handleRevoke: createFlow racy after admin_cleanup', { flow_id });
-      return interaction.editReply({
-        content: 'Could not start a revoke session — please try again.',
-      });
-    }
+    return interaction.editReply({
+      content: 'Could not start a revoke session — please try again.',
+    });
   }
 
   const select = new StringSelectMenuBuilder()
@@ -2843,24 +2832,6 @@ const SETUP_SUCCESS_MSG =
   + 'Your team can use `/qurl send` to share files and locations securely.\n'
   + 'All qURL usage will be billed to your API key.';
 
-// Sibling-flow → message map for the post-supersede-retry-failure
-// disambiguation in handleSetup. Each entry says: "if the surviving
-// row at this flow_id is at THIS stage, tell the admin what to do
-// about it." The forgot-to-add-an-entry footgun is real once more
-// flows land — the dispatcher-side test in
-// commands-comprehensive.test.js pins both the known-stage and
-// generic-fallback branches.
-//
-// Future PRs (e.g. /qurl send) should add their awaiting_* entry
-// here as they ship.
-const SIBLING_FLOW_MESSAGES = {
-  [REVOKE_STAGE_AWAITING_SELECT]:
-    'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
-};
-function siblingMessageForStage(stage) {
-  return SIBLING_FLOW_MESSAGES[stage] ?? null;
-}
-
 // Button-stage handler. Routed by flow-dispatch when the admin
 // clicks the [Configure qURL] button rendered by handleSetup.
 //
@@ -2931,20 +2902,19 @@ async function handleSetupButton(interaction, { flow_id, row }) {
 
   // Roll back the OCC transition if showModal throws. Without the
   // delete, the row sits at awaiting_setup_modal until TTL and the
-  // admin's /qurl setup rerun trips the loadFlow-peek into the
-  // misleading "you already have a modal open" branch. If the
-  // rollback itself also fails (DDB region outage), both errors
-  // log at error-level — admin recovery is the SETUP_MODAL_TTL_SECONDS
-  // (5 min) wait.
+  // admin's /qurl setup rerun trips the supersede peek into the
+  // "you already have a modal open" branch. If the rollback itself
+  // also fails (DDB region outage), the error logs at error-level
+  // — admin recovery is the SETUP_MODAL_TTL_SECONDS (5 min) wait.
   //
-  // TODO(supersede-race) #272: the rollback delete uses
-  // stage='awaiting_setup_modal' (matching the just-committed
-  // transition). A concurrent /qurl setup rerun whose loadFlow
-  // peek lands in the narrow window AFTER the transition committed
-  // but BEFORE this rollback fires will surface the misleading
-  // "you already have a modal open" message. Window is bounded by
-  // a single DDB round-trip; not worth closing with an additional
-  // OCC primitive yet, but greppable for future readers.
+  // expectedVersion gates the rollback delete on the exact version
+  // we just wrote. If a concurrent /qurl setup rerun's
+  // supersedeOrCreate ALSO observed this row and won the version
+  // race first, this delete fails (deleted:false) — correct: the
+  // row that exists at flow_id is now the new caller's, not ours
+  // to clean up. Without the version gate, two simultaneous
+  // rollbacks across two clients could each "succeed" against
+  // each other's rows.
   //
   // No spurious error log if a concurrent supersede ALSO cleared
   // this row first — CCFE in deleteFlow returns `{deleted: false}`
@@ -2964,6 +2934,11 @@ async function handleSetupButton(interaction, { flow_id, row }) {
     await deleteFlow(flow_id, {
       stage: SETUP_STAGE_AWAITING_MODAL,
       reason: 'abort',
+      // The version that landed after our successful transitionFlow
+      // — anything else means a concurrent supersede already
+      // advanced the row past us, in which case we don't own the
+      // rollback anymore.
+      expectedVersion: result.version,
     }).catch((rollbackErr) => {
       // `metric: 'setup_rollback_failed'` is the stable selector
       // for the CloudWatch alarm filter. Keying on the message
@@ -3990,117 +3965,53 @@ const commands = [
         // button is a persistent message component, not an
         // in-process Promise.
         //
-        // Supersede semantics: deleteFlow's stage gate makes a
-        // second /qurl setup a no-op when the prior flow is already
-        // mid-modal (the deleteFlow returns deleted:false on the
-        // stage mismatch and the retry createFlow then also fails,
-        // surfacing "could not start"). When the prior flow is
-        // pre-modal — i.e. the admin walked away from the button —
-        // supersede + recreate gives them a fresh button.
+        // Supersede semantics: supersedeOrCreate's version-gated
+        // deleteFlow makes a second /qurl setup a no-op when the
+        // prior flow is mid-modal (the surviving peek returns the
+        // awaiting_setup_modal row unchanged, and we surface the
+        // "modal already open" wording from its registered
+        // siblingMessage). When the prior flow is still pre-modal
+        // — i.e. the admin walked away from the button — the
+        // claim succeeds and they get a fresh button.
         await interaction.deferReply({ ephemeral: true });
         const setupFlowId = flowIdForInteraction(interaction);
-        const setupCreated = await createFlow({
-          flow_id: setupFlowId,
-          stage: SETUP_STAGE_AWAITING_BUTTON,
-          payload: null,
-          expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
-        });
-        if (!setupCreated.created) {
-          // Within the supersede branch, deleteFlow + retry createFlow
-          // share one try-envelope so a DDB throttle / IAM blip on
-          // either gets the recoverable "could not start" message.
-          // The FIRST createFlow above is intentionally NOT wrapped —
-          // its throw bubbles to handleCommand's outer envelope.
-          // Pinned by:
-          //   - "propagates the throw when the first createFlow fails"
-          //   - "handleCommand wraps the createFlow throw into a generic
-          //      user-visible reply"
-          //
-          // Race-edge #272: two same-user supersede calls from
-          // different clients within the deleteFlow round-trip can
-          // have the second deleteFlow stomp the first retry's
-          // fresh row (no OCC on deleteFlow). Worst case is "admin
-          // reruns," and /qurl setup is admin-only + same-user so
-          // the window is vanishingly small — not worth an OCC
-          // primitive yet, tracked in #272 if/when it bites.
-          let setupRetry;
-          try {
-            await deleteFlow(setupFlowId, {
-              stage: SETUP_STAGE_AWAITING_BUTTON,
-              reason: 'admin_cleanup',
-            });
-            setupRetry = await createFlow({
-              flow_id: setupFlowId,
-              stage: SETUP_STAGE_AWAITING_BUTTON,
-              payload: null,
-              // Recompute expires_at after the deleteFlow round-trip
-              // so the retried row gets a full SETUP_BUTTON_TTL_SECONDS
-              // budget, not a sub-second-truncated one.
-              expires_at: Math.floor(Date.now() / 1000) + SETUP_BUTTON_TTL_SECONDS,
-            });
-          } catch (err) {
-            logger.warn('handleSetup: supersede deleteFlow+createFlow threw', {
-              flow_id: setupFlowId, error: err && err.message,
-            });
-            return interaction.editReply({
-              content: 'Could not start a setup session — please try again.',
-            });
+        let setupSupersede;
+        try {
+          setupSupersede = await supersedeOrCreate({
+            flow_id: setupFlowId,
+            stage: SETUP_STAGE_AWAITING_BUTTON,
+            payload: null,
+            ttl_seconds: SETUP_BUTTON_TTL_SECONDS,
+          });
+        } catch (err) {
+          logger.warn('handleSetup: supersedeOrCreate threw', {
+            flow_id: setupFlowId, error: err && err.message,
+          });
+          return interaction.editReply({
+            content: 'Could not start a setup session — please try again.',
+          });
+        }
+        if (!setupSupersede.created) {
+          // Did not claim the slot. Three distinct branches:
+          //   (a) surviving.stage === awaiting_setup_modal → admin
+          //       has an in-flight modal; tell them to finish or
+          //       wait for it to expire.
+          //   (b) surviving is a sibling flow's row (e.g. revoke
+          //       menu open) → surface its registered sibling
+          //       message.
+          //   (c) surviving is null OR an unregistered stage →
+          //       generic "try again" fallback.
+          logger.warn('handleSetup: supersedeOrCreate did not claim slot', {
+            flow_id: setupFlowId,
+            surviving_stage: setupSupersede.surviving?.stage ?? null,
+          });
+          const siblingMsg = siblingMessageForStage(setupSupersede.surviving?.stage);
+          if (siblingMsg) {
+            return interaction.editReply({ content: siblingMsg });
           }
-          if (!setupRetry.created) {
-            // Retry create can fail for three distinct reasons:
-            //   (a) stage gate refused admin_cleanup because the
-            //       prior row is mid-modal → tell admin to finish
-            //       their existing modal.
-            //   (b) sibling flow type lives at this flow_id (e.g.
-            //       in-flight revoke) → don't claim a modal is
-            //       open; use the generic "could not start" wording.
-            //   (c) two races in a row → also generic wording.
-            // Disambiguate with a loadFlow peek. Adds one DDB read
-            // on a rare error path; cheap relative to telling the
-            // user about a modal that doesn't exist.
-            logger.warn('handleSetup: createFlow racy after admin_cleanup', {
-              flow_id: setupFlowId,
-            });
-            // TODO(stuck-orphan-#273): loadFlow filters logically-
-            // expired rows to null. If the orphan row is past its
-            // logical TTL but not yet physically reaped (DDB reap
-            // is async, minutes-to-hours), the peek returns null
-            // and we fall through to the generic "could not start"
-            // message — leaving the admin stuck until physical
-            // reap. /qurl revoke doesn't hit this because its
-            // supersede stage gate matches the orphan's own stage.
-            // Tracked in #273; mitigation likely a
-            // loadFlow({include_expired: true}) opt-in plus a
-            // matching deleteFlow against the expired stage.
-            const surviving = await loadFlow(setupFlowId).catch((err) => {
-              // Preserve observability — a DDB outage here silently
-              // degrades the user-visible wording from actionable
-              // ("you have a /qurl revoke menu open") to generic
-              // ("try again"). Without this warn, an intermittent
-              // read-side regression would be invisible to ops.
-              logger.warn('handleSetup: loadFlow peek failed (post-supersede disambiguation)', {
-                flow_id: setupFlowId, error: err && err.message,
-              });
-              return null;
-            });
-            if (surviving?.stage === SETUP_STAGE_AWAITING_MODAL) {
-              return interaction.editReply({
-                content: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
-              });
-            }
-            // Sibling-flow message lookup. A known sibling stage
-            // (revoke today, send/etc tomorrow) gets actionable
-            // wording naming the command the admin should finish
-            // or cancel first; an unknown stage / row-vanished
-            // case falls through to the generic "try again."
-            const siblingMsg = siblingMessageForStage(surviving?.stage);
-            if (siblingMsg) {
-              return interaction.editReply({ content: siblingMsg });
-            }
-            return interaction.editReply({
-              content: 'Could not start a setup session — please try again.',
-            });
-          }
+          return interaction.editReply({
+            content: 'Could not start a setup session — please try again.',
+          });
         }
 
         const setupButton = new ButtonBuilder()
@@ -4501,17 +4412,36 @@ async function handleCommand(interaction) {
 // in index.js) co-locates the registration with the handler
 // implementation so future readers don't have to grep two modules to
 // understand the routing.
+// Each registerFlow co-locates two things at the same site: the
+// customId → handler binding (for dispatch) and the stage →
+// siblingMessage binding (for cross-flow supersede disambiguation).
+// A future flow that adds a new awaiting_* stage SHOULD register
+// its siblingMessage here so peer flows' supersede peeks can
+// surface actionable wording instead of falling through to the
+// generic "try again." Stages without a registered message (e.g.
+// short-lived ones nobody else would race against) are fine to
+// omit — peers will fall through to the generic copy.
 registerFlow(REVOKE_SELECT_CUSTOM_ID, {
   expectedStage: REVOKE_STAGE_AWAITING_SELECT,
   handler: handleRevokeSelect,
+  siblingMessage: 'You have a `/qurl revoke` menu open in this channel — finish or cancel it first.',
 });
 registerFlow(SETUP_BUTTON_CUSTOM_ID, {
   expectedStage: SETUP_STAGE_AWAITING_BUTTON,
   handler: handleSetupButton,
+  // Cross-flow collision wording: a /qurl revoke supersede whose
+  // peek finds a row at awaiting_setup_button surfaces this — its
+  // surviving.stage !== awaiting_revoke_select so it doesn't claim,
+  // but a generic "try again" wouldn't tell the admin what to do.
+  // (A same-flow-type /qurl setup rerun never hits this path: its
+  // own supersedeOrCreate matches the button stage and version-
+  // gated-deletes the prior row in one round-trip.)
+  siblingMessage: 'You have a `/qurl setup` button waiting in this channel — click it or wait for it to expire.',
 });
 registerFlow(SETUP_MODAL_CUSTOM_ID, {
   expectedStage: SETUP_STAGE_AWAITING_MODAL,
   handler: handleSetupModal,
+  siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
 module.exports = {

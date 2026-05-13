@@ -34,6 +34,7 @@ jest.mock('../src/config', () => ({
 const { loadFlow } = require('../src/flow-state');
 const {
   registerFlow,
+  siblingMessageForStage,
   flowIdForInteraction,
   handleFlowInteraction,
   SUPERSEDED_MSG,
@@ -103,6 +104,67 @@ describe('registerFlow', () => {
   it('rejects non-function handler', () => {
     expect(() => registerFlow('bad_handler_prefix', { expectedStage: 's', handler: null }))
       .toThrow(/handler must be a function/);
+  });
+
+  it('rejects non-string siblingMessage when provided', () => {
+    expect(() => registerFlow('sm_bad_type', {
+      expectedStage: 's_bad_type', handler: jest.fn(), siblingMessage: 42,
+    })).toThrow(/siblingMessage must be a non-empty string when provided/);
+    expect(() => registerFlow('sm_bad_empty', {
+      expectedStage: 's_bad_empty', handler: jest.fn(), siblingMessage: '',
+    })).toThrow(/siblingMessage must be a non-empty string when provided/);
+  });
+
+  it('rejects re-registering a stage with a DIFFERENT siblingMessage', () => {
+    // Two customIds registering the same stage MUST agree on the
+    // sibling message — otherwise the lookup behavior would flip
+    // depending on registration order, which is registration-order
+    // dependent magic.
+    registerFlow('sm_first_prefix', {
+      expectedStage: 'sm_consistent_stage',
+      handler: jest.fn(),
+      siblingMessage: 'first message',
+    });
+    expect(() => registerFlow('sm_second_prefix', {
+      expectedStage: 'sm_consistent_stage',
+      handler: jest.fn(),
+      siblingMessage: 'second message',
+    })).toThrow(/already has a different siblingMessage/);
+  });
+
+  it('allows omitting siblingMessage entirely (no entry in the lookup)', () => {
+    registerFlow('sm_optional_prefix', {
+      expectedStage: 'sm_optional_stage',
+      handler: jest.fn(),
+    });
+    expect(siblingMessageForStage('sm_optional_stage')).toBeNull();
+  });
+});
+
+describe('siblingMessageForStage', () => {
+  it('returns the message registered alongside a customId for that stage', () => {
+    registerFlow('sm_lookup_prefix', {
+      expectedStage: 'sm_lookup_stage',
+      handler: jest.fn(),
+      siblingMessage: 'You have an X in progress — finish it first.',
+    });
+    expect(siblingMessageForStage('sm_lookup_stage'))
+      .toBe('You have an X in progress — finish it first.');
+  });
+
+  it('returns null for an unregistered stage', () => {
+    expect(siblingMessageForStage('never_registered_stage')).toBeNull();
+  });
+
+  it('returns null for non-string input (defensive against caller bugs)', () => {
+    // The caller's typical input is `surviving?.stage` where
+    // surviving may be null — guard against the resulting
+    // undefined / non-string defensively rather than relying on
+    // every caller to optional-chain.
+    expect(siblingMessageForStage(undefined)).toBeNull();
+    expect(siblingMessageForStage(null)).toBeNull();
+    expect(siblingMessageForStage(42)).toBeNull();
+    expect(siblingMessageForStage('')).toBeNull();
   });
 });
 
