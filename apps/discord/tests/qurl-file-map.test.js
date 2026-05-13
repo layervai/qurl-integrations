@@ -760,6 +760,46 @@ describe('handleQurlFile — slash entry', () => {
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Unrecognized expiry/);
   });
+
+  test('inner catch on supersedeOrCreate throw clears cooldown + surfaces specific error', async () => {
+    // The supersedeOrCreate-specific inner catch is the dominant
+    // failure-path test for cooldown release — verifies the canonical
+    // "DDB outage" branch lifts the cooldown so the user can retry.
+    mockSupersedeOrCreate.mockRejectedValueOnce(new Error('ddb gone'));
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int, 'apikey');
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/Could not start a send/);
+  });
+
+  test('safety-net top-level catch clears cooldown on an unanticipated synchronous throw', async () => {
+    // The safety-net's job: catch throws that don't have a targeted
+    // inner catch — synchronous bugs in helpers, malformed cache
+    // entries, future regex changes that fail. Forcing
+    // `deferReply` to throw is the cleanest reproduction: it's the
+    // first await inside the try block, NOT wrapped by any inner
+    // catch, and forcing it to reject simulates a Discord token
+    // exhausted or gateway blip on the entry-time ACK.
+    //
+    // Without the safety-net, setCooldown ran but no clearCooldown
+    // would fire — user is locked out for the full cooldown window
+    // despite never seeing a response.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    int.deferReply.mockRejectedValueOnce(new Error('token expired'));
+    await handleQurlFile(int, 'apikey');
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/unexpected throw/),
+      expect.objectContaining({ user_id: SENDER_ID }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -911,19 +951,18 @@ describe('handleSendConfirmClick', () => {
 
   test('no apiKey resolved → tells user setup is needed', async () => {
     mockDb.getGuildApiKey.mockResolvedValueOnce(null);
-    // Override config to also have no fallback.
+    // jest.replaceProperty restores automatically on test teardown
+    // and is parallel-test-safe — beats hand-rolled
+    // mutate-restore-in-finally which would silently corrupt the
+    // mocked config if a future refactor parallelizes test cases
+    // within this file.
     const config = require('../src/config');
-    const originalKey = config.QURL_API_KEY;
-    config.QURL_API_KEY = null;
-    try {
-      const int = makeInteraction({ guildMembers: { [u1]: {} } });
-      await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
-      expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
-        content: expect.stringMatching(/not configured|setup/i),
-      }));
-    } finally {
-      config.QURL_API_KEY = originalKey;
-    }
+    jest.replaceProperty(config, 'QURL_API_KEY', null);
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/not configured|setup/i),
+    }));
   });
 });
 
@@ -932,12 +971,14 @@ describe('handleSendConfirmClick', () => {
 // ──────────────────────────────────────────────────────────────
 
 describe('handleSendCancelClick', () => {
-  test('happy path → deleteFlow + cooldown cleared + update', async () => {
+  test('happy path → version-gated deleteFlow + cooldown cleared + update', async () => {
     const int = makeInteraction();
     sendCooldowns.set(SENDER_ID, Date.now());
-    await handleSendCancelClick(int, { flow_id: 'fid' });
+    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
-      stage: SEND_STAGE_AWAITING_CONFIRM, reason: 'terminal',
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: 3,
     }));
     expect(isOnCooldown(SENDER_ID)).toBe(false);
     expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -945,13 +986,30 @@ describe('handleSendCancelClick', () => {
     }));
   });
 
-  test('deleteFlow dedup loser → ephemeral "already processed"', async () => {
+  test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED', async () => {
+    // Critical: when Send won the race, we must NOT clear cooldown
+    // mid-send-fanout. Otherwise the user can re-fire /qurl file
+    // immediately and bypass the per-user cooldown window while the
+    // first send is still DMing recipients.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    const cooldownAt = Date.now();
+    sendCooldowns.set(SENDER_ID, cooldownAt);
     const int = makeInteraction();
-    await handleSendCancelClick(int, { flow_id: 'fid' });
+    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/already processed/),
+      content: expect.stringMatching(/already processed|card moved/),
       ephemeral: true,
+    }));
+    // Cooldown is still in place — Cancel-loser must not unlock it.
+    expect(isOnCooldown(SENDER_ID)).toBe(true);
+    expect(sendCooldowns.get(SENDER_ID)).toBe(cooldownAt);
+  });
+
+  test('Cancel deleteFlow is version-fenced against picker race', async () => {
+    const int = makeInteraction();
+    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 11 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      expectedVersion: 11,
     }));
   });
 });

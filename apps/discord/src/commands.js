@@ -3408,7 +3408,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 
 const {
   parseRecipientMentions,
-  MAX_INPUT_LENGTH: RECIPIENTS_MAX_INPUT_LENGTH,
+  MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
 } = require('./recipient-parser');
 
 const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
@@ -3614,12 +3614,18 @@ function renderConfirmCardContent({
   return content;
 }
 
-// Build the ActionRow set for the confirm card. When `needsPicker`,
-// row 0 is a UserSelectMenu (recipients absent / post-filter empty);
-// otherwise no picker row. Send/Cancel always in the last row.
-function renderConfirmCardRows({ needsPicker, sendDisabled }) {
+// Build the ActionRow set for the confirm card. When `attachPicker`,
+// row 0 is a UserSelectMenu (recipients absent OR a prior pick is in
+// the payload and the user might want to re-pick); otherwise no
+// picker row. Send/Cancel always in the last row.
+//
+// Renamed from `needsPicker` so the content/rows divergence at the
+// post-pick call site (content rendered WITHOUT picker, rows rendered
+// WITH picker — to let the user re-pick) is impossible to silently
+// merge in a future refactor.
+function renderConfirmCardRows({ attachPicker, sendDisabled }) {
   const rows = [];
-  if (needsPicker) {
+  if (attachPicker) {
     const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
     rows.push(new ActionRowBuilder().addComponents(
       new UserSelectMenuBuilder()
@@ -3665,150 +3671,167 @@ async function handleQurlSlashSend(interaction, apiKey, params) {
   }
   setCooldown(interaction.user.id);
 
-  await interaction.deferReply({ ephemeral: true });
+  // Top-level try/catch fences unanticipated throws (a TypeError from
+  // a malformed cached member, a future parser change, etc.) from
+  // leaving the user stranded in a cooldown window for a failure
+  // that never produced a visible response. Every known failure
+  // mode below has its own targeted clearCooldown + ephemeral
+  // editReply; this catch is the safety net for everything else.
+  try {
+    await interaction.deferReply({ ephemeral: true });
 
-  const recipientsRaw = interaction.options.getString('recipients');
-  const expiresIn = interaction.options.getString('expires-in') || '24h';
-  const selfDestructValue = interaction.options.getString('self-destruct') || SELF_DESTRUCT_NO_TIMER_CHOICE;
-  const personalMessageRaw = interaction.options.getString('personal-message');
+    const recipientsRaw = interaction.options.getString('recipients');
+    const expiresIn = interaction.options.getString('expires-in') || '24h';
+    const selfDestructValue = interaction.options.getString('self-destruct') || SELF_DESTRUCT_NO_TIMER_CHOICE;
+    const personalMessageRaw = interaction.options.getString('personal-message');
 
-  // Defense-in-depth: expiresIn comes from the slash command's choice
-  // list which Discord enforces server-side, but a forged interaction
-  // could carry an off-set value. EXPIRY_LABELS owns the closed set.
-  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({
-      content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
-    });
-  }
-  const selfDestructSeconds = selfDestructOptionToSeconds(selfDestructValue);
-  const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
-
-  // Phase 1: parse the recipients string (no fetch yet).
-  const parsed = parseRecipientMentions(recipientsRaw, interaction);
-
-  // Phase 2: resolve IDs → Users via guild member cache + fallback fetch.
-  let resolved = { users: [], unresolvedIds: [] };
-  if (parsed.ids.length > 0) {
-    try {
-      resolved = await resolveRecipientUsers(interaction, parsed.ids);
-    } catch (err) {
+    // Defense-in-depth: expiresIn comes from the slash command's choice
+    // list which Discord enforces server-side, but a forged interaction
+    // could carry an off-set value. EXPIRY_LABELS owns the closed set.
+    if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
       clearCooldown(interaction.user.id);
-      logger.error('qurl file/map: resolveRecipientUsers threw', {
-        user_id: interaction.user.id, error: err && err.message,
-      });
       return interaction.editReply({
-        content: '❌ Could not resolve recipients. Please try again.',
+        content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
       });
     }
-  }
+    const selfDestructSeconds = selfDestructOptionToSeconds(selfDestructValue);
+    const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
 
-  // Phase 3: drop bots + self.
-  const { valid, droppedBots, droppedSelf } = partitionRecipients(resolved.users, interaction.user.id);
+    const parsed = parseRecipientMentions(recipientsRaw, interaction);
 
-  // Phase 4: decide branch — confirm card straight through, or picker
-  // fallback. `needsPicker` is true when the user supplied no
-  // `recipients:` value at all. When they DID supply one but it
-  // post-filtered to empty, we hard-fail with a specific error so
-  // the user knows why (vs. silently dropping into the picker, which
-  // would mask the underlying mention-list problem).
-  const recipientsOmitted = recipientsRaw == null || recipientsRaw.trim().length === 0;
-  const warningsBlock = renderRecipientWarnings({
-    invalidTokens: parsed.invalidTokens,
-    cappedCount: parsed.cappedCount,
-    unresolvedIds: resolved.unresolvedIds,
-    droppedBots,
-    droppedSelf,
-  });
-  if (!recipientsOmitted && valid.length === 0) {
-    clearCooldown(interaction.user.id);
-    // Parser silently strips bots + the sender from `<@id>` mentions
-    // when the cache reports them (recipient-parser.js:205, 214) —
-    // those IDs never reach `partitionRecipients`. If post-parse `ids`
-    // is empty AND the user supplied non-empty `recipients`, surface
-    // a "nothing usable" message even when partition's breakdown is
-    // zero. This is what bot-only / self-only mention lists hit.
-    const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
-      && resolved.unresolvedIds.length === 0
-      && parsed.invalidTokens.length === 0
-      && parsed.cappedCount === 0;
-    const detail = breakdownEmpty
-      ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
-      : '';
-    return interaction.editReply({
-      content: warningsBlock + '❌ **No valid recipients to send to.** Re-run with at least one valid user mention.' + detail,
+    let resolved = { users: [], unresolvedIds: [] };
+    if (parsed.ids.length > 0) {
+      try {
+        resolved = await resolveRecipientUsers(interaction, parsed.ids);
+      } catch (err) {
+        clearCooldown(interaction.user.id);
+        logger.error('qurl file/map: resolveRecipientUsers threw', {
+          user_id: interaction.user.id, error: err && err.message,
+        });
+        return interaction.editReply({
+          content: '❌ Could not resolve recipients. Please try again.',
+        });
+      }
+    }
+
+    const { valid, droppedBots, droppedSelf } = partitionRecipients(resolved.users, interaction.user.id);
+
+    // `needsPicker` is true when the user supplied no `recipients:`
+    // value at all. When they DID supply one but it post-filtered to
+    // empty, hard-fail with a specific error so the user knows why
+    // (vs. silently dropping into the picker, which would mask the
+    // underlying mention-list problem).
+    const recipientsOmitted = recipientsRaw == null || recipientsRaw.trim().length === 0;
+    const warningsBlock = renderRecipientWarnings({
+      invalidTokens: parsed.invalidTokens,
+      cappedCount: parsed.cappedCount,
+      unresolvedIds: resolved.unresolvedIds,
+      droppedBots,
+      droppedSelf,
     });
-  }
+    if (!recipientsOmitted && valid.length === 0) {
+      clearCooldown(interaction.user.id);
+      // Parser silently strips bots + the sender from `<@id>` mentions
+      // when the cache reports them (recipient-parser.js:205, 214) —
+      // those IDs never reach `partitionRecipients`. If post-parse `ids`
+      // is empty AND the user supplied non-empty `recipients`, surface
+      // a "nothing usable" message even when partition's breakdown is
+      // zero. This is what bot-only / self-only mention lists hit.
+      const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
+        && resolved.unresolvedIds.length === 0
+        && parsed.invalidTokens.length === 0
+        && parsed.cappedCount === 0;
+      const detail = breakdownEmpty
+        ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
+        : '';
+      return interaction.editReply({
+        content: warningsBlock + '❌ **No valid recipients to send to.** Re-run with at least one valid user mention.' + detail,
+      });
+    }
 
-  const needsPicker = recipientsOmitted;
-  const recipientIds = valid.map((u) => u.id);
+    const needsPicker = recipientsOmitted;
+    const recipientIds = valid.map((u) => u.id);
 
-  // Phase 5: open the flow row. supersedeOrCreate handles the
-  // "another /qurl file/map is open" case — sibling-flow disambig
-  // surfaces a stage-specific message; same-stage rerun atomically
-  // claims the slot. Mirrors /qurl revoke's pattern.
-  const flow_id = flowIdForInteraction(interaction);
-  const sendNonce = crypto.randomBytes(8).toString('hex');
-  const payload = {
-    resourceType: params.resourceType,
-    attachment: params.attachment,
-    locationUrl: params.locationUrl,
-    locationName: params.locationName,
-    resourceLabel: params.resourceLabel,
-    recipientIds,
-    expiresIn,
-    selfDestructSeconds,
-    personalMessage,
-    sendNonce,
-  };
-  let supersede;
-  try {
-    supersede = await supersedeOrCreate({
-      flow_id,
-      stage: SEND_STAGE_AWAITING_CONFIRM,
-      payload,
-      ttl_seconds: SEND_FLOW_TTL_SECONDS,
+    // supersedeOrCreate handles the "another /qurl file/map is open"
+    // case — sibling-flow disambig surfaces a stage-specific message;
+    // same-stage rerun atomically claims the slot. Mirrors /qurl
+    // revoke's pattern.
+    const flow_id = flowIdForInteraction(interaction);
+    const sendNonce = crypto.randomBytes(8).toString('hex');
+    const payload = {
+      resourceType: params.resourceType,
+      attachment: params.attachment,
+      locationUrl: params.locationUrl,
+      locationName: params.locationName,
+      resourceLabel: params.resourceLabel,
+      recipientIds,
+      expiresIn,
+      selfDestructSeconds,
+      personalMessage,
+      sendNonce,
+    };
+    let supersede;
+    try {
+      supersede = await supersedeOrCreate({
+        flow_id,
+        stage: SEND_STAGE_AWAITING_CONFIRM,
+        payload,
+        ttl_seconds: SEND_FLOW_TTL_SECONDS,
+      });
+    } catch (err) {
+      clearCooldown(interaction.user.id);
+      logger.warn('handleQurlSlashSend: supersedeOrCreate threw', {
+        flow_id, error: err && err.message,
+      });
+      return interaction.editReply({
+        content: '❌ Could not start a send — please try again.',
+      });
+    }
+    if (!supersede.created) {
+      clearCooldown(interaction.user.id);
+      const siblingMsg = siblingMessageForStage(supersede.surviving?.stage);
+      return interaction.editReply({
+        content: siblingMsg || '❌ Could not start a send — please try again.',
+      });
+    }
+
+    const content = renderConfirmCardContent({
+      resourceType: params.resourceType,
+      resourceLabel: params.resourceLabel,
+      validRecipients: valid,
+      expiresIn,
+      selfDestructSeconds,
+      personalMessage,
+      warningsBlock,
+      needsPicker,
     });
+    const rows = renderConfirmCardRows({
+      attachPicker: needsPicker,
+      sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
+    });
+    return interaction.editReply({ content, components: rows });
   } catch (err) {
+    // Unanticipated throw. Always clear cooldown — the user got no
+    // visible response, so they must not be locked out for the full
+    // cooldown window. Try to surface a generic error via the
+    // (already-deferred) reply; if the editReply ALSO throws (token
+    // expired, Discord blip), the safety-net catch in flow-dispatch's
+    // handleFlowInteraction handles the front-half error visibility.
     clearCooldown(interaction.user.id);
-    logger.warn('handleQurlSlashSend: supersedeOrCreate threw', {
-      flow_id, error: err && err.message,
+    logger.error('handleQurlSlashSend: unexpected throw', {
+      user_id: interaction.user.id, error: err && err.message, stack: err && err.stack,
     });
     return interaction.editReply({
-      content: '❌ Could not start a send — please try again.',
-    });
+      content: '❌ Something went wrong — please try again.',
+    }).catch(logIgnoredDiscordErr);
   }
-  if (!supersede.created) {
-    clearCooldown(interaction.user.id);
-    const siblingMsg = siblingMessageForStage(supersede.surviving?.stage);
-    return interaction.editReply({
-      content: siblingMsg || '❌ Could not start a send — please try again.',
-    });
-  }
-
-  // Phase 6: render the confirm card.
-  const content = renderConfirmCardContent({
-    resourceType: params.resourceType,
-    resourceLabel: params.resourceLabel,
-    validRecipients: valid,
-    expiresIn,
-    selfDestructSeconds,
-    personalMessage,
-    warningsBlock,
-    needsPicker,
-  });
-  const rows = renderConfirmCardRows({
-    needsPicker,
-    sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
-  });
-  return interaction.editReply({ content, components: rows });
 }
 
 async function handleQurlFile(interaction, apiKey) {
-  // File concurrency-cap pre-check (UX fast-fail). Final claim happens
-  // inside executeSendPipeline. Surfacing the cap here lets us refuse
-  // the slash invocation before we render a confirm card the user
-  // would then never get past.
+  // UX fast-fail. The real concurrency-slot claim happens inside
+  // executeSendPipeline (commands.js:~1043); this pre-check is best-
+  // effort — by Send-click time the cap state can have shifted, in
+  // which case the back-half's guard fires instead.
   if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
     return interaction.reply({
       content: 'The bot is processing too many file sends right now. Please try again in a moment.',
@@ -3855,7 +3878,11 @@ async function handleQurlFile(interaction, apiKey) {
     },
     locationUrl: null,
     locationName: null,
-    resourceLabel: escapeDiscordMarkdown(attachment.name),
+    // 256-char cap mirrors the map-path `locationName` cap so a future
+    // upload-pipeline change that loosens Discord's filename ceiling
+    // can't bloat the confirm card. String() coerces in case a
+    // hypothetical future caller hands a non-string name.
+    resourceLabel: escapeDiscordMarkdown(String(attachment.name).slice(0, 256)),
   });
 }
 
@@ -3903,13 +3930,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     return interaction.update({
       content: '⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
         + ' Re-pick recipients below.',
-      components: renderConfirmCardRows({ needsPicker: true, sendDisabled: true }),
+      components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
     }).catch(logIgnoredDiscordErr);
   }
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
     return interaction.update({
       content: `⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.`,
-      components: renderConfirmCardRows({ needsPicker: true, sendDisabled: true }),
+      components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -3945,6 +3972,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     droppedBots,
     droppedSelf,
   });
+  // Intentional flag divergence: the CONTENT renders the resolved
+  // recipient summary ("**To:** N user(s)") — needsPicker:false —
+  // while the ROWS keep the UserSelectMenu attached so the user can
+  // re-pick. Send is enabled because we now have a valid recipient
+  // set. The two flags are deliberately fed opposite values; the
+  // rename from `needsPicker` to `attachPicker` on the rows side
+  // makes this asymmetry impossible to silently consolidate.
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,
@@ -3957,7 +3991,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   });
   return interaction.update({
     content,
-    components: renderConfirmCardRows({ needsPicker: true, sendDisabled: false }),
+    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: false }),
   }).catch(logIgnoredDiscordErr);
 }
 
@@ -4052,21 +4086,34 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   });
 }
 
-// Cancel button → deleteFlow + acknowledge. The cooldown was set on
-// invocation; clear it so a user who second-guesses isn't gated for
-// the full QURL_SEND_COOLDOWN_MS window.
-async function handleSendCancelClick(interaction, { flow_id }) {
+// Cancel button → version-gated deleteFlow + acknowledge.
+//
+// expectedVersion fences two distinct races, both serious:
+//  1. Cancel vs. Send: if Send is mid-dispatch (already deleted the
+//     flow), Cancel must NOT clear the cooldown — the first send is
+//     fanning out DMs and the user could otherwise immediately rerun
+//     and bypass the per-user cooldown window mid-send.
+//  2. Cancel vs. UserSelect: a Cancel click that lands while a
+//     UserSelectMenu transition is in flight would otherwise silently
+//     kill the row out from under the user's pick. The version gate
+//     surfaces that as the dedup-loser path (user re-clicks Cancel on
+//     the new row if they still want to abort).
+//
+// `clearCooldown` is gated on `deleted: true` so the cooldown stays
+// honored on the Cancel-loser branch.
+async function handleSendCancelClick(interaction, { flow_id, row }) {
   const { deleted } = await deleteFlow(flow_id, {
     stage: SEND_STAGE_AWAITING_CONFIRM,
     reason: 'terminal',
+    expectedVersion: row.version,
   });
-  clearCooldown(interaction.user.id);
   if (!deleted) {
     return interaction.reply({
-      content: 'This send was already processed.',
+      content: 'This send was already processed or the card moved — re-check it.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
+  clearCooldown(interaction.user.id);
   return interaction.update({
     content: 'Send cancelled.',
     components: [],
@@ -4872,7 +4919,7 @@ const commands = [
             opt.setName('recipients')
               .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
               .setRequired(false)
-              .setMaxLength(RECIPIENTS_MAX_INPUT_LENGTH)
+              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
           )
           .addStringOption(opt =>
             opt.setName('expires-in')
@@ -4906,7 +4953,7 @@ const commands = [
             opt.setName('recipients')
               .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
               .setRequired(false)
-              .setMaxLength(RECIPIENTS_MAX_INPUT_LENGTH)
+              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
           )
           .addStringOption(opt =>
             opt.setName('location-name')
