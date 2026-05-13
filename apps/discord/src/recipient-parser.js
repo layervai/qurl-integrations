@@ -36,6 +36,16 @@
 //     that Discord would ping (`<@id>`, `<@&id>`) can't reach this
 //     slot because they parse as valid mentions in the passes above.
 //
+// `invalidTokens` ARE NOT escaped against Discord markdown — a pasted
+// `[link](https://evil)`, `||spoiler||`, or backtick-fenced content
+// will render with full markdown semantics if a caller interpolates
+// the token bare into a message. The caller (7b.2's error renderer)
+// MUST wrap `invalidTokens` in a code block, or escape `[`, `]`,
+// `` ` ``, `|`, `*`, `_` before display. The mass-mention escape is
+// special-cased because it's the only shape with off-channel side
+// effects (a real ping to thousands of users); other markdown is
+// "ugly rendering" not "security."
+//
 // Output shape:
 //   {
 //     ids:           [<user_id>, ...],        // deduped, cap-applied
@@ -186,14 +196,20 @@ function parseRecipientMentions(raw, interaction) {
     consider(id);
   }
 
-  // Role expansion: missing role / empty role / DM-context guild lands
-  // the raw role token in `invalidTokens` so the caller can surface
-  // "couldn't resolve @role" rather than silently produce a smaller
-  // recipient list. NOTE on perf: discord.js's `Role.members` getter
-  // filters the full guild member cache per call, so N role mentions
-  // = N O(guild_size) scans. Bounded by the 4000-char input cap and
-  // by Discord's slash-option max — worth knowing for 7b.2 wiring
-  // in large guilds but not a hot-path concern today.
+  // Role expansion: missing role / empty role / DM-context guild
+  // / all-members-filtered all land the raw role token in
+  // `invalidTokens` so the caller can surface "couldn't resolve
+  // @role" rather than silently produce a smaller recipient list.
+  // NOTE: these three states are CONFLATED in the current shape —
+  // 7b.2 may want to distinguish "role doesn't exist" / "role has
+  // no members" / "all members are you+bots" via separate fields
+  // (e.g. `emptyRoles`, or check `role.memberCount > 0 && members.size
+  // === 0` for the partial-cache case). For now, conflation is
+  // acceptable because the user-visible copy ("couldn't expand @role")
+  // works for all three. NOTE on perf: discord.js's `Role.members`
+  // getter filters the full guild member cache per call, so N role
+  // mentions = N O(guild_size) scans. Bounded by the 4000-char input
+  // cap and Discord's slash-option max.
   // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
   // an unknown role yields one invalidTokens entry, not two. The
   // strip-pass's residue-tokens already dedupe naturally via input
@@ -225,9 +241,9 @@ function parseRecipientMentions(raw, interaction) {
     // vs "role contributed but we'd already counted them" — dedupe
     // is still a contribution.
     let usable = 0;
-    for (const [memberId, member] of members) {
+    for (const [memberId, roleMember] of members) {
       if (memberId === senderId) continue;
-      if (member?.user?.bot) continue;
+      if (roleMember?.user?.bot) continue;
       usable++;
       consider(memberId);
     }

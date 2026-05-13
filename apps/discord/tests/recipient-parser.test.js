@@ -210,6 +210,17 @@ describe('parseRecipientMentions — role mentions', () => {
       .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
+  test('DM context (guild=null) also treats role mentions as invalid', () => {
+    // discord.js returns `null` (not `undefined`) for DM-context
+    // guilds. Optional chaining handles both, but pin the runtime
+    // shape explicitly so a future refactor that switched
+    // `guild?.roles?.cache` to `guild.roles?.cache` would surface
+    // on this test, not in prod.
+    const int = { user: { id: '900' }, guild: null };
+    expect(parseRecipientMentions('<@&7000>', int))
+      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
+  });
+
   test('repeated invalid role mention dedupes in invalidTokens', () => {
     // `<@&999> <@&999>` against a guild missing role 999 must yield
     // ONE invalidTokens entry, not two. Without the role-id dedupe,
@@ -252,13 +263,17 @@ describe('parseRecipientMentions — role mentions', () => {
     expect(res.cappedCount).toBe(30);
   });
 
-  test('user listed BOTH directly AND via a role mention appears once in ids', () => {
+  test('user listed BOTH directly AND via a role mention appears once in ids, role is not flagged useless', () => {
     // The "merges role expansion with direct user mentions" test
     // above exercises this implicitly (user 101 is in role 7000 AND
     // mentioned directly), but a fixture that EXPLICITLY overlaps
-    // makes the dedupe invariant non-incidental — a regression that
-    // re-added role members without the Set guard would surface
-    // here as ids.length === 2 instead of 1.
+    // makes two invariants non-incidental:
+    // (a) ids.length === 1 (Set dedup — a regression re-adding role
+    //     members without the dedupe guard surfaces here);
+    // (b) invalidTokens === [] (the role contributed via dedupe so
+    //     `usable++` fires before the seen-check — a refactor
+    //     swapping `usable++` to AFTER `seen.has` would flag this
+    //     role as useless and push the token to invalidTokens).
     const int = makeInteraction({
       users: { '101': {} },
       roles: { '7000': ['101'] },
@@ -513,13 +528,37 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(res.invalidTokens.every(t => !t.startsWith('<@'))).toBe(true);
   });
 
+  test('exactly-cap unique candidates: no cap fires, no log call', () => {
+    // Boundary on the OTHER side of the cap. The cap fires when
+    // `cappedCount > 0` (i.e. seen.size > ids.size); at exactly
+    // `cap` unique inputs, ids absorbs all of them and cappedCount
+    // stays 0. Pin that this branch doesn't log — the cap-overshoot
+    // signal should ONLY surface when something was actually dropped.
+    const users = {};
+    const mentions = [];
+    for (let i = 0; i < 25; i++) {
+      const id = `${7000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    const int = makeInteraction({ users });
+    logger.debug.mockClear();
+    logger.warn.mockClear();
+    const res = parseRecipientMentions(mentions.join(' '), int);
+    expect(res.ids).toHaveLength(25);
+    expect(res.cappedCount).toBe(0);
+    expect(logger.debug).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
   test('cap-overshoot logging escalates to warn past 2x the cap', () => {
     // Modest overshoot (≤ 2× cap) signals "user typed too many" and
     // stays at debug; massive overshoot signals "user pasted an
     // untrimmed list" and surfaces at warn so oncall sees the pattern.
     // Pin the threshold so a future refactor that flipped the
     // comparison or moved the multiplier silently regresses the
-    // oncall signal.
+    // oncall signal. Also pins the meta payload shape so a future
+    // field rename in the log fires this test, not the prod logs.
     const users = {};
     const mentions = [];
     // 26 unique = cap+1 = modest overshoot → debug
@@ -533,6 +572,10 @@ describe('parseRecipientMentions — cap + length safety', () => {
     logger.warn.mockClear();
     parseRecipientMentions(mentions.join(' '), int);
     expect(logger.debug).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('capping recipient list'),
+      expect.objectContaining({ unique_count: 26, cap: 25, capped_count: 1 }),
+    );
     expect(logger.warn).not.toHaveBeenCalled();
 
     // 51 unique = 2× cap + 1 = massive overshoot → warn
@@ -546,6 +589,10 @@ describe('parseRecipientMentions — cap + length safety', () => {
     logger.warn.mockClear();
     parseRecipientMentions(mentions.join(' '), int);
     expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('capping recipient list'),
+      expect.objectContaining({ unique_count: 51, cap: 25, capped_count: 26 }),
+    );
     expect(logger.debug).not.toHaveBeenCalled();
   });
 });
