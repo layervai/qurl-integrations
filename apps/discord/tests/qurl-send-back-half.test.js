@@ -242,7 +242,9 @@ function makeInteraction(overrides = {}) {
 // the baseline explicitly: `{ attachment: { ...DEFAULT_ATTACHMENT,
 // url: 'x' } }`.
 // Frozen so a test forgetting to spread (`DEFAULT_ATTACHMENT.url = ...`)
-// fails loudly instead of silently corrupting the constant for later tests.
+// can't silently corrupt the constant for later tests. (In strict
+// mode this throws; in this file's CommonJS non-strict context the
+// assignment is a silent no-op — either way, the constant stays clean.)
 const DEFAULT_ATTACHMENT = Object.freeze({ url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' });
 function makePipelineParams(overrides = {}) {
   return {
