@@ -229,6 +229,39 @@ function makeInteraction(overrides = {}) {
   };
 }
 
+// Single drift-anchor for the executeSendPipeline param shape used
+// across every entry-gate describe block below. Each gate test
+// passes `{ [field]: value }` to vary exactly one field; everything
+// else stays at the canonical baseline. Adding a new pipeline param
+// is a one-line edit here instead of touching every gate's
+// describe block.
+//
+// CAVEAT: overrides REPLACE nested objects wholesale (e.g. passing
+// `{ attachment: { url: 'x' } }` drops the baseline's `contentType`
+// and `name`). If a test wants to vary just one nested field, spread
+// the baseline explicitly: `{ attachment: { ...DEFAULT_ATTACHMENT,
+// url: 'x' } }`.
+// Frozen so a test forgetting to spread (`DEFAULT_ATTACHMENT.url = ...`)
+// can't corrupt the constant for later tests.
+const DEFAULT_ATTACHMENT = Object.freeze({ url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' });
+function makePipelineParams(overrides = {}) {
+  return {
+    apiKey: 'apikey',
+    resourceType: 'file',
+    attachment: { ...DEFAULT_ATTACHMENT },
+    locationUrl: null,
+    locationName: null,
+    recipients: [{ id: 'u1', username: 'u1' }],
+    target: 'user',
+    isVoiceContext: false,
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+    sendNonce: 'nonce',
+    ...overrides,
+  };
+}
+
 // monitorLinkStatus polls at max(15s, min(60s, expiryMs/10)).
 // Tests use '1m' expiry → expiryMs/10 = 6s → max(15s, 6s) = 15s. So one
 // POLL_INTERVAL tick fires the setInterval body once.
@@ -1387,26 +1420,8 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     }
   });
 
-  // Minimal params object that would otherwise satisfy the destructure
-  // — only isVoiceContext varies per case. The pipeline never reaches
-  // any downstream call because the gate is at function entry, so the
-  // mocks below don't need to be configured.
-  function makePipelineParams(isVoiceContext) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
-  }
+  // Gate is at function entry — mocks below don't need to be
+  // configured because the pipeline never reaches a downstream call.
 
   test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
     const interaction = makeInteraction();
@@ -1416,7 +1431,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     // the gate is idempotent — but would surface a double-fire bug if a
     // future change adds side effects (audit emission, etc.) ahead of
     // the throw.
-    const rejection = executeSendPipeline(interaction, makePipelineParams(undefined));
+    const rejection = executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: undefined }));
     await expect(rejection).rejects.toThrow(TypeError);
     await expect(rejection).rejects.toThrow(/isVoiceContext must be a boolean/);
     // Gate clears the caller's stale ephemeral with an explicit error
@@ -1438,7 +1453,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
 
   test('throws TypeError when isVoiceContext is a string (most-likely miscoding shape)', async () => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams('true')))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: 'true' })))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
     // Same user-facing cancellation behavior as the undefined case.
     expect(interaction.editReply).toHaveBeenCalledWith(
@@ -1453,7 +1468,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     // rejected. A flow_state payload that serialized `false` as
     // missing-vs-null could hit this without the test.
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(null)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: null })))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
   });
 
@@ -1464,7 +1479,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     // looks deceptively boolean-compatible but trips the typeof
     // check.
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(n)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: n })))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
   });
 
@@ -1478,7 +1493,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     const interaction = makeInteraction();
     // eslint-disable-next-line no-new-wrappers
     const wrapperTrue = new Boolean(true);
-    await expect(executeSendPipeline(interaction, makePipelineParams(wrapperTrue)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: wrapperTrue })))
       .rejects.toThrow(/isVoiceContext must be a boolean/);
   });
 
@@ -1501,7 +1516,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
     setCooldown(interaction.user.id);
     expect(isOnCooldown(interaction.user.id)).toBe(true);
 
-    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: undefined })))
       .rejects.toThrow(TypeError);
     expect(isOnCooldown(interaction.user.id)).toBe(false);
   });
@@ -1511,30 +1526,13 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
 // attachment.url at entry so a tampered persisted payload or a
 // future caller mis-coding cannot reach the upload/announce path.
 describe('executeSendPipeline — target allowed-set gate', () => {
-  function makePipelineParams(target) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target,
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
-  }
-
   test.each([
     ['voice (silent-suppress shape — docstring warns about this)', 'voice'],
     ['empty string', ''],
     ['unknown future value', 'group'],
   ])('throws TypeError for target=%s', async (_label, target) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(target)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ target })))
       .rejects.toThrow(/target must be 'user' or 'channel'/);
     // Cancel-edit fires before the throw — same shape as the
     // isVoiceContext gate.
@@ -1547,7 +1545,7 @@ describe('executeSendPipeline — target allowed-set gate', () => {
 
   test('throws TypeError for non-string target (undefined / null)', async () => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ target: undefined })))
       .rejects.toThrow(/target must be 'user' or 'channel'/);
   });
 
@@ -1558,7 +1556,7 @@ describe('executeSendPipeline — target allowed-set gate', () => {
     // else (e.g. downstream mint failures) is a different concern.
     const interaction = makeInteraction();
     try {
-      await executeSendPipeline(interaction, makePipelineParams(target));
+      await executeSendPipeline(interaction, makePipelineParams({ target }));
     } catch (err) {
       expect(err.message).not.toMatch(/target must be/);
       return;
@@ -1570,23 +1568,6 @@ describe('executeSendPipeline — target allowed-set gate', () => {
 });
 
 describe('executeSendPipeline — attachment.url SSRF re-validation gate', () => {
-  function makePipelineParams(attachmentOverrides) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: attachmentOverrides,
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
-  }
-
   test.each([
     ['null attachment', null],
     ['attachment with no url field', { name: 'x.png', contentType: 'image/png' }],
@@ -1596,7 +1577,7 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     ['internal AWS metadata endpoint', { url: 'http://169.254.169.254/latest/meta-data/', name: 'x.png' }],
   ])('throws on %s when resourceType=file', async (_label, attachment) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(attachment)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ attachment })))
       .rejects.toThrow(/attachment\.url failed SSRF re-validation/);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1618,8 +1599,7 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     logger.warn.mockClear();
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({
-      url: 'http://localhost/internal',
-      name: 'x.png',
+      attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/internal' },
     }))).rejects.toThrow(/SSRF re-validation/);
     expect(logger.warn).toHaveBeenCalledWith(
       'executeSendPipeline: attachment.url failed isAllowedSourceUrl gate',
@@ -1642,20 +1622,12 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     // resourceType is 'location' so the gate is bypassed. The pipeline
     // will fail later downstream (mocks aren't configured for the
     // location path), but NOT with the SSRF gate message.
-    const params = {
-      apiKey: 'apikey',
+    const params = makePipelineParams({
       resourceType: 'location',
-      attachment: { url: 'http://localhost/whatever', name: 'x.png' },
+      attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/whatever' },
       locationUrl: 'https://google.com/maps/search/x',
       locationName: 'X',
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
+    });
     try {
       await executeSendPipeline(interaction, params);
     } catch (err) {
@@ -1666,23 +1638,6 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
 });
 
 describe('executeSendPipeline — expiresIn allowed-set gate', () => {
-  function makePipelineParams(expiresIn) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn,
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
-  }
-
   test.each([
     ['off-set numeric-style', '25h'],
     ['totally bogus', 'never'],
@@ -1691,7 +1646,7 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     ['number (not string)', 24],
   ])('throws on expiresIn=%s', async (_label, expiresIn) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(expiresIn)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn })))
       .rejects.toThrow(/expiresIn must be one of/);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1703,7 +1658,7 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
   test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
     const interaction = makeInteraction();
     try {
-      await executeSendPipeline(interaction, makePipelineParams(expiresIn));
+      await executeSendPipeline(interaction, makePipelineParams({ expiresIn }));
     } catch (err) {
       expect(err.message).not.toMatch(/expiresIn must be one of/);
       return;
@@ -1712,23 +1667,6 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
 });
 
 describe('executeSendPipeline — personalMessage shape gate', () => {
-  function makePipelineParams(personalMessage) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage,
-      sendNonce: 'nonce',
-    };
-  }
-
   test.each([
     ['object', { text: 'oops' }],
     ['array', ['oops']],
@@ -1736,7 +1674,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
     ['boolean', true],
   ])('throws on non-string non-null personalMessage (%s) — would render [object Object] in DM otherwise', async (_label, personalMessage) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(personalMessage)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ personalMessage })))
       .rejects.toThrow(/personalMessage must be null or string/);
   });
 
@@ -1747,7 +1685,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
   ])('accepts the allowed shape: %s', async (_label, personalMessage) => {
     const interaction = makeInteraction();
     try {
-      await executeSendPipeline(interaction, makePipelineParams(personalMessage));
+      await executeSendPipeline(interaction, makePipelineParams({ personalMessage }));
     } catch (err) {
       expect(err.message).not.toMatch(/personalMessage must be null or string/);
       return;
@@ -1768,23 +1706,6 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   // the individual tests centralizes the drift-anchor.
   const { QURL_SEND_MAX_RECIPIENTS: RECIPIENT_CAP } = require('../src/config');
 
-  function makePipelineParams(recipients) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients,
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-    };
-  }
-
   test.each([
     ['empty array', []],
     ['null', null],
@@ -1795,7 +1716,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['number', 42],
   ])('throws TypeError on non-array-or-empty recipients (%s)', async (_label, recipients) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients })))
       .rejects.toThrow(/recipients must be a non-empty array/);
     // Cancel-edit fires before the throw — same shape as the other
     // entry gates.
@@ -1817,7 +1738,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // gate. Pin that the value-detail field disambiguates the
     // realistic miscoding shapes.
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(recipients)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients })))
       .rejects.toThrow(detailRe);
   });
 
@@ -1829,12 +1750,12 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // exactly these 64 chars" from "we cut a longer value."
     const interaction = makeInteraction();
     const oneKB = 'x'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makePipelineParams(oneKB)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: oneKB })))
       .rejects.toThrow(/value=x{64}…/);
     // Negative pin: a 64-char value should NOT have the marker
     // (otherwise we can't distinguish exact-fit from truncated).
     const exact64 = 'y'.repeat(64);
-    await expect(executeSendPipeline(interaction, makePipelineParams(exact64)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: exact64 })))
       .rejects.toThrow(/value=y{64}\)/);
   });
 
@@ -1854,7 +1775,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['null-prototype object', Object.create(null)],
   ])('rejection message falls back to <unrepresentable> when String() throws (%s)', async (_label, value) => {
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(value)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: value })))
       .rejects.toThrow(/value=<unrepresentable>/);
   });
 
@@ -1869,18 +1790,18 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // code-point slicing it surfaces as 64 intact emoji.
     const interaction = makeInteraction();
     const sixtyFourEmoji = '🚀'.repeat(64);
-    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFourEmoji)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: sixtyFourEmoji })))
       .rejects.toThrow(/value=(?:🚀){64}\)/u);
     // 65 emoji → 64 in the rendering + `…` marker.
     const sixtyFiveEmoji = '🚀'.repeat(65);
-    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFiveEmoji)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: sixtyFiveEmoji })))
       .rejects.toThrow(/value=(?:🚀){64}…/u);
   });
 
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
     const oversized = Array.from({ length: RECIPIENT_CAP + 1 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }));
     const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: oversized })))
       .rejects.toThrow(/recipients\.length .* exceeds QURL_SEND_MAX_RECIPIENTS/);
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1896,7 +1817,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     setCooldown(interaction.user.id);
     expect(isOnCooldown(interaction.user.id)).toBe(true);
 
-    await expect(executeSendPipeline(interaction, makePipelineParams([])))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: [] })))
       .rejects.toThrow(TypeError);
     // The gate's own clearCooldown call IS the cleanup; the
     // post-throw isOnCooldown assertion is what verifies it.
@@ -1916,7 +1837,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     setCooldown(interaction.user.id);
     expect(isOnCooldown(interaction.user.id)).toBe(true);
 
-    await expect(executeSendPipeline(interaction, makePipelineParams(oversized)))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ recipients: oversized })))
       .rejects.toThrow(RangeError);
     expect(isOnCooldown(interaction.user.id)).toBe(false);
   });
@@ -1939,7 +1860,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // path tests in this file is tracked in #291.
     const interaction = makeInteraction();
     try {
-      await executeSendPipeline(interaction, makePipelineParams(recipients));
+      await executeSendPipeline(interaction, makePipelineParams({ recipients }));
     } catch (err) {
       expect(err.message).not.toMatch(/recipients must be a non-empty array/);
       expect(err.message).not.toMatch(/exceeds QURL_SEND_MAX_RECIPIENTS/);
@@ -1954,42 +1875,24 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
 // `target`, or `expiresIn` would otherwise dump the whole blob
 // into the rejection message.
 describe('executeSendPipeline — truncForLog applies to all value-rendering gates', () => {
-  function makeParams(overrides) {
-    return {
-      apiKey: 'apikey',
-      resourceType: 'file',
-      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
-      locationUrl: null,
-      locationName: null,
-      recipients: [{ id: 'u1', username: 'u1' }],
-      target: 'user',
-      isVoiceContext: false,
-      expiresIn: '24h',
-      selfDestructSeconds: null,
-      personalMessage: null,
-      sendNonce: 'nonce',
-      ...overrides,
-    };
-  }
-
   test('isVoiceContext rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
     const huge = 'w'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makeParams({ isVoiceContext: huge })))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: huge })))
       .rejects.toThrow(/isVoiceContext must be a boolean .* value=w{64}…\)/);
   });
 
   test('target rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
     const huge = 'x'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makeParams({ target: huge })))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ target: huge })))
       .rejects.toThrow(/target must be 'user' or 'channel' \(got x{64}…\)/);
   });
 
   test('expiresIn rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
     const huge = 'y'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makeParams({ expiresIn: huge })))
+    await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: huge })))
       .rejects.toThrow(/expiresIn must be one of .* \(got y{64}…\)/);
   });
 });
