@@ -38,20 +38,31 @@ import * as qurl from '../helpers/qurl-api';
 const env = loadEnv();
 
 describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
-  let tempFile: string;
-
-  beforeAll(() => {
-    // Tiny fixture — the file content doesn't matter; we're pinning
-    // the connector → qurl-service contract, not the upload pipeline.
-    tempFile = path.join(__dirname, 'qurl-send-viewer-ttl.smoke.fixture.txt');
-    fs.writeFileSync(tempFile, `e2e smoke fixture ${new Date().toISOString()}\n`);
-  });
+  // Per-test unique fixture content to avoid the connector's md5
+  // content-addressed dedup shortcut. If both tests uploaded the
+  // same bytes, the second call would short-circuit to the cached
+  // resource from the first call (minted WITH viewer_ttl_seconds=30)
+  // and the "control" no-TTL case would silently fail to exercise
+  // the "use server default" branch it's supposed to pin.
+  const tempFiles: string[] = [];
+  function freshFixture(label: string): string {
+    const f = path.join(
+      __dirname,
+      `qurl-send-viewer-ttl.smoke.fixture.${label}.${Date.now()}.${Math.random().toString(36).slice(2)}.txt`,
+    );
+    fs.writeFileSync(f, `e2e smoke fixture ${label} ${new Date().toISOString()} ${Math.random()}\n`);
+    tempFiles.push(f);
+    return f;
+  }
 
   afterAll(() => {
-    try { fs.unlinkSync(tempFile); } catch { /* best-effort */ }
+    for (const f of tempFiles) {
+      try { fs.unlinkSync(f); } catch { /* best-effort */ }
+    }
   });
 
   test('connector accepts viewer_ttl_seconds=30 and qurl-service mints a link', async () => {
+    const tempFile = freshFixture('ttl30');
     // 30s = below the historical 5-minute floor. If qurl-service ever
     // re-tightens the floor without coordinating with the connector,
     // this assertion catches it before users do.
@@ -78,6 +89,11 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
     // path was the only one exercised by smoke before #283. Kept
     // alongside the TTL'd case so a regression that breaks the
     // no-TTL path is also caught here, not silently in another file.
+    //
+    // Fresh fixture (different bytes from the TTL'd test) so the
+    // connector's content-addressed dedup doesn't return the cached
+    // TTL'd resource.
+    const tempFile = freshFixture('no-ttl');
     const result = await qurl.uploadFile(
       env.UPLOAD_API_URL,
       tempFile,

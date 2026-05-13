@@ -1,0 +1,90 @@
+/**
+ * Unit pin for classifyMintFailure (qurl-integrations#276).
+ *
+ * The helper maps thrown errors from /qurl send's upload + mint phase
+ * into a small enum of reason classes — `timeout`, `upstream_4xx`,
+ * `upstream_5xx`, `unknown` — that drive the CloudWatch metric filter
+ * dimension. Without a test pinning the contract, the docstring's
+ * "don't add per-API-code branches" cardinality discipline silently
+ * drifts the first time someone adds a "helpful" special case.
+ */
+
+const { _test } = require('../src/commands');
+const { classifyMintFailure } = _test;
+
+describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
+  test('null / undefined → unknown', () => {
+    expect(classifyMintFailure(null)).toBe('unknown');
+    expect(classifyMintFailure(undefined)).toBe('unknown');
+  });
+
+  describe('timeout class', () => {
+    test('libuv ETIMEDOUT (axios / http.request socket-level)', () => {
+      expect(classifyMintFailure({ code: 'ETIMEDOUT' })).toBe('timeout');
+    });
+
+    test('libuv ECONNABORTED (axios timeout after socket connect)', () => {
+      expect(classifyMintFailure({ code: 'ECONNABORTED' })).toBe('timeout');
+    });
+
+    test('undici / node fetch TimeoutError DOMException', () => {
+      // Node's built-in fetch surfaces timeout as { name: 'TimeoutError' }
+      // with no code field. Without the .name check, this would have
+      // bucketed as `unknown` and tonight's incident would be in a
+      // different category from the next undici-shaped one.
+      expect(classifyMintFailure({ name: 'TimeoutError' })).toBe('timeout');
+    });
+
+    test('undici AbortController AbortError', () => {
+      // AbortError from a per-request AbortController firing on
+      // deadline — same user-experience as a TimeoutError.
+      expect(classifyMintFailure({ name: 'AbortError' })).toBe('timeout');
+    });
+
+    test('message-string fallback', () => {
+      // Some HTTP libs surface "timeout" only in the error message
+      // without a code/name. The regex catches those.
+      expect(classifyMintFailure({ message: 'request timeout exceeded' })).toBe('timeout');
+      expect(classifyMintFailure({ message: 'Timeout while waiting for response' })).toBe('timeout');
+    });
+  });
+
+  describe('upstream_5xx class', () => {
+    test('500 / 502 / 503 / 504', () => {
+      for (const status of [500, 502, 503, 504, 599]) {
+        expect(classifyMintFailure({ status })).toBe('upstream_5xx');
+      }
+    });
+  });
+
+  describe('upstream_4xx class', () => {
+    test('400 / 401 / 403 / 404 / 429', () => {
+      for (const status of [400, 401, 403, 404, 429, 499]) {
+        expect(classifyMintFailure({ status })).toBe('upstream_4xx');
+      }
+    });
+  });
+
+  describe('unknown class', () => {
+    test('non-HTTP error with no code/name/message-keyword', () => {
+      expect(classifyMintFailure({ message: 'something else broke' })).toBe('unknown');
+    });
+
+    test('2xx status (should never happen in this code path, but pinned)', () => {
+      // The catch block only fires on thrown errors, but if a caller
+      // somehow synthesized a 2xx error object, it should NOT bucket
+      // as upstream_4xx or upstream_5xx.
+      expect(classifyMintFailure({ status: 200 })).toBe('unknown');
+    });
+  });
+
+  describe('priority ordering: timeout beats status when both present', () => {
+    test('ETIMEDOUT + status 504 → timeout (not upstream_5xx)', () => {
+      // If a future axios-like lib attaches BOTH a timeout code AND
+      // a synthesized 504, the more-specific timeout label should win
+      // — operators want to distinguish "we never got a response" from
+      // "upstream actively returned 504".
+      expect(classifyMintFailure({ code: 'ETIMEDOUT', status: 504 })).toBe('timeout');
+    });
+  });
+});

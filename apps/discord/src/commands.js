@@ -52,7 +52,15 @@ const TOKENS_PER_RESOURCE = 10;
 // 429 handling).
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
+  // libuv socket codes (axios, http.get, etc.) + undici/fetch
+  // DOMException shapes (TimeoutError from a real timeout,
+  // AbortError when an AbortController fired before the response
+  // landed — both are timeout-class from the user's perspective).
+  // Without the .name check, undici timeouts bucket as 'unknown'
+  // and we lose the dimensional split that's the whole point of
+  // having reason classes.
   if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
+      error.name === 'TimeoutError' || error.name === 'AbortError' ||
       /timeout/i.test(error.message || '')) {
     return 'timeout';
   }
@@ -1170,13 +1178,22 @@ async function executeSendPipeline(interaction, {
     // Without this, the "Failed to create links" user surface goes
     // un-instrumented and tonight's outage shape (4+ hours of users
     // hitting this before anyone noticed) repeats. qurl-integrations#276.
-    logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
-      send_id: sendId,
-      reason: classifyMintFailure(error),
-      api_code: error.apiCode || null,
-      status_code: error.status || null,
-      kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
-    });
+    //
+    // Skip emission for `quota_exceeded` — that error has its own
+    // dedicated user-message path below and is a normal product
+    // condition (viral file hitting TOKENS_PER_RESOURCE), NOT an
+    // availability signal. The constants.js docstring for this
+    // event explicitly excludes it; emitting here would page on a
+    // viral upload.
+    if (error.apiCode !== 'quota_exceeded') {
+      logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+        send_id: sendId,
+        reason: classifyMintFailure(error),
+        api_code: error.apiCode || null,
+        status_code: error.status || null,
+        kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
+      });
+    }
     logger.error('Failed to prepare QURL links', {
       error: error.message,
       apiCode: error.apiCode,
@@ -4819,6 +4836,12 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
+      // classifyMintFailure: exposed so a unit test pins the
+      // reason-category contract (qurl-integrations#276). The
+      // cardinality-discipline comment on the helper says "don't
+      // add per-API-code branches" — without a test, that's just
+      // a docstring waiting to drift.
+      classifyMintFailure,
     },
   }),
 };
