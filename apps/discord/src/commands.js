@@ -90,8 +90,11 @@ function emitMintFailureAudit(error, { sendId, kind }) {
   logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
     send_id: sendId,
     reason: classifyMintFailure(error),
-    api_code: (error && error.apiCode) || null,
-    status_code: (error && error.status) || null,
+    // `?? null` (not `|| null`) preserves a legitimate `0` status (e.g.
+    // fetch-on-DNS-failure surfaces 0) or empty-string `apiCode` —
+    // collapsing those to null would lose a dimension silently.
+    api_code: error?.apiCode ?? null,
+    status_code: error?.status ?? null,
     kind,
   });
 }

@@ -363,8 +363,11 @@ const AUDIT_EVENTS = {
   // Carries `reason` (categorized failure class), `api_code` (the
   // upstream-error code if the connector/qurl-service surfaced
   // RFC 7807-style), `status_code` (the upstream HTTP status), and
-  // `kind` ('file' | 'location' | 'unknown'; same value space as
-  // UPLOAD_SUCCESS — dashboard splits stay symmetric across the two).
+  // `kind` ('file' | 'location' for normal traffic; 'unknown' is a
+  // defensive-only fallback for a future refactor that could throw
+  // before activeKind is set — don't wire a dashboard panel expecting
+  // 'unknown' traffic). Same value space as UPLOAD_SUCCESS — dashboard
+  // splits stay symmetric across the two events.
   //
   // Cardinality discipline: `reason`, `kind`, and `status_code` are LOW
   // cardinality (closed enums) — safe to dimension on for CloudWatch
