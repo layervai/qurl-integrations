@@ -95,6 +95,11 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // before the API ceiling. 7b.2 should narrow the option's
 // max_length to ≤4000 so this cap becomes defense-in-depth rather
 // than the user-visible truncation point.
+// KEEP IN SYNC with the slash-option `max_length` in 7b.2's
+// builder. If 7b.2 narrows the option's max_length to ≤ 4000,
+// this cap becomes defense-in-depth; if it doesn't, this is the
+// user-visible truncation point (and the partial-mention trim
+// below becomes lossy on legitimate over-cap content).
 const MAX_INPUT_LENGTH = 4000;
 
 // Cap-overshoot logging threshold: above this multiple of the cap,
@@ -170,6 +175,9 @@ function parseRecipientMentions(raw, interaction) {
   const invalidTokens = [];
   const senderId = interaction.user?.id;
   const guild = interaction.guild;
+  // `cap > 0` is guaranteed by intEnv's `minPositive: true` validator
+  // at config.js:279 — if the env override ever flipped to ≤ 0, that
+  // validator would crash boot, not silently produce an empty result here.
   const cap = config.QURL_SEND_MAX_RECIPIENTS;
 
   // Mark an ID as considered: dedupe via `seen`, add to `ids` only

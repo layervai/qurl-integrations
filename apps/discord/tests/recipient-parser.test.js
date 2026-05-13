@@ -578,6 +578,22 @@ describe('parseRecipientMentions — cap + length safety', () => {
     );
     expect(logger.warn).not.toHaveBeenCalled();
 
+    // 50 unique = exactly 2× cap (the boundary) → debug.
+    // Pin the strict-greater direction: `seen.size > cap *
+    // MASSIVE_OVERSHOOT_MULTIPLIER` means EXACTLY 2× stays at debug.
+    // A future refactor flipping `>` to `>=` would surface here.
+    for (let i = 26; i < 50; i++) {
+      const id = `${6000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    int = makeInteraction({ users });
+    logger.debug.mockClear();
+    logger.warn.mockClear();
+    parseRecipientMentions(mentions.join(' '), int);
+    expect(logger.debug).toHaveBeenCalledTimes(1);
+    expect(logger.warn).not.toHaveBeenCalled();
+
     // 51 unique = 2× cap + 1 = massive overshoot → warn
     for (let i = 26; i < 51; i++) {
       const id = `${6000000000 + i}`;
