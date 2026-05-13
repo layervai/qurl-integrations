@@ -121,6 +121,19 @@ describe('parseRecipientMentions — filtering', () => {
       .toEqual({ ids: ['222'], invalidTokens: [], cappedCount: 0 });
   });
 
+  test('missing interaction.user falls through (sender-exclusion no-ops, no throw)', () => {
+    // Defensive precondition: `interaction.user?.id` is the sender
+    // exclusion anchor. If a caller passes `interaction = { guild }`
+    // (no user — bot misuse, not user input), the optional chain
+    // makes `senderId === undefined` so sender exclusion silently
+    // no-ops. Pin that the parser doesn't throw — the caller bug
+    // surfaces downstream via the back-half's interaction.user.id
+    // read, which is a clearer crash site than a parse-time TypeError.
+    const interaction = { guild: { members: { cache: new Map([['111', { user: { id: '111', bot: false } }]]) }, roles: { cache: new Map() } } };
+    expect(parseRecipientMentions('<@111>', interaction))
+      .toEqual({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
+  });
+
   test('best-effort bot filter: cache miss leaves the ID in (back-half re-checks)', () => {
     // Bot filter relies on member.cache; a cache miss (e.g. cold cache
     // or member not yet fetched) cannot tell us "is this a bot." The

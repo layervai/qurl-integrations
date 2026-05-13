@@ -13,9 +13,11 @@
 //   - User mentions:  <@123456> or <@!123456>   → user ID 123456
 //   - Role mentions:  <@&987654>                → expand to current
 //                                                 guild members of that role
-//   - Whitespace, commas, semicolons, pipes, and slashes as
-//     separators (lenient — covers free-form paste from contact
-//     lists / CSV-ish formats)
+// Mention extraction is regex-based — separators don't matter for
+// the mentions themselves (`<@111><@222>` matches both). The
+// separator class only affects the residue/invalid-token strip
+// pass: whitespace, commas, semicolons, pipes, and slashes (lenient
+// — covers free-form paste from contact lists / CSV-ish formats).
 //
 // What we reject (returned in `invalidTokens`):
 //   - Channel mentions <#...>
@@ -46,12 +48,18 @@
 // same per-send cap the in-channel form enforces), and excludes the
 // invoking user + bots (matches the form's self-send + bot rejection).
 //
-// Role expansion uses interaction.guild.members.cache. If the cache is
-// cold (DM context, bot just restarted) the role expansion silently
-// resolves to no members for that role — the role mention lands in
-// `invalidTokens` so the caller can surface "couldn't expand @team-blue,
-// pick users from the menu instead." This matches the existing form's
-// posture (fall through to the picker rather than 404 a slash command).
+// Role expansion uses interaction.guild.members.cache via discord.js's
+// `Role.members` getter, which filters the guild's member cache for
+// the role. PARTIAL-CACHE BLIND SPOT: in large guilds running without
+// `GUILD_MEMBERS` intent (or before chunking), `role.members.size`
+// reflects only the currently-cached subset, not the role's true
+// population. We cannot distinguish "small role" from "large role,
+// partial cache." Cold-cache / DM-context degrades safely (token
+// lands in `invalidTokens`), but a partial-cache silent under-resolve
+// is harder to surface — 7b.2 should consider logging `role.memberCount`
+// vs `role.members.size` when they diverge, and the user-facing copy
+// should say "expanded N members" so users notice if a role appears
+// to expand to far fewer recipients than they expect.
 
 const config = require('./config');
 const logger = require('./logger');
@@ -65,9 +73,13 @@ const USER_MENTION_RE = /<@!?(\d+)>/g;
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
 
 // Hard cap on input length so an adversarial regex-blowup attack
-// (10MB of `<@1>` repetitions) doesn't tie up the worker. The form's
-// 200-char descriptions and Discord's natural 2000-char message cap
-// make 4000 chars more than enough headroom for legitimate use.
+// (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
+// slash-command STRING option max is 6000 chars (when not narrowed
+// via setMaxLength); 4000 is a conservative budget that comfortably
+// fits any legitimate recipient-list paste while leaving headroom
+// before the API ceiling. 7b.2 should narrow the option's
+// max_length to ≤4000 so this cap becomes defense-in-depth rather
+// than the user-visible truncation point.
 const MAX_INPUT_LENGTH = 4000;
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / etc.) to
@@ -122,14 +134,13 @@ function parseRecipientMentions(raw, interaction) {
   const guild = interaction.guild;
   const cap = config.QURL_SEND_MAX_RECIPIENTS;
 
-  // Mark an ID as considered. Returns true if it's net-new to the
-  // candidate set (caller uses this to drive "role contributed
-  // anything" detection).
+  // Mark an ID as considered: dedupe via `seen`, add to `ids` only
+  // while under cap. Role-contribution detection lives in the role
+  // loop's `usable` counter — see comment there.
   function consider(id) {
-    if (seen.has(id)) return false;
+    if (seen.has(id)) return;
     seen.add(id);
     if (ids.size < cap) ids.add(id);
-    return true;
   }
 
   for (const m of input.matchAll(USER_MENTION_RE)) {
