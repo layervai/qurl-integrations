@@ -134,6 +134,17 @@ describe('parseRecipientMentions — filtering', () => {
       .toEqual({ ids: ['222'], invalidTokens: [], cappedCount: 0 });
   });
 
+  test('completely empty interaction ({}) does not throw, returns empty result', () => {
+    // The `interaction == null` early-return handles null/undefined,
+    // but a truthy empty object still has to walk the optional chains
+    // (`interaction.user?.id`, `interaction.guild?.roles?.cache`)
+    // without crashing. Pin that an `interaction = {}` is tolerated
+    // — a future refactor that switched `.guild?.x` to `.guild.x?` on
+    // the assumption "we've already null-checked" would surface here.
+    expect(parseRecipientMentions('<@111>', {}))
+      .toEqual({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
+  });
+
   test('missing interaction.user falls through (sender-exclusion no-ops, no throw)', () => {
     // Defensive precondition: `interaction.user?.id` is the sender
     // exclusion anchor. If a caller passes `interaction = { guild }`
@@ -526,6 +537,27 @@ describe('parseRecipientMentions — cap + length safety', () => {
     // surfaces as one invalid token after the strip. The KEY
     // assertion is the partial-mention residue isn't ALSO there.
     expect(res.invalidTokens.every(t => !t.startsWith('<@'))).toBe(true);
+  });
+
+  test('invalidTokens entries are capped at MAX_INVALID_TOKEN_LENGTH', () => {
+    // A single ~4000-char garbage token (one long string with no
+    // separators) would otherwise blow Discord's 4096-char embed
+    // budget if the caller interpolated it verbatim. Parser caps
+    // each token at MAX_INVALID_TOKEN_LENGTH chars and appends `…`.
+    // Pin both branches: under-cap stays untrimmed; over-cap gets
+    // the marker.
+    const int = makeInteraction({});
+    const longToken = 'x'.repeat(500);
+    const res = parseRecipientMentions(longToken, int);
+    expect(res.invalidTokens).toHaveLength(1);
+    // 256 chars + the ellipsis marker.
+    expect(res.invalidTokens[0]).toHaveLength(257);
+    expect(res.invalidTokens[0].endsWith('…')).toBe(true);
+
+    // Under-cap token is unchanged.
+    const shortToken = 'y'.repeat(100);
+    const res2 = parseRecipientMentions(shortToken, int);
+    expect(res2.invalidTokens).toEqual([shortToken]);
   });
 
   test('exactly-cap unique candidates: no cap fires, no log call', () => {

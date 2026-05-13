@@ -26,7 +26,7 @@
 //     to resolve "alice" to a user ID without an autocomplete round-trip,
 //     and silently dropping it would mask user typos.
 //
-// `invalidTokens` are PRE-ESCAPED at the parser boundary:
+// SECURITY: `invalidTokens` are PRE-ESCAPED at the parser boundary:
 //   - `@everyone` / `@here` are rewritten by inserting a zero-width
 //     space (U+200B) after the `@` — visually identical but Discord's
 //     tokenizer no longer recognizes the mass-mention shape. A caller
@@ -36,7 +36,7 @@
 //     that Discord would ping (`<@id>`, `<@&id>`) can't reach this
 //     slot because they parse as valid mentions in the passes above.
 //
-// `invalidTokens` ARE NOT escaped against Discord markdown — a pasted
+// SECURITY: `invalidTokens` ARE NOT escaped against Discord markdown — a pasted
 // `[link](https://evil)`, `||spoiler||`, or backtick-fenced content
 // will render with full markdown semantics if a caller interpolates
 // the token bare into a message. The caller (7b.2's error renderer)
@@ -101,6 +101,15 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // user-visible truncation point (and the partial-mention trim
 // below becomes lossy on legitimate over-cap content).
 const MAX_INPUT_LENGTH = 4000;
+
+// Per-token cap on entries in `invalidTokens`. Discord's embed total
+// is 4096 chars; a single ~4000-char garbage token (one giant string
+// with no separators) would blow that budget. Truncating at the
+// parser boundary means the caller's error renderer can interpolate
+// `invalidTokens` without further trimming. Applied to residue
+// tokens only — `<@&id>` role tokens are bounded by Discord ID
+// width and don't need it.
+const MAX_INVALID_TOKEN_LENGTH = 256;
 
 // Cap-overshoot logging threshold: above this multiple of the cap,
 // escalate the log level from `debug` to `warn`. The signal is "user
@@ -293,7 +302,12 @@ function parseRecipientMentions(raw, interaction) {
     // already inert. Widening would needlessly mangle legitimate
     // `@Everyone` paste artifacts. The `@Everyone-not-escaped`
     // test pins this invariant.
-    invalidTokens.push(tok.replace(/@(everyone|here)/g, '@\u200b$1'));
+    let escaped = tok.replace(/@(everyone|here)/g, '@\u200b$1');
+    // Per-token length cap (see MAX_INVALID_TOKEN_LENGTH doc above).
+    if (escaped.length > MAX_INVALID_TOKEN_LENGTH) {
+      escaped = `${escaped.slice(0, MAX_INVALID_TOKEN_LENGTH)}\u2026`;
+    }
+    invalidTokens.push(escaped);
   }
 
   // Cap was enforced inline during the two passes (`ids` never
