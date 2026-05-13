@@ -52,15 +52,12 @@ const TOKENS_PER_RESOURCE = 10;
 // 429 handling).
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
-  // AbortError disambiguation runs BEFORE the message-regex branch
-  // because undici/fetch raises AbortError on deadline-fired aborts
-  // AND on user-cancellations. Bucket as `timeout` only when
-  // error.cause corroborates a timeout signal; otherwise fall through
-  // to `unknown` so a future cancel-button adoption doesn't silently
-  // mis-bucket cancellations as timeouts. Without this ordering, an
-  // AbortError whose message happens to contain "timeout" would
-  // short-circuit through the regex below and bypass the cause check.
-  // See PR #300 review (Justin).
+  // AbortError is ambiguous: undici/fetch raises it on deadline-fired
+  // aborts AND on user-cancellations. error.cause is the only reliable
+  // disambiguator — bucket as `timeout` only when cause corroborates a
+  // timeout signal; otherwise fall through to `unknown` so a future
+  // cancel-button adoption doesn't silently mis-bucket cancellations
+  // as timeouts. See PR #300 review (Justin).
   if (error.name === 'AbortError') {
     const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
     if (/timeout/i.test(causeStr)) return 'timeout';
@@ -1212,10 +1209,13 @@ async function executeSendPipeline(interaction, {
     // un-instrumented and tonight's outage shape (4+ hours of users
     // hitting this before anyone noticed) repeats. qurl-integrations#276.
     //
-    emitMintFailureAudit(error, {
-      sendId,
-      kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
-    });
+    // Explicit map (RESOURCE_TYPES.MAPS → 'location' for parity with the
+    // UPLOAD_SUCCESS / addRecipients vocabulary) instead of `=== FILE ?
+    // 'file' : 'location'` so a future third RESOURCE_TYPES value
+    // surfaces as `null` rather than silently bucketing as 'location'.
+    // quota_exceeded skip lives inside emitMintFailureAudit.
+    const kindMap = { [RESOURCE_TYPES.FILE]: 'file', [RESOURCE_TYPES.MAPS]: 'location' };
+    emitMintFailureAudit(error, { sendId, kind: kindMap[resourceType] ?? null });
     logger.error('Failed to prepare QURL links', {
       error: error.message,
       apiCode: error.apiCode,
@@ -2698,6 +2698,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
+        // quota_exceeded skip lives inside emitMintFailureAudit.
         emitMintFailureAudit(err, { sendId, kind: 'file' });
         return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
@@ -2760,6 +2761,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // fallback needed. If a future refactor adds throwable work before
     // the branches, the audit emission will land with kind=null and
     // surface in CloudWatch (discoverable, not silent).
+    // quota_exceeded skip lives inside emitMintFailureAudit.
     emitMintFailureAudit(error, { sendId, kind: activeKind });
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }

@@ -32,7 +32,7 @@ export async function uploadFile(
   filePath: string,
   apiKey: string,
   opts?: { viewerTtlSeconds?: number },
-): Promise<{ resource_id: string; hash: string; qurl_link?: string; error?: string }> {
+): Promise<{ resource_id: string; hash: string }> {
   const fileBuffer = fs.readFileSync(filePath);
   const fileName = path.basename(filePath);
 
@@ -49,7 +49,7 @@ export async function uploadFile(
   });
 
   if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<{ resource_id: string; hash: string; qurl_link?: string; error?: string }>;
+  return res.json() as Promise<{ resource_id: string; hash: string }>;
 }
 
 /** Mint a one-time qURL link for a resource */
