@@ -184,9 +184,10 @@ function parseRecipientMentions(raw, interaction) {
   const invalidTokens = [];
   const senderId = interaction.user?.id;
   const guild = interaction.guild;
-  // `cap > 0` is guaranteed by intEnv's `minPositive: true` validator
-  // at config.js:279 — if the env override ever flipped to ≤ 0, that
-  // validator would crash boot, not silently produce an empty result here.
+  // `cap > 0` is guaranteed by the `intEnv(..., { minPositive: true })`
+  // validator on QURL_SEND_MAX_RECIPIENTS in config.js — if the env
+  // override ever flipped to ≤ 0, that validator would crash boot,
+  // not silently produce an empty result here.
   const cap = config.QURL_SEND_MAX_RECIPIENTS;
 
   // Mark an ID as considered: dedupe via `seen`, add to `ids` only
@@ -253,10 +254,14 @@ function parseRecipientMentions(raw, interaction) {
       pushRoleErrorIfNew(roleId, m[0]);
       continue;
     }
-    // `usable` counts post-filter members the role exposed (whether
-    // or not they were new to `seen`). Used to detect "all filtered"
-    // vs "role contributed but we'd already counted them" — dedupe
-    // is still a contribution.
+    // `usable` counts members that passed the sender/bot filter,
+    // INCLUDING ones already in `seen` (i.e. a role whose every
+    // member was already direct-mentioned still contributes — dedupe
+    // counts). Drives ONLY the "no usable members" → invalidTokens
+    // branch below: empty role / sender-only role / bots-only role.
+    // Critically, `usable++` runs BEFORE the seen-check inside
+    // `consider`, so the "fully-duplicate role isn't useless" test
+    // catches a future refactor reversing that order.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
       if (memberId === senderId) continue;
@@ -305,8 +310,13 @@ function parseRecipientMentions(raw, interaction) {
     // test pins this invariant.
     let escaped = tok.replace(/@(everyone|here)/g, '@\u200b$1');
     // Per-token length cap (see MAX_INVALID_TOKEN_LENGTH doc above).
+    // Truncation runs AFTER the escape; defense-in-depth re-escape
+    // below catches the edge case where the cut leaves an `@everyone`
+    // suffix-fragment that's somehow still parseable (e.g. if the
+    // escape ever changes to a positional pattern). Cheap pass.
     if (escaped.length > MAX_INVALID_TOKEN_LENGTH) {
       escaped = `${escaped.slice(0, MAX_INVALID_TOKEN_LENGTH)}\u2026`;
+      escaped = escaped.replace(/@(everyone|here)/g, '@\u200b$1');
     }
     // Dedupe residue tokens by the post-escape rendered form so
     // `<#456> <#456>` or `alice alice` produces ONE entry, not two.

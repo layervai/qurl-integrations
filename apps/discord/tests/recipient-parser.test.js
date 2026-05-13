@@ -16,13 +16,13 @@ jest.mock('../src/logger', () => ({
 }));
 
 // Mock cap chosen for test convenience (prod default is 50 — see
-// src/config.js:279). Tests pin the cap behavior at 25 so the
-// boundary cases stay small + readable.
+// QURL_SEND_MAX_RECIPIENTS in src/config.js). Tests pin the cap
+// behavior at 25 so the boundary cases stay small + readable.
 jest.mock('../src/config', () => ({
   QURL_SEND_MAX_RECIPIENTS: 25,
 }));
 
-const { parseRecipientMentions, MAX_INPUT_LENGTH } = require('../src/recipient-parser');
+const { parseRecipientMentions, MAX_INPUT_LENGTH, MAX_INVALID_TOKEN_LENGTH } = require('../src/recipient-parser');
 const logger = require('../src/logger');
 
 // Build a synthetic interaction with the cache shape the parser reads.
@@ -579,7 +579,8 @@ describe('parseRecipientMentions — cap + length safety', () => {
     const res = parseRecipientMentions(longToken, int);
     expect(res.invalidTokens).toHaveLength(1);
     // 256 chars + the ellipsis marker.
-    expect(res.invalidTokens[0]).toHaveLength(257);
+    // length = cap + 1 (the ellipsis).
+    expect(res.invalidTokens[0]).toHaveLength(MAX_INVALID_TOKEN_LENGTH + 1);
     expect(res.invalidTokens[0].endsWith('…')).toBe(true);
 
     // Under-cap token is unchanged.
