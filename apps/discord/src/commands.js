@@ -777,6 +777,637 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   return allLinks;
 }
 
+// executeSendPipeline — back-half of the /qurl send lifecycle, extracted
+// from handleSend during PR 7a. Pure refactor: every behavior pinned by
+// qurl-send.test.js, qurl-send-state-machine.test.js,
+// qurl-send-back-half.test.js, and commands-comprehensive.test.js
+// passes unchanged. The closure-captured state from the legacy
+// handleSend's Step-3 form-fill becomes explicit destructured params
+// here so PR 7b's flow_state-backed form can be the second caller (its
+// handleSendFormSend will construct the params object from the
+// flow_state row's decrypted payload and invoke this function).
+//
+// Caller contract:
+//   - `apiKey` is the resolved guild API key (or env fallback).
+//   - `attachment` is non-null when `resourceType === RESOURCE_TYPES.FILE`
+//     and carries the Discord CDN URL + filename + contentType.
+//   - `locationUrl`/`locationName` are non-null when `resourceType` is
+//     a location kind; the back-half forwards `locationUrl` as a
+//     `google-map` JSON payload to the connector.
+//   - `recipients` is the resolved final list (filtered: sender + bots
+//     excluded, capped at config.QURL_SEND_MAX_RECIPIENTS). The
+//     back-half defends-in-depth with its own length checks but
+//     assumes the caller has done the cap math.
+//   - `sendNonce` is logging-breadcrumb only — keeps continuity with
+//     the caller's earlier log lines on the same flow.
+async function executeSendPipeline(interaction, {
+  apiKey,
+  resourceType,
+  attachment,
+  locationUrl,
+  locationName,
+  recipients,
+  target,
+  isVoiceContext,
+  expiresIn,
+  selfDestructSeconds,
+  personalMessage,
+  sendNonce,
+}) {
+  await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
+
+  const sendId = crypto.randomUUID();
+  let qurlLinks = [];
+  let connectorResourceId = null;
+
+  // Track whether this send has claimed the file-concurrency slot so the
+  // outer finally can release it exactly once even if we hit an error path.
+  let fileSendSlotClaimed = false;
+  // Safety watchdog: if an upload hangs past the deadline (network stuck,
+  // misbehaving upstream AbortSignal), forcibly release the slot so a bad
+  // upload can never permanently consume one of the MAX_CONCURRENT_FILE_SENDS
+  // slots. 5 min is generous — every internal fetch already has its own
+  // shorter AbortSignal timeout, so this fires only on truly stuck flows.
+  let slotWatchdog = null;
+  const releaseSlot = () => {
+    if (fileSendSlotClaimed) {
+      activeFileSends--;
+      fileSendSlotClaimed = false;
+    }
+    if (slotWatchdog) { clearTimeout(slotWatchdog); slotWatchdog = null; }
+  };
+  try {
+    if (resourceType === RESOURCE_TYPES.FILE) {
+      // Atomic claim. The earlier cap-check at file acceptance is UX-only
+      // (told the user upfront the system was busy); five users could each
+      // pass that check while activeFileSends == 0, then all sit in the
+      // 3-min Step-3 form loop, then all increment here past the cap. Re-
+      // check at the increment point to keep the cap honest.
+      if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+        clearCooldown(interaction.user.id);
+        logger.warn('File send rejected at slot-claim: concurrency cap reached', {
+          activeFileSends, sendId, sendNonce, userId: interaction.user.id,
+        });
+        return interaction.editReply({
+          content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+          components: [],
+        });
+      }
+      activeFileSends++;
+      fileSendSlotClaimed = true;
+      slotWatchdog = setTimeout(() => {
+        if (fileSendSlotClaimed) {
+          logger.error('activeFileSends slot watchdog fired — slot force-released', { sendId, sendNonce, userId: interaction.user.id });
+          activeFileSends--;
+          fileSendSlotClaimed = false;
+        }
+      }, 5 * 60 * 1000);
+      slotWatchdog.unref();
+      const filename = sanitizeFilename(attachment.name);
+      const expiresAt = expiryToISO(expiresIn);
+
+      // Download once, cache the buffer for re-uploads.
+      // selfDestructSeconds threads through both initial upload AND every
+      // re-upload, so the bot's "Add Recipients" mints the same TTL on
+      // each new resource that gets registered (TOKENS_PER_RESOURCE
+      // exhaustion → re-upload → new connector resource).
+      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds);
+      connectorResourceId = firstUpload.resource_id;
+      // Use a holder so we can null out the reference after all re-uploads
+      // finish — the subsequent link-monitor closure would otherwise pin up
+      // to 25MB in memory for up to an hour per concurrent send.
+      const bufHolder = { buf: firstUpload.fileBuffer };
+
+      // try/finally around mintLinksInBatches so a throw inside batching
+      // still releases the 25 MB buffer — otherwise the reuploadFn closure
+      // would pin it on the activeMonitors set / pending error handler for
+      // up to an hour per concurrent send under GC pressure.
+      let allLinks;
+      try {
+        allLinks = await mintLinksInBatches({
+          initialResourceId: firstUpload.resource_id,
+          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
+          expiresAt,
+          recipientCount: recipients.length,
+          apiKey,
+        });
+      } finally {
+        bufHolder.buf = null;
+      }
+
+      if (allLinks.length < recipients.length) {
+        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+      }
+
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: allLinks[i].resourceId,
+      }));
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
+    } else {
+      // Location send — upload JSON payload to connector, then mint in batches
+      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
+      const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
+      // Note: google-map JSON resources hit the connector's render
+      // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
+      // expire_after at view time — qurl-integrations-infra#480).
+      // We still forward selfDestructSeconds so behavior matches the
+      // contract once the carve-out is removed; today it's a no-op.
+      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
+      connectorResourceId = firstUpload.resource_id;
+
+      const expiresAt = expiryToISO(expiresIn);
+      const allLinks = await mintLinksInBatches({
+        initialResourceId: firstUpload.resource_id,
+        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
+        expiresAt,
+        recipientCount: recipients.length,
+        apiKey,
+      });
+
+      if (allLinks.length < recipients.length) {
+        logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
+        clearCooldown(interaction.user.id);
+        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
+      }
+
+      qurlLinks = recipients.map((r, i) => ({
+        recipientId: r.id,
+        qurlLink: allLinks[i].qurl_link,
+        resourceId: allLinks[i].resourceId,
+      }));
+      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
+    }
+  } catch (error) {
+    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
+    clearCooldown(interaction.user.id); // allow retry on failure
+    releaseSlot();
+    // Surface a specific message for known upstream failure codes so the
+    // user knows what to do (re-upload to refresh the per-resource quota)
+    // instead of seeing a generic "try again" that won't help.
+    if (error.apiCode === 'quota_exceeded') {
+      const isFile = resourceType === RESOURCE_TYPES.FILE;
+      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
+      return interaction.editReply({
+        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
+      });
+    }
+    return interaction.editReply({ content: 'Failed to create links. Please try again.' });
+  } finally {
+    // Release the file-concurrency slot as soon as the mint+batch phase is
+    // done — we no longer hold the 25 MB buffer past this point.
+    releaseSlot();
+  }
+
+  if (qurlLinks.length === 0) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
+  }
+
+  // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
+  // still exist on the QURL side but there's no local record to revoke them
+  // later — abort the send and surface the error instead of continuing to DMs.
+  try {
+    await db.recordQURLSendBatch(qurlLinks.map(link => ({
+      sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
+      resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
+      expiresIn, channelId: interaction.channelId, targetType: target,
+    })));
+  } catch (err) {
+    // Log the orphaned QURL resources at error level so an operator can
+    // manually revoke them — they exist on the QURL side with no local row.
+    logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
+      sendId, error: err.message, linkCount: qurlLinks.length,
+      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: 'Failed to save link records. Links were not sent. Please try again.',
+    });
+  }
+
+  // Send DMs
+  let delivered = 0;
+  let failed = 0;
+  const failedUsers = [];
+  const recipientMap = new Map(recipients.map(r => [r.id, r]));
+
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is bounded
+  // by the time between this line and the mint call (sub-second on
+  // handleSend; can be a few seconds on handleAddRecipients which
+  // re-downloads + re-uploads + re-mints first). Negligible at the
+  // 30m–7d horizon — recipients see "in 24 hours" instead of
+  // "in 23h 59m 56s" on the worst-case path.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
+  const dmResults = await batchSettled(qurlLinks, async (link) => {
+    const recipient = recipientMap.get(link.recipientId);
+    // Audit in `finally` so the metric fires for every recipient regardless
+    // of where the dispatch fails — sendDM resolving to false, sendDM
+    // throwing (against contract — see apps/discord/src/discord.js), OR
+    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
+    // it either — that's the failure mode the audit metric exists to
+    // measure. Coverage spans the entire dispatch attempt, not just the
+    // network leg.
+    let sent = false;
+    try {
+      const dmPayload = buildDeliveryPayload({
+        // member.displayName resolves to nickname || globalName || username,
+        // so it works whether the sender has a per-guild nickname, only a
+        // global display name, or just the legacy @-handle.
+        senderAlias: resolveSenderAlias(interaction),
+        qurlLink: link.qurlLink,
+        expiresAt,
+        personalMessage,
+      });
+      sent = await sendDM(link.recipientId, dmPayload);
+    } finally {
+      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+    }
+    await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    return { recipientId: link.recipientId, username: recipient?.username, sent };
+  }, 5);
+
+  for (const r of dmResults) {
+    if (r.status === 'fulfilled' && r.value.sent) {
+      delivered++;
+    } else {
+      failed++;
+      if (r.status === 'fulfilled') {
+        failedUsers.push({ id: r.value.recipientId, username: r.value.username });
+      } else {
+        failedUsers.push({ id: null, username: 'unknown' });
+      }
+    }
+  }
+
+  // Save send config for "Add Recipients" reuse. For file sends, also stash
+  // the Discord CDN URL + content type so we can re-download + re-upload when
+  // adding recipients (the original resource's 10-token pool may be drained).
+  // Logged-and-swallowed: a failure here doesn't block DM delivery (already
+  // done above) but it disables future Add Recipients / revoke-via-ui for
+  // this send. The per-link rows in qurl_sends persisted above, so /qurl
+  // revoke by sendId still works even if this row is missing.
+  try {
+    await db.saveSendConfig({
+      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
+      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
+      attachmentName: attachment?.name || null,
+      attachmentContentType: attachment?.contentType || null,
+      attachmentUrl: attachment?.url || null,
+      selfDestructSeconds,
+    });
+  } catch (err) {
+    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
+      sendId, error: err.message,
+    });
+  }
+
+  // Ephemeral confirmation with Add Recipients + Revoke buttons.
+  // Match on the Discord id (snowflake, globally unique) rather than the
+  // display username — usernames can collide within a guild.
+  // Shares REVOKE_TRUNC_LIMIT (module scope) so the send-confirmation
+  // "Recipients: …" line and the post-revoke "Revoked for: …" line
+  // truncate at the same threshold.
+  const failedUserIds = new Set(failedUsers.map(u => u.id || u));
+  const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => resolveRecipientAlias(r, interaction));
+
+  // Plain-form failed names (sanitizeDisplayNamePlain is already
+  // applied inside resolveRecipientAlias). Used for the attachment
+  // file; message-content rendering escapes per name.
+  const failedNamesPlain = failedUsers.map(u => resolveRecipientAlias(u, interaction));
+  const buildConfirmMsg = (showAll) => renderSendConfirm({
+    delivered, expiresIn,
+    failedNamesPlain, successNames, showAll,
+  });
+
+  const confirmRendered = buildConfirmMsg(false);
+  let confirmMsg = confirmRendered.content;
+  // In attachment mode the file IS the full list, so suppress the
+  // Show All toggle — the same shape the post-revoke flow uses.
+  const needsExpand = confirmRendered.needsExpand;
+
+  const buttonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`qurl_add_${sendId}`)
+      .setLabel('Add Recipients')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`qurl_revoke_${sendId}`)
+      .setLabel('Revoke All')
+      .setStyle(ButtonStyle.Danger),
+  );
+  if (needsExpand) {
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`qurl_expand_${sendId}`)
+        .setLabel('Show All')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+
+  // When successNames + failedNames overflow Discord's 2000-char content
+  // cap, attach the full lists as `recipients.txt` on this initial
+  // editReply. Subsequent monitor ticks / Add Recipients edits don't
+  // pass `files`, so Discord keeps the existing attachment without
+  // re-uploading. Add Recipients does NOT regenerate the attachment;
+  // the newly-added users surface in the post-revoke "Revoked for: …"
+  // list (with its own overflow path) and in monitor link-status
+  // updates.
+  const initialPayload = {
+    content: confirmMsg,
+    components: delivered > 0 ? [buttonRow] : [],
+  };
+  if (confirmRendered.attachmentText) {
+    initialPayload.files = [
+      new AttachmentBuilder(Buffer.from(confirmRendered.attachmentText, 'utf8'), { name: 'recipients.txt' }),
+    ];
+  }
+  const response = await interaction.editReply(initialPayload);
+
+  // Non-ephemeral channel notification when sending to "Everyone" (channel
+  // target) or "Voice users" (voice target). The sender's ephemeral reply
+  // confirms the send to THEM; this message is what recipients see in the
+  // channel so they know to look for the Qurl Bot DM. Without this, a
+  // passive channel member who missed the DM ping has no signal that a
+  // send happened. Logged-and-swallowed on failure — a missing
+  // "Send Messages" permission in a customer server shouldn't fail the
+  // whole send (DMs already went out successfully).
+  //
+  // Guard on `interaction.channel` being present: for a slash command
+  // invoked in a guild channel this is always set, but in edge cases
+  // (partial-cache on a fresh gateway connect, thread that got
+  // archived mid-send, DM-channel dispatch) the channel object can be
+  // null — and `.send()` on null throws synchronously, before the
+  // try/catch can see it.
+  if (interaction.channel && target === 'channel' && delivered > 0) {
+    // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
+    // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
+    // fallback). Channel-post is a wider blast radius than DM, so applying
+    // the same spoof defense here is critical — without it a display name
+    // with a leading U+202E flips text direction in the public announcement.
+    const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
+    const notifyMsg = isVoiceContext
+      ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
+      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
+    try {
+      await interaction.channel.send({ content: notifyMsg });
+    } catch (err) {
+      logger.warn('Failed to send channel notification', { error: err.message });
+    }
+  }
+
+  logger.info('/qurl send completed', {
+    sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
+  });
+
+  // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
+  let monitor = null;
+  if (delivered > 0) {
+    let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
+    // Single source of truth for the "adding recipients" lock: the global
+    // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
+    // collect handler, release in a single outer finally{} so any throw
+    // between acquire and the previous dual-flag release paths can't
+    // permanently block subsequent button clicks.
+
+    // Create the collector FIRST — if collector setup throws, we return
+    // without ever having started the monitor, so no setInterval leaks
+    // interaction/recipients/buttonRow/file data in a closure for up to
+    // an hour. Only after the collector is established do we kick the
+    // monitor setInterval.
+    let collector;
+    try {
+      collector = response.createMessageComponentCollector({
+        filter: (i) => i.user.id === interaction.user.id,
+        time: TIMEOUTS.QURL_REVOKE_WINDOW,
+      });
+    } catch (err) {
+      logger.error('Failed to create button collector', { sendId, error: err.message });
+      return;
+    }
+    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
+
+    let showAllRecipients = false;
+
+    // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
+    // guards the on('end') re-render so a Failed message isn't overwritten
+    // by a stale "Revoked 0/0".
+    let revokeResultUserNames = [];
+    let revokeResultTotal = 0;
+    // Authoritative DDB strict-success count. Tracked separately from
+    // `revokeResultUserNames.length` so the header stays correct even
+    // if a successful recipient_id can't be name-resolved against
+    // `recipients[]`.
+    let revokeResultSuccess = 0;
+    let revokeShowAll = false;
+    let revokeInFlight = false;
+    let revokeSucceeded = false;
+
+    collector.on('collect', async (btnInteraction) => {
+      if (btnInteraction.customId === `qurl_expand_${sendId}`) {
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        showAllRecipients = !showAllRecipients;
+        // buildConfirmMsg now returns {content, attachmentText, needsExpand};
+        // extract content for the monitor + editReply (string-only).
+        confirmMsg = buildConfirmMsg(showAllRecipients).content;
+        monitor.updateBaseMsg(confirmMsg);
+        const fullMsg = monitor.getFullMsg();
+        const updatedRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`qurl_add_${sendId}`).setLabel('Add Recipients').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
+        );
+        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(logIgnoredDiscordErr);
+        return;
+      }
+
+      if (btnInteraction.customId === `qurl_revoke_expand_${sendId}`) {
+        // Toggle Show All / Show Less on the post-revoke recipient list.
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        revokeShowAll = !revokeShowAll;
+        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+        await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
+        return;
+      }
+
+      if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
+        // Sync dedup before any await (Node single-threaded).
+        if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        revokeInFlight = true;
+        // Stop monitor BEFORE any editReply — its setInterval can
+        // overwrite the revoke-result message otherwise.
+        if (monitor) monitor.stop();
+        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
+        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
+        try {
+          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+          // Iterate `recipients` (canonical send-confirmation order)
+          // and filter by membership — `successUserIds` walks Set
+          // insertion order from resource-grouped iteration, which
+          // doesn't match what the user saw on "Recipients: …".
+          const successSet = new Set(revoked.successUserIds);
+          revokeResultUserNames = recipients
+            .filter(r => successSet.has(r.id))
+            .map(r => resolveRecipientAlias(r, interaction));
+          revokeResultTotal = revoked.total;
+          revokeResultSuccess = revoked.success;
+          revokeShowAll = false;
+          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
+          await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
+          revokeSucceeded = true;
+        } catch (err) {
+          logger.error('Revoke failed', { sendId, error: err.message });
+          await interaction.editReply({
+            content: 'Failed to revoke links. Try `/qurl revoke` instead.',
+            components: [],
+          }).catch(logIgnoredDiscordErr);
+          // Reset so the dedup flag isn't sticky if the failure UI
+          // ever changes to retain the Revoke button.
+          revokeInFlight = false;
+        }
+        // Collector keeps running for the post-revoke expand toggle;
+        // its `time:` window auto-expires.
+
+      } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
+        // =====================================================================
+        // CRITICAL SECTION — do NOT add any `await` between the three lines
+        // below and the next `return` path. Node.js is single-threaded: if
+        // check+set+cooldown all happen synchronously, a second button click
+        // dispatched to the same handler cannot observe the unlocked state.
+        // The `await` in the rejection branches is fine because we've already
+        // committed to rejecting at that point.
+        // =====================================================================
+        // Check-and-claim are now adjacent: if the flag is unset, grab it
+        // FIRST (before any cap check), then verify remaining capacity and
+        // release on rejection. That way a future refactor that adds an
+        // `await` in the remaining check can't reopen a racy window.
+        if (addRecipientsLocks.has(sendId)) {
+          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(logIgnoredDiscordErr);
+          return;
+        }
+        addRecipientsLocks.add(sendId);
+        // Single outer try/finally guarantees the lock is released on every
+        // exit path — even if a synchronous throw happens between acquire
+        // and any early return. The old dual-flag pattern had multiple
+        // release sites and risked permanent lock-out on a missed release.
+        try {
+          const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
+          if (remaining <= 0) {
+            await btnInteraction.reply({
+              content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
+              ephemeral: true,
+            });
+            return;
+          }
+          if (isOnCooldown(interaction.user.id)) {
+            await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
+            return;
+          }
+          setCooldown(interaction.user.id);
+
+          // Show user select menu — collect the response on the REPLY message
+          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
+          const userSelectRow = new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder()
+              .setCustomId(`qurl_addusers_${sendId}`)
+              .setPlaceholder('Select users to send to')
+              .setMinValues(1)
+              .setMaxValues(maxSelect)
+          );
+          const selectReply = await btnInteraction.reply({
+            content: 'Select additional recipients:',
+            components: [userSelectRow],
+            ephemeral: true,
+            fetchReply: true,
+          });
+
+          try {
+            const selectInteraction = await selectReply.awaitMessageComponent({
+              componentType: ComponentType.UserSelect,
+              time: 60000,
+            });
+
+            await selectInteraction.deferUpdate();
+            const addResult = await handleAddRecipients(
+              sendId, selectInteraction.users, interaction, apiKey,
+            );
+
+            // Extend recipients[] for the post-revoke names line.
+            // Dedupe by id — re-Add of an already-included user.
+            if (addResult.newRecipients?.length) {
+              const existingIds = new Set(recipients.map(r => r.id));
+              for (const r of addResult.newRecipients) {
+                if (!existingIds.has(r.id)) recipients.push(r);
+              }
+            }
+
+            if (addResult.delivered > 0) {
+              addRecipientsCount += addResult.delivered;
+              // Tell the monitor to track the new links (including new resource IDs for location sends)
+              monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
+              const totalSent = delivered + addRecipientsCount;
+              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+              if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
+              monitor.updateBaseMsg(confirmMsg);
+              await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
+            }
+
+            await selectInteraction.editReply({ content: addResult.msg, components: [] });
+          } catch (err) {
+            const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
+            // Generic user-facing message; real details only land in logs.
+            const msg = isTimeout ? 'Selection timed out.' : 'Failed to add recipients. Please try again.';
+            // Drop to warn for routine user-timeouts; keep error for real failures.
+            const log = isTimeout ? logger.warn : logger.error;
+            log('Add recipients failed', { sendId, error: err.message, isTimeout });
+            await btnInteraction.editReply({ content: msg, components: [] }).catch(logIgnoredDiscordErr);
+          }
+        } finally {
+          addRecipientsLocks.delete(sendId);
+        }
+      }
+    });
+
+    collector.on('end', (_, reason) => {
+      // Stop monitor polling when collector ends for any reason
+      if (monitor) monitor.stop();
+      if (reason === 'time') {
+        // After a SUCCESSFUL revoke, re-render the revoke result
+        // instead of the pre-revoke confirmMsg + Management-window
+        // banner — otherwise the user's "Revoked X/Y links" view
+        // gets clobbered when the collector window ends. Gate on
+        // `revokeSucceeded` (not `revokeInFlight`) so a failure
+        // message ("Failed to revoke links…") isn't overwritten with
+        // a stale "Revoked 0/0 links" line.
+        if (revokeSucceeded) {
+          // Terminal state: re-render content (Show All may have
+          // toggled), strip components. Omit `files`/`attachments`
+          // so Discord keeps the existing revoked-users.txt without
+          // re-uploading the same blob 15min later.
+          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
+          interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
+          return;
+        }
+        // Revoke attempted but failed — leave the failure message.
+        if (revokeInFlight) return;
+        interaction.editReply({
+          content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n⏰ **Management window closed** — use `/qurl revoke` to revoke later.',
+          components: [],
+        }).catch(logIgnoredDiscordErr);
+      }
+    });
+  }
+}
+
 async function handleSend(interaction, apiKey) {
   // awaitMessageComponent below requires a channel handle
   if (!interaction.channel) {
@@ -1646,600 +2277,21 @@ async function handleSend(interaction, apiKey) {
     });
   }
 
-  // --- Step 4: Process and send (back-half — preserved unchanged) ---
-  await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
-
-  const sendId = crypto.randomUUID();
-  let qurlLinks = [];
-  let connectorResourceId = null;
-
-  // Track whether this send has claimed the file-concurrency slot so the
-  // outer finally can release it exactly once even if we hit an error path.
-  let fileSendSlotClaimed = false;
-  // Safety watchdog: if an upload hangs past the deadline (network stuck,
-  // misbehaving upstream AbortSignal), forcibly release the slot so a bad
-  // upload can never permanently consume one of the MAX_CONCURRENT_FILE_SENDS
-  // slots. 5 min is generous — every internal fetch already has its own
-  // shorter AbortSignal timeout, so this fires only on truly stuck flows.
-  let slotWatchdog = null;
-  const releaseSlot = () => {
-    if (fileSendSlotClaimed) {
-      activeFileSends--;
-      fileSendSlotClaimed = false;
-    }
-    if (slotWatchdog) { clearTimeout(slotWatchdog); slotWatchdog = null; }
-  };
-  try {
-    if (resourceType === RESOURCE_TYPES.FILE) {
-      // Atomic claim. The earlier cap-check at file acceptance is UX-only
-      // (told the user upfront the system was busy); five users could each
-      // pass that check while activeFileSends == 0, then all sit in the
-      // 3-min Step-3 form loop, then all increment here past the cap. Re-
-      // check at the increment point to keep the cap honest.
-      if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
-        clearCooldown(interaction.user.id);
-        logger.warn('File send rejected at slot-claim: concurrency cap reached', {
-          activeFileSends, sendId, sendNonce, userId: interaction.user.id,
-        });
-        return interaction.editReply({
-          content: 'The bot is processing too many file sends right now. Please try again in a moment.',
-          components: [],
-        });
-      }
-      activeFileSends++;
-      fileSendSlotClaimed = true;
-      slotWatchdog = setTimeout(() => {
-        if (fileSendSlotClaimed) {
-          logger.error('activeFileSends slot watchdog fired — slot force-released', { sendId, sendNonce, userId: interaction.user.id });
-          activeFileSends--;
-          fileSendSlotClaimed = false;
-        }
-      }, 5 * 60 * 1000);
-      slotWatchdog.unref();
-      const filename = sanitizeFilename(attachment.name);
-      const expiresAt = expiryToISO(expiresIn);
-
-      // Download once, cache the buffer for re-uploads.
-      // selfDestructSeconds threads through both initial upload AND every
-      // re-upload, so the bot's "Add Recipients" mints the same TTL on
-      // each new resource that gets registered (TOKENS_PER_RESOURCE
-      // exhaustion → re-upload → new connector resource).
-      const firstUpload = await downloadAndUpload(attachment.url, filename, attachment.contentType, apiKey, selfDestructSeconds);
-      connectorResourceId = firstUpload.resource_id;
-      // Use a holder so we can null out the reference after all re-uploads
-      // finish — the subsequent link-monitor closure would otherwise pin up
-      // to 25MB in memory for up to an hour per concurrent send.
-      const bufHolder = { buf: firstUpload.fileBuffer };
-
-      // try/finally around mintLinksInBatches so a throw inside batching
-      // still releases the 25 MB buffer — otherwise the reuploadFn closure
-      // would pin it on the activeMonitors set / pending error handler for
-      // up to an hour per concurrent send under GC pressure.
-      let allLinks;
-      try {
-        allLinks = await mintLinksInBatches({
-          initialResourceId: firstUpload.resource_id,
-          reuploadFn: () => reUploadBuffer(bufHolder.buf, filename, attachment.contentType, apiKey, selfDestructSeconds),
-          expiresAt,
-          recipientCount: recipients.length,
-          apiKey,
-        });
-      } finally {
-        bufHolder.buf = null;
-      }
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
-      }
-
-      qurlLinks = recipients.map((r, i) => ({
-        recipientId: r.id,
-        qurlLink: allLinks[i].qurl_link,
-        resourceId: allLinks[i].resourceId,
-      }));
-      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'file' });
-    } else {
-      // Location send — upload JSON payload to connector, then mint in batches
-      // of TOKENS_PER_RESOURCE and re-upload when the pool is drained.
-      const locPayload = { type: 'google-map', url: locationUrl, name: locationName || locationUrl };
-      // Note: google-map JSON resources hit the connector's render
-      // carve-out (mapEmbedTmpl/mapFallbackTmpl don't honor
-      // expire_after at view time — qurl-integrations-infra#480).
-      // We still forward selfDestructSeconds so behavior matches the
-      // contract once the carve-out is removed; today it's a no-op.
-      const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds);
-      connectorResourceId = firstUpload.resource_id;
-
-      const expiresAt = expiryToISO(expiresIn);
-      const allLinks = await mintLinksInBatches({
-        initialResourceId: firstUpload.resource_id,
-        reuploadFn: () => uploadJsonToConnector(locPayload, 'location.json', apiKey, selfDestructSeconds),
-        expiresAt,
-        recipientCount: recipients.length,
-        apiKey,
-      });
-
-      if (allLinks.length < recipients.length) {
-        logger.error('mintLinks returned fewer links than expected for location', { expected: recipients.length, got: allLinks.length });
-        clearCooldown(interaction.user.id);
-        return interaction.editReply({ content: `Only ${allLinks.length} of ${recipients.length} links could be created. Please try again.` });
-      }
-
-      qurlLinks = recipients.map((r, i) => ({
-        recipientId: r.id,
-        qurlLink: allLinks[i].qurl_link,
-        resourceId: allLinks[i].resourceId,
-      }));
-      logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
-    }
-  } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
-    clearCooldown(interaction.user.id); // allow retry on failure
-    releaseSlot();
-    // Surface a specific message for known upstream failure codes so the
-    // user knows what to do (re-upload to refresh the per-resource quota)
-    // instead of seeing a generic "try again" that won't help.
-    if (error.apiCode === 'quota_exceeded') {
-      const isFile = resourceType === RESOURCE_TYPES.FILE;
-      const verb = isFile ? 're-upload the file' : 'edit the location query and resend';
-      return interaction.editReply({
-        content: `Couldn't create more links — this ${isFile ? 'file' : 'location'} has hit its share limit (${TOKENS_PER_RESOURCE} per upload). To send to more recipients, ${verb}.`,
-      });
-    }
-    return interaction.editReply({ content: 'Failed to create links. Please try again.' });
-  } finally {
-    // Release the file-concurrency slot as soon as the mint+batch phase is
-    // done — we no longer hold the 25 MB buffer past this point.
-    releaseSlot();
-  }
-
-  if (qurlLinks.length === 0) {
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
-  }
-
-  // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
-  // still exist on the QURL side but there's no local record to revoke them
-  // later — abort the send and surface the error instead of continuing to DMs.
-  try {
-    await db.recordQURLSendBatch(qurlLinks.map(link => ({
-      sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
-      resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
-      expiresIn, channelId: interaction.channelId, targetType: target,
-    })));
-  } catch (err) {
-    // Log the orphaned QURL resources at error level so an operator can
-    // manually revoke them — they exist on the QURL side with no local row.
-    logger.error('recordQURLSendBatch failed; aborting send to keep state consistent', {
-      sendId, error: err.message, linkCount: qurlLinks.length,
-      orphanedResources: qurlLinks.map(l => ({ resourceId: l.resourceId, qurlLink: l.qurlLink })),
-    });
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({
-      content: 'Failed to save link records. Links were not sent. Please try again.',
-    });
-  }
-
-  // Send DMs
-  let delivered = 0;
-  let failed = 0;
-  const failedUsers = [];
-  const recipientMap = new Map(recipients.map(r => [r.id, r]));
-
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on
-  // handleSend; can be a few seconds on handleAddRecipients which
-  // re-downloads + re-uploads + re-mints first). Negligible at the
-  // 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
-
-  const dmResults = await batchSettled(qurlLinks, async (link) => {
-    const recipient = recipientMap.get(link.recipientId);
-    // Audit in `finally` so the metric fires for every recipient regardless
-    // of where the dispatch fails — sendDM resolving to false, sendDM
-    // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
-    // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
-    // it either — that's the failure mode the audit metric exists to
-    // measure. Coverage spans the entire dispatch attempt, not just the
-    // network leg.
-    let sent = false;
-    try {
-      const dmPayload = buildDeliveryPayload({
-        // member.displayName resolves to nickname || globalName || username,
-        // so it works whether the sender has a per-guild nickname, only a
-        // global display name, or just the legacy @-handle.
-        senderAlias: resolveSenderAlias(interaction),
-        qurlLink: link.qurlLink,
-        expiresAt,
-        personalMessage,
-      });
-      sent = await sendDM(link.recipientId, dmPayload);
-    } finally {
-      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
-    }
-    await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
-    return { recipientId: link.recipientId, username: recipient?.username, sent };
-  }, 5);
-
-  for (const r of dmResults) {
-    if (r.status === 'fulfilled' && r.value.sent) {
-      delivered++;
-    } else {
-      failed++;
-      if (r.status === 'fulfilled') {
-        failedUsers.push({ id: r.value.recipientId, username: r.value.username });
-      } else {
-        failedUsers.push({ id: null, username: 'unknown' });
-      }
-    }
-  }
-
-  // Save send config for "Add Recipients" reuse. For file sends, also stash
-  // the Discord CDN URL + content type so we can re-download + re-upload when
-  // adding recipients (the original resource's 10-token pool may be drained).
-  // Logged-and-swallowed: a failure here doesn't block DM delivery (already
-  // done above) but it disables future Add Recipients / revoke-via-ui for
-  // this send. The per-link rows in qurl_sends persisted above, so /qurl
-  // revoke by sendId still works even if this row is missing.
-  try {
-    await db.saveSendConfig({
-      sendId, senderDiscordId: interaction.user.id, resourceType, connectorResourceId,
-      actualUrl: locationUrl || null, expiresIn, personalMessage, locationName,
-      attachmentName: attachment?.name || null,
-      attachmentContentType: attachment?.contentType || null,
-      attachmentUrl: attachment?.url || null,
-      selfDestructSeconds,
-    });
-  } catch (err) {
-    logger.error('saveSendConfig failed; Add Recipients will be unavailable for this send', {
-      sendId, error: err.message,
-    });
-  }
-
-  // Ephemeral confirmation with Add Recipients + Revoke buttons.
-  // Match on the Discord id (snowflake, globally unique) rather than the
-  // display username — usernames can collide within a guild.
-  // Shares REVOKE_TRUNC_LIMIT (module scope) so the send-confirmation
-  // "Recipients: …" line and the post-revoke "Revoked for: …" line
-  // truncate at the same threshold.
-  const failedUserIds = new Set(failedUsers.map(u => u.id || u));
-  const successNames = recipients.filter(r => !failedUserIds.has(r.id)).map(r => resolveRecipientAlias(r, interaction));
-
-  // Plain-form failed names (sanitizeDisplayNamePlain is already
-  // applied inside resolveRecipientAlias). Used for the attachment
-  // file; message-content rendering escapes per name.
-  const failedNamesPlain = failedUsers.map(u => resolveRecipientAlias(u, interaction));
-  const buildConfirmMsg = (showAll) => renderSendConfirm({
-    delivered, expiresIn,
-    failedNamesPlain, successNames, showAll,
+  // --- Step 4: Process and send (back-half — extracted to executeSendPipeline). ---
+  await executeSendPipeline(interaction, {
+    apiKey,
+    resourceType,
+    attachment,
+    locationUrl,
+    locationName,
+    recipients,
+    target,
+    isVoiceContext,
+    expiresIn,
+    selfDestructSeconds,
+    personalMessage,
+    sendNonce,
   });
-
-  const confirmRendered = buildConfirmMsg(false);
-  let confirmMsg = confirmRendered.content;
-  // In attachment mode the file IS the full list, so suppress the
-  // Show All toggle — the same shape the post-revoke flow uses.
-  const needsExpand = confirmRendered.needsExpand;
-
-  const buttonRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`qurl_add_${sendId}`)
-      .setLabel('Add Recipients')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`qurl_revoke_${sendId}`)
-      .setLabel('Revoke All')
-      .setStyle(ButtonStyle.Danger),
-  );
-  if (needsExpand) {
-    buttonRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId(`qurl_expand_${sendId}`)
-        .setLabel('Show All')
-        .setStyle(ButtonStyle.Secondary),
-    );
-  }
-
-  // When successNames + failedNames overflow Discord's 2000-char content
-  // cap, attach the full lists as `recipients.txt` on this initial
-  // editReply. Subsequent monitor ticks / Add Recipients edits don't
-  // pass `files`, so Discord keeps the existing attachment without
-  // re-uploading. Add Recipients does NOT regenerate the attachment;
-  // the newly-added users surface in the post-revoke "Revoked for: …"
-  // list (with its own overflow path) and in monitor link-status
-  // updates.
-  const initialPayload = {
-    content: confirmMsg,
-    components: delivered > 0 ? [buttonRow] : [],
-  };
-  if (confirmRendered.attachmentText) {
-    initialPayload.files = [
-      new AttachmentBuilder(Buffer.from(confirmRendered.attachmentText, 'utf8'), { name: 'recipients.txt' }),
-    ];
-  }
-  const response = await interaction.editReply(initialPayload);
-
-  // Non-ephemeral channel notification when sending to "Everyone" (channel
-  // target) or "Voice users" (voice target). The sender's ephemeral reply
-  // confirms the send to THEM; this message is what recipients see in the
-  // channel so they know to look for the Qurl Bot DM. Without this, a
-  // passive channel member who missed the DM ping has no signal that a
-  // send happened. Logged-and-swallowed on failure — a missing
-  // "Send Messages" permission in a customer server shouldn't fail the
-  // whole send (DMs already went out successfully).
-  //
-  // Guard on `interaction.channel` being present: for a slash command
-  // invoked in a guild channel this is always set, but in edge cases
-  // (partial-cache on a fresh gateway connect, thread that got
-  // archived mid-send, DM-channel dispatch) the channel object can be
-  // null — and `.send()` on null throws synchronously, before the
-  // try/catch can see it.
-  if (interaction.channel && target === 'channel' && delivered > 0) {
-    // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
-    // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
-    // fallback). Channel-post is a wider blast radius than DM, so applying
-    // the same spoof defense here is critical — without it a display name
-    // with a leading U+202E flips text direction in the public announcement.
-    const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
-    const notifyMsg = isVoiceContext
-      ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
-      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
-    try {
-      await interaction.channel.send({ content: notifyMsg });
-    } catch (err) {
-      logger.warn('Failed to send channel notification', { error: err.message });
-    }
-  }
-
-  logger.info('/qurl send completed', {
-    sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
-  });
-
-  // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
-  let monitor = null;
-  if (delivered > 0) {
-    let addRecipientsCount = 0; // Track cumulative adds for cap enforcement
-    // Single source of truth for the "adding recipients" lock: the global
-    // addRecipientsLocks Set keyed by sendId. Acquire at the top of the
-    // collect handler, release in a single outer finally{} so any throw
-    // between acquire and the previous dual-flag release paths can't
-    // permanently block subsequent button clicks.
-
-    // Create the collector FIRST — if collector setup throws, we return
-    // without ever having started the monitor, so no setInterval leaks
-    // interaction/recipients/buttonRow/file data in a closure for up to
-    // an hour. Only after the collector is established do we kick the
-    // monitor setInterval.
-    let collector;
-    try {
-      collector = response.createMessageComponentCollector({
-        filter: (i) => i.user.id === interaction.user.id,
-        time: TIMEOUTS.QURL_REVOKE_WINDOW,
-      });
-    } catch (err) {
-      logger.error('Failed to create button collector', { sendId, error: err.message });
-      return;
-    }
-    monitor = monitorLinkStatus(sendId, interaction, qurlLinks, recipients, expiresIn, confirmMsg, buttonRow, delivered, apiKey);
-
-    let showAllRecipients = false;
-
-    // `revokeInFlight` dedups concurrent Revoke clicks. `revokeSucceeded`
-    // guards the on('end') re-render so a Failed message isn't overwritten
-    // by a stale "Revoked 0/0".
-    let revokeResultUserNames = [];
-    let revokeResultTotal = 0;
-    // Authoritative DDB strict-success count. Tracked separately from
-    // `revokeResultUserNames.length` so the header stays correct even
-    // if a successful recipient_id can't be name-resolved against
-    // `recipients[]`.
-    let revokeResultSuccess = 0;
-    let revokeShowAll = false;
-    let revokeInFlight = false;
-    let revokeSucceeded = false;
-
-    collector.on('collect', async (btnInteraction) => {
-      if (btnInteraction.customId === `qurl_expand_${sendId}`) {
-        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        showAllRecipients = !showAllRecipients;
-        // buildConfirmMsg now returns {content, attachmentText, needsExpand};
-        // extract content for the monitor + editReply (string-only).
-        confirmMsg = buildConfirmMsg(showAllRecipients).content;
-        monitor.updateBaseMsg(confirmMsg);
-        const fullMsg = monitor.getFullMsg();
-        const updatedRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`qurl_add_${sendId}`).setLabel('Add Recipients').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`qurl_revoke_${sendId}`).setLabel('Revoke All').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId(`qurl_expand_${sendId}`).setLabel(showAllRecipients ? 'Show Less' : 'Show All').setStyle(ButtonStyle.Secondary),
-        );
-        await interaction.editReply({ content: fullMsg, components: [updatedRow] }).catch(logIgnoredDiscordErr);
-        return;
-      }
-
-      if (btnInteraction.customId === `qurl_revoke_expand_${sendId}`) {
-        // Toggle Show All / Show Less on the post-revoke recipient list.
-        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        revokeShowAll = !revokeShowAll;
-        const updated = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
-        await interaction.editReply(revokeReplyPayload(updated)).catch(logIgnoredDiscordErr);
-        return;
-      }
-
-      if (btnInteraction.customId === `qurl_revoke_${sendId}`) {
-        // Sync dedup before any await (Node single-threaded).
-        if (revokeInFlight) return btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        revokeInFlight = true;
-        // Stop monitor BEFORE any editReply — its setInterval can
-        // overwrite the revoke-result message otherwise.
-        if (monitor) monitor.stop();
-        await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
-        await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
-        try {
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
-          // Iterate `recipients` (canonical send-confirmation order)
-          // and filter by membership — `successUserIds` walks Set
-          // insertion order from resource-grouped iteration, which
-          // doesn't match what the user saw on "Recipients: …".
-          const successSet = new Set(revoked.successUserIds);
-          revokeResultUserNames = recipients
-            .filter(r => successSet.has(r.id))
-            .map(r => resolveRecipientAlias(r, interaction));
-          revokeResultTotal = revoked.total;
-          revokeResultSuccess = revoked.success;
-          revokeShowAll = false;
-          const initial = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, false, revokeResultSuccess);
-          await interaction.editReply(revokeReplyPayload(initial)).catch(logIgnoredDiscordErr);
-          revokeSucceeded = true;
-        } catch (err) {
-          logger.error('Revoke failed', { sendId, error: err.message });
-          await interaction.editReply({
-            content: 'Failed to revoke links. Try `/qurl revoke` instead.',
-            components: [],
-          }).catch(logIgnoredDiscordErr);
-          // Reset so the dedup flag isn't sticky if the failure UI
-          // ever changes to retain the Revoke button.
-          revokeInFlight = false;
-        }
-        // Collector keeps running for the post-revoke expand toggle;
-        // its `time:` window auto-expires.
-
-      } else if (btnInteraction.customId === `qurl_add_${sendId}`) {
-        // =====================================================================
-        // CRITICAL SECTION — do NOT add any `await` between the three lines
-        // below and the next `return` path. Node.js is single-threaded: if
-        // check+set+cooldown all happen synchronously, a second button click
-        // dispatched to the same handler cannot observe the unlocked state.
-        // The `await` in the rejection branches is fine because we've already
-        // committed to rejecting at that point.
-        // =====================================================================
-        // Check-and-claim are now adjacent: if the flag is unset, grab it
-        // FIRST (before any cap check), then verify remaining capacity and
-        // release on rejection. That way a future refactor that adds an
-        // `await` in the remaining check can't reopen a racy window.
-        if (addRecipientsLocks.has(sendId)) {
-          await btnInteraction.reply({ content: 'Already processing an "Add Recipients" action.', ephemeral: true }).catch(logIgnoredDiscordErr);
-          return;
-        }
-        addRecipientsLocks.add(sendId);
-        // Single outer try/finally guarantees the lock is released on every
-        // exit path — even if a synchronous throw happens between acquire
-        // and any early return. The old dual-flag pattern had multiple
-        // release sites and risked permanent lock-out on a missed release.
-        try {
-          const remaining = config.QURL_SEND_MAX_RECIPIENTS - delivered - addRecipientsCount;
-          if (remaining <= 0) {
-            await btnInteraction.reply({
-              content: `Recipient limit reached (${config.QURL_SEND_MAX_RECIPIENTS} max).`,
-              ephemeral: true,
-            });
-            return;
-          }
-          if (isOnCooldown(interaction.user.id)) {
-            await btnInteraction.reply({ content: 'Please wait before adding more recipients.', ephemeral: true }).catch(logIgnoredDiscordErr);
-            return;
-          }
-          setCooldown(interaction.user.id);
-
-          // Show user select menu — collect the response on the REPLY message
-          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
-          const userSelectRow = new ActionRowBuilder().addComponents(
-            new UserSelectMenuBuilder()
-              .setCustomId(`qurl_addusers_${sendId}`)
-              .setPlaceholder('Select users to send to')
-              .setMinValues(1)
-              .setMaxValues(maxSelect)
-          );
-          const selectReply = await btnInteraction.reply({
-            content: 'Select additional recipients:',
-            components: [userSelectRow],
-            ephemeral: true,
-            fetchReply: true,
-          });
-
-          try {
-            const selectInteraction = await selectReply.awaitMessageComponent({
-              componentType: ComponentType.UserSelect,
-              time: 60000,
-            });
-
-            await selectInteraction.deferUpdate();
-            const addResult = await handleAddRecipients(
-              sendId, selectInteraction.users, interaction, apiKey,
-            );
-
-            // Extend recipients[] for the post-revoke names line.
-            // Dedupe by id — re-Add of an already-included user.
-            if (addResult.newRecipients?.length) {
-              const existingIds = new Set(recipients.map(r => r.id));
-              for (const r of addResult.newRecipients) {
-                if (!existingIds.has(r.id)) recipients.push(r);
-              }
-            }
-
-            if (addResult.delivered > 0) {
-              addRecipientsCount += addResult.delivered;
-              // Tell the monitor to track the new links (including new resource IDs for location sends)
-              monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
-              const totalSent = delivered + addRecipientsCount;
-              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
-              if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
-              monitor.updateBaseMsg(confirmMsg);
-              await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
-            }
-
-            await selectInteraction.editReply({ content: addResult.msg, components: [] });
-          } catch (err) {
-            const isTimeout = err?.code === 'InteractionCollectorError' || err?.message?.includes('time');
-            // Generic user-facing message; real details only land in logs.
-            const msg = isTimeout ? 'Selection timed out.' : 'Failed to add recipients. Please try again.';
-            // Drop to warn for routine user-timeouts; keep error for real failures.
-            const log = isTimeout ? logger.warn : logger.error;
-            log('Add recipients failed', { sendId, error: err.message, isTimeout });
-            await btnInteraction.editReply({ content: msg, components: [] }).catch(logIgnoredDiscordErr);
-          }
-        } finally {
-          addRecipientsLocks.delete(sendId);
-        }
-      }
-    });
-
-    collector.on('end', (_, reason) => {
-      // Stop monitor polling when collector ends for any reason
-      if (monitor) monitor.stop();
-      if (reason === 'time') {
-        // After a SUCCESSFUL revoke, re-render the revoke result
-        // instead of the pre-revoke confirmMsg + Management-window
-        // banner — otherwise the user's "Revoked X/Y links" view
-        // gets clobbered when the collector window ends. Gate on
-        // `revokeSucceeded` (not `revokeInFlight`) so a failure
-        // message ("Failed to revoke links…") isn't overwritten with
-        // a stale "Revoked 0/0 links" line.
-        if (revokeSucceeded) {
-          // Terminal state: re-render content (Show All may have
-          // toggled), strip components. Omit `files`/`attachments`
-          // so Discord keeps the existing revoked-users.txt without
-          // re-uploading the same blob 15min later.
-          const final = renderRevokeMsg(sendId, revokeResultUserNames, revokeResultTotal, revokeShowAll, revokeResultSuccess);
-          interaction.editReply({ content: final.content, components: [] }).catch(logIgnoredDiscordErr);
-          return;
-        }
-        // Revoke attempted but failed — leave the failure message.
-        if (revokeInFlight) return;
-        interaction.editReply({
-          content: (monitor ? monitor.getFullMsg() : confirmMsg) + '\n\n\u23f0 **Management window closed** — use `/qurl revoke` to revoke later.',
-          components: [],
-        }).catch(logIgnoredDiscordErr);
-      }
-    });
-  }
-
 }
 
 // Handle adding new recipients to an existing send. senderDiscordId is
