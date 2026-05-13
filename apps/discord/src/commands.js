@@ -50,6 +50,23 @@ const TOKENS_PER_RESOURCE = 10;
 // categories or earn a new top-level category with a clear
 // dimensional purpose (e.g. a future "rate_limit" if we add upstream
 // 429 handling).
+// emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
+// emission contract so the three catch sites (initial /qurl send +
+// addRecipients file branch + addRecipients location branch) cannot
+// drift on the skip rule or field shape. Adding a fourth call site
+// goes through here too — owns both the contract and the cardinality
+// discipline in one place. See #276.
+function emitMintFailureAudit(error, { sendId, kind }) {
+  if (error && error.apiCode === 'quota_exceeded') return;
+  logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+    send_id: sendId,
+    reason: classifyMintFailure(error),
+    api_code: (error && error.apiCode) || null,
+    status_code: (error && error.status) || null,
+    kind,
+  });
+}
+
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
   // libuv socket codes + undici/fetch TimeoutError DOMException — all
@@ -1184,21 +1201,10 @@ async function executeSendPipeline(interaction, {
     // un-instrumented and tonight's outage shape (4+ hours of users
     // hitting this before anyone noticed) repeats. qurl-integrations#276.
     //
-    // Skip emission for `quota_exceeded` — that error has its own
-    // dedicated user-message path below and is a normal product
-    // condition (viral file hitting TOKENS_PER_RESOURCE), NOT an
-    // availability signal. The constants.js docstring for this
-    // event explicitly excludes it; emitting here would page on a
-    // viral upload.
-    if (error.apiCode !== 'quota_exceeded') {
-      logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
-        send_id: sendId,
-        reason: classifyMintFailure(error),
-        api_code: error.apiCode || null,
-        status_code: error.status || null,
-        kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
-      });
-    }
+    emitMintFailureAudit(error, {
+      sendId,
+      kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
+    });
     logger.error('Failed to prepare QURL links', {
       error: error.message,
       apiCode: error.apiCode,
@@ -2619,8 +2625,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // can both fire for a sendConfig that had both kinds, and a per-branch
   // recompute would invite drift.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
+  // activeKind tracks which branch is in-flight when the outer catch
+  // fires. The inner file try/catch returns on file failure, so by the
+  // time we reach the outer catch the failure was NOT in the file
+  // branch — `hasFile ? 'file' : 'location'` would mis-label mixed
+  // sends. Per-branch assignment is the durable fix.
+  let activeKind = null;
   try {
     if (hasFile) {
+      activeKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
       // resource so the 10-token pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
@@ -2674,18 +2687,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
         logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
-        // Mirror the /qurl send catch-block emission (#276) — Add Recipients
-        // is the same upload+mint phase and the 2026-05-13 incident shape
-        // fires through here too. Same quota_exceeded skip semantics.
-        if (err.apiCode !== 'quota_exceeded') {
-          logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
-            send_id: sendId,
-            reason: classifyMintFailure(err),
-            api_code: err.apiCode || null,
-            status_code: err.status || null,
-            kind: 'file',
-          });
-        }
+        emitMintFailureAudit(err, { sendId, kind: 'file' });
         return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
@@ -2710,6 +2712,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       preparedKinds.push('file');
     }
     if (hasLocation) {
+      activeKind = 'location';
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
       const expiresAt = expiryToISO(sendConfig.expires_in);
@@ -2741,21 +2744,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
-    // Mirror the /qurl send catch-block emission (#276) — Add Recipients
-    // is the same upload+mint phase as initial send and the 2026-05-13
-    // incident shape (viewer_ttl_seconds regression) fires through here
-    // too if the user retries via Add Recipients. Without this, the alarm
-    // under-counts and the next regression of the same shape is invisible
-    // again from this surface.
-    if (error.apiCode !== 'quota_exceeded') {
-      logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
-        send_id: sendId,
-        reason: classifyMintFailure(error),
-        api_code: error.apiCode || null,
-        status_code: error.status || null,
-        kind: hasFile ? 'file' : 'location',
-      });
-    }
+    emitMintFailureAudit(error, { sendId, kind: activeKind ?? 'unknown' });
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 

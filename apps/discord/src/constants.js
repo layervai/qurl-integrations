@@ -362,7 +362,9 @@ const AUDIT_EVENTS = {
   //
   // Carries `reason` (categorized failure class), `api_code` (the
   // upstream-error code if the connector/qurl-service surfaced
-  // RFC 7807-style), and `status_code` (the upstream HTTP status).
+  // RFC 7807-style), `status_code` (the upstream HTTP status), and
+  // `kind` ('file' | 'location' | 'unknown'; same value space as
+  // UPLOAD_SUCCESS — dashboard splits stay symmetric across the two).
   // Reason classes used today:
   //   - upstream_4xx          — connector or qurl-service 4xx that
   //                              isn't quota_exceeded (already split

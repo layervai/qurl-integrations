@@ -1817,6 +1817,17 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
+
+    // Pin the QURL_SEND_CREATE_LINK_FAILURE emission from the INNER file
+    // catch at commands.js:2667. This catch site was un-instrumented before
+    // the round-6 fix — Add Recipients failures from the file branch went
+    // un-audited and the alarm under-counted. See #300 Claude review.
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-fail',
+      kind: 'file',
+      reason: expect.any(String),
+    }));
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {
@@ -1915,6 +1926,57 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-allfail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Failed to create links for new recipients.');
     expect(mockSendDM).not.toHaveBeenCalled();
+
+    // Pin the QURL_SEND_CREATE_LINK_FAILURE emission from the OUTER catch
+    // at commands.js:2738. activeKind tracking guarantees kind='location'
+    // for a URL/location-resource send — `hasFile ? 'file' : 'location'`
+    // would mis-label mixed sends because the file branch returns early
+    // on its own failure. See #300 Claude review.
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-allfail',
+      kind: 'location',
+      reason: expect.any(String),
+    }));
+  });
+
+  // Mixed-resource sendConfig variant — exercises the `activeKind` fix
+  // for the case where hasFile && hasLocation are both true. Without the
+  // fix, the outer catch would emit kind='file' for a failure that
+  // happened in the location branch (file branch returns on its own
+  // failure). Pins the #300 round-7 correctness fix.
+  it('mixed send (file+location): outer catch from location failure emits kind=location, not file', async () => {
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'mixed',
+      connector_resource_id: null,
+      actual_url: 'https://maps.google.com/?q=test',
+      expires_in: '24h',
+      personal_message: null,
+      location_name: 'Mixed Send Location',
+      attachment_name: 'doc.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/doc.pdf',
+    });
+
+    // File branch succeeds, location branch fails. activeKind must be
+    // 'location' at the moment the outer catch fires.
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'mix-file-res', fileBuffer: new ArrayBuffer(4) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/m-1' }]);
+    mockUploadJsonToConnector.mockRejectedValue(Object.assign(new Error('connector 502'), { status: 502 }));
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-1', bot: false, username: 'Alice' },
+    ]);
+
+    await handleAddRecipients('send-mixed-fail', users, mockOriginalInteraction, 'test-api-key');
+
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-mixed-fail',
+      kind: 'location', // NOT 'file' — pins the activeKind fix
+      reason: 'upstream_5xx',
+      status_code: 502,
+    }));
   });
 });
 
