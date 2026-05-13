@@ -539,6 +539,25 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(res.invalidTokens.every(t => !t.startsWith('<@'))).toBe(true);
   });
 
+  test('mass-mention escape runs BEFORE per-token truncation', () => {
+    // Critical ordering. If truncate ran first and the slice fell
+    // before the escape pass, a token like `@everyone` near the
+    // start of an oversized residue would land in invalidTokens
+    // un-escaped after truncation. Pin: with `@everyone` at the
+    // start of a 300-char token, the rendered output starts with
+    // the ZWS-escaped form (`@\u200beveryone`) AND ends in the
+    // truncation marker. A future refactor flipping to truncate-
+    // then-escape would lose the ZWS and fail this test.
+    const int = makeInteraction({});
+    const overCap = `@everyone${'x'.repeat(300)}`;  // 309 chars total
+    const res = parseRecipientMentions(overCap, int);
+    expect(res.invalidTokens).toHaveLength(1);
+    const rendered = res.invalidTokens[0];
+    expect(rendered.endsWith('…')).toBe(true);
+    expect(rendered.startsWith('@\u200beveryone')).toBe(true);  // ZWS form
+    expect(rendered.startsWith('@e')).toBe(false);  // raw form absent
+  });
+
   test('invalidTokens entries are capped at MAX_INVALID_TOKEN_LENGTH', () => {
     // A single ~4000-char garbage token (one long string with no
     // separators) would otherwise blow Discord's 4096-char embed

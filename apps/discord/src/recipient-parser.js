@@ -332,4 +332,5 @@ function parseRecipientMentions(raw, interaction) {
 module.exports = {
   parseRecipientMentions,
   MAX_INPUT_LENGTH,
+  MAX_INVALID_TOKEN_LENGTH,
 };
