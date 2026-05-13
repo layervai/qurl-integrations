@@ -61,6 +61,16 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ name: 'AbortError', cause: 'user-cancelled' })).toBe('unknown');
     });
 
+    test('AbortError with timeout-shaped message + no cause → unknown (ordering fence)', () => {
+      // Round-9 regression fence: the message-regex `/timeout/i` runs
+      // AFTER the AbortError branch. Pre-fix, an AbortError whose
+      // message happened to contain "timeout" would short-circuit
+      // through the regex and bypass the cause check — defeating the
+      // user-cancel disambiguation. Pin that bare AbortError + timeout-
+      // worded message still requires cause-corroboration.
+      expect(classifyMintFailure({ name: 'AbortError', message: 'aborted due to timeout' })).toBe('unknown');
+    });
+
     test('message-string fallback', () => {
       // Some HTTP libs surface "timeout" only in the error message
       // without a code/name. The regex catches those.

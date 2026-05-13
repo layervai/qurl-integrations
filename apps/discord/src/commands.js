@@ -52,22 +52,26 @@ const TOKENS_PER_RESOURCE = 10;
 // 429 handling).
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
+  // AbortError disambiguation runs BEFORE the message-regex branch
+  // because undici/fetch raises AbortError on deadline-fired aborts
+  // AND on user-cancellations. Bucket as `timeout` only when
+  // error.cause corroborates a timeout signal; otherwise fall through
+  // to `unknown` so a future cancel-button adoption doesn't silently
+  // mis-bucket cancellations as timeouts. Without this ordering, an
+  // AbortError whose message happens to contain "timeout" would
+  // short-circuit through the regex below and bypass the cause check.
+  // See PR #300 review (Justin).
+  if (error.name === 'AbortError') {
+    const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
+    if (/timeout/i.test(causeStr)) return 'timeout';
+    return 'unknown';
+  }
   // libuv socket codes + undici/fetch TimeoutError DOMException — all
   // unambiguous deadline-shaped failures.
   if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
       error.name === 'TimeoutError' ||
       /timeout/i.test(error.message || '')) {
     return 'timeout';
-  }
-  // AbortError is ambiguous: undici/fetch raises it on deadline-fired
-  // aborts AND on user-cancellations. Bucket as `timeout` only when
-  // error.cause corroborates a timeout signal; otherwise fall through
-  // to `unknown` so a future cancel-button adoption doesn't silently
-  // mis-bucket cancellations as timeouts. See PR #300 review (Justin).
-  if (error.name === 'AbortError') {
-    const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
-    if (/timeout/i.test(causeStr)) return 'timeout';
-    return 'unknown';
   }
   const status = error.status || 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';

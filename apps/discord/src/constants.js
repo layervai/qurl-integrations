@@ -365,6 +365,13 @@ const AUDIT_EVENTS = {
   // RFC 7807-style), `status_code` (the upstream HTTP status), and
   // `kind` ('file' | 'location' | 'unknown'; same value space as
   // UPLOAD_SUCCESS — dashboard splits stay symmetric across the two).
+  //
+  // Cardinality discipline: `reason`, `kind`, and `status_code` are LOW
+  // cardinality (closed enums) — safe to dimension on for CloudWatch
+  // metric filters and dashboard splits. `api_code` is HIGH cardinality
+  // (free-form upstream string) — log-side forensic field, NOT a
+  // metric dimension. Mirrors DEPENDENCY_AUTH_FAILURE's `path` guidance.
+  //
   // Reason classes used today:
   //   - upstream_4xx          — connector or qurl-service 4xx that
   //                              isn't quota_exceeded (already split
