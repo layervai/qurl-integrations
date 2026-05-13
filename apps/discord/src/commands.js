@@ -908,11 +908,10 @@ async function executeSendPipeline(interaction, {
 
   // Shared bookkeeping for every entry-gate failure. Nested so it
   // closes over `interaction` + `cancelEdit` without parameter
-  // sprawl at the call sites. Always throws — the function-return
-  // type is `never` in practice, so a future control-flow change
-  // here (e.g. removing the throw) would surface as fall-through
-  // past every gate and trip the downstream invariants the gates
-  // exist to guard.
+  // sprawl at the call sites. Always throws — a future control-
+  // flow change here (e.g. removing the throw) would surface as
+  // fall-through past every gate and trip the downstream
+  // invariants the gates exist to guard.
   function failGate(ErrorCtor, msg) {
     clearCooldown(interaction.user.id);
     cancelEdit();
