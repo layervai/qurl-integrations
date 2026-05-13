@@ -227,6 +227,33 @@ describe('parseRecipientMentions — invalid tokens', () => {
     expect(res.ids).toEqual([]);
     expect(res.invalidTokens.length).toBeGreaterThan(0);
   });
+
+  test('@everyone / @here land in invalidTokens (no fan-out shortcut)', () => {
+    // Discord's @everyone / @here are NOT `<@id>` mentions — they're
+    // bare tokens that the API expands at message-send time. The
+    // parser must surface them as invalid so a power-user typing
+    // `recipients:@everyone` doesn't get silent zero-recipient
+    // behavior (or, worse, the back-half hands the literal `@everyone`
+    // to mintLinksInBatches). Callers that render `invalidTokens`
+    // for the user MUST escape these the same way commands.js does
+    // (zero-width-space insertion) to avoid sending a stray ping.
+    const int = makeInteraction({ users: { '111': {} } });
+    expect(parseRecipientMentions('@everyone <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@everyone'] });
+    expect(parseRecipientMentions('@here <@111>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['@here'] });
+  });
+
+  test('newline characters separate tokens (split regex includes \\n)', () => {
+    // Discord slash-command option strings can contain literal
+    // newlines (paste-from-multi-line). Pin that the split regex
+    // `/[\s,]+/` includes \n — a regression that switched to
+    // `/[ \t,]+/` would silently merge "alice\nbob" into one
+    // bare-name token.
+    const int = makeInteraction({ users: { '111': {} } });
+    expect(parseRecipientMentions('<@111>\n<#456>\n\nstray', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['<#456>', 'stray'] });
+  });
 });
 
 describe('parseRecipientMentions — cap + length safety', () => {
@@ -273,6 +300,26 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(input).toHaveLength(MAX_INPUT_LENGTH);
     const int = makeInteraction({ users: { '777': {} } });
     expect(parseRecipientMentions(input, int).ids).toEqual(['777']);
+  });
+
+  test('cap and invalidTokens are populated independently in the same call', () => {
+    // The cap test above exercises 30 valid → 25 ids. The invalid-
+    // tokens tests exercise typos in isolation. Pin the cross-cut:
+    // 30 valid mentions PLUS a channel-mention typo should produce
+    // 25 ids AND keep the typo in invalidTokens. A future bug where
+    // the cap pass also accidentally truncated invalidTokens would
+    // silently hide user-visible error feedback.
+    const users = {};
+    const mentions = [];
+    for (let i = 0; i < 30; i++) {
+      const id = `${1000000000 + i}`;
+      users[id] = {};
+      mentions.push(`<@${id}>`);
+    }
+    const int = makeInteraction({ users });
+    const res = parseRecipientMentions(`${mentions.join(' ')} <#456>`, int);
+    expect(res.ids).toHaveLength(25);
+    expect(res.invalidTokens).toEqual(['<#456>']);
   });
 
   test('truncation that lands inside `<...>` drops the partial (no manufactured invalid token)', () => {

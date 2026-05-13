@@ -72,12 +72,15 @@ function parseRecipientMentions(raw, interaction) {
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
-  // pathological repetitions still allocate per-match strings. If the
-  // cut lands inside a `<...>` token, drop the trailing partial so the
-  // strip-pass doesn't surface a manufactured "invalid token" the user
-  // didn't actually type wrong.
-  let input = raw.length > MAX_INPUT_LENGTH ? raw.slice(0, MAX_INPUT_LENGTH) : raw;
-  if (input.length === MAX_INPUT_LENGTH) {
+  // pathological repetitions still allocate per-match strings.
+  const truncated = raw.length > MAX_INPUT_LENGTH;
+  let input = truncated ? raw.slice(0, MAX_INPUT_LENGTH) : raw;
+  // If the cut lands inside a `<...>` token, drop the trailing partial
+  // so the strip-pass doesn't surface a manufactured "invalid token"
+  // the user didn't actually mistype. Gate strictly on `truncated` —
+  // a naturally-MAX-length input with a stray `<` mid-string is
+  // legitimate content that the strip-pass should surface as-is.
+  if (truncated) {
     const lastOpen = input.lastIndexOf('<');
     const lastClose = input.lastIndexOf('>');
     if (lastOpen > lastClose) {
@@ -158,7 +161,12 @@ function parseRecipientMentions(raw, interaction) {
   const cap = config.QURL_SEND_MAX_RECIPIENTS;
   let finalIds = [...ids];
   if (finalIds.length > cap) {
-    logger.debug('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
+    // Massive over-cap (>2× the limit) signals user confusion —
+    // probably pasted a list they didn't trim. Surface at warn so
+    // oncall sees the pattern. Modest overshoot is normal-ish
+    // (typed too many) and stays at debug.
+    const logFn = finalIds.length > cap * 2 ? logger.warn : logger.debug;
+    logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
       raw_count: finalIds.length, cap,
     });
     finalIds = finalIds.slice(0, cap);
