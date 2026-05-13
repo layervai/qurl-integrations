@@ -52,17 +52,22 @@ const TOKENS_PER_RESOURCE = 10;
 // 429 handling).
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
-  // libuv socket codes (axios, http.get, etc.) + undici/fetch
-  // DOMException shapes (TimeoutError from a real timeout,
-  // AbortError when an AbortController fired before the response
-  // landed — both are timeout-class from the user's perspective).
-  // Without the .name check, undici timeouts bucket as 'unknown'
-  // and we lose the dimensional split that's the whole point of
-  // having reason classes.
+  // libuv socket codes + undici/fetch TimeoutError DOMException — all
+  // unambiguous deadline-shaped failures.
   if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
-      error.name === 'TimeoutError' || error.name === 'AbortError' ||
+      error.name === 'TimeoutError' ||
       /timeout/i.test(error.message || '')) {
     return 'timeout';
+  }
+  // AbortError is ambiguous: undici/fetch raises it on deadline-fired
+  // aborts AND on user-cancellations. Bucket as `timeout` only when
+  // error.cause corroborates a timeout signal; otherwise fall through
+  // to `unknown` so a future cancel-button adoption doesn't silently
+  // mis-bucket cancellations as timeouts. See PR #300 review (Justin).
+  if (error.name === 'AbortError') {
+    const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
+    if (/timeout/i.test(causeStr)) return 'timeout';
+    return 'unknown';
   }
   const status = error.status || 0;
   if (status >= 500 && status < 600) return 'upstream_5xx';

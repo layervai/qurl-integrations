@@ -35,10 +35,25 @@ describe('classifyMintFailure (qurl-integrations#276 reason taxonomy)', () => {
       expect(classifyMintFailure({ name: 'TimeoutError' })).toBe('timeout');
     });
 
-    test('undici AbortController AbortError', () => {
-      // AbortError from a per-request AbortController firing on
-      // deadline — same user-experience as a TimeoutError.
-      expect(classifyMintFailure({ name: 'AbortError' })).toBe('timeout');
+    test('AbortError with timeout cause → timeout (deadline-fired abort)', () => {
+      // Real undici deadline-fired aborts populate error.cause with the
+      // reason string. Pin both the cause-string and cause-with-message
+      // shapes (cause can be a string OR an Error object).
+      expect(classifyMintFailure({ name: 'AbortError', cause: 'timeout' })).toBe('timeout');
+      expect(classifyMintFailure({ name: 'AbortError', cause: new Error('request timeout') })).toBe('timeout');
+    });
+  });
+
+  describe('AbortError without timeout cause → unknown (PR #300 review)', () => {
+    test('bare AbortError → unknown (ambiguous between deadline and user-cancel)', () => {
+      // Justin: if AbortController gets adopted upstream for user-
+      // cancellation (e.g. a future "cancel send" button), bare
+      // AbortError without a corroborating timeout signal should NOT
+      // mis-bucket as timeout. Bare AbortError now buckets as unknown;
+      // a deliberate cause-tagged AbortError still buckets as timeout
+      // (see the cause-corroborated test above).
+      expect(classifyMintFailure({ name: 'AbortError' })).toBe('unknown');
+      expect(classifyMintFailure({ name: 'AbortError', cause: 'user-cancelled' })).toBe('unknown');
     });
 
     test('message-string fallback', () => {
