@@ -4009,17 +4009,19 @@ async function handleQurlSlashSend(interaction, params) {
   } catch (err) {
     // Unanticipated throw. Always clear cooldown — the user got no
     // visible response, so they must not be locked out for the full
-    // cooldown window. Try to surface a generic error via the
-    // (already-deferred) reply; if the editReply ALSO throws (token
-    // expired, Discord blip), the safety-net catch in flow-dispatch's
-    // handleFlowInteraction handles the front-half error visibility.
+    // cooldown window. Try editReply first (interaction was deferred
+    // up-front); if it also throws (the deferReply ITSELF failed, so
+    // there's no deferred state to edit), fall back to reply() as
+    // ephemeral. The double .catch keeps a failed fallback silent —
+    // worst case the user sees nothing, but the cooldown is cleared
+    // so they can retry.
     clearCooldown(interaction.user.id);
     logger.error('handleQurlSlashSend: unexpected throw', {
       user_id: interaction.user.id, error: err && err.message, stack: err && err.stack,
     });
-    return interaction.editReply({
-      content: '❌ Something went wrong — please try again.',
-    }).catch(logIgnoredDiscordErr);
+    const errContent = '❌ Something went wrong — please try again.';
+    return interaction.editReply({ content: errContent })
+      .catch(() => interaction.reply({ content: errContent, ephemeral: true }).catch(logIgnoredDiscordErr));
   }
 }
 
@@ -4546,8 +4548,15 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 
   const apiKey = guildApiKey || config.QURL_API_KEY;
   if (!apiKey) {
-    // Admin action required to recover (`/qurl setup`); unlock retry so
-    // the user isn't stranded for 30s after the admin completes setup.
+    // Flow row is INTENTIONALLY already deleted here — by the time the
+    // happy-path deleteFlow above succeeded, the user's send-intent has
+    // committed. If the API key vanished (admin ran `/qurl setup` and
+    // the new key didn't propagate, or the key was actively rotated
+    // between the dispatcher's pre-check and click time), the recovery
+    // path is `/qurl setup` followed by a NEW `/qurl file` / `/qurl
+    // map` invocation — NOT a re-click on the dead card. Cooldown
+    // clears so the user isn't stranded for 30s after the admin
+    // completes setup.
     clearCooldown(interaction.user.id);
     return interaction.editReply({
       content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
@@ -4569,6 +4578,13 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // blipped" encourages a fresh rerun if they want to include the
   // missed recipients. The rerun hint names the actual subcommand
   // they invoked (resourceType drives /qurl file vs /qurl map).
+  //
+  // followUp (not edited into the "Preparing send…" editReply) is
+  // INTENTIONAL: executeSendPipeline will rewrite editReply to
+  // "Sent to N users" / failure copy as the send progresses, which
+  // would clobber the partial-drop banner if it lived in the same
+  // message. followUp is a separate ephemeral that persists past
+  // the back-half's editReply rewrites.
   if (partialLeftCount > 0 || partialTransientCount > 0) {
     const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl file';
     const parts = [];

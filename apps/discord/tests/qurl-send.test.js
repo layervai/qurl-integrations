@@ -202,6 +202,21 @@ describe('Helper functions', () => {
       expect(isGoogleMapsURL('https://goo.gl.evil.com/maps/abc')).toBe(false);
     });
 
+    it('host-anchor contract: hostname must END at google.{tld} — no suffix attack', () => {
+      // Defense-in-depth pin: even if a future MAPS_URL_PATTERNS
+      // relaxation lets `google.com.evil.com` through the regex,
+      // isGoogleMapsURL is the second line of defense and MUST reject
+      // any host that has additional segments after the google.{tld}
+      // suffix. The host-anchor regex /^(www\.)?google\.[a-z]{2,3}...$/
+      // is what makes this work.
+      expect(isGoogleMapsURL('https://google.com.evil.com/maps/place/x')).toBe(false);
+      expect(isGoogleMapsURL('https://www.google.com.evil.com/maps')).toBe(false);
+      expect(isGoogleMapsURL('https://google.co.uk.evil.com/maps')).toBe(false);
+      // Pre-suffix attacks (e.g. evil-google.com) also rejected.
+      expect(isGoogleMapsURL('https://evil-google.com/maps')).toBe(false);
+      expect(isGoogleMapsURL('https://notgoogle.com/maps')).toBe(false);
+    });
+
     it('handles edge cases', () => {
       expect(isGoogleMapsURL('')).toBe(false);
       expect(isGoogleMapsURL('not a url')).toBe(false);

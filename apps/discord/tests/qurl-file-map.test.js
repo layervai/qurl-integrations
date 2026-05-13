@@ -429,6 +429,22 @@ describe('softenCooldown', () => {
     softenCooldown('u1', 0);
     expect(isOnCooldown('u1')).toBe(false);
   });
+
+  test('soften reorders the Map: softened entry moves to the end of iteration order', () => {
+    // LRU iteration contract: setCooldown's bulk eviction (commands.js:~248)
+    // drops the oldest N keys in iteration order. softenCooldown deletes-
+    // then-sets so a soften refreshes the user's iteration position to
+    // the end, keeping them resident through bulk evictions. Without
+    // this, a Cancel-then-Cancel sequence would still drop the active
+    // user during the next eviction wave.
+    sendCooldowns.set('uA', Date.now());
+    sendCooldowns.set('uB', Date.now());
+    sendCooldowns.set('uC', Date.now());
+    // Initial iteration order: A, B, C.
+    softenCooldown('uA', 5000);
+    // After softening A, iteration order should be: B, C, A.
+    expect(Array.from(sendCooldowns.keys())).toEqual(['uB', 'uC', 'uA']);
+  });
 });
 
 describe('parseLocationInput', () => {
