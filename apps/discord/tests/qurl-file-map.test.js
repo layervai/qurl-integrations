@@ -189,6 +189,8 @@ const {
   clearCooldown,
   sendCooldowns,
   executeSendPipeline,
+  getActiveFileSends,
+  setActiveFileSends,
 } = _test;
 
 // Flow-dispatch handlers live at module top-level (consumed by
@@ -901,6 +903,31 @@ describe('handleQurlFile — slash entry', () => {
       content: expect.stringMatching(/in a server/),
       ephemeral: true,
     }));
+  });
+
+  test('rejects when activeFileSends is at cap (UX fast-fail) — cooldown NOT burned (server-side backpressure)', async () => {
+    // activeFileSends ≥ MAX_CONCURRENT_FILE_SENDS short-circuits at slash
+    // entry with a "bot too busy" reply. The actual concurrency-slot
+    // claim happens inside executeSendPipeline; this entry-time check
+    // is a UX fast-fail. Server-side backpressure is not user fault →
+    // cooldown is intentionally NOT set so the user can retry as soon
+    // as a slot frees.
+    const originalActive = getActiveFileSends();
+    try {
+      setActiveFileSends(99);  // any value ≥ MAX_CONCURRENT_FILE_SENDS
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      await handleQurlFile(int);
+      expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringMatching(/too many file sends/i),
+        ephemeral: true,
+      }));
+      // No cooldown set on this branch.
+      expect(isOnCooldown(SENDER_ID)).toBe(false);
+      // And no flow row created.
+      expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    } finally {
+      setActiveFileSends(originalActive);
+    }
   });
 
   test('rejects when attachment.url is not Discord CDN (SSRF gate) — cooldown PRESERVED (probing defense)', async () => {

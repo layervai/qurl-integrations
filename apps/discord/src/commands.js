@@ -4426,7 +4426,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // without committing the dedup deleteFlow.
   let resolved;
   try {
-    resolved = await resolveRecipientUsers(interaction, payload.recipientIds || []);
+    resolved = await resolveRecipientUsers(interaction, payload.recipientIds);
   } catch (err) {
     logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
       flow_id, error: err && err.message,
