@@ -3862,8 +3862,10 @@ async function handleQurlFile(interaction, apiKey) {
     });
   }
   if (attachment.size > MAX_FILE_SIZE) {
+    // Match /qurl send's MB formatting at commands.js:~1994 so users
+    // see the same readable cap across all three entry points.
     return interaction.reply({
-      content: `❌ File too large: ${attachment.size} bytes (cap: ${MAX_FILE_SIZE}).`,
+      content: `❌ File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
       ephemeral: true,
     });
   }
@@ -3933,6 +3935,11 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
       components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
     }).catch(logIgnoredDiscordErr);
   }
+  // Defense-in-depth — unreachable in production today: the picker's
+  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
+  // QURL_SEND_MAX_RECIPIENTS=25) = 10, so the user physically can't
+  // pick more than 25. Kept against a future bump to either constant
+  // (or a forged interaction) so the cap stays honored.
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
     return interaction.update({
       content: `⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.`,
@@ -4001,20 +4008,24 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 async function handleSendConfirmClick(interaction, { flow_id, row }) {
   const payload = row.payload || {};
   // Re-fetch users at click time — defensive against members leaving
-  // the guild between confirm and Send. unresolvedIds at this point
-  // are no longer surface-able (we already committed past the warning
-  // step), so they're silently dropped with a debug log.
+  // the guild between confirm and Send. `partialDropCount` carries
+  // unresolved IDs forward so the Send-success path can surface a
+  // followUp explaining why N recipients won't receive their DM.
+  // The forensic log escalates to info (not debug) — oncall benefits
+  // from grep-discoverable signal on guild churn mid-flow without
+  // having to lower log verbosity.
   const { users, unresolvedIds } = await resolveRecipientUsers(interaction, payload.recipientIds || []);
-  if (unresolvedIds.length > 0) {
-    logger.debug('handleSendConfirmClick: dropping unresolved IDs at click time', {
-      flow_id, count: unresolvedIds.length,
+  const partialDropCount = unresolvedIds.length;
+  if (partialDropCount > 0) {
+    logger.info('handleSendConfirmClick: dropping unresolved IDs at click time', {
+      flow_id, count: partialDropCount,
     });
   }
   const { valid } = partitionRecipients(users, interaction.user.id);
   if (valid.length === 0) {
-    // Everyone left the guild between confirm and Send. Treat as a
-    // terminal failure of THIS attempt — delete the flow so a rerun
-    // claims a fresh slot.
+    // Every recipient resolved at confirm time has since left the
+    // guild or become unreachable. Terminal for THIS attempt —
+    // delete the flow so a rerun claims a fresh slot.
     await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
@@ -4022,7 +4033,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       flow_id, error: err && err.message,
     }));
     return interaction.update({
-      content: '❌ Recipients are no longer available. Re-run the command.',
+      content: '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
@@ -4073,6 +4084,18 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // takes over the editReply from here. Matches handleSend's hand-off
   // shape at commands.js:~2307.
   await interaction.update({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
+
+  // Surface the partial-drop (members who left the guild between
+  // confirm and Send) as a separate ephemeral followUp BEFORE the
+  // back-half takes over the main reply. Without this the user
+  // would see "Sent to N users" with no signal that N != the count
+  // shown on the card.
+  if (partialDropCount > 0) {
+    await interaction.followUp({
+      content: `ℹ\u{FE0F} ${partialDropCount} recipient${partialDropCount === 1 ? '' : 's'} had left the server between **Send** and now — sending to the remaining ${valid.length}.`,
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
 
   return executeSendPipeline(interaction, {
     apiKey,

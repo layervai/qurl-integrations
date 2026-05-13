@@ -28,6 +28,40 @@ function makeOptionBuilder() {
   };
 }
 
+// Component-builder chainable — superset surface covering
+// ButtonBuilder, StringSelectMenuBuilder, UserSelectMenuBuilder,
+// ModalBuilder, TextInputBuilder. Each method returns `this` so the
+// discord.js builder DSL works unchanged. Unused methods on the
+// chainable are inert — tests can reuse this for any component
+// without per-component shaping.
+//
+// commands-comprehensive.test.js and coverage-boost.test.js still
+// inline narrower per-component shapes for historical reasons; they
+// can migrate to this superset whenever a discord.js change
+// surfaces a setMaxLength-style drift gap for components.
+function makeComponentChainable(extra = {}) {
+  return {
+    setCustomId: jest.fn().mockReturnThis(),
+    setLabel: jest.fn().mockReturnThis(),
+    setEmoji: jest.fn().mockReturnThis(),
+    setStyle: jest.fn().mockReturnThis(),
+    setURL: jest.fn().mockReturnThis(),
+    setTitle: jest.fn().mockReturnThis(),
+    setPlaceholder: jest.fn().mockReturnThis(),
+    addOptions: jest.fn().mockReturnThis(),
+    setMinValues: jest.fn().mockReturnThis(),
+    setMaxValues: jest.fn().mockReturnThis(),
+    addComponents: jest.fn().mockReturnThis(),
+    setDisabled: jest.fn().mockReturnThis(),
+    setValue: jest.fn().mockReturnThis(),
+    setMaxLength: jest.fn().mockReturnThis(),
+    setMinLength: jest.fn().mockReturnThis(),
+    setRequired: jest.fn().mockReturnThis(),
+    ...extra,
+  };
+}
+
 module.exports = {
   makeOptionBuilder,
+  makeComponentChainable,
 };

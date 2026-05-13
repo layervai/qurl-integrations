@@ -49,34 +49,23 @@ jest.mock('../src/logger', () => ({
 // chain from throwing when commands.js loads. Tests exercise the
 // handler functions directly, not the registration path.
 jest.mock('discord.js', () => {
-  const makeChainable = (extra = {}) => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setLabel: jest.fn().mockReturnThis(),
-    setEmoji: jest.fn().mockReturnThis(),
-    setStyle: jest.fn().mockReturnThis(),
-    setURL: jest.fn().mockReturnThis(),
-    setTitle: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    addOptions: jest.fn().mockReturnThis(),
-    addChoices: jest.fn().mockReturnThis(),
-    setMinValues: jest.fn().mockReturnThis(),
-    setMaxValues: jest.fn().mockReturnThis(),
-    addComponents: jest.fn().mockReturnThis(),
-    setDisabled: jest.fn().mockReturnThis(),
-    setMaxLength: jest.fn().mockReturnThis(),
-    setRequired: jest.fn().mockReturnThis(),
-    setValue: jest.fn().mockReturnThis(),
-    setName: jest.fn().mockReturnThis(),
-    setDescription: jest.fn().mockReturnThis(),
-    ...extra,
-  });
+  // Shared chainables from tests/helpers/discord-mock.js:
+  //   makeOptionBuilder — option callbacks (addStringOption, etc.)
+  //   makeComponentChainable — component builders (Button, Select,
+  //     Modal, etc.) with a superset surface.
+  // Both inlined inside the jest.mock factory body so the require
+  // dodges jest.mock's hoisting. Centralized so a new chained method
+  // at the discord.js layer touches one site for the whole test suite.
+  const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
   return {
     SlashCommandBuilder: jest.fn().mockImplementation(() => {
-      const subBuilder = () => makeChainable({
-        addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeChainable()); return this; }),
-        addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeChainable()); return this; }),
-        addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeChainable()); return this; }),
-        addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeChainable()); return this; }),
+      const subBuilder = () => ({
+        setName: jest.fn().mockReturnThis(),
+        setDescription: jest.fn().mockReturnThis(),
+        addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+        addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+        addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+        addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
       });
       const builder = {
         setName: jest.fn().mockReturnThis(),
@@ -91,7 +80,7 @@ jest.mock('discord.js', () => {
       };
       return builder;
     }),
-    EmbedBuilder: jest.fn().mockImplementation(() => makeChainable({
+    EmbedBuilder: jest.fn().mockImplementation(() => makeComponentChainable({
       setColor: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
       addFields: jest.fn().mockReturnThis(),
@@ -102,14 +91,14 @@ jest.mock('discord.js', () => {
       const row = { components: [], addComponents: jest.fn(function (...args) { row.components.push(...args.flat()); return row; }) };
       return row;
     }),
-    ButtonBuilder: jest.fn().mockImplementation(() => makeChainable()),
+    ButtonBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
     ChannelType: { GuildText: 0, DM: 1, GuildVoice: 2, GuildStageVoice: 13 },
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
-    StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
-    UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
-    ModalBuilder: jest.fn().mockImplementation(() => makeChainable()),
-    TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
+    StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
+    UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
+    ModalBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
+    TextInputBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
     AttachmentBuilder: jest.fn().mockImplementation((buf, opts) => ({ buf, name: opts?.name })),
     PermissionFlagsBits: { ManageRoles: 1n, Administrator: 8n, ManageGuild: 32n },
@@ -554,6 +543,21 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/\\\\\*/);
   });
 
+  test('personal-message with mixed markdown + escape sequences renders without re-escaping the escapes', () => {
+    // Composite edge case: a real-world sanitizeMessage output for a
+    // user input like `**bold** \\n [link](https://evil)`. The literal
+    // backslashes that sanitizeMessage emits for markdown escapes
+    // must NOT themselves become `\\\\` in the card.
+    const presanitized = '\\*\\*bold\\*\\* \\\\n \\[link\\]\\(https://evil\\)';
+    const out = renderConfirmCardContent({ ...baseProps, personalMessage: presanitized });
+    // The substring renders exactly as supplied — no markdown-escape
+    // pass turns `\\` into `\\\\`.
+    expect(out).toContain(`"${presanitized}"`);
+    // Defense: no `\\\\` (four backslashes) appears — that'd be the
+    // unambiguous double-escape regression signature.
+    expect(out).not.toMatch(/\\\\\\\\/);
+  });
+
   test('warningsBlock prepended', () => {
     const out = renderConfirmCardContent({ ...baseProps, warningsBlock: '⚠ warned\n\n' });
     expect(out.startsWith('⚠ warned')).toBe(true);
@@ -982,7 +986,7 @@ describe('handleSendConfirmClick', () => {
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
     expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/no longer available/),
+      content: expect.stringMatching(/no longer reachable/),
     }));
   });
 
@@ -1002,13 +1006,14 @@ describe('handleSendConfirmClick', () => {
     }));
   });
 
-  test('partial-resolve at Send click — Send proceeds with remaining users, dropped IDs logged at debug', async () => {
+  test('partial-resolve at Send click — Send proceeds with remaining users, drop surfaced via followUp + info log', async () => {
     // Mid-flight guild churn: row.payload.recipientIds = [u1, gone],
     // at click time gone left the guild. resolveRecipientUsers returns
     // {users:[u1's user], unresolvedIds:[gone]}. partitionRecipients
-    // keeps u1. Send should fire executeSendPipeline with the
-    // remaining valid user (NOT abort), with the silent-drop logged
-    // at debug level for forensic trail.
+    // keeps u1. Send fires executeSendPipeline with the remaining
+    // user, the silent-drop is announced to the sender via ephemeral
+    // followUp, and the forensic log lands at info (not debug) so
+    // oncall sees the signal without lowering log verbosity.
     const gone = '100000000000000099';
     const payloadWithGhost = { ...validPayload, recipientIds: [u1, gone] };
     const int = makeInteraction({
@@ -1021,9 +1026,16 @@ describe('handleSendConfirmClick', () => {
     expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
-    // The silent-drop forensic log fires at debug level (not warn)
-    // because mid-flight guild churn is expected/normal behavior.
-    expect(logger.debug).toHaveBeenCalledWith(
+    // followUp announces the drop to the sender so they know the
+    // delivered count doesn't match the card.
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/1 recipient had left the server/),
+      ephemeral: true,
+    }));
+    // Forensic log at INFO (escalated from debug per cr round 3) —
+    // oncall can grep for mid-flight guild churn without dialing
+    // verbosity up.
+    expect(logger.info).toHaveBeenCalledWith(
       expect.stringMatching(/dropping unresolved/),
       expect.objectContaining({ count: 1 }),
     );
