@@ -10,15 +10,31 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-const authFailureMessage = "Failed to authenticate. Please check your qURL API key configuration."
+const (
+	authFailureMessage       = "Failed to authenticate. Please check your qURL API key configuration."
+	workspaceNotSetupMessage = "qURL isn't connected to this workspace yet. A workspace admin can run `/qurl setup` to connect it."
+)
+
+// authErrorMessage maps an APIKey-lookup error to the right user-facing
+// reply. The ErrWorkspaceNotConfigured sentinel is the "admin hasn't run
+// /qurl setup yet" path — surface a useful next-action instead of the
+// generic auth-failure string.
+func authErrorMessage(err error) string {
+	if errors.Is(err, auth.ErrWorkspaceNotConfigured) {
+		return workspaceNotSetupMessage
+	}
+	return authFailureMessage
+}
 
 // ackWorkingOnIt is the user-visible ephemeral text returned synchronously
 // while async work runs. The hourglass keeps the user oriented that a
@@ -116,6 +132,12 @@ type Handler struct {
 	// now is injected so tests can pin the clock for timestamp-skew checks
 	// without touching a package global. Defaults to time.Now.
 	now func() time.Time
+	// oauthSetup carries the runtime configuration the /qurl setup
+	// slash-command needs to mint a state token and build the /start
+	// URL. nil when the OAuth surface is not configured (sandbox /
+	// missing env vars) — /qurl setup returns a "not configured"
+	// ephemeral in that case rather than minting a useless link.
+	oauthSetup *oauth.SetupConfig
 	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
 	// context.Background()). Each async goroutine derives a
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
@@ -146,6 +168,32 @@ type Handler struct {
 	// returned value, which is the SSRF-sanitization pattern CodeQL's
 	// taint analysis recognizes.
 	validateResponseURLFn func(string) (*url.URL, error)
+}
+
+// SetOAuthSetup wires the per-workspace OAuth configuration into the
+// /qurl setup slash command. Must be called exactly once, before
+// srv.Serve. Empty/short secret or empty base URL is a no-op
+// (/qurl setup will reply that OAuth is not configured). A second call
+// panics — the field is read without synchronization on the request
+// hot path, and the only safe write window is before any goroutine can
+// observe it.
+func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
+	if h.oauthSetup != nil {
+		panic("SetOAuthSetup called twice — must be called once before Serve")
+	}
+	if len(cfg.StateSecret) == 0 || cfg.SlackBaseURL == "" {
+		return
+	}
+	if len(cfg.StateSecret) < oauth.StateMinSecret {
+		// Fail-fast at startup: MintState would reject this later, but
+		// the operator-facing failure is more discoverable here.
+		panic("SetOAuthSetup: StateSecret shorter than oauth.StateMinSecret")
+	}
+	// Defensive copy: the field is read on the request hot path without
+	// a lock. A caller mutating the original byte slice would silently
+	// poison every subsequent MintState call.
+	cfg.StateSecret = append([]byte(nil), cfg.StateSecret...)
+	h.oauthSetup = &cfg
 }
 
 // NewHandler creates a new Slack handler.
@@ -184,6 +232,36 @@ func NewHandler(cfg Config) *Handler {
 // ctx, wedging shutdown past the platform's hard-kill window.
 func (h *Handler) Wait() {
 	h.wg.Wait()
+}
+
+// Compile-time check that *Handler still satisfies oauth.AsyncTracker
+// after any future rename of Handler.Go — would break here rather
+// than nil-tracker the OAuth callback's fire-and-forget revoke path
+// at runtime.
+var _ oauth.AsyncTracker = (*Handler)(nil)
+
+// Go runs fn in a goroutine tracked by h.wg so the cmd shutdown drain
+// covers it. Implements oauth.AsyncTracker — the OAuth callback's
+// fire-and-forget DM and orphan-key revoke goroutines flow through
+// here, putting them inside the same WaitTimeout budget as the
+// slash-command async workers.
+//
+// Panics in fn are recovered with a stack-trace log so a buggy Slack
+// client or qurl-service stub can't crash the bot. Mirrors the
+// recover discipline in runAsync.
+func (h *Handler) Go(fn func()) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in OAuth async goroutine",
+					"recover", r,
+					"stack", string(debug.Stack()))
+			}
+		}()
+		fn()
+	}()
 }
 
 // WaitTimeout drains in-flight async workers, returning early after d.
@@ -374,14 +452,16 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	command := values.Get("command")
-	text := strings.TrimSpace(values.Get("text"))
+	command := values.Get(fieldCommand)
+	text := strings.TrimSpace(values.Get(fieldText))
 
 	slog.Info("slash command", "command", command, "text", text)
 
 	switch {
 	case text == "" || text == "help":
 		respondSlack(w, helpMessage())
+	case text == "setup":
+		h.handleSetup(w, values)
 	case strings.HasPrefix(text, "create "):
 		h.handleCreate(w, values)
 	case text == "list":
@@ -401,7 +481,7 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 }
 
 func (h *Handler) handleCreate(w http.ResponseWriter, values url.Values) {
-	text := strings.TrimSpace(values.Get("text"))
+	text := strings.TrimSpace(values.Get(fieldText))
 	targetURL := strings.TrimSpace(strings.TrimPrefix(text, "create "))
 
 	if targetURL == "" {
@@ -418,6 +498,43 @@ func (h *Handler) handleList(w http.ResponseWriter, values url.Values) {
 	h.runAsync(w, "list", values, func(ctx context.Context, log *slog.Logger) {
 		h.processList(ctx, log, values)
 	})
+}
+
+// handleSetup mints a workspace-bound state token and replies with the
+// /oauth/qurl/start URL. team_id + user_id come from the Slack form
+// payload, which has already passed signing-secret verification — that
+// chain is what binds workspace identity to the resulting state token
+// (the alternative, taking team_id from an unsigned query param at
+// /start, was the workspace-rebind primitive flagged in PR review).
+//
+// Admin restriction: this handler does NOT verify the invoking user is
+// a workspace admin. That gate lives in the Slack app manifest — the
+// `/qurl setup` command must be declared admin-only (or restricted via
+// channel/role permissions in the install config). Without that gate,
+// any workspace user could initiate setup and overwrite the workspace's
+// qURL key with one minted against their own Auth0 account. Confirm
+// the manifest before shipping; an in-bot check would require an extra
+// Slack API round-trip per setup attempt that the manifest already
+// covers.
+func (h *Handler) handleSetup(w http.ResponseWriter, values url.Values) {
+	if h.oauthSetup == nil {
+		respondSlack(w, "qURL OAuth is not configured on this Slack bot deployment. Contact the operator.")
+		return
+	}
+	teamID := strings.TrimSpace(values.Get(fieldTeamID))
+	userID := strings.TrimSpace(values.Get(fieldUserID))
+	if teamID == "" || userID == "" {
+		respondSlack(w, "Could not read your Slack workspace or user ID from the command payload.")
+		return
+	}
+	state, err := oauth.MintState(h.oauthSetup.StateSecret, teamID, userID, h.now())
+	if err != nil {
+		slog.Error("/qurl setup: MintState failed", "error", err)
+		respondSlack(w, "Could not generate setup link. Please try again or contact support.")
+		return
+	}
+	setupURL := h.oauthSetup.SetupURL(state)
+	respondSlack(w, "Click to connect qURL to your Slack workspace: <"+setupURL+"|Connect qURL>\n\nThis link is valid for 5 minutes and only works for you.")
 }
 
 // authenticatedClient resolves an API key for the team and returns a configured client.
@@ -460,6 +577,7 @@ func helpMessage() string {
 	return `*/qurl* — Create and manage qURLs from Slack
 
 *Commands:*
+• ` + "`/qurl setup`" + ` — Connect qURL to your Slack workspace (workspace admin only)
 • ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
 • ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
 • ` + "`/qurl help`" + ` — Show this help message`
@@ -497,9 +615,18 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// Slack slash-command response keys + the ephemeral response-type value.
+// Centralized so respondSlack and the parallel writer in postResponse
+// can't drift, and so the goconst/keyword consistency stays linter-clean.
+const (
+	respFieldResponseType = "response_type"
+	respFieldText         = "text"
+	respTypeEphemeral     = "ephemeral"
+)
+
 func respondSlack(w http.ResponseWriter, text string) {
 	respondJSON(w, http.StatusOK, map[string]string{
-		"response_type": "ephemeral",
-		"text":          text,
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
 	})
 }

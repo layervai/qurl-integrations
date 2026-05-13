@@ -19,12 +19,23 @@ import (
 	"github.com/layervai/qurl-integrations/shared/client"
 )
 
-// fieldResponseURL is the form field Slack sends with every slash command;
-// follow-up messages are POSTed back to this URL within 30 minutes (5
-// posts per command). Treated as opaque — slashing into it would risk
-// SSRF if the signature gate ever broke, so postResponse validates the
-// scheme and host before dialing.
-const fieldResponseURL = "response_url"
+// Slack slash-command form-field names. Slack POSTs slash-command
+// bodies as application/x-www-form-urlencoded; these are the keys the
+// handler reads off the parsed values. Centralizing keeps a typo on
+// one read site (which silently yields "") from going un-fenced.
+//
+// fieldResponseURL in particular is treated as opaque — slashing into
+// it would risk SSRF if the signature gate ever broke, so postResponse
+// validates the scheme and host before dialing.
+const (
+	fieldResponseURL = "response_url"
+	fieldTeamID      = "team_id"
+	fieldUserID      = "user_id"
+	fieldChannelID   = "channel_id"
+	fieldCommand     = "command"
+	fieldText        = "text"
+	fieldTriggerID   = "trigger_id"
+)
 
 // slackResponseURLHost is Slack's webhook ingress for slash-command
 // follow-ups. Pinning the host before dialing is defense-in-depth: a
@@ -54,9 +65,9 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 	// as the request-path slog sites in handler.go.
 	log := slog.With(
 		"command", command,
-		"team_id", values.Get("team_id"),
-		"channel_id", values.Get("channel_id"),
-		"trigger_id", values.Get("trigger_id"),
+		"team_id", values.Get(fieldTeamID),
+		"channel_id", values.Get(fieldChannelID),
+		"trigger_id", values.Get(fieldTriggerID),
 	)
 
 	select {
@@ -108,13 +119,13 @@ func (h *Handler) runAsync(w http.ResponseWriter, command string, values url.Val
 // (3s ack timeout exceeded), so collisions are exactly the dedup target.
 func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values url.Values, targetURL string) {
 	responseURL := values.Get(fieldResponseURL)
-	teamID := values.Get("team_id")
-	triggerID := values.Get("trigger_id")
+	teamID := values.Get(fieldTeamID)
+	triggerID := values.Get(fieldTriggerID)
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authErrorMessage(err))
 		return
 	}
 
@@ -135,12 +146,12 @@ func (h *Handler) processCreate(ctx context.Context, log *slog.Logger, values ur
 // most recent qURLs and POST a formatted summary back via response_url.
 func (h *Handler) processList(ctx context.Context, log *slog.Logger, values url.Values) {
 	responseURL := values.Get(fieldResponseURL)
-	teamID := values.Get("team_id")
+	teamID := values.Get(fieldTeamID)
 
 	c, err := h.authenticatedClient(ctx, teamID)
 	if err != nil {
 		log.Error("failed to get API key", "error", err)
-		h.postResponse(log, responseURL, authFailureMessage)
+		h.postResponse(log, responseURL, authErrorMessage(err))
 		return
 	}
 
@@ -245,8 +256,8 @@ func (h *Handler) postResponse(log *slog.Logger, responseURL, text string) {
 	}
 
 	body, err := json.Marshal(map[string]string{
-		"response_type": "ephemeral",
-		"text":          text,
+		respFieldResponseType: respTypeEphemeral,
+		respFieldText:         text,
 	})
 	if err != nil {
 		// json.Marshal of a map[string]string can't fail in practice; log
