@@ -1605,6 +1605,37 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     );
   });
 
+  test('logger.warn fires BEFORE cancelEdit on the SSRF rejection path', async () => {
+    // Lock in the #292 reorder. Old order in commands.js was
+    // clearCooldown → cancelEdit → logger.warn → throw. cancelEdit
+    // is `interaction.editReply(...).catch(...)` — an async failure
+    // is swallowed by .catch, but a SYNC throw from editReply would
+    // bypass the catch and lose the SSRF breadcrumb. Reordering to
+    // logger.warn → failGate(...) means the warn lands first even
+    // under that hypothetical sync-throw shape. Use invocation-
+    // order to pin the warn-before-editReply sequence so a future
+    // refactor moving the warn back after cancelEdit fails loudly.
+    logger.warn.mockClear();
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams({
+      url: 'http://localhost/internal',
+      name: 'x.png',
+    }))).rejects.toThrow(/SSRF re-validation/);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'executeSendPipeline: attachment.url failed isAllowedSourceUrl gate',
+      expect.objectContaining({ user_id: expect.any(String) }),
+    );
+    // Anchor `[0]` to a single observable call on each side. The
+    // SSRF gate fires before the "Preparing links for…" edit, so
+    // logger.warn fires exactly once (the SSRF breadcrumb) and
+    // editReply fires exactly once (cancelEdit's underlying call).
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(interaction.editReply).toHaveBeenCalledTimes(1);
+    const warnOrder = logger.warn.mock.invocationCallOrder[0];
+    const editReplyOrder = interaction.editReply.mock.invocationCallOrder[0];
+    expect(warnOrder).toBeLessThan(editReplyOrder);
+  });
+
   test('SSRF gate is skipped when resourceType is NOT file (location sends carry no user URL)', async () => {
     const interaction = makeInteraction();
     // Bogus attachment.url that WOULD fail isAllowedSourceUrl — but

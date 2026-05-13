@@ -906,6 +906,20 @@ async function executeSendPipeline(interaction, {
     components: [],
   }).catch(logIgnoredDiscordErr);
 
+  // Nested so it closes over `interaction` + `cancelEdit` without
+  // parameter sprawl at the call sites. The `@returns {never}`
+  // annotation lets static analysis treat the call as terminating.
+  /**
+   * @param {new (msg: string) => Error} ErrorCtor
+   * @param {string} msg
+   * @returns {never}
+   */
+  function failGate(ErrorCtor, msg) {
+    clearCooldown(interaction.user.id);
+    cancelEdit();
+    throw new ErrorCtor(msg);
+  }
+
   // `isVoiceContext` strict-boolean gate. Unique among the params
   // because a wrong value surfaces only as a subtle copy mismatch
   // in the non-ephemeral channel-announce — the silent-regression
@@ -915,18 +929,14 @@ async function executeSendPipeline(interaction, {
   // on every error path" convention so a caller that hit the
   // gate doesn't strand the user in a cooldown window.
   if (typeof isVoiceContext !== 'boolean') {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
     // `typeof=` + `value=` rendered separately because
     // `typeof null === 'object'` is a classic foot-gun in
-    // a single-field "(got object: null)" rendering. `String()`
-    // keeps `undefined` visible (JSON.stringify drops it) and
-    // avoids the JSON.stringify-throws-on-BigInt edge case.
-    // Slice keeps the message bounded if a future caller hands
-    // a pathological value (1MB string, etc.). The `…` marker
-    // signals truncation to a prod-log reader so they don't
-    // assume the rendered value was the full payload.
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${truncForLog(isVoiceContext)})`);
+    // a single-field "(got object: null)" rendering. truncForLog
+    // keeps the message bounded if a future caller hands a
+    // pathological value (1MB string, etc.) and appends a `…`
+    // marker so a prod-log reader can tell a truncated rendering
+    // from the full payload.
+    failGate(TypeError, `executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${truncForLog(isVoiceContext)})`);
   }
 
   // `target` allowed-set gate. Same silent-mis-render shape: an
@@ -934,9 +944,7 @@ async function executeSendPipeline(interaction, {
   // the channel-announce — the announce site gates on strict
   // equality with `'channel'`.
   if (target !== 'user' && target !== 'channel') {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
-    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
+    failGate(TypeError, `executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
   }
 
   // Defense-in-depth SSRF re-check. handleSend's Step-2 validates
@@ -944,17 +952,16 @@ async function executeSendPipeline(interaction, {
   // pipeline; this gate catches a future caller that forgets.
   // FILE-only because location sends carry no attacker-controlled
   // URL (locationUrl is built from sanitized user-text via
-  // google.com/maps/search).
+  // google.com/maps/search). logger.warn fires before failGate so
+  // the breadcrumb lands even if cancelEdit later throws.
   if (resourceType === RESOURCE_TYPES.FILE) {
     if (!attachment || typeof attachment.url !== 'string' || !isAllowedSourceUrl(attachment.url)) {
-      clearCooldown(interaction.user.id);
-      cancelEdit();
       logger.warn('executeSendPipeline: attachment.url failed isAllowedSourceUrl gate', {
         user_id: interaction.user.id,
         send_nonce: sendNonce,
         host: attachment?.url && safeUrlHost(attachment.url),
       });
-      throw new Error(`executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`);
+      failGate(Error, `executeSendPipeline: attachment.url failed SSRF re-validation (resourceType=${String(resourceType)})`);
     }
   }
 
@@ -965,9 +972,7 @@ async function executeSendPipeline(interaction, {
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
-    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
+    failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
@@ -978,9 +983,7 @@ async function executeSendPipeline(interaction, {
   // here would be user-authored DM prose; we don't want even a
   // truncated 64-char prefix of that landing in prod logs.
   if (personalMessage !== null && typeof personalMessage !== 'string') {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
-    throw new TypeError(`executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
+    failGate(TypeError, `executeSendPipeline: personalMessage must be null or string (got typeof=${typeof personalMessage})`);
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
@@ -994,8 +997,6 @@ async function executeSendPipeline(interaction, {
   // below, then the editReply) — a non-array reaching either site
   // would crash on `.length` lookup against undefined.
   if (!Array.isArray(recipients) || recipients.length === 0) {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
     // Same canonical `typeof=`, `value=` rendering as the
     // isVoiceContext gate above. Empty-array case renders the literal
     // `<empty array>` sentinel (truncForLog on `[]` would `String()`
@@ -1004,12 +1005,10 @@ async function executeSendPipeline(interaction, {
     const detail = Array.isArray(recipients)
       ? 'typeof=object, value=<empty array>'
       : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
-    throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
+    failGate(TypeError, `executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
   }
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    clearCooldown(interaction.user.id);
-    cancelEdit();
-    throw new RangeError(`executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+    failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
 
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
