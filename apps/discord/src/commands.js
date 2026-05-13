@@ -50,23 +50,6 @@ const TOKENS_PER_RESOURCE = 10;
 // categories or earn a new top-level category with a clear
 // dimensional purpose (e.g. a future "rate_limit" if we add upstream
 // 429 handling).
-// emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
-// emission contract so the three catch sites (initial /qurl send +
-// addRecipients file branch + addRecipients location branch) cannot
-// drift on the skip rule or field shape. Adding a fourth call site
-// goes through here too — owns both the contract and the cardinality
-// discipline in one place. See #276.
-function emitMintFailureAudit(error, { sendId, kind }) {
-  if (error && error.apiCode === 'quota_exceeded') return;
-  logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
-    send_id: sendId,
-    reason: classifyMintFailure(error),
-    api_code: (error && error.apiCode) || null,
-    status_code: (error && error.status) || null,
-    kind,
-  });
-}
-
 function classifyMintFailure(error) {
   if (!error) return 'unknown';
   // libuv socket codes + undici/fetch TimeoutError DOMException — all
@@ -90,6 +73,23 @@ function classifyMintFailure(error) {
   if (status >= 500 && status < 600) return 'upstream_5xx';
   if (status >= 400 && status < 500) return 'upstream_4xx';
   return 'unknown';
+}
+
+// emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
+// emission contract so the three catch sites (initial /qurl send +
+// addRecipients file branch + addRecipients location branch) cannot
+// drift on the skip rule or field shape. Adding a fourth call site
+// goes through here too — owns both the contract and the cardinality
+// discipline in one place. See #276.
+function emitMintFailureAudit(error, { sendId, kind }) {
+  if (error && error.apiCode === 'quota_exceeded') return;
+  logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+    send_id: sendId,
+    reason: classifyMintFailure(error),
+    api_code: (error && error.apiCode) || null,
+    status_code: (error && error.status) || null,
+    kind,
+  });
 }
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
@@ -2744,6 +2744,12 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
+    // `?? 'unknown'` is defensive against a future refactor that adds
+    // throwable work BEFORE either branch sets activeKind (e.g. a
+    // sendConfig validation step). Today this fallback is unreachable
+    // because activeKind is set on entry to each hasFile/hasLocation
+    // block; preserves the audit-event invariant that `kind` is always
+    // populated.
     emitMintFailureAudit(error, { sendId, kind: activeKind ?? 'unknown' });
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }

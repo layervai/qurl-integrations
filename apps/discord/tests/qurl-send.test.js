@@ -1940,6 +1940,42 @@ describe('handleAddRecipients', () => {
     }));
   });
 
+  // quota_exceeded skip rule for addRecipients sites. The skip lives in
+  // emitMintFailureAudit (commands.js helper) so it applies uniformly to
+  // all 3 emission sites. If a future refactor moves the guard back out
+  // of the helper, the addRecipients sites silently regress to paging on
+  // viral uploads via Add Recipients — this test catches that.
+  it('addRecipients: quota_exceeded does NOT emit QURL_SEND_CREATE_LINK_FAILURE', async () => {
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-q',
+      actual_url: null,
+      expires_in: '24h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: 'viral.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/viral.pdf',
+    });
+
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-q', fileBuffer: new ArrayBuffer(4) });
+    const quotaErr = Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' });
+    mockMintLinks.mockRejectedValue(quotaErr);
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-1', bot: false, username: 'Alice' },
+    ]);
+
+    const logger = require('../src/logger');
+    logger.audit.mockClear();
+    await handleAddRecipients('send-quota', users, mockOriginalInteraction, 'test-api-key');
+
+    const failureCalls = logger.audit.mock.calls.filter(
+      (c) => c[0] === 'qurl_send_create_link_failure',
+    );
+    expect(failureCalls).toHaveLength(0);
+  });
+
   // Mixed-resource sendConfig variant — exercises the `activeKind` fix
   // for the case where hasFile && hasLocation are both true. Without the
   // fix, the outer catch would emit kind='file' for a failure that

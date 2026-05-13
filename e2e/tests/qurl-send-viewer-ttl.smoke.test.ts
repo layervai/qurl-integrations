@@ -29,6 +29,7 @@
 
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
@@ -46,8 +47,11 @@ describe('Smoke: /qurl send with viewer_ttl_seconds (Snapchat path)', () => {
   // the "use server default" branch it's supposed to pin.
   const tempFiles: string[] = [];
   function freshFixture(label: string): string {
+    // os.tmpdir() rather than __dirname so a killed-mid-test run doesn't
+    // leak fixture files into the e2e source tree (and from there into
+    // `git status`). afterAll cleanup is still best-effort.
     const f = path.join(
-      __dirname,
+      os.tmpdir(),
       `qurl-send-viewer-ttl.smoke.fixture.${label}.${Date.now()}.${Math.random().toString(36).slice(2)}.txt`,
     );
     fs.writeFileSync(f, `e2e smoke fixture ${label} ${new Date().toISOString()} ${Math.random()}\n`);
