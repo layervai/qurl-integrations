@@ -380,6 +380,61 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // use this — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
 
+// Shared Google Maps URL patterns. Both `/qurl send`'s modal-driven
+// location-text capture and `/qurl file`/`/qurl map`'s slash-option
+// `location:` consume these — extracted to a single source so a
+// future "new URL shape" tweak only happens here.
+//
+// Each pattern bounds character-class repetition (`{1,500}`, `{1,32}`,
+// etc.) to keep ReDoS-resistant against pathological inputs.
+const MAPS_URL_PATTERNS = [
+  /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
+  /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
+  /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s]{1,500}/,
+];
+
+// decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
+// Swallow + return the raw string — a garbled label is preferable to a
+// crashed command handler.
+function safeDecodeURIComponent(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// Parse a free-form `location:` input into `{ locationUrl, locationName }`.
+// Detection order:
+//   1. Google Maps URL embedded anywhere in the input → preserve URL,
+//      extract name from `?q=` or `/place/<name>`.
+//   2. Anything else → synthesize a `/maps/search/<input>` URL with the
+//      whole input as the name.
+//
+// Returns BOTH fields; caller is responsible for escaping the name
+// (markdown injection defense) and applying any cap. The two call
+// sites — `handleSend`'s modal branch and `handleQurlMap`'s slash
+// entry — share this so a pattern tweak lands in one place.
+function parseLocationInput(rawInput) {
+  let detectedUrl = null;
+  for (const pattern of MAPS_URL_PATTERNS) {
+    const match = rawInput.match(pattern);
+    if (match) { detectedUrl = match[0]; break; }
+  }
+  if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
+    const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+    const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
+    let name = null;
+    if (queryMatch) name = safeDecodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+    else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+    return { locationUrl: detectedUrl, locationName: name };
+  }
+  // Either no Maps URL detected, OR a candidate URL failed
+  // `isGoogleMapsURL` re-validation (path/host check). Either way,
+  // wrap the raw input in a maps-search URL and use it as both URL
+  // and name.
+  return {
+    locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
+    locationName: rawInput,
+  };
+}
+
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Same helper used at the channel
@@ -2041,39 +2096,11 @@ async function handleSend(interaction, apiKey) {
 
     // Hard-cap input length BEFORE regex matching to prevent ReDoS on
     // pathological strings against the unbounded character classes
-    // below. Real Google Maps URLs peak around ~300 chars.
+    // inside MAPS_URL_PATTERNS. Real Google Maps URLs peak around ~300 chars.
     const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
     await modalSubmit.deferUpdate();
 
-    const mapsPatterns = [
-      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
-      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
-      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s]{1,500}/,
-    ];
-
-    let detectedUrl = null;
-    for (const pattern of mapsPatterns) {
-      const match = locationValue.match(pattern);
-      if (match) { detectedUrl = match[0]; break; }
-    }
-
-    if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
-      locationUrl = detectedUrl;
-      const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
-      const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-      // decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
-      // Swallow and fall back to the raw string — a garbled label is better
-      // than a crashed command handler.
-      const safeDecode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
-      if (queryMatch) locationName = safeDecode(queryMatch[1].replace(/\+/g, ' '));
-      else if (placeMatch) locationName = safeDecode(placeMatch[1].replace(/\+/g, ' '));
-    } else if (detectedUrl) {
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-    } else {
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-    }
+    ({ locationUrl, locationName } = parseLocationInput(locationValue));
     // Cap + escape markdown so a crafted place name can't inject
     // **bold** / links / code / spoilers into the recipient embed.
     if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
@@ -3355,6 +3382,677 @@ async function handleSetupModal(interaction, { flow_id }) {
   }).catch(logIgnoredDiscordErr);
 }
 
+// ─────────────────────────────────────────────────────────────
+// /qurl file + /qurl map — slash-driven sends.
+//
+// Two new subcommands replace `/qurl send`'s button-driven wizard
+// with all-options-up-front slash commands. The flow:
+//
+//   /qurl file recipients:<text> attachment:<file> [expires-in]
+//                                                  [self-destruct]
+//                                                  [personal-message]
+//   /qurl map  recipients:<text> location:<text>   [location-name]
+//                                                  [expires-in]
+//                                                  [self-destruct]
+//                                                  [personal-message]
+//
+// After parsing/validating the slash options, the bot renders an
+// in-channel ephemeral confirm card with the resolved recipient list
+// (or a UserSelectMenu when `recipients:` was omitted) plus Send /
+// Cancel buttons. The confirm card is flow_state-backed so the Send
+// dedup gate fires on `deleteFlow` (consistent with /qurl revoke,
+// /qurl setup).
+//
+// /qurl send stays in place until PR 7b.3 hard-removes it.
+// ─────────────────────────────────────────────────────────────
+
+const {
+  parseRecipientMentions,
+  MAX_INPUT_LENGTH: RECIPIENTS_MAX_INPUT_LENGTH,
+} = require('./recipient-parser');
+
+const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
+
+// CustomIds — PREFIX-ONLY (no nonce). flow-dispatch's loadFlow already
+// gates routing on stage + version; encoding identity into customId
+// would not add safety (the dispatcher's trust model treats customId
+// as a routing key, not an identity signal). Matches the convention
+// REVOKE_SELECT_CUSTOM_ID / SETUP_BUTTON_CUSTOM_ID use.
+const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
+const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
+const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
+
+// 3-minute confirm-card window. Matches /qurl send's Step-3 form
+// timeout at line ~2293 so users have the same time-to-finish budget
+// whichever entry point they use.
+const SEND_FLOW_TTL_SECONDS = 180;
+
+// Slash-option choice arrays. Reuse the existing /qurl send wording
+// so users see the same labels in autocomplete as in the form's
+// dropdowns. EXPIRY_CHOICES already exists. SELF_DESTRUCT_CHOICES is
+// new here because /qurl send wires self-destruct via a StringSelect
+// post-invocation rather than a slash option.
+const SELF_DESTRUCT_NO_TIMER_CHOICE = 'none';
+const SELF_DESTRUCT_CHOICES = [
+  { name: 'No timer (default)', value: SELF_DESTRUCT_NO_TIMER_CHOICE },
+  ...SELF_DESTRUCT_PRESETS.map((p) => ({ name: p.label, value: String(p.seconds) })),
+];
+
+// Map the slash option's string value to a seconds integer or null.
+// Mirrors `selfDestructSelectValueToSeconds` in utils/time but for the
+// slash-option value space (which uses 'none' instead of the form's
+// SELF_DESTRUCT_NO_TIMER_VALUE). Wrong values fall back to null (no
+// timer) so a future option-list drift can't crash the handler.
+function selfDestructOptionToSeconds(value) {
+  if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+// Resolve a list of recipient IDs to User-shaped objects via the guild
+// member cache (with fallback fetch on miss). Returns
+// `{ users, unresolvedIds }` — callers surface unresolvedIds so a
+// user who left the guild between /qurl file invocation and Send
+// click sees a deterministic error rather than a silent drop in the
+// back-half.
+//
+// Discord API code 10007 ("Unknown Member") is the canonical
+// "left the guild" signal. Any other fetch error (rate limit,
+// gateway blip) is also treated as unresolved — degrading to the
+// resolvable subset is preferable to aborting the whole command.
+//
+// Fetches the cache-miss tail in parallel via `batchSettled` (the
+// same helper used by the DM fan-out path; honors Discord's per-route
+// rate-limit bucket by capping concurrent in-flight calls).
+async function resolveRecipientUsers(interaction, ids) {
+  if (!interaction.guild) {
+    return { users: [], unresolvedIds: [...ids] };
+  }
+  const users = [];
+  const missQueue = [];
+  for (const id of ids) {
+    const cached = interaction.guild.members.cache.get(id);
+    if (cached) users.push(cached.user);
+    else missQueue.push(id);
+  }
+  if (missQueue.length === 0) return { users, unresolvedIds: [] };
+
+  const unresolvedIds = [];
+  const results = await batchSettled(missQueue, async (id) => {
+    try {
+      const m = await interaction.guild.members.fetch(id);
+      return { id, user: m.user };
+    } catch (err) {
+      if (!err || (err.code !== 10007 && err.code !== '10007')) {
+        logger.warn('resolveRecipientUsers: members.fetch failed', {
+          recipient_id: id, error: err && err.message, code: err && err.code,
+        });
+      }
+      return { id, user: null };
+    }
+  });
+  for (const r of results) {
+    // batchSettled wraps each callback in Promise.allSettled — fulfilled
+    // results carry our `{id, user}` shape, rejected ones would carry an
+    // err. The callback never throws (try/catch above) so `rejected` is
+    // unreachable in practice; defend regardless.
+    if (r.status !== 'fulfilled' || !r.value || r.value.user == null) {
+      const id = r.value?.id ?? null;
+      if (id) unresolvedIds.push(id);
+      continue;
+    }
+    users.push(r.value.user);
+  }
+  return { users, unresolvedIds };
+}
+
+// Filter resolved Users: drop bots, drop the sender. Returns
+// `{ valid, droppedBots, droppedSelf }` so the caller can surface
+// "X bots / your-own-id were dropped" as a distinct error from
+// "no recipients at all".
+//
+// Known v1 cap-skew: parseRecipientMentions caps to QURL_SEND_MAX_RECIPIENTS
+// BEFORE knowing which IDs are bots. A mention list of
+// [bot1, bot2, ..., bot25, user1] with cap=25 yields ids=[bot1..bot25]
+// and post-filter valid=[]. The user sees "all recipients dropped" and
+// has to re-run with bots removed. Acceptable since (a) it requires a
+// pathological mention list to trip, (b) the failure mode is loud
+// rather than silent. A future refactor can resolve-then-cap if this
+// becomes a real complaint.
+function partitionRecipients(users, senderId) {
+  const valid = [];
+  let droppedBots = 0;
+  let droppedSelf = 0;
+  for (const u of users) {
+    if (u.bot) { droppedBots++; continue; }
+    if (u.id === senderId) { droppedSelf++; continue; }
+    valid.push(u);
+  }
+  return { valid, droppedBots, droppedSelf };
+}
+
+// Returns the empty string when nothing is worth surfacing — keeps
+// callers simple (`warningsBlock + content`) without a separate
+// "do I have any warnings" check.
+function renderRecipientWarnings({ invalidTokens, cappedCount, unresolvedIds, droppedBots, droppedSelf }) {
+  const lines = [];
+  if (cappedCount > 0) {
+    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
+  }
+  if (invalidTokens.length > 0) {
+    // Code-fence the raw tokens so any residual markdown / mention
+    // shapes the parser couldn't fully neutralize render as literals.
+    // Cap the listed count at 10 so a pathological list doesn't blow
+    // the Discord content budget.
+    const shown = invalidTokens.slice(0, 10);
+    const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
+    lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
+  }
+  if (unresolvedIds.length > 0) {
+    lines.push(`• ${unresolvedIds.length} user(s) are no longer in this server and were dropped.`);
+  }
+  if (droppedBots > 0) {
+    lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
+  }
+  if (droppedSelf > 0) {
+    lines.push('• You cannot send a qURL to yourself — skipped.');
+  }
+  if (lines.length === 0) return '';
+  return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
+}
+
+// Build the confirm-card content string. Mirrors /qurl send's Step-3
+// content shape (formContent at ~line 2130) so users see consistent
+// wording across both entry points. Brand spelling is `qURL` per
+// CLAUDE.md — the user-visible copy here, the slash-command
+// descriptions, and any logger.audit user-facing fields all preserve
+// the case.
+function renderConfirmCardContent({
+  resourceType, resourceLabel, validRecipients,
+  expiresIn, selfDestructSeconds, personalMessage,
+  warningsBlock, needsPicker,
+}) {
+  let content = warningsBlock || '';
+  if (resourceType === RESOURCE_TYPES.FILE) {
+    content += `📁 **Sending file:** ${resourceLabel}\n`;
+  } else {
+    content += `🗺\u{FE0F} **Sending location:** ${resourceLabel}\n`;
+  }
+  if (needsPicker) {
+    content += '\n**Pick recipients below** (1–'
+      + String(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
+      + ' users), then click **Send**.\n';
+  } else {
+    // First-N preview keeps the card scannable when a paste resolves
+    // to many users. Discord-name display via resolveRecipientAlias
+    // matches the post-send confirmation wording.
+    const PREVIEW = 5;
+    const previewNames = validRecipients.slice(0, PREVIEW)
+      .map((u) => escapeDiscordMarkdown(u.username))
+      .join(', ');
+    const more = validRecipients.length > PREVIEW ? `, +${validRecipients.length - PREVIEW} more` : '';
+    content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
+  }
+  content += `**Expires:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
+  if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
+    content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
+  }
+  if (personalMessage) {
+    const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
+    content += `**Note:** "${escapeDiscordMarkdown(preview)}"\n`;
+  }
+  content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
+  return content;
+}
+
+// Build the ActionRow set for the confirm card. When `needsPicker`,
+// row 0 is a UserSelectMenu (recipients absent / post-filter empty);
+// otherwise no picker row. Send/Cancel always in the last row.
+function renderConfirmCardRows({ needsPicker, sendDisabled }) {
+  const rows = [];
+  if (needsPicker) {
+    const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+    rows.push(new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(SEND_USER_SELECT_CUSTOM_ID)
+        .setPlaceholder(`Pick recipients (1–${maxValues})`)
+        .setMinValues(1)
+        .setMaxValues(maxValues)
+    ));
+  }
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(SEND_CONFIRM_SEND_CUSTOM_ID)
+      .setLabel('\u{1F4E4} Send')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(sendDisabled),
+    new ButtonBuilder()
+      .setCustomId(SEND_CONFIRM_CANCEL_CUSTOM_ID)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary),
+  ));
+  return rows;
+}
+
+// Shared entry point — both `/qurl file` and `/qurl map` route here
+// after collecting their resource-specific options. `params` carries:
+//   resourceType: RESOURCE_TYPES.FILE | RESOURCE_TYPES.MAPS
+//   attachment:   {url, name, contentType, size} | null  (file path)
+//   locationUrl:  string | null                          (map path)
+//   locationName: string | null                          (map path)
+//   resourceLabel: string                                (rendered on card)
+async function _handleQurlSlashSend(interaction, apiKey, params) {
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+  if (isOnCooldown(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before sending again.',
+      ephemeral: true,
+    });
+  }
+  setCooldown(interaction.user.id);
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const recipientsRaw = interaction.options.getString('recipients');
+  const expiresIn = interaction.options.getString('expires-in') || '24h';
+  const selfDestructValue = interaction.options.getString('self-destruct') || SELF_DESTRUCT_NO_TIMER_CHOICE;
+  const personalMessageRaw = interaction.options.getString('personal-message');
+
+  // Defense-in-depth: expiresIn comes from the slash command's choice
+  // list which Discord enforces server-side, but a forged interaction
+  // could carry an off-set value. EXPIRY_LABELS owns the closed set.
+  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
+    });
+  }
+  const selfDestructSeconds = selfDestructOptionToSeconds(selfDestructValue);
+  const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
+
+  // Phase 1: parse the recipients string (no fetch yet).
+  const parsed = parseRecipientMentions(recipientsRaw, interaction);
+
+  // Phase 2: resolve IDs → Users via guild member cache + fallback fetch.
+  let resolved = { users: [], unresolvedIds: [] };
+  if (parsed.ids.length > 0) {
+    try {
+      resolved = await resolveRecipientUsers(interaction, parsed.ids);
+    } catch (err) {
+      clearCooldown(interaction.user.id);
+      logger.error('qurl file/map: resolveRecipientUsers threw', {
+        user_id: interaction.user.id, error: err && err.message,
+      });
+      return interaction.editReply({
+        content: '❌ Could not resolve recipients. Please try again.',
+      });
+    }
+  }
+
+  // Phase 3: drop bots + self.
+  const { valid, droppedBots, droppedSelf } = partitionRecipients(resolved.users, interaction.user.id);
+
+  // Phase 4: decide branch — confirm card straight through, or picker
+  // fallback. `needsPicker` is true when the user supplied no
+  // `recipients:` value at all. When they DID supply one but it
+  // post-filtered to empty, we hard-fail with a specific error so
+  // the user knows why (vs. silently dropping into the picker, which
+  // would mask the underlying mention-list problem).
+  const recipientsOmitted = recipientsRaw == null || recipientsRaw.trim().length === 0;
+  const warningsBlock = renderRecipientWarnings({
+    invalidTokens: parsed.invalidTokens,
+    cappedCount: parsed.cappedCount,
+    unresolvedIds: resolved.unresolvedIds,
+    droppedBots,
+    droppedSelf,
+  });
+  if (!recipientsOmitted && valid.length === 0) {
+    clearCooldown(interaction.user.id);
+    // Parser silently strips bots + the sender from `<@id>` mentions
+    // when the cache reports them (recipient-parser.js:205, 214) —
+    // those IDs never reach `partitionRecipients`. If post-parse `ids`
+    // is empty AND the user supplied non-empty `recipients`, surface
+    // a "nothing usable" message even when partition's breakdown is
+    // zero. This is what bot-only / self-only mention lists hit.
+    const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
+      && resolved.unresolvedIds.length === 0
+      && parsed.invalidTokens.length === 0
+      && parsed.cappedCount === 0;
+    const detail = breakdownEmpty
+      ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
+      : '';
+    return interaction.editReply({
+      content: warningsBlock + '❌ **No valid recipients to send to.** Re-run with at least one valid user mention.' + detail,
+    });
+  }
+
+  const needsPicker = recipientsOmitted;
+  const recipientIds = valid.map((u) => u.id);
+
+  // Phase 5: open the flow row. supersedeOrCreate handles the
+  // "another /qurl file/map is open" case — sibling-flow disambig
+  // surfaces a stage-specific message; same-stage rerun atomically
+  // claims the slot. Mirrors /qurl revoke's pattern.
+  const flow_id = flowIdForInteraction(interaction);
+  const sendNonce = crypto.randomBytes(8).toString('hex');
+  const payload = {
+    resourceType: params.resourceType,
+    attachment: params.attachment,
+    locationUrl: params.locationUrl,
+    locationName: params.locationName,
+    resourceLabel: params.resourceLabel,
+    recipientIds,
+    expiresIn,
+    selfDestructSeconds,
+    personalMessage,
+    sendNonce,
+  };
+  let supersede;
+  try {
+    supersede = await supersedeOrCreate({
+      flow_id,
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      payload,
+      ttl_seconds: SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    clearCooldown(interaction.user.id);
+    logger.warn('handleQurlSlashSend: supersedeOrCreate threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.editReply({
+      content: '❌ Could not start a send — please try again.',
+    });
+  }
+  if (!supersede.created) {
+    clearCooldown(interaction.user.id);
+    const siblingMsg = siblingMessageForStage(supersede.surviving?.stage);
+    return interaction.editReply({
+      content: siblingMsg || '❌ Could not start a send — please try again.',
+    });
+  }
+
+  // Phase 6: render the confirm card.
+  const content = renderConfirmCardContent({
+    resourceType: params.resourceType,
+    resourceLabel: params.resourceLabel,
+    validRecipients: valid,
+    expiresIn,
+    selfDestructSeconds,
+    personalMessage,
+    warningsBlock,
+    needsPicker,
+  });
+  const rows = renderConfirmCardRows({
+    needsPicker,
+    sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
+  });
+  return interaction.editReply({ content, components: rows });
+}
+
+async function handleQurlFile(interaction, apiKey) {
+  // File concurrency-cap pre-check (UX fast-fail). Final claim happens
+  // inside executeSendPipeline. Surfacing the cap here lets us refuse
+  // the slash invocation before we render a confirm card the user
+  // would then never get past.
+  if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+    return interaction.reply({
+      content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+      ephemeral: true,
+    });
+  }
+
+  const attachment = interaction.options.getAttachment('attachment', true);
+  if (!attachment || typeof attachment.url !== 'string') {
+    return interaction.reply({
+      content: '❌ Attachment is missing or malformed.',
+      ephemeral: true,
+    });
+  }
+  if (!isAllowedSourceUrl(attachment.url)) {
+    logger.warn('handleQurlFile: attachment.url failed SSRF gate', {
+      user_id: interaction.user.id, host: safeUrlHost(attachment.url),
+    });
+    return interaction.reply({
+      content: '❌ Attachment source not allowed. Files must be uploaded via Discord, not linked from external URLs.',
+      ephemeral: true,
+    });
+  }
+  if (!isAllowedFileType(attachment.contentType)) {
+    return interaction.reply({
+      content: `❌ File type not allowed: \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\`.`,
+      ephemeral: true,
+    });
+  }
+  if (attachment.size > MAX_FILE_SIZE) {
+    return interaction.reply({
+      content: `❌ File too large: ${attachment.size} bytes (cap: ${MAX_FILE_SIZE}).`,
+      ephemeral: true,
+    });
+  }
+
+  return _handleQurlSlashSend(interaction, apiKey, {
+    resourceType: RESOURCE_TYPES.FILE,
+    attachment: {
+      url: attachment.url,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.size,
+    },
+    locationUrl: null,
+    locationName: null,
+    resourceLabel: escapeDiscordMarkdown(attachment.name),
+  });
+}
+
+async function handleQurlMap(interaction, apiKey) {
+  const locationValue = interaction.options.getString('location', true).trim();
+  const locationNameRaw = interaction.options.getString('location-name');
+  if (locationValue.length === 0) {
+    return interaction.reply({
+      content: '❌ Location is empty.',
+      ephemeral: true,
+    });
+  }
+
+  // Shared parser: see `parseLocationInput` near the top of this file.
+  // `/qurl send`'s modal-driven location text calls it too — keep both
+  // entry points in lockstep so they produce identical delivered URLs
+  // for the same input.
+  let { locationUrl, locationName } = parseLocationInput(locationValue);
+  // Explicit location-name override wins over the URL-derived name.
+  if (locationNameRaw && locationNameRaw.trim().length > 0) {
+    locationName = locationNameRaw.trim();
+  }
+  if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
+
+  return _handleQurlSlashSend(interaction, apiKey, {
+    resourceType: RESOURCE_TYPES.MAPS,
+    attachment: null,
+    locationUrl,
+    locationName,
+    resourceLabel: locationName || 'location',
+  });
+}
+
+// Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
+// `stage_to` === current stage advances the version (OCC guard) and
+// refreshes the TTL, so repeated picker churn doesn't expire the row
+// while the user is still deciding.
+async function handleSendUserSelect(interaction, { flow_id, row }) {
+  const selected = [...interaction.users.values()];
+  if (selected.length === 0) {
+    return interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  }
+  const { valid, droppedBots, droppedSelf } = partitionRecipients(selected, interaction.user.id);
+  if (valid.length === 0) {
+    return interaction.update({
+      content: '⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
+        + ' Re-pick recipients below.',
+      components: renderConfirmCardRows({ needsPicker: true, sendDisabled: true }),
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return interaction.update({
+      content: `⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.`,
+      components: renderConfirmCardRows({ needsPicker: true, sendDisabled: true }),
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const payload = row.payload || {};
+  const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
+  const result = await transitionFlow(flow_id, row.version, {
+    stage_to: SEND_STAGE_AWAITING_CONFIRM,
+    payload: newPayload,
+    terminal: false,
+    set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+  });
+  if (result.result === 'conflict') {
+    return interaction.update({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.update({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Recompute warnings against the new pick (bots-on-pick is the only
+  // signal that can flip here; cappedCount / invalidTokens were string-
+  // path-only). droppedBots / droppedSelf above already short-circuited
+  // on zero-valid; if we got here, both are best-effort UI cues only.
+  const warningsBlock = renderRecipientWarnings({
+    invalidTokens: [],
+    cappedCount: 0,
+    unresolvedIds: [],
+    droppedBots,
+    droppedSelf,
+  });
+  const content = renderConfirmCardContent({
+    resourceType: payload.resourceType,
+    resourceLabel: payload.resourceLabel,
+    validRecipients: valid,
+    expiresIn: payload.expiresIn,
+    selfDestructSeconds: payload.selfDestructSeconds,
+    personalMessage: payload.personalMessage,
+    warningsBlock,
+    needsPicker: false,
+  });
+  return interaction.update({
+    content,
+    components: renderConfirmCardRows({ needsPicker: true, sendDisabled: false }),
+  }).catch(logIgnoredDiscordErr);
+}
+
+// Send button → fire executeSendPipeline. deleteFlow first as the
+// dedup primitive (duplicate dispatch under future SQS at-least-once
+// must not double-send). Mirrors handleRevokeSelect's ordering.
+async function handleSendConfirmClick(interaction, { flow_id, row }) {
+  const payload = row.payload || {};
+  // Re-fetch users at click time — defensive against members leaving
+  // the guild between confirm and Send. unresolvedIds at this point
+  // are no longer surface-able (we already committed past the warning
+  // step), so they're silently dropped with a debug log.
+  const { users, unresolvedIds } = await resolveRecipientUsers(interaction, payload.recipientIds || []);
+  if (unresolvedIds.length > 0) {
+    logger.debug('handleSendConfirmClick: dropping unresolved IDs at click time', {
+      flow_id, count: unresolvedIds.length,
+    });
+  }
+  const { valid } = partitionRecipients(users, interaction.user.id);
+  if (valid.length === 0) {
+    // Everyone left the guild between confirm and Send. Treat as a
+    // terminal failure of THIS attempt — delete the flow so a rerun
+    // claims a fresh slot.
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
+      flow_id, error: err && err.message,
+    }));
+    return interaction.update({
+      content: '❌ Recipients are no longer available. Re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Resolve apiKey before dedup — getGuildApiKey is idempotent + free,
+  // so a duplicate dispatch's redundant call is harmless. Same
+  // safety rule handleRevokeSelect documents (parallelize ONLY with
+  // idempotent reads).
+  const [guildApiKey, deleteResult] = await Promise.all([
+    interaction.guildId ? db.getGuildApiKey(interaction.guildId) : null,
+    deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }),
+  ]);
+  if (!deleteResult.deleted) {
+    return interaction.reply({
+      content: 'This send was already processed.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const apiKey = guildApiKey || config.QURL_API_KEY;
+  if (!apiKey) {
+    return interaction.update({
+      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Ack with a "Preparing send…" placeholder; executeSendPipeline
+  // takes over the editReply from here. Matches handleSend's hand-off
+  // shape at commands.js:~2307.
+  await interaction.update({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
+
+  return executeSendPipeline(interaction, {
+    apiKey,
+    resourceType: payload.resourceType,
+    attachment: payload.attachment,
+    locationUrl: payload.locationUrl,
+    locationName: payload.locationName,
+    recipients: valid,
+    target: 'user',
+    isVoiceContext: false,
+    expiresIn: payload.expiresIn,
+    selfDestructSeconds: payload.selfDestructSeconds,
+    personalMessage: payload.personalMessage,
+    sendNonce: payload.sendNonce,
+  });
+}
+
+// Cancel button → deleteFlow + acknowledge. The cooldown was set on
+// invocation; clear it so a user who second-guesses isn't gated for
+// the full QURL_SEND_COOLDOWN_MS window.
+async function handleSendCancelClick(interaction, { flow_id }) {
+  const { deleted } = await deleteFlow(flow_id, {
+    stage: SEND_STAGE_AWAITING_CONFIRM,
+    reason: 'terminal',
+  });
+  clearCooldown(interaction.user.id);
+  if (!deleted) {
+    return interaction.reply({
+      content: 'This send was already processed.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  return interaction.update({
+    content: 'Send cancelled.',
+    components: [],
+  }).catch(logIgnoredDiscordErr);
+}
+
 // Pure rendering / wording logic lives in `./revoke-render` so the
 // e2e smoke test can require it without pulling in `discord.js`.
 const {
@@ -4136,6 +4834,84 @@ const commands = [
           // then converges on a shared final step that gathers
           // recipient(s), optional message, and expiry before
           // committing the send.
+          //
+          // PR 7b.3 hard-removes /qurl send in favor of /qurl file
+          // and /qurl map. The two new subcommands take all options
+          // up-front so power users can stay on the keyboard, and
+          // the in-channel confirm card is flow_state-backed.
+      )
+      .addSubcommand(sub =>
+        sub.setName('file')
+          .setDescription('Share a file via one-time qURL links')
+          .addAttachmentOption(opt =>
+            opt.setName('attachment')
+              .setDescription('The file to share')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt.setName('recipients')
+              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+              .setRequired(false)
+              .setMaxLength(RECIPIENTS_MAX_INPUT_LENGTH)
+          )
+          .addStringOption(opt =>
+            opt.setName('expires-in')
+              .setDescription('How long the qURL links stay valid (default: 24 hours)')
+              .setRequired(false)
+              .addChoices(...EXPIRY_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('self-destruct')
+              .setDescription('Optional countdown after first open (default: no timer)')
+              .setRequired(false)
+              .addChoices(...SELF_DESTRUCT_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('personal-message')
+              .setDescription('Optional note included in each recipient\'s DM')
+              .setRequired(false)
+              .setMaxLength(280)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('map')
+          .setDescription('Share a Google Maps location via one-time qURL links')
+          .addStringOption(opt =>
+            opt.setName('location')
+              .setDescription('Google Maps URL, or a place / address to search')
+              .setRequired(true)
+              .setMaxLength(500)
+          )
+          .addStringOption(opt =>
+            opt.setName('recipients')
+              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+              .setRequired(false)
+              .setMaxLength(RECIPIENTS_MAX_INPUT_LENGTH)
+          )
+          .addStringOption(opt =>
+            opt.setName('location-name')
+              .setDescription('Override the label shown to recipients (defaults to URL/address)')
+              .setRequired(false)
+              .setMaxLength(256)
+          )
+          .addStringOption(opt =>
+            opt.setName('expires-in')
+              .setDescription('How long the qURL links stay valid (default: 24 hours)')
+              .setRequired(false)
+              .addChoices(...EXPIRY_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('self-destruct')
+              .setDescription('Optional countdown after first open (default: no timer)')
+              .setRequired(false)
+              .addChoices(...SELF_DESTRUCT_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('personal-message')
+              .setDescription('Optional note included in each recipient\'s DM')
+              .setRequired(false)
+              .setMaxLength(280)
+          )
       )
       .addSubcommand(sub =>
         sub.setName('revoke')
@@ -4363,9 +5139,13 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke
+      // Gate: require guild API key for send/file/map/revoke. The
+      // `Set.has` lookup keeps the gate's allowlist single-source —
+      // adding a new send-style subcommand in 7b.3+ only requires
+      // touching this set, not the dispatch fall-through below.
+      const SEND_LIKE_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
       let resolvedApiKey = null;
-      if (sub === 'send' || sub === 'revoke') {
+      if (SEND_LIKE_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
@@ -4383,6 +5163,8 @@ const commands = [
       // sometimes clone/serialize interactions) and a security smell for
       // secret-bearing values.
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
+      if (sub === 'file') return handleQurlFile(interaction, resolvedApiKey);
+      if (sub === 'map') return handleQurlMap(interaction, resolvedApiKey);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it
@@ -4406,7 +5188,9 @@ const commands = [
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
-            '  `/qurl send` — send a file or location to users\n' +
+            '  `/qurl file` — share a file with users via one-time qURL links\n' +
+            '  `/qurl map` — share a Google Maps location via one-time qURL links\n' +
+            '  `/qurl send` — legacy button-driven flow (use `/qurl file` or `/qurl map` instead)\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -4416,17 +5200,17 @@ const commands = [
             // misalign "1." with "2.", "3.", "4."). The tab indent now
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
-            '\t1. Run `/qurl send` and pick **Send File** or **Send Location**\n' +
-            '  2. (Files only) I\'ll DM you privately — attach the file there, not in the public channel\n' +
-            '  3. Choose recipient(s), expiry, and optionally a personal message — then click **Send**\n' +
+            '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n' +
+            '  2. Optionally `recipients:@a @b @role` — leave blank to pick from a menu\n' +
+            '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
-            'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
-            '**Large servers (~1000+ members):** when sending to **Everyone in this channel** ' +
-            'or **Everyone in your voice channel**, members who appear offline in Discord may be skipped. ' +
-            'If you need to reach a specific person for sure, pick **A specific user**.\n\n' +
+            'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
+            '**Large servers (~1000+ members):** `/qurl send` with **Everyone in this channel** ' +
+            'or **Everyone in your voice channel** may skip members who appear offline in Discord. ' +
+            'If you need to reach a specific person for sure, prefer `/qurl file` or `/qurl map` with an explicit @mention.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });
@@ -4703,6 +5487,26 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
   siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
+// /qurl file + /qurl map confirm-card components. All three customIds
+// share the same expectedStage — they're three component types
+// (button + user-select + button) attached to the same confirm-card
+// message, all routed by stage. siblingMessage is registered on the
+// FIRST customId only; flow-dispatch rejects mismatched re-registrations
+// of the same stage so we don't repeat it.
+registerFlow(SEND_USER_SELECT_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendUserSelect,
+  siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
+});
+registerFlow(SEND_CONFIRM_SEND_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmClick,
+});
+registerFlow(SEND_CONFIRM_CANCEL_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendCancelClick,
+});
+
 module.exports = {
   commands,
   registerCommands,
@@ -4712,6 +5516,9 @@ module.exports = {
   handleRevokeSelect,
   handleSetupButton,
   handleSetupModal,
+  handleSendUserSelect,
+  handleSendConfirmClick,
+  handleSendCancelClick,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -4776,6 +5583,22 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
+      // /qurl file + /qurl map handlers + flow constants. Tests pin
+      // against production values via these exports rather than
+      // re-stating the strings.
+      handleQurlFile,
+      handleQurlMap,
+      resolveRecipientUsers,
+      partitionRecipients,
+      selfDestructOptionToSeconds,
+      renderRecipientWarnings,
+      renderConfirmCardContent,
+      SEND_STAGE_AWAITING_CONFIRM,
+      SEND_USER_SELECT_CUSTOM_ID,
+      SEND_CONFIRM_SEND_CUSTOM_ID,
+      SEND_CONFIRM_CANCEL_CUSTOM_ID,
+      SEND_FLOW_TTL_SECONDS,
+      SELF_DESTRUCT_NO_TIMER_CHOICE,
     },
   }),
 };
