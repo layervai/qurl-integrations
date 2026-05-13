@@ -241,7 +241,9 @@ function makeInteraction(overrides = {}) {
 // and `name`). If a test wants to vary just one nested field, spread
 // the baseline explicitly: `{ attachment: { ...DEFAULT_ATTACHMENT,
 // url: 'x' } }`.
-const DEFAULT_ATTACHMENT = { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' };
+// Frozen so a test forgetting to spread (`DEFAULT_ATTACHMENT.url = ...`)
+// fails loudly instead of silently corrupting the constant for later tests.
+const DEFAULT_ATTACHMENT = Object.freeze({ url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' });
 function makePipelineParams(overrides = {}) {
   return {
     apiKey: 'apikey',
