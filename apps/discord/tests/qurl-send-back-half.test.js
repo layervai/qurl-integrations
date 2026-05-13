@@ -212,6 +212,7 @@ const {
   handleAddRecipients,
   mintLinksInBatches,
   activeMonitors,
+  executeSendPipeline,
 } = _test;
 
 // ---------------------------------------------------------------------------
@@ -1363,3 +1364,61 @@ describe('mintLinksInBatches', () => {
     expect(mockMintLinks).not.toHaveBeenCalled();
   });
 });
+
+// Strict input gate added in PR #277 (round-4 cr fix). isVoiceContext
+// is the one param whose silent default would mis-render the channel-
+// announce blurb — every other param either lands in DB rows where
+// corruption is grep-discoverable, or fails loudly inside the upload/
+// mint pipeline. Pin the gate here so PR 7b's flow_state-payload
+// schema can't drop the boolean in serialization and silently land
+// a voice-context send on text-channel wording.
+describe('executeSendPipeline — isVoiceContext strict gate', () => {
+  // Minimal params object that would otherwise satisfy the destructure
+  // — only isVoiceContext varies per case. The pipeline never reaches
+  // any downstream call because the gate is at function entry, so the
+  // mocks below don't need to be configured.
+  function makePipelineParams(isVoiceContext) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+    };
+  }
+
+  test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(TypeError);
+    await expect(executeSendPipeline(interaction, makePipelineParams(undefined)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+    // Gate fires BEFORE the "Preparing links..." editReply that would
+    // otherwise be the first user-visible signal — confirm no editReply.
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  test('throws TypeError when isVoiceContext is a string (most-likely miscoding shape)', async () => {
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams('true')))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+    expect(interaction.editReply).not.toHaveBeenCalled();
+  });
+
+  test('throws TypeError for null isVoiceContext (typeof null === "object" foot-gun)', async () => {
+    // `typeof null === 'object'`, NOT 'boolean' — pin that null is
+    // rejected. A flow_state payload that serialized `false` as
+    // missing-vs-null could hit this without the test.
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams(null)))
+      .rejects.toThrow(/isVoiceContext must be a boolean/);
+  });
+});
+
