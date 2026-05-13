@@ -805,10 +805,18 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     persisted source (flow_state payload, retry, etc.) should treat
 //     it as transferred ownership for the lifetime of the call, not as
 //     a snapshot.
-//   - `target` — `'user' | 'channel' | 'voice'`; gates the channel-
-//     announce message and lands as `targetType` in the DB row.
+//   - `target` — `'user' | 'channel'`; gates the channel-announce
+//     message and lands as `targetType` in the DB row. The voice-vs-
+//     text-channel discrimination is on `isVoiceContext`, NOT on
+//     `target` (a voice-context send still has `target: 'channel'`).
+//     Setting `target: 'voice'` would silently suppress the channel-
+//     announce because the gate at the announce site is strict
+//     equality on `'channel'`.
 //   - `isVoiceContext` — boolean; selects the voice-flavored wording in
-//     the channel-announce blurb.
+//     the channel-announce blurb. Defaults to `false` in the destructure
+//     so a caller that omits it (e.g. PR 7b reconstructing from a
+//     flow_state payload) lands on the text-channel wording rather
+//     than `undefined ? ... : ...` returning the false branch silently.
 //   - `expiresIn` — canonical expiry token ('1h' / '24h' / '7d' / etc.);
 //     fed through `expiryToISO` and `expiryToMs`.
 //   - `selfDestructSeconds` — `null` for no timer, otherwise a positive
@@ -834,7 +842,7 @@ async function executeSendPipeline(interaction, {
   locationName,
   recipients,
   target,
-  isVoiceContext,
+  isVoiceContext = false,
   expiresIn,
   selfDestructSeconds,
   personalMessage,
@@ -2304,7 +2312,11 @@ async function handleSend(interaction, apiKey) {
   }
 
   // --- Step 4: Process and send (back-half — extracted to executeSendPipeline). ---
-  await executeSendPipeline(interaction, {
+  // `return await` (not bare `await`) so the docstring's "Resolved value"
+  // contract matches the call shape — and the tail call propagates a
+  // throw with one less microtask hop than a bare-await + implicit
+  // undefined return.
+  return await executeSendPipeline(interaction, {
     apiKey,
     resourceType,
     attachment,
