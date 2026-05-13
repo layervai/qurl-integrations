@@ -320,6 +320,17 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // input types, and a negative `grace_seconds: -3600` typo would
 // silently shorten flow lifetimes by an hour. Tight by symmetry.
 //
+// include_expired (default false) is an opt-in escape hatch for
+// callers that legitimately need to observe a row past its logical
+// expiry — currently `supersedeOrCreate` uses it to peek at a
+// stuck-orphan row whose stage gate would otherwise be unreachable
+// (DDB physical reap is async, minutes-to-hours, and meanwhile the
+// row's stored stage is the only key that can unlock the matching
+// `deleteFlow`). The default stays `false` so existing callers
+// (the dispatcher, OCC pre-reads) keep the "logically expired ==
+// absent" contract — flipping the default would silently surface
+// stale rows to every reader.
+//
 // ConsistentRead: the read is strongly consistent. Canonical use
 // case is "I just transitioned this flow and want to re-verify"
 // or "I'm about to transition and want the current version" —
@@ -328,7 +339,7 @@ async function createFlow({ flow_id, stage, payload, expires_at }) {
 // no orthogonal-read callers (admin tooling, audit forensics)
 // to justify a parameter. Add `consistent_read: false` here if
 // such a caller arrives.
-async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
+async function loadFlow(flow_id, { grace_seconds = 0, include_expired = false } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.loadFlow: flow_id must be a non-empty string');
   }
@@ -340,6 +351,9 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   // would silently shorten flow lifetimes by an hour.
   if (typeof grace_seconds !== 'number' || !Number.isFinite(grace_seconds) || grace_seconds < 0) {
     throw new TypeError(`flow-state.loadFlow: grace_seconds must be a non-negative finite number (got ${typeof grace_seconds}: ${JSON.stringify(grace_seconds)})`);
+  }
+  if (typeof include_expired !== 'boolean') {
+    throw new TypeError(`flow-state.loadFlow: include_expired must be a boolean (got ${typeof include_expired})`);
   }
   const res = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
@@ -354,9 +368,10 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
   // round-trip undetected (writer rejects, but a regression or
   // manual console put could still produce one). Same set: finite
   // integer Number. Anything else falls through to the warn+null
-  // branch below.
+  // branch below (even under include_expired — a corrupted row's
+  // stage isn't a safe key to act on).
   if (typeof expires === 'number' && Number.isFinite(expires) && Math.floor(expires) === expires) {
-    if (nowEpochSeconds() > expires + grace_seconds) {
+    if (!include_expired && nowEpochSeconds() > expires + grace_seconds) {
       // Logically expired but not yet reaped. Treat as absent.
       return null;
     }
@@ -365,7 +380,9 @@ async function loadFlow(flow_id, { grace_seconds = 0 } = {}) {
     // corrupted row (manual console put, legacy writer regression,
     // future schema mismatch). Fail-safe: treat as expired rather
     // than returning a row that DDB TTL will never reap. Symmetric
-    // to the assertExpiresAt() guard on the writer side.
+    // to the assertExpiresAt() guard on the writer side. We do
+    // NOT honor include_expired here — a corrupted row's stage is
+    // not a safe basis for any harness operation.
     logger.warn('flow-state.loadFlow: row has missing or non-numeric expires_at; treating as expired', {
       flow_id,
       expires_at_type: typeof expires,
@@ -714,7 +731,18 @@ async function transitionFlow(flow_id, expectedVersion, { stage_to, payload, ter
 // the audit event's payload contract. Caller-supplied because
 // flow-state can't know whether a given delete is a clean
 // completion vs. a user abort.
-async function deleteFlow(flow_id, { stage, reason }) {
+//
+// `expectedVersion` (optional): when passed, adds `AND #v =
+// :expected` to the ConditionExpression so the delete is atomic
+// against a concurrent transitionFlow. Used by `supersedeOrCreate`
+// to claim a specific row version it just observed — without it,
+// two concurrent supersedes could each see the same orphan,
+// agree on its stage, and have the second delete stomp the
+// first caller's freshly-created replacement. When undefined,
+// behavior is exactly the pre-existing stage-gate-only delete
+// (the only path used by terminal-flow callers, where there
+// is no concurrent advancement to race against).
+async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
   if (typeof flow_id !== 'string' || flow_id.length === 0) {
     throw new TypeError('flow-state.deleteFlow: flow_id must be a non-empty string');
   }
@@ -724,6 +752,11 @@ async function deleteFlow(flow_id, { stage, reason }) {
   if (reason !== 'terminal' && reason !== 'abort' && reason !== 'admin_cleanup') {
     throw new TypeError(`flow-state.deleteFlow: reason must be one of 'terminal'|'abort'|'admin_cleanup' (got ${JSON.stringify(reason)})`);
   }
+  if (expectedVersion !== undefined) {
+    if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
+      throw new TypeError(`flow-state.deleteFlow: expectedVersion must be a positive integer when provided (got ${expectedVersion})`);
+    }
+  }
 
   // Conditional Delete + emit-on-success. The SLI math
   //   silently_dropped = count(FLOW_CREATED) - count(FLOW_DELETED)
@@ -731,39 +764,52 @@ async function deleteFlow(flow_id, { stage, reason }) {
   // CREATED is gated by `attribute_not_exists`; DELETED needs both
   // attribute_exists (so SQS redeliveries don't double-emit) AND
   // the stage gate (so a sibling flow at the same flow_id is never
-  // collateral damage).
+  // collateral damage). Optional version gate adds OCC for callers
+  // racing concurrent advancement.
   //
   // Returns `{ deleted: bool }` so callers can gate user-visible
   // "flow completed" side effects on actual deletion (a false
   // return means someone else already deleted, the TTL reaped, OR
   // the stored stage doesn't match — for any of those, don't re-DM
   // the user).
+  const conditionParts = ['attribute_exists(flow_id)', '#s = :stage'];
+  const exprNames = { '#s': 'stage' };
+  const exprValues = { ':stage': stage };
+  if (expectedVersion !== undefined) {
+    conditionParts.push('#v = :expected');
+    exprNames['#v'] = 'version';
+    exprValues[':expected'] = expectedVersion;
+  }
+
   try {
     await ddb.send(new DeleteCommand({
       TableName: TABLE_NAME,
       Key: { flow_id },
-      ConditionExpression: 'attribute_exists(flow_id) AND #s = :stage',
-      ExpressionAttributeNames: { '#s': 'stage' },
-      ExpressionAttributeValues: { ':stage': stage },
+      ConditionExpression: conditionParts.join(' AND '),
+      ExpressionAttributeNames: exprNames,
+      ExpressionAttributeValues: exprValues,
     }));
   } catch (err) {
     if (isConditionalCheckFailed(err)) {
-      // Row absent OR stage mismatch. Discriminate via post-recheck
-      // for the forensic log line — same pattern as transitionFlow's
+      // Row absent OR stage mismatch OR (when expectedVersion is
+      // gated) version mismatch. Discriminate via post-recheck for
+      // the forensic log line — same pattern as transitionFlow's
       // recheck. Best-effort: any throw here is swallowed because
       // the recheck is purely informational.
       let actual_stage = null;
+      let actual_version = null;
       let row_present = false;
       try {
         const recheck = await ddb.send(new GetCommand({
           TableName: TABLE_NAME,
           Key: { flow_id },
-          ProjectionExpression: 'stage',
+          ProjectionExpression: 'stage, version',
           ConsistentRead: true,
         }));
         if (recheck.Item) {
           row_present = true;
           actual_stage = recheck.Item.stage;
+          actual_version = recheck.Item.version ?? null;
         }
       } catch (rcErr) {
         logger.warn('flow-state.deleteFlow: post-CCFE recheck failed (informational)', {
@@ -771,7 +817,12 @@ async function deleteFlow(flow_id, { stage, reason }) {
         });
       }
       logger.debug('flow-state.deleteFlow: condition failed', {
-        flow_id, expected_stage: stage, actual_stage, row_present,
+        flow_id,
+        expected_stage: stage,
+        actual_stage,
+        expected_version: expectedVersion ?? null,
+        actual_version,
+        row_present,
       });
       return { deleted: false };
     }
@@ -786,16 +837,141 @@ async function deleteFlow(flow_id, { stage, reason }) {
   return { deleted: true };
 }
 
+// Open a fresh flow row, superseding a same-flow_id predecessor at
+// the SAME stage if one exists. The supersede-and-retry pattern was
+// duplicated across /qurl revoke and /qurl setup (and would have
+// re-emerged in /qurl send); extracting it here closes #272 (OCC on
+// deleteFlow against the prior version), #273 (include_expired so
+// a stuck-orphan past its logical TTL is still observable), and
+// #274 (the duplication itself).
+//
+// Returns one of:
+//   { created: true, version: 1 }
+//        — fresh row written; caller proceeds with the flow.
+//   { created: false, surviving: <row>|null }
+//        — caller did NOT win the supersede race or a sibling flow
+//          owns this flow_id. `surviving` is the post-failure peek
+//          (via loadFlow include_expired:true so stuck-orphans are
+//          observable) so the caller can disambiguate sibling-flow
+//          vs same-flow-different-stage vs vanished. May be null if
+//          the row evaporated between the second createFlow and
+//          the peek.
+//
+// Why not also return surviving on success: the caller already has
+// the version it needs (1, since createFlow just wrote it) and no
+// other useful state — a same-shape return on both branches would
+// just invite "surviving" reads on the success path that aren't
+// meaningful.
+//
+// Pure-harness contract: this function does not know about the
+// dispatcher's `siblingMessageForStage` registry. The caller looks
+// up the user-visible disambiguation message from the surviving
+// row's stage; the harness only delivers the row.
+//
+// Atomicity caveat: the implementation is a sequence of DDB
+// operations, NOT a TransactWriteItems batch. Between the
+// observed-version `loadFlow(include_expired:true)` and the
+// `deleteFlow(expectedVersion)`, a concurrent caller can advance
+// the row, causing our deleteFlow to fail-by-design (we wanted to
+// claim that specific version). This is the right shape: a
+// concurrent caller advanced the prior flow, so the right answer
+// for us is "the prior flow is still active, return surviving"
+// rather than "stomp it." TransactWriteItems would buy us the
+// ability to fail more cleanly but not a different correctness
+// shape.
+async function supersedeOrCreate({ flow_id, stage, payload, ttl_seconds }) {
+  if (typeof flow_id !== 'string' || flow_id.length === 0) {
+    throw new TypeError('flow-state.supersedeOrCreate: flow_id must be a non-empty string');
+  }
+  if (typeof stage !== 'string' || stage.length === 0) {
+    throw new TypeError('flow-state.supersedeOrCreate: stage must be a non-empty string');
+  }
+  if (typeof ttl_seconds !== 'number' || !Number.isInteger(ttl_seconds) || ttl_seconds < 1) {
+    throw new TypeError(`flow-state.supersedeOrCreate: ttl_seconds must be a positive integer (got ${ttl_seconds})`);
+  }
+
+  // First attempt — happy path. No row at flow_id ⇒ write straight
+  // through. createFlow does its own assertExpiresAt and structure
+  // validation; we just hand it a freshly computed expires_at.
+  const firstExpiresAt = nowEpochSeconds() + ttl_seconds;
+  const created = await createFlow({ flow_id, stage, payload, expires_at: firstExpiresAt });
+  if (created.created) {
+    return { created: true, version: created.version };
+  }
+
+  // Collision. Peek with include_expired:true so the supersede can
+  // act on a stuck-orphan whose logical TTL has passed but whose
+  // physical reap hasn't fired (#273). Without the opt-in, an
+  // orphan at the supersede-mismatch stage would be invisible
+  // here and the next deleteFlow would fail by stage gate.
+  let surviving = await loadFlow(flow_id, { include_expired: true });
+  if (!surviving) {
+    // Row vanished between createFlow conflict and the peek (TTL
+    // reap on a stuck-orphan, or a concurrent supersede won the
+    // delete). Retry the create — at this point we're racing as
+    // if we never saw a collision.
+    const retryExpiresAt = nowEpochSeconds() + ttl_seconds;
+    const retry = await createFlow({ flow_id, stage, payload, expires_at: retryExpiresAt });
+    if (retry.created) {
+      return { created: true, version: retry.version };
+    }
+    // Lost the race twice in a row — caller's branch is the same
+    // "couldn't claim it, here's what's there" with surviving:null
+    // letting the caller fall through to generic wording.
+    return { created: false, surviving: null };
+  }
+
+  // Same-stage predecessor: we can attempt to claim it via stage +
+  // version gate. A sibling flow (different stage) is unreachable
+  // by deleteFlow's stage check — return it unchanged so the caller
+  // can surface the sibling-flow message.
+  if (surviving.stage !== stage) {
+    return { created: false, surviving };
+  }
+
+  // Atomic claim: stage gate AND version gate. If a concurrent
+  // transitionFlow advanced the prior row between our peek and
+  // this delete, the version check fails and we leave the row
+  // alone — correct, since "concurrent advancement" means the
+  // prior flow is still active.
+  const claimed = await deleteFlow(flow_id, {
+    stage: surviving.stage,
+    reason: 'admin_cleanup',
+    expectedVersion: surviving.version,
+  });
+  if (!claimed.deleted) {
+    // Lost the OCC race or the row evaporated. Re-peek so the
+    // caller sees the current state (could be a sibling flow's
+    // fresh row, or another supersede's fresh same-stage row).
+    surviving = await loadFlow(flow_id, { include_expired: true });
+    return { created: false, surviving };
+  }
+
+  // Claimed the slot — retry create. Recompute expires_at so the
+  // new row gets a full TTL budget despite the deleteFlow RTT.
+  const retryExpiresAt = nowEpochSeconds() + ttl_seconds;
+  const retry = await createFlow({ flow_id, stage, payload, expires_at: retryExpiresAt });
+  if (retry.created) {
+    return { created: true, version: retry.version };
+  }
+  // Lost the create race to a third caller that slipped in
+  // between our delete and our retry. Same return shape — the
+  // surviving peek tells the caller what to do.
+  surviving = await loadFlow(flow_id, { include_expired: true });
+  return { created: false, surviving };
+}
+
 module.exports = {
   createFlow,
   loadFlow,
   transitionFlow,
   deleteFlow,
+  supersedeOrCreate,
   // Test-only escape hatch (the `__` prefix signals: not part of
   // the public API). Production code paths must go through the
-  // four functions above. A future admin CLI or third consumer
-  // should get its own real export when it arrives — the shape
-  // of "what does the API surface to non-test callers look like"
-  // is easier to design once that caller actually exists.
+  // five named functions above. A future admin CLI or third
+  // consumer should get its own real export when it arrives — the
+  // shape of "what does the API surface to non-test callers look
+  // like" is easier to design once that caller actually exists.
   __TABLE_NAME: TABLE_NAME,
 };
