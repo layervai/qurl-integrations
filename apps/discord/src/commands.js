@@ -3467,7 +3467,7 @@ function selfDestructOptionToSeconds(value) {
 //     rather than imply the recipient is gone.
 //
 // Splitting the buckets prevents the 429-rendered-as-"left the
-// server" misdirection cr round 4 flagged.
+// server" misdirection.
 //
 // Fetches the cache-miss tail in parallel via `batchSettled` (the
 // same helper used by the DM fan-out path; honors Discord's per-route
@@ -3692,17 +3692,23 @@ const NEWLINE_COLLAPSE_RE = new RegExp('[\\r\\n\\u2028\\u2029]+', 'g');
 
 function formatPersonalMessagePreview(message) {
   const oneLine = message.replace(NEWLINE_COLLAPSE_RE, ' ');
-  if (oneLine.length <= 80) return `> ${oneLine}`;
+  // Codepoint-aware view of the string — bare String.prototype.slice
+  // operates on UTF-16 code units, so a slice that lands mid-surrogate
+  // emits a lone surrogate that Discord renders as tofu. Same defense
+  // sanitize.js applies for display-name caps.
+  const codepoints = Array.from(oneLine);
+  if (codepoints.length <= 80) return `> ${oneLine}`;
   let cut = 80;
   // Count trailing backslashes just before `cut`. An ODD count means
   // the last `\` is starting a markdown-escape sequence (`\X`) whose
   // target lands at `cut` and would be sliced off — back off by 1.
   // EVEN counts represent complete `\\` literal-backslash pairs and
-  // can be kept. Handles single (`\*`), triple (`\\\*`), etc.
+  // can be kept. Handles single (`\*`), triple (`\\\*`), etc. A `\` is
+  // one codepoint, so the count is the same in either view.
   let bs = 0;
-  for (let i = cut - 1; i >= 0 && oneLine[i] === '\\'; i--) bs++;
+  for (let i = cut - 1; i >= 0 && codepoints[i] === '\\'; i--) bs++;
   if (bs % 2 === 1) cut -= 1;
-  return `> ${oneLine.slice(0, cut)}…`;
+  return `> ${codepoints.slice(0, cut).join('')}…`;
 }
 
 // Build the ActionRow set for the confirm card. When `attachPicker`,
@@ -4065,6 +4071,13 @@ async function handleQurlMap(interaction) {
 // refreshes the TTL, so repeated picker churn doesn't expire the row
 // while the user is still deciding.
 async function handleSendUserSelect(interaction, { flow_id, row }) {
+  // `deferUpdate` first so the downstream `transitionFlow` (DDB OCC
+  // update) can take more than Discord's 3-second hard ack deadline
+  // without surfacing as an "interaction failed" toast. Mirrors
+  // handleSendConfirmClick / handleSendCancelClick. All `update`
+  // calls below become `editReply` (the interaction is now deferred).
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
   // `interaction.users` is a discord.js Collection in production,
   // duck-typed as a Map in tests — both support `.values()` so the
   // iteration here is interchangeable. A future test refactor that
@@ -4073,7 +4086,8 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // Map-compatible API surface.
   const selected = [...interaction.users.values()];
   if (selected.length === 0) {
-    return interaction.deferUpdate().catch(logIgnoredDiscordErr);
+    // Empty pick → already acked via deferUpdate above. Nothing to edit.
+    return undefined;
   }
   // `interaction.user.id` IS the original sender's ID — Discord
   // enforces "only the user who triggered an ephemeral interaction
@@ -4100,7 +4114,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // chose at /qurl file time — they shouldn't have to scroll back to
   // remember what they're sending. needsPicker:true keeps the "Pick
   // recipients below" prompt; sendDisabled:true keeps Send greyed.
-  const rejectPick = (warning) => interaction.update({
+  const rejectPick = (warning) => interaction.editReply({
     content: renderConfirmCardContent({
       resourceType: payload.resourceType,
       resourceLabel: payload.resourceLabel,
@@ -4127,7 +4141,6 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
 
-
   const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SEND_STAGE_AWAITING_CONFIRM,
@@ -4136,13 +4149,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
   });
   if (result.result === 'conflict') {
-    return interaction.update({
+    return interaction.editReply({
       content: 'Send was superseded — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'not_found') {
-    return interaction.update({
+    return interaction.editReply({
       content: 'This send expired — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
@@ -4180,7 +4193,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     needsPicker: false,
     interaction,
   });
-  return interaction.update({
+  return interaction.editReply({
     content,
     components: renderConfirmCardRows({ attachPicker: true, sendDisabled: false }),
   }).catch(logIgnoredDiscordErr);

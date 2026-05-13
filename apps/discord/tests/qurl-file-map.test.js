@@ -160,8 +160,10 @@ jest.mock('../src/flow-state', () => ({
   supersedeOrCreate: (...a) => mockSupersedeOrCreate(...a),
 }));
 
-// flow-dispatch is a real module — we want registerFlow's
-// idempotent-failure guard to fire on test re-loads.
+// flow-dispatch (registerFlow + customId routing) is loaded for real —
+// only flow-state's DDB-backed primitives are mocked above. Loading
+// the real registerFlow lets the idempotent-failure guard fire on
+// test re-loads and pins the customId → handler contract.
 const commands = require('../src/commands');
 const { _test } = commands;
 const logger = require('../src/logger');
@@ -303,8 +305,8 @@ beforeEach(() => {
 describe('selfDestructOptionToSeconds', () => {
   // SELF_DESTRUCT_PRESETS (utils/time.js): 0.5, 1, 5, 30, 300, 1800, 3600.
   // Anything else falls back to null per the defense-in-depth gate
-  // added in round 6 (cr-flagged: forged interactions could otherwise
-  // smuggle '999999999' past Discord's server-side choice enforcement).
+  // against forged interactions that could otherwise smuggle
+  // '999999999' past Discord's server-side choice enforcement.
   test.each([
     ['none', null],
     [SELF_DESTRUCT_NO_TIMER_CHOICE, null],
@@ -365,7 +367,7 @@ describe('partitionRecipients', () => {
   });
 
   test('contract: does NOT re-dedup — dedup is upstream (parseRecipientMentions Set + Discord picker gateway-event)', () => {
-    // cr round 10 audit: confirm that duplicates passed in are preserved
+    // Confirm duplicates passed in are preserved verbatim:
     // verbatim. parseRecipientMentions already dedupes via Set
     // (recipient-parser.js:197-198) and Discord's UserSelectMenu
     // gateway-event surfaces each picked user at most once. If a future
@@ -515,7 +517,7 @@ describe('renderRecipientWarnings', () => {
   test('transientFailureIds rendered with neutral copy (not "left the server")', () => {
     // Rate-limit / gateway-blip 429s land in transientFailureIds, NOT
     // unresolvedIds — so the message must encourage retry, not imply
-    // the recipient is gone. cr round 4 caught this misdirection.
+    // the recipient is gone — distinct copy avoids misdirection.
     const out = renderRecipientWarnings({
       transientFailureIds: ['100000000000000001', '100000000000000002'],
     });
@@ -563,9 +565,8 @@ describe('renderConfirmCardContent', () => {
   });
 
   test('unknown resourceType throws — forces an explicit branch for future types', () => {
-    // Round-7 (cr) added an explicit else-throw so a future resource
-    // type (audio, contact card, etc.) can't silently render as a
-    // location. Pins the contract.
+    // Explicit else-throw so a future resource type (audio, contact
+    // card, etc.) can't silently render as a location.
     expect(() => renderConfirmCardContent({
       ...baseProps,
       resourceType: 'audio',
@@ -595,8 +596,8 @@ describe('renderConfirmCardContent', () => {
   test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
     const long = 'x'.repeat(120);
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: long });
-    // Round-6 (cr) switched from `"..."` to `> ` blockquote so literal
-    // `"` chars in the message can't make the rendering look ragged.
+    // Blockquote form (`> `) instead of `"..."` wrap so literal `"`
+    // chars in the message can't make the rendering look ragged.
     expect(out).toMatch(/> x{80}…/);
     // The previous `"..."` wrap is gone.
     expect(out).not.toMatch(/"x{80}…"/);
@@ -605,8 +606,8 @@ describe('renderConfirmCardContent', () => {
   test('personal-message preview backs off the cut when it would land on a markdown escape', () => {
     // sanitizeMessage emits `\*` etc. If a slice lands the cut at a
     // boundary between `\` and `*`, the rendered preview shows a
-    // dangling `\`. Round-6 (cr) backs the cut off by 1 when the
-    // 80th char is a `\` not preceded by another `\`.
+    // dangling `\`. The slice backs off by 1 when the 80th char
+    // is a `\` not preceded by another `\`.
     //
     // Build a 90-char message where char[79] is '\\' and char[80] is '*'.
     // Confirm the truncation drops the trailing `\` before the ellipsis.
@@ -619,9 +620,21 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/\\…/);
   });
 
+  test('personal-message preview slices by codepoint, not UTF-16 code units (surrogate-pair safe)', () => {
+    // Bare String.prototype.slice operates on UTF-16 code units, so a
+    // slice that lands mid-surrogate emits a lone surrogate that
+    // Discord renders as tofu. Build a message where the 80th
+    // codepoint is an emoji (surrogate pair) and verify the rendered
+    // preview contains no lone surrogate.
+    const message = 'a'.repeat(79) + '\u{1F600}' + 'rest'.repeat(20);
+    const out = renderConfirmCardContent({ ...baseProps, personalMessage: message });
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    expect(out).not.toMatch(lone);
+  });
+
   test('personal-message preview back-off handles odd-count multi-backslash boundary', () => {
-    // cr round 10: the previous heuristic only checked the last two
-    // chars (`\` at cut-1 + non-`\` at cut-2). With THREE consecutive
+    // The previous single-backslash heuristic only checked the last
+    // two chars (`\` at cut-1 + non-`\` at cut-2). With THREE consecutive
     // `\` at cut-3..cut-1, the last one starts a fresh escape sequence
     // but cut-2 also `\` would fool the old check into NOT backing off.
     // The fix counts trailing `\` and backs off when the count is odd.
@@ -681,10 +694,10 @@ describe('renderConfirmCardContent', () => {
   });
 
   test('preview prefers guild member displayName over username when interaction is supplied', () => {
-    // cr round 9: a previous round's comment claimed
-    // resolveRecipientAlias was used, but the code path was raw
-    // `u.username`. Pin the alias path so a future refactor can't
-    // silently drift back to username-only.
+    // Pin the resolveRecipientAlias path so a future refactor can't
+    // silently drift back to raw `u.username` (which skips the
+    // nickname/globalName resolution and would diverge from the
+    // post-send confirmation wording).
     const u = makeUser('100000000000000001', { username: 'alice' });
     const int = {
       guild: {
@@ -699,14 +712,13 @@ describe('renderConfirmCardContent', () => {
   });
 
   test('personal-message blockquote collapses embedded newlines + unicode line/paragraph separators to spaces', () => {
-    // cr round 9: Discord blockquotes are per-LINE — only the line
-    // starting with `> ` gets the left-bar. A multi-line message
-    // would render with a quoted first line and flush-left subsequent
-    // lines. formatPersonalMessagePreview collapses `\n` / `\r\n` /
-    // U+2028 (line sep) / U+2029 (paragraph sep) into single spaces
-    // so the preview is a clean one-liner. The Unicode separators
-    // matter because Discord renders them as line breaks too (per
-    // simplify round 10 review).
+    // Discord blockquotes are per-LINE — only the line starting with
+    // `> ` gets the left-bar. A multi-line message would render with
+    // a quoted first line and flush-left subsequent lines.
+    // formatPersonalMessagePreview collapses `\n` / `\r\n` / U+2028
+    // (line sep) / U+2029 (paragraph sep) into single spaces so the
+    // preview is a clean one-liner. The Unicode separators matter
+    // because Discord renders them as line breaks too.
     const out = renderConfirmCardContent({
       ...baseProps,
       personalMessage: 'first line\nsecond\r\nthird fourth fifth',
@@ -1056,7 +1068,7 @@ describe('handleQurlMap — slash entry', () => {
   });
 
   test('locationName strips bidi/zero-width control chars (RLO spoof defense)', async () => {
-    // Round-8 (cr): /qurl map's slash option is a new attack surface
+    // /qurl map's slash option is a new attack surface
     // that bypasses the modal's natural friction. A crafted U+202E
     // (RLO) in `location-name` would otherwise flip text direction
     // in the rendered confirm card. sanitizeContentLabel strips it
@@ -1102,7 +1114,7 @@ describe('handleQurlMap — slash entry', () => {
   test('forged interaction missing required `location` → actionable ephemeral, no flow row', async () => {
     // Discord enforces required options server-side; only a forged
     // interaction can hit the `getString('location', true)` throw.
-    // Round-6 (cr) added a targeted catch so the user sees an
+    // Targeted catch so the user sees an
     // actionable message instead of the dispatcher's generic safety
     // net.
     const int = makeInteraction({ options: {} });
@@ -1146,9 +1158,9 @@ describe('handleSendConfirmClick', () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
-    // Defer-ack within the 3s window before any awaits — round-7 (cr)
-    // added this so resolveRecipientUsers + getGuildApiKey + deleteFlow
-    // can't blow Discord's hard ack deadline on a cold cache.
+    // Defer-ack within the 3s window before any awaits — without this,
+    // resolveRecipientUsers + getGuildApiKey + deleteFlow can blow
+    // Discord's hard ack deadline on a cold cache.
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM, reason: 'terminal',
@@ -1247,9 +1259,8 @@ describe('handleSendConfirmClick', () => {
       content: expect.stringMatching(/1 recipient had left the server/),
       ephemeral: true,
     }));
-    // Forensic log at INFO (escalated from debug per cr round 3) —
-    // oncall can grep for mid-flight guild churn without dialing
-    // verbosity up. Round 5 split the bucket so the log fields
+    // Forensic log at INFO so oncall can grep for mid-flight guild
+    // churn without dialing verbosity up. Split bucket: log fields
     // distinguish left-the-server (10007) from transient.
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringMatching(/partial drop at click time/),
@@ -1258,10 +1269,9 @@ describe('handleSendConfirmClick', () => {
   });
 
   test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy', async () => {
-    // cr round 5: transientFailureIds were previously dropped silently
-    // at click time. They must be surfaced with retry-encouraging
-    // copy (NOT "left the server" wording) — the buckets are now
-    // split + threaded.
+    // transientFailureIds must be surfaced with retry-encouraging
+    // copy (NOT "left the server" wording) — the buckets are split
+    // + threaded so a 429/gateway blip doesn't read as "they're gone".
     const flaky = '100000000000000099';
     const payloadWithFlaky = { ...validPayload, recipientIds: [u1, flaky] };
     const int = makeInteraction({
@@ -1285,9 +1295,9 @@ describe('handleSendConfirmClick', () => {
   });
 
   test('getGuildApiKey throw at click time → ephemeral retry, NO deleteFlow (row stays alive)', async () => {
-    // Round-6 (cr) reordering: getGuildApiKey runs BEFORE deleteFlow
-    // so a DDB blip doesn't burn the flow row. User can re-click
-    // Send within the 3-min TTL once the blip clears.
+    // getGuildApiKey runs BEFORE deleteFlow so a DDB blip doesn't
+    // burn the flow row. User can re-click Send within the 3-min TTL
+    // once the blip clears.
     mockDb.getGuildApiKey.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
@@ -1303,12 +1313,11 @@ describe('handleSendConfirmClick', () => {
   });
 
   test('resolveRecipientUsers throw at click time → ephemeral retry message, NO deleteFlow', async () => {
-    // cr round 5: handleSendConfirmClick previously had no try/catch
-    // around the click-time resolution. A throw would propagate to the
-    // dispatcher's outer catch and leave the user staring at the
-    // unchanged card. Targeted catch now surfaces a recoverable
-    // ephemeral reply and DOES NOT commit the dedup deleteFlow so the
-    // card stays alive for the 3-min TTL.
+    // Targeted catch on resolveRecipientUsers surfaces a recoverable
+    // ephemeral reply and does NOT commit the dedup deleteFlow, so
+    // the card stays alive for the 3-min TTL. Without it the throw
+    // would hit the dispatcher's outer catch and leave the user
+    // staring at an unchanged card.
     const int = makeInteraction({
       guildMembers: {},
       // Force a throw out of `members.fetch` (not a return-value error,
@@ -1337,12 +1346,11 @@ describe('handleSendConfirmClick', () => {
   });
 
   test('forged Send click with empty recipientIds → distinct copy + deleteFlow (not the "all left" copy)', async () => {
-    // cr round 10: a legitimate Send click only lands when the card has
-    // at least one recipient (Send is disabled in the empty state).
-    // A click with payload.recipientIds === [] therefore implies a
-    // fabricated interaction. The all-unresolved branch's "they left
-    // the server" copy is wrong here — nobody left, nobody was ever
-    // selected. Distinct copy + deleteFlow.
+    // A legitimate Send click only lands when the card has at least
+    // one recipient (Send is disabled in the empty state). A click
+    // with payload.recipientIds === [] therefore implies a fabricated
+    // interaction. The all-unresolved branch's "they left the server"
+    // copy is wrong here — nobody left, nobody was ever selected.
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     await handleSendConfirmClick(int, {
       flow_id: 'fid',
@@ -1362,12 +1370,12 @@ describe('handleSendConfirmClick', () => {
   });
 
   test('bot kicked between confirm and Send → distinct ephemeral, flow row deleted', async () => {
-    // cr round 9: when the bot is removed from the guild between
-    // confirm and Send, `interaction.guild` is null. Without an
-    // explicit guard, resolveRecipientUsers returns every recipientId
-    // in unresolvedIds and the user sees "recipients left the server"
-    // — misleading. Pin the dedicated copy + deleteFlow so the flow
-    // row doesn't linger.
+    // When the bot is removed from the guild between confirm and
+    // Send, `interaction.guild` is null. Without an explicit guard,
+    // resolveRecipientUsers returns every recipientId in unresolvedIds
+    // and the user sees "recipients left the server" — misleading.
+    // Pin the dedicated copy + deleteFlow so the flow row doesn't
+    // linger.
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     int.guild = null;
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
@@ -1434,7 +1442,7 @@ describe('handleSendCancelClick', () => {
   });
 
   test('deleteFlow throw → ephemeral retry, cooldown preserved (Send may still be in flight)', async () => {
-    // Round-8 (cr) added a targeted catch around the Cancel deleteFlow
+    // Targeted catch around the Cancel deleteFlow
     // for symmetry with handleSendConfirmClick. A DDB blip during a
     // Cancel click now surfaces an actionable ephemeral instead of
     // the dispatcher's generic safety net. Cooldown stays set on the
@@ -1499,33 +1507,49 @@ describe('handleSendUserSelect', () => {
     const SKEW = 5;
     expect(callArgs.set_expires_at).toBeGreaterThanOrEqual(beforeSecs + SEND_FLOW_TTL_SECONDS - SKEW);
     expect(callArgs.set_expires_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS + SKEW);
-    expect(int.update).toHaveBeenCalled();
-    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    expect(int.editReply).toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Sending file/);
   });
 
-  test('empty pick → deferUpdate, no transition', async () => {
+  test('empty pick → deferUpdate, no transition, no editReply', async () => {
     const int = makeSelectInteraction({ users: [] });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
+  });
+
+  test('deferUpdate fires before transitionFlow await — protects Discord 3s ack budget on slow DDB', async () => {
+    // Without this guard the transitionFlow DDB OCC call can blow
+    // Discord's hard ack deadline on tail-latency, surfacing as an
+    // "interaction failed" toast. Mirror handleSendConfirmClick /
+    // handleSendCancelClick: ack first, then do the work.
+    let deferAckedBeforeTransition = false;
+    const int = makeSelectInteraction();
+    mockTransitionFlow.mockImplementationOnce(async () => {
+      deferAckedBeforeTransition = int.deferUpdate.mock.calls.length > 0;
+      return { result: 'ok', version: 2 };
+    });
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(deferAckedBeforeTransition).toBe(true);
   });
 
   test('all bots picked → re-prompt warning prepended to full confirm card (resource header preserved)', async () => {
-    // cr round 10: an invalid pick used to replace card content with
-    // just the warning string — the user lost the "Sending file:
-    // report.pdf / Expires: 24h" header they chose at /qurl file time.
-    // The fix re-renders the full confirm card with the warning
-    // banner prepended via warningsBlock; needsPicker:true keeps the
-    // pick prompt and the picker stays attached.
+    // An invalid pick re-renders the full confirm card with the
+    // warning banner prepended via warningsBlock; needsPicker:true
+    // keeps the pick prompt and the picker stays attached. Replacing
+    // the content with just the warning string would strip the
+    // "Sending file: report.pdf / Expires: 24h" header the user
+    // chose at /qurl file time.
     const int = makeSelectInteraction({
       users: [makeUser(u1, { bot: true })],
     });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bots/);
-    // Resource header survives — this is the regression cr round 10 caught.
+    // Resource header survives — pin the preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
     expect(updated.content).toMatch(/Expires/);
   });
@@ -1542,10 +1566,9 @@ describe('handleSendUserSelect', () => {
     const int = makeSelectInteraction({ users });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Pick at most/);
-    // Same regression defense as the all-bots branch — resource header
-    // must survive the warning re-render.
+    // Same preserved-context contract as the all-bots branch.
     expect(updated.content).toMatch(/Sending file/);
   });
 
@@ -1569,7 +1592,7 @@ describe('handleSendUserSelect', () => {
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ recipientIds: [u1, u2, u3] }),
     }));
-    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bot/);
     expect(updated.content).toMatch(/Sending file/);
   });
@@ -1578,7 +1601,7 @@ describe('handleSendUserSelect', () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeSelectInteraction();
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/),
     }));
   });
@@ -1587,7 +1610,7 @@ describe('handleSendUserSelect', () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeSelectInteraction();
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/),
     }));
   });
