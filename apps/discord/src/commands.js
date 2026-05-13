@@ -38,6 +38,30 @@ const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } 
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
+// classifyMintFailure maps a thrown error from the upload + mint phase
+// of /qurl send into a small enum of reason strings. Used as the
+// `reason` field on the QURL_SEND_CREATE_LINK_FAILURE audit event
+// (qurl-integrations#276) so the CloudWatch metric filter can split
+// failures by class — 4xx (likely client/contract problem) vs 5xx
+// (likely upstream outage) vs timeout (likely network/cold-start).
+//
+// Don't add per-API-code branches here — that explodes the metric
+// cardinality. New reasons should map to one of the existing
+// categories or earn a new top-level category with a clear
+// dimensional purpose (e.g. a future "rate_limit" if we add upstream
+// 429 handling).
+function classifyMintFailure(error) {
+  if (!error) return 'unknown';
+  if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
+      /timeout/i.test(error.message || '')) {
+    return 'timeout';
+  }
+  const status = error.status || 0;
+  if (status >= 500 && status < 600) return 'upstream_5xx';
+  if (status >= 400 && status < 500) return 'upstream_4xx';
+  return 'unknown';
+}
+
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
@@ -1139,7 +1163,26 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
+    // Audit emission for CloudWatch metric filter — pairs with the
+    // qurl_send_create_link_failure log-metric filter +
+    // qurl-bot-discord-send-failure alarm in
+    // qurl-integrations-infra qurl-bot-discord/terraform/monitoring.tf.
+    // Without this, the "Failed to create links" user surface goes
+    // un-instrumented and tonight's outage shape (4+ hours of users
+    // hitting this before anyone noticed) repeats. qurl-integrations#276.
+    logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+      send_id: sendId,
+      reason: classifyMintFailure(error),
+      api_code: error.apiCode || null,
+      status_code: error.status || null,
+      kind: resourceType === RESOURCE_TYPES.FILE ? 'file' : 'location',
+    });
+    logger.error('Failed to prepare QURL links', {
+      error: error.message,
+      apiCode: error.apiCode,
+      status: error.status,
+      sendId,
+    });
     clearCooldown(interaction.user.id); // allow retry on failure
     // Slot release lives in the `finally` block below — it ALWAYS runs
     // after a return-from-catch, and `releaseSlot` is idempotent via

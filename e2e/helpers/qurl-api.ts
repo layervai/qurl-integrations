@@ -19,17 +19,28 @@ export interface LinkAccessResult {
   body?: string;
 }
 
-/** Upload a file to the connector and get a resource_id */
+/** Upload a file to the connector and get a resource_id.
+ *
+ * Set `viewerTtlSeconds` to exercise the Snapchat-style auto-destruct
+ * path — the connector derives `session_duration` from it and forwards
+ * to qurl-service. Pinning this in a smoke test catches the
+ * 2026-05-13 contract regression class where a session_duration value
+ * below qurl-service's then-current floor returned a 400 with no
+ * direct test coverage (qurl-integrations#283). */
 export async function uploadFile(
   uploadUrl: string,
   filePath: string,
   apiKey: string,
-): Promise<{ resource_id: string; hash: string }> {
+  opts?: { viewerTtlSeconds?: number },
+): Promise<{ resource_id: string; hash: string; qurl_link?: string; error?: string }> {
   const fileBuffer = fs.readFileSync(filePath);
   const fileName = path.basename(filePath);
 
   const formData = new FormData();
   formData.append('file', new Blob([fileBuffer]), fileName);
+  if (opts?.viewerTtlSeconds !== undefined) {
+    formData.append('viewer_ttl_seconds', String(opts.viewerTtlSeconds));
+  }
 
   const res = await fetch(`${uploadUrl}/upload`, {
     method: 'POST',
@@ -38,7 +49,7 @@ export async function uploadFile(
   });
 
   if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<{ resource_id: string; hash: string }>;
+  return res.json() as Promise<{ resource_id: string; hash: string; qurl_link?: string; error?: string }>;
 }
 
 /** Mint a one-time qURL link for a resource */
