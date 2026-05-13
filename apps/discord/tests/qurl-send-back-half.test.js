@@ -1815,6 +1815,25 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       .rejects.toThrow(/value=<unrepresentable>/);
   });
 
+  test('truncation slices on code points, not UTF-16 code units (astral-char safety)', async () => {
+    // Round-5 cr nit: `slice(0, 64)` on code units would split a
+    // high-surrogate at position 63 from its low-surrogate at 64,
+    // producing a malformed UTF-16 pair before the `…`. Iterating
+    // via [...s] (the string iterator) operates on code points,
+    // so an emoji at the boundary stays intact. Build a string
+    // with 64 emoji (each 2 code units) — under code-unit slicing
+    // this would surface as 32 intact emoji + a lone high-surrogate;
+    // under code-point slicing it surfaces as 64 intact emoji.
+    const interaction = makeInteraction();
+    const sixtyFourEmoji = '🚀'.repeat(64);
+    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFourEmoji)))
+      .rejects.toThrow(/value=(?:🚀){64}\)/u);
+    // 65 emoji → 64 in the rendering + `…` marker.
+    const sixtyFiveEmoji = '🚀'.repeat(65);
+    await expect(executeSendPipeline(interaction, makePipelineParams(sixtyFiveEmoji)))
+      .rejects.toThrow(/value=(?:🚀){64}…/u);
+  });
+
   test('throws RangeError when recipients.length exceeds QURL_SEND_MAX_RECIPIENTS', async () => {
     // Read the cap via the same config module the gate consults so
     // the test doesn't drift if the cap is bumped.
@@ -1889,6 +1908,44 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
       expect(err.message).not.toMatch(/exceeds QURL_SEND_MAX_RECIPIENTS/);
       return;
     }
+  });
+});
+
+// Pin that truncForLog applies to ALL value-rendering gates in
+// the entry-gate family, not just the two introduced in round 4.
+// A future caller handing a 1MB string as `target` or `expiresIn`
+// would otherwise dump the whole blob into the rejection message.
+describe('executeSendPipeline — truncForLog applies to all value-rendering gates', () => {
+  function makeParams(overrides) {
+    return {
+      apiKey: 'apikey',
+      resourceType: 'file',
+      attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: 'u1', username: 'u1' }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      sendNonce: 'nonce',
+      ...overrides,
+    };
+  }
+
+  test('target rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'x'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ target: huge })))
+      .rejects.toThrow(/target must be 'user' or 'channel' \(got x{64}…\)/);
+  });
+
+  test('expiresIn rejection message is bounded with `…` on oversized input', async () => {
+    const interaction = makeInteraction();
+    const huge = 'y'.repeat(1024);
+    await expect(executeSendPipeline(interaction, makeParams({ expiresIn: huge })))
+      .rejects.toThrow(/expiresIn must be one of .* \(got y{64}…\)/);
   });
 });
 

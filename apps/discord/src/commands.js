@@ -851,13 +851,18 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // observable result; the function exists for its user-visible
 // side-effects (editReply + DM fan-out + channel-announce).
 // Shared throw-message renderer for the entry-gate family. Bounds the
-// stringified value at 64 chars and appends `…` when truncation
+// stringified value at 64 code points and appends `…` when truncation
 // happened, so a prod-log reader can tell "the caller passed exactly
 // these 64 chars" from "the value was longer and we cut it." The
 // String() coercion may itself throw on a pathological value with a
 // throwing Symbol.toPrimitive / toString — fall back to a sentinel so
 // the gate's intended throw isn't itself replaced by an opaque error
 // from the renderer.
+//
+// Slice on code points (via the string iterator), NOT code units, so
+// the 64th character can't land on a high surrogate and produce a
+// malformed UTF-16 pair before the `…`. Cosmetic for log readability
+// but matches "do the boring thing right" for the gate family.
 function truncForLog(v) {
   let s;
   try {
@@ -865,7 +870,8 @@ function truncForLog(v) {
   } catch {
     return '<unrepresentable>';
   }
-  return s.length > 64 ? `${s.slice(0, 64)}…` : s;
+  const cps = [...s];
+  return cps.length > 64 ? `${cps.slice(0, 64).join('')}…` : s;
 }
 
 async function executeSendPipeline(interaction, {
@@ -928,7 +934,7 @@ async function executeSendPipeline(interaction, {
   if (target !== 'user' && target !== 'channel') {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${String(target)})`);
+    throw new TypeError(`executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
   }
 
   // Defense-in-depth SSRF re-check. handleSend's Step-2 validates
@@ -959,7 +965,7 @@ async function executeSendPipeline(interaction, {
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${String(expiresIn)})`);
+    throw new TypeError(`executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
   // `personalMessage` shape gate. The DM-embed renderer expects
@@ -985,14 +991,9 @@ async function executeSendPipeline(interaction, {
   if (!Array.isArray(recipients) || recipients.length === 0) {
     clearCooldown(interaction.user.id);
     cancelEdit();
-    // For the non-array branch, render `typeof=` + `value=` separately
-    // — same disambiguation the isVoiceContext gate uses for the
-    // `typeof null === 'object'` foot-gun. A prod-log reader can tell
-    // `null` from `{}` from `undefined` from `'u1'`. For the
-    // empty-array branch, the value adds nothing (`[]` is the
-    // observable shape), so render just "empty array".
-    // Same rendering rationale as the isVoiceContext gate above
-    // (typeof + truncated value with `…` marker on truncation).
+    // Same `typeof=` + `value=` rendering as the isVoiceContext gate
+    // above. Empty-array branch collapses to just "empty array"
+    // since `[]` is the only observable shape there.
     const detail = Array.isArray(recipients)
       ? 'empty array'
       : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
