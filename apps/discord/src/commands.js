@@ -896,7 +896,9 @@ async function executeSendPipeline(interaction, {
     // a single-field "(got object: null)" rendering. `String()`
     // keeps `undefined` visible (JSON.stringify drops it) and
     // avoids the JSON.stringify-throws-on-BigInt edge case.
-    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext)})`);
+    // Slice keeps the message bounded if a future caller hands
+    // a pathological value (1MB string, etc.).
+    throw new TypeError(`executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${String(isVoiceContext).slice(0, 64)})`);
   }
 
   // `target` allowed-set gate. Same silent-mis-render shape: an
@@ -969,9 +971,12 @@ async function executeSendPipeline(interaction, {
     // `null` from `{}` from `undefined` from `'u1'`. For the
     // empty-array branch, the value adds nothing (`[]` is the
     // observable shape), so render just "empty array".
+    // Slice the rendered value to 64 chars so a future caller
+    // that hands a pathological argument (1MB string, etc.)
+    // doesn't dump the whole blob into the rejection message.
     const detail = Array.isArray(recipients)
       ? 'empty array'
-      : `typeof=${typeof recipients}, value=${String(recipients)}`;
+      : `typeof=${typeof recipients}, value=${String(recipients).slice(0, 64)}`;
     throw new TypeError(`executeSendPipeline: recipients must be a non-empty array (got ${detail})`);
   }
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {

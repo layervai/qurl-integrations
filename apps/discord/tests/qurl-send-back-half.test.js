@@ -1753,7 +1753,8 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     ['empty array', []],
     ['null', null],
     ['undefined', undefined],
-    ['plain object (not array-like)', {}],
+    ['plain object', {}],
+    ['array-like object', { 0: 'u1', length: 1 }],  // pins Array.isArray-strict (not duck-typed)
     ['string (not array)', 'u1'],
     ['number', 42],
   ])('throws TypeError on non-array-or-empty recipients (%s)', async (_label, recipients) => {
@@ -1836,6 +1837,12 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   test.each([
     ['one recipient', [{ id: 'u1', username: 'u1' }]],
     ['several recipients', Array.from({ length: 5 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
+    // Boundary case: pin that `length === cap` is accepted (the
+    // gate uses `>`, not `>=`). A future typo flipping `>` to
+    // `>=` would otherwise only show up if a real send happened
+    // to hit exactly the cap. Compute the cap-sized array via
+    // the same config the gate reads, so a cap bump doesn't drift.
+    ['exactly at the cap', Array.from({ length: require('../src/config').QURL_SEND_MAX_RECIPIENTS }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
   ])('accepts the allowed shape: %s', async (_label, recipients) => {
     // Same shape as the other accept-path tests in this file:
     // assert the gate didn't reject. The pipeline mocks aren't
@@ -1843,7 +1850,7 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
     // either throws downstream with a different message, or
     // resolves cleanly if the mock chain happens to line up.
     // The shared vacuous-pass concern across all four accept-
-    // path tests in this file is tracked separately.
+    // path tests in this file is tracked in #291.
     const interaction = makeInteraction();
     try {
       await executeSendPipeline(interaction, makePipelineParams(recipients));
