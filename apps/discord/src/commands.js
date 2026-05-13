@@ -955,8 +955,9 @@ async function executeSendPipeline(interaction, {
   // skips those checks. Trips here would otherwise surface deep
   // inside mintLinksInBatches as "Failed to create any links" with
   // no caller-side breadcrumb. The non-empty check ALSO fences
-  // line 948's `recipients.length` read — a non-array reaching
-  // that line would crash on `.length` lookup against undefined.
+  // the `recipients.length` read on the editReply below — a non-
+  // array reaching that line would crash on `.length` lookup
+  // against undefined.
   if (!Array.isArray(recipients) || recipients.length === 0) {
     clearCooldown(interaction.user.id);
     cancelEdit();

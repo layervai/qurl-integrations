@@ -1787,28 +1787,29 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
 
   test('clears cooldown on the recipients-empty path (same convention as other gates)', async () => {
     const interaction = makeInteraction();
-    const { setCooldown, isOnCooldown, clearCooldown } = _test;
+    const { setCooldown, isOnCooldown } = _test;
     interaction.user = { id: 'recipients-empty-test-user', username: 'test' };
     setCooldown(interaction.user.id);
     expect(isOnCooldown(interaction.user.id)).toBe(true);
 
     await expect(executeSendPipeline(interaction, makePipelineParams([])))
       .rejects.toThrow(TypeError);
+    // The gate's own clearCooldown call IS the cleanup; the
+    // post-throw isOnCooldown assertion is what verifies it.
     expect(isOnCooldown(interaction.user.id)).toBe(false);
-
-    if (typeof clearCooldown === 'function') {
-      clearCooldown(interaction.user.id);
-    }
   });
 
   test.each([
     ['one recipient', [{ id: 'u1', username: 'u1' }]],
     ['several recipients', Array.from({ length: 5 }, (_, i) => ({ id: `u${i}`, username: `u${i}` }))],
   ])('accepts the allowed shape: %s', async (_label, recipients) => {
-    // Same shape as the other accept-path tests: assert the gate
-    // didn't reject. The pipeline mocks aren't fully wired here,
-    // so anything past the gate is fine (it'll fail downstream
-    // with a different message).
+    // Same shape as the other accept-path tests in this file:
+    // assert the gate didn't reject. The pipeline mocks aren't
+    // fully wired here, so anything past the gate is fine — it
+    // either throws downstream with a different message, or
+    // resolves cleanly if the mock chain happens to line up.
+    // The shared vacuous-pass concern across all four accept-
+    // path tests in this file is tracked separately.
     const interaction = makeInteraction();
     try {
       await executeSendPipeline(interaction, makePipelineParams(recipients));
