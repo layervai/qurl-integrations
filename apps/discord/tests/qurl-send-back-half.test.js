@@ -235,11 +235,18 @@ function makeInteraction(overrides = {}) {
 // else stays at the canonical baseline. Adding a new pipeline param
 // is a one-line edit here instead of touching every gate's
 // describe block.
+//
+// CAVEAT: overrides REPLACE nested objects wholesale (e.g. passing
+// `{ attachment: { url: 'x' } }` drops the baseline's `contentType`
+// and `name`). If a test wants to vary just one nested field, spread
+// the baseline explicitly: `{ attachment: { ...DEFAULT_ATTACHMENT,
+// url: 'x' } }`.
+const DEFAULT_ATTACHMENT = { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' };
 function makePipelineParams(overrides = {}) {
   return {
     apiKey: 'apikey',
     resourceType: 'file',
-    attachment: { url: 'https://cdn.discordapp.com/x', name: 'x.png', contentType: 'image/png' },
+    attachment: { ...DEFAULT_ATTACHMENT },
     locationUrl: null,
     locationName: null,
     recipients: [{ id: 'u1', username: 'u1' }],
@@ -1590,7 +1597,7 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     logger.warn.mockClear();
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({
-      attachment: { url: 'http://localhost/internal', name: 'x.png' },
+      attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/internal' },
     }))).rejects.toThrow(/SSRF re-validation/);
     expect(logger.warn).toHaveBeenCalledWith(
       'executeSendPipeline: attachment.url failed isAllowedSourceUrl gate',
@@ -1615,7 +1622,7 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
     // location path), but NOT with the SSRF gate message.
     const params = makePipelineParams({
       resourceType: 'location',
-      attachment: { url: 'http://localhost/whatever', name: 'x.png' },
+      attachment: { ...DEFAULT_ATTACHMENT, url: 'http://localhost/whatever' },
       locationUrl: 'https://google.com/maps/search/x',
       locationName: 'X',
     });
