@@ -265,6 +265,22 @@ function clearCooldown(userId) {
   sendCooldowns.delete(userId);
 }
 
+// Soften an existing cooldown so `residualMs` remain. Monotonic SHRINK
+// — only reduces remaining time, never extends. Used by Cancel paths
+// so a legitimate "I changed my mind" doesn't lock the full window
+// out, but rapid /qurl file → Cancel → /qurl file → Cancel spam still
+// pays a small throttle on each iteration (preventing supersedeOrCreate
+// + interaction-reply abuse).
+function softenCooldown(userId, residualMs) {
+  if (!sendCooldowns.has(userId)) return;
+  const target = Date.now() - Math.max(0, config.QURL_SEND_COOLDOWN_MS - residualMs);
+  const existing = sendCooldowns.get(userId);
+  if (target < existing) {
+    sendCooldowns.delete(userId);
+    sendCooldowns.set(userId, target);
+  }
+}
+
 async function batchSettled(items, fn, batchSize = 5) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
@@ -390,7 +406,12 @@ const USER_SELECT_PER_PICK_CAP = 10;
 const MAPS_URL_PATTERNS = [
   /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
   /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
-  /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s]{1,500}/,
+  // Defense-in-depth: exclude `<>"'|\` from the embed-tail character
+  // class. `isGoogleMapsURL` re-validates host and downstream sanitizers
+  // escape rendering, so these chars aren't exploitable today — but
+  // narrowing the regex here makes the bound tighter against URL
+  // shapes that would never come from a legitimate maps embed link.
+  /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s<>"'|\\`]{1,500}/,
 ];
 
 // decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
@@ -2097,9 +2118,11 @@ async function handleSend(interaction, apiKey) {
     await modalSubmit.deferUpdate();
 
     ({ locationUrl, locationName } = parseLocationInput(locationValue));
-    // Cap + escape markdown so a crafted place name can't inject
-    // **bold** / links / code / spoilers into the recipient embed.
-    if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
+    // sanitizeContentLabel: NFKC + bidi/zero-width/control strip +
+    // codepoint-aware 256-cap + markdown-escape. Matches the
+    // /qurl map slash entry's defense at handleQurlMap so a U+202E
+    // RLO can't visually spoof a Maps URL via the modal path either.
+    if (locationName) locationName = sanitizeContentLabel(locationName);
   }
 
   // ── Step 3: Common final step ──
@@ -3719,6 +3742,15 @@ function formatPersonalMessagePreview(message) {
   // operates on UTF-16 code units, so a slice that lands mid-surrogate
   // emits a lone surrogate that Discord renders as tofu. Same defense
   // sanitize.js applies for display-name caps.
+  //
+  // Caveat: codepoint-aware ≠ grapheme-aware. ZWJ-joined emoji
+  // sequences (e.g. 👨‍👩‍👧 = man + ZWJ + woman + ZWJ + girl, three
+  // codepoints + two joiners = 5 codepoints) can be sliced mid-cluster
+  // and render only the first segment. Acceptable: the preview is
+  // an 80-codepoint truncation indicator (followed by `…`), so a
+  // partial emoji renders as exactly that — a partial display, not
+  // garbled text. Full grapheme-segmentation would need Intl.Segmenter
+  // which isn't justified for a preview cap.
   const codepoints = Array.from(oneLine);
   if (codepoints.length <= 80) return `> ${oneLine}`;
   let cut = 80;
@@ -3790,13 +3822,10 @@ async function handleQurlSlashSend(interaction, params) {
       ephemeral: true,
     });
   }
-  if (isOnCooldown(interaction.user.id)) {
-    return interaction.reply({
-      content: 'Please wait before sending again.',
-      ephemeral: true,
-    });
-  }
-  setCooldown(interaction.user.id);
+  // Cooldown gate is owned by the front-half handlers (handleQurlFile /
+  // handleQurlMap) so invalid inputs are throttled too. By the time we
+  // get here the cooldown is already set; legitimate clearCooldown calls
+  // on individual error branches below still unlock retry.
 
   // Top-level try/catch fences unanticipated throws (a TypeError from
   // a malformed cached member, a future parser change, etc.) from
@@ -3958,6 +3987,21 @@ async function handleQurlSlashSend(interaction, params) {
 }
 
 async function handleQurlFile(interaction) {
+  // Cooldown gate at the EARLIEST entry point so invalid inputs
+  // (malformed attachment, SSRF host, wrong type, oversize) are
+  // throttled too — matches handleSend's pattern at commands.js:~1677.
+  // setCooldown is shared with /qurl send and /qurl map via the
+  // sendCooldowns Map; tests pin the cross-command contract.
+  if (interaction.guildId && interaction.guild) {
+    if (isOnCooldown(interaction.user.id)) {
+      return interaction.reply({
+        content: 'Please wait before sending again.',
+        ephemeral: true,
+      });
+    }
+    setCooldown(interaction.user.id);
+  }
+
   // UX fast-fail. The real concurrency-slot claim happens inside
   // executeSendPipeline (commands.js:~1043); this pre-check is best-
   // effort — by Send-click time the cap state can have shifted, in
@@ -4038,6 +4082,19 @@ async function handleQurlFile(interaction) {
 }
 
 async function handleQurlMap(interaction) {
+  // Cooldown gate at entry — same pattern handleQurlFile uses.
+  // Cross-command bucket (sendCooldowns) shared with /qurl send and
+  // /qurl file; tests pin the contract.
+  if (interaction.guildId && interaction.guild) {
+    if (isOnCooldown(interaction.user.id)) {
+      return interaction.reply({
+        content: 'Please wait before sending again.',
+        ephemeral: true,
+      });
+    }
+    setCooldown(interaction.user.id);
+  }
+
   // `getString('location', true)` throws on a missing option. Discord
   // enforces required server-side; only a forged interaction can hit
   // this. Targeted catch matches handleQurlFile's required-option
@@ -4157,6 +4214,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
+    // No transitionFlow on the all-invalid branch — the card stays at
+    // the same flow_state version. Log for forensics so a sudden spike
+    // in invalid-pick churn surfaces in metrics without lowering log
+    // verbosity.
+    logger.debug('handleSendUserSelect: all-invalid pick', {
+      flow_id, dropped_bots: droppedBots, dropped_self: droppedSelf,
+    });
     return rejectPick('⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
       + ' Re-pick recipients below.\n\n');
   }
@@ -4414,7 +4478,10 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       parts.push(`${partialTransientCount} couldn't be looked up just now (rerun /qurl file to retry them)`);
     }
     await interaction.followUp({
-      content: `ℹ\u{FE0F} ${parts.join('; ')} — sending to the remaining ${valid.length}.`,
+      // "Attempting to" (not "sending to") so a downstream pipeline
+      // failure doesn't leave the user reading a confident "sending"
+      // message alongside a subsequent failure message.
+      content: `ℹ\u{FE0F} ${parts.join('; ')} — attempting to send to the remaining ${valid.length}.`,
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
@@ -4448,8 +4515,12 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 //     surfaces that as the dedup-loser path (user re-clicks Cancel on
 //     the new row if they still want to abort).
 //
-// `clearCooldown` is gated on `deleted: true` so the cooldown stays
-// honored on the Cancel-loser branch.
+// On a successful Cancel, `softenCooldown` retains 5s of throttle
+// instead of fully clearing — a full clear would let a user spam
+// /qurl file → Cancel → /qurl file → Cancel and rack up
+// supersedeOrCreate DDB writes + Discord interactions with zero
+// throttle. The cooldown-loser branch leaves cooldown untouched
+// (Send is mid-fanout; bypassing is the abuse vector).
 async function handleSendCancelClick(interaction, { flow_id, row }) {
   // Defer-ack within the 3s window. The single deleteFlow call below
   // is fast in the happy path, but a DDB blip or slow region could
@@ -4479,12 +4550,17 @@ async function handleSendCancelClick(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
   if (!deleted) {
+    // Dedup-loser: either Send won the race (deletedFlow already, fan-out
+    // in progress) or a UserSelect transition advanced the row version.
+    // Distinct branches share the same recovery (re-check the card),
+    // but the wording avoids implying the flow was "processed" on the
+    // picker-race path where nothing actually committed.
     return interaction.followUp({
-      content: 'This send was already processed or the card moved — re-check it.',
+      content: 'The card moved — re-check it.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  clearCooldown(interaction.user.id);
+  softenCooldown(interaction.user.id, 5000);
   return interaction.editReply({
     content: 'Send cancelled.',
     components: [],
@@ -6041,6 +6117,9 @@ module.exports = {
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,
+      parseLocationInput,
+      safeDecodeURIComponent,
+      softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
       SEND_USER_SELECT_CUSTOM_ID,
       SEND_CONFIRM_SEND_CUSTOM_ID,

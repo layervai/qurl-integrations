@@ -175,6 +175,9 @@ const {
   selfDestructOptionToSeconds,
   renderRecipientWarnings,
   renderConfirmCardContent,
+  parseLocationInput,
+  safeDecodeURIComponent,
+  softenCooldown,
   SEND_STAGE_AWAITING_CONFIRM,
   SEND_USER_SELECT_CUSTOM_ID,
   SEND_CONFIRM_SEND_CUSTOM_ID,
@@ -182,6 +185,7 @@ const {
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
+  setCooldown,
   clearCooldown,
   sendCooldowns,
   executeSendPipeline,
@@ -380,6 +384,122 @@ describe('partitionRecipients', () => {
     const dup = makeUser('100000000000000001');
     const r = partitionRecipients([dup, dup, makeUser('100000000000000002')], SENDER_ID);
     expect(r.valid.length).toBe(3);
+  });
+});
+
+describe('softenCooldown', () => {
+  // Cancel-path helper: leave `residualMs` of cooldown remaining,
+  // monotonically SHRINK (never extend). Tests use the real
+  // QURL_SEND_COOLDOWN_MS via config (mocked in the test setup).
+  const config = require('../src/config');
+  const COOLDOWN_MS = config.QURL_SEND_COOLDOWN_MS;
+
+  beforeEach(() => sendCooldowns.clear());
+
+  test('no-op when no cooldown is set', () => {
+    softenCooldown('u1', 5000);
+    expect(sendCooldowns.has('u1')).toBe(false);
+  });
+
+  test('softens a fresh cooldown so ~5s remain', () => {
+    const now = Date.now();
+    sendCooldowns.set('u1', now);
+    softenCooldown('u1', 5000);
+    expect(sendCooldowns.has('u1')).toBe(true);
+    // Resulting `last` should be approximately now - (COOLDOWN - 5000)
+    // so remaining time is 5000ms.
+    const last = sendCooldowns.get('u1');
+    expect(last).toBeLessThanOrEqual(now - (COOLDOWN_MS - 5000) + 5);
+    expect(last).toBeGreaterThanOrEqual(now - (COOLDOWN_MS - 5000) - 5);
+  });
+
+  test('does NOT extend an already-short remaining cooldown', () => {
+    // existing `last` is older than the soften target → remaining is
+    // already less than 5s. Soften must NOT bump it back up.
+    const ancient = Date.now() - (COOLDOWN_MS - 1000);  // 1s remaining
+    sendCooldowns.set('u1', ancient);
+    softenCooldown('u1', 5000);
+    expect(sendCooldowns.get('u1')).toBe(ancient);
+  });
+
+  test('residualMs=0 effectively clears (last pushed far enough back that remaining=0)', () => {
+    sendCooldowns.set('u1', Date.now());
+    softenCooldown('u1', 0);
+    expect(isOnCooldown('u1')).toBe(false);
+  });
+});
+
+describe('parseLocationInput', () => {
+  test('Google Maps short URL passes through verbatim', () => {
+    const r = parseLocationInput('https://goo.gl/maps/abc123');
+    expect(r.locationUrl).toBe('https://goo.gl/maps/abc123');
+  });
+
+  test('Google Maps place URL passes through with derived name', () => {
+    const r = parseLocationInput('https://www.google.com/maps/place/Eiffel+Tower/@48.85,2.29,17z');
+    expect(r.locationUrl).toContain('google.com/maps/place');
+    expect(r.locationName).toBeTruthy();
+  });
+
+  test('plain place name synthesizes a search URL', () => {
+    const r = parseLocationInput('Eiffel Tower, Paris');
+    expect(r.locationUrl).toContain('google.com/maps/search');
+    expect(r.locationName).toBe('Eiffel Tower, Paris');
+  });
+
+  test('URL that matches a pattern but fails isGoogleMapsURL falls through to synth-search', () => {
+    // A URL hosted at a non-Google domain that happens to match the
+    // shape — must be handled by isGoogleMapsURL re-validation, not the
+    // pattern match alone.
+    const r = parseLocationInput('not a url just plain text input');
+    expect(r.locationUrl).toContain('google.com/maps/search');
+  });
+
+  test('malformed %-encoding in the input does not throw', () => {
+    expect(() => parseLocationInput('https://www.google.com/maps/place/%ZZ-broken')).not.toThrow();
+  });
+});
+
+describe('safeDecodeURIComponent', () => {
+  test('decodes normal percent-encoding', () => {
+    expect(safeDecodeURIComponent('Hello%20World')).toBe('Hello World');
+  });
+
+  test('returns raw input on malformed encoding (does not throw)', () => {
+    expect(safeDecodeURIComponent('%ZZ')).toBe('%ZZ');
+    expect(safeDecodeURIComponent('%')).toBe('%');
+    expect(safeDecodeURIComponent('valid%20but%incomplete')).toBe('valid%20but%incomplete');
+  });
+
+  test('handles control chars passing through', () => {
+    expect(safeDecodeURIComponent('plain')).toBe('plain');
+  });
+});
+
+describe('cross-command cooldown contract', () => {
+  // /qurl send, /qurl file, /qurl map share the sendCooldowns Map.
+  // setCooldown from any one MUST block the others — without this
+  // contract, a user could bypass the per-user throttle by alternating
+  // entry points.
+  beforeEach(() => sendCooldowns.clear());
+
+  test('setCooldown via one user blocks isOnCooldown for the same user across all entry points', () => {
+    setCooldown('uA');
+    // The shared Map key is the user ID — no per-command bucket. All
+    // three slash handlers consult the same isOnCooldown helper.
+    expect(isOnCooldown('uA')).toBe(true);
+  });
+
+  test('clearCooldown unlocks all entry points for that user', () => {
+    setCooldown('uA');
+    clearCooldown('uA');
+    expect(isOnCooldown('uA')).toBe(false);
+  });
+
+  test('cooldown is per-user, not global', () => {
+    setCooldown('uA');
+    expect(isOnCooldown('uA')).toBe(true);
+    expect(isOnCooldown('uB')).toBe(false);
   });
 });
 
@@ -1402,36 +1522,51 @@ describe('handleSendConfirmClick', () => {
 // ──────────────────────────────────────────────────────────────
 
 describe('handleSendCancelClick', () => {
-  test('happy path → version-gated deleteFlow + cooldown cleared + update', async () => {
+  test('happy path → version-gated deleteFlow + cooldown softened to ~5s residual + update', async () => {
+    // softenCooldown leaves 5s of throttle so a user can't spam
+    // /qurl file → Cancel → /qurl file → Cancel and rack up
+    // supersedeOrCreate DDB writes with zero cost. A legitimate
+    // "I changed my mind" still has the cooldown softened from full
+    // QURL_SEND_COOLDOWN_MS down to 5s.
     const int = makeInteraction();
-    sendCooldowns.set(SENDER_ID, Date.now());
+    const cooldownStart = Date.now();
+    sendCooldowns.set(SENDER_ID, cooldownStart);
     await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
       expectedVersion: 3,
     }));
-    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    // Cooldown ENTRY still exists (not deleted) — softening pushes
+    // `last` to a value that leaves ~5s remaining. isOnCooldown is
+    // therefore still true (within the 5s residual window).
+    expect(sendCooldowns.has(SENDER_ID)).toBe(true);
+    expect(isOnCooldown(SENDER_ID)).toBe(true);
+    // The new `last` should be older than the original cooldownStart
+    // (softening pushed it back so remaining time is now ~5s).
+    expect(sendCooldowns.get(SENDER_ID)).toBeLessThan(cooldownStart);
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/cancelled/),
     }));
   });
 
-  test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED', async () => {
-    // Critical: when Send won the race, we must NOT clear cooldown
-    // mid-send-fanout. Otherwise the user can re-fire /qurl file
-    // immediately and bypass the per-user cooldown window while the
-    // first send is still DMing recipients.
+  test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED (no soften)', async () => {
+    // Critical: when Send won the race, we must NOT touch the cooldown
+    // — Send is fanning out DMs and a soften would let the user
+    // re-fire /qurl file within 5s of clicking Cancel, before the
+    // first send finishes. The Cancel-loser branch leaves the
+    // original cooldown timestamp intact (no softening).
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const cooldownAt = Date.now();
     sendCooldowns.set(SENDER_ID, cooldownAt);
     const int = makeInteraction();
     await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/already processed|card moved/),
+      content: expect.stringMatching(/card moved/i),
       ephemeral: true,
     }));
-    // Cooldown is still in place — Cancel-loser must not unlock it.
+    // Cooldown is exactly as the test set it — Cancel-loser must not
+    // soften OR clear it.
     expect(isOnCooldown(SENDER_ID)).toBe(true);
     expect(sendCooldowns.get(SENDER_ID)).toBe(cooldownAt);
   });
