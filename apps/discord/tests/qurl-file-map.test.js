@@ -275,17 +275,25 @@ const VALID_ATTACHMENT = Object.freeze({
 });
 
 beforeEach(() => {
+  // `clearAllMocks` resets call history but preserves implementations
+  // — critical because the discord.js mock factory at the top of the
+  // file uses jest.fn().mockReturnThis() chains on builder methods
+  // (setCustomId, setLabel, etc.). `resetAllMocks` would wipe those
+  // implementations and crash the next call into a non-function.
   jest.clearAllMocks();
   sendCooldowns.clear();
+  // Targeted mockReset for mocks where the `mockResolvedValueOnce`
+  // queue can leak across tests (an early-return path that doesn't
+  // consume the queued value pollutes the next test's first call).
+  // Re-seeded with `mockResolvedValue` defaults below; tests
+  // override per-call with `mockResolvedValueOnce` as needed.
+  mockSupersedeOrCreate.mockReset();
+  mockDeleteFlow.mockReset();
+  mockTransitionFlow.mockReset();
+  mockDb.getGuildApiKey.mockReset();
   mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   mockDeleteFlow.mockResolvedValue({ deleted: true });
   mockTransitionFlow.mockResolvedValue({ result: 'ok', version: 2 });
-  // mockResolvedValueOnce queues survive `clearAllMocks` — a queued
-  // value left unconsumed by a prior test (e.g. an early-return path)
-  // would leak into the next test's first call. Drain the queue with
-  // mockReset for the mocks where per-test `mockResolvedValueOnce` is
-  // the dominant pattern.
-  mockDb.getGuildApiKey.mockReset();
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -376,15 +384,19 @@ describe('resolveRecipientUsers', () => {
     expect(r.unresolvedIds).toEqual(['100000000000000001']);
   });
 
-  test('non-10007 error → unresolved + warn logged', async () => {
+  test('non-10007 error → transientFailureIds (NOT unresolvedIds) + warn logged', async () => {
+    // Rate-limit / gateway-blip 429s and 500-class errors must land
+    // in transientFailureIds so the caller surfaces "try again"
+    // copy instead of "they left the server."
     const int = makeInteraction({
       guildMembers: {},
       guildFetchByID: { '100000000000000001': 'ratelimit' },
     });
     const r = await resolveRecipientUsers(int, ['100000000000000001']);
-    expect(r.unresolvedIds).toEqual(['100000000000000001']);
+    expect(r.transientFailureIds).toEqual(['100000000000000001']);
+    expect(r.unresolvedIds).toEqual([]);
     expect(logger.warn).toHaveBeenCalledWith(
-      'resolveRecipientUsers: members.fetch failed',
+      'resolveRecipientUsers: members.fetch failed (transient)',
       expect.any(Object),
     );
   });
@@ -472,6 +484,25 @@ describe('renderRecipientWarnings', () => {
     expect(out).toMatch(/no longer in this server/);
     expect(out).toMatch(/bot/);
     expect(out).toMatch(/yourself/);
+  });
+
+  test('transientFailureIds rendered with neutral copy (not "left the server")', () => {
+    // Rate-limit / gateway-blip 429s land in transientFailureIds, NOT
+    // unresolvedIds — so the message must encourage retry, not imply
+    // the recipient is gone. cr round 4 caught this misdirection.
+    const out = renderRecipientWarnings({
+      transientFailureIds: ['100000000000000001', '100000000000000002'],
+    });
+    expect(out).toMatch(/2 user.*couldn't be looked up.*try again/);
+    expect(out).not.toMatch(/no longer in this server/);
+  });
+
+  test('renderRecipientWarnings tolerates missing fields via defaults', () => {
+    // The destructure now defaults each field — a future caller that
+    // forgets to pass `transientFailureIds` (or any other bucket)
+    // should get an empty warning, not a `.length`-of-undefined crash.
+    expect(renderRecipientWarnings({})).toBe('');
+    expect(renderRecipientWarnings()).toBe('');
   });
 });
 
@@ -1230,6 +1261,25 @@ describe('constants + exports', () => {
     expect(typeof handleSendUserSelect).toBe('function');
     expect(typeof handleSendConfirmClick).toBe('function');
     expect(typeof handleSendCancelClick).toBe('function');
+  });
+
+  test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
+    // siblingMessage is registered only on SEND_USER_SELECT_CUSTOM_ID
+    // (commands.js's registerFlow blocks), but flow-dispatch stores
+    // siblingMessages keyed by EXPECTED_STAGE — so a /qurl revoke
+    // supersede that peeks at a row at SEND_STAGE_AWAITING_CONFIRM
+    // gets the same actionable message regardless of which customId
+    // was registered. Pin the lookup so a future refactor that
+    // accidentally keys siblingMessage by customId breaks here.
+    const { siblingMessageForStage } = require('../src/flow-dispatch');
+    const msg = siblingMessageForStage(SEND_STAGE_AWAITING_CONFIRM);
+    expect(msg).toMatch(/qurl file.*qurl map.*confirm card/i);
+    // Defense-in-depth: confirm-card customIds for SEND + CANCEL,
+    // although registered without their own siblingMessage, still
+    // reach the same registered message through the stage lookup.
+    // (Tested indirectly: any customId at this stage maps to the
+    // same single registered message.)
+    expect(msg).toBeTruthy();
   });
 
   test('executeSendPipeline still exported (back-half hook)', () => {

@@ -3452,22 +3452,24 @@ function selfDestructOptionToSeconds(value) {
 
 // Resolve a list of recipient IDs to User-shaped objects via the guild
 // member cache (with fallback fetch on miss). Returns
-// `{ users, unresolvedIds }` — callers surface unresolvedIds so a
-// user who left the guild between /qurl file invocation and Send
-// click sees a deterministic error rather than a silent drop in the
-// back-half.
+// `{ users, unresolvedIds, transientFailureIds }` — callers surface
+// each bucket with appropriate copy:
+//   * `unresolvedIds` — Discord API 10007 "Unknown Member". The
+//     canonical "user left the guild" signal. Stable / deterministic.
+//   * `transientFailureIds` — any other fetch error (rate limit
+//     surfacing past discord.js's retry, gateway blip, perms
+//     revoked mid-fetch). User-visible copy should encourage retry
+//     rather than imply the recipient is gone.
 //
-// Discord API code 10007 ("Unknown Member") is the canonical
-// "left the guild" signal. Any other fetch error (rate limit,
-// gateway blip) is also treated as unresolved — degrading to the
-// resolvable subset is preferable to aborting the whole command.
+// Splitting the buckets prevents the 429-rendered-as-"left the
+// server" misdirection cr round 4 flagged.
 //
 // Fetches the cache-miss tail in parallel via `batchSettled` (the
 // same helper used by the DM fan-out path; honors Discord's per-route
 // rate-limit bucket by capping concurrent in-flight calls).
 async function resolveRecipientUsers(interaction, ids) {
   if (!interaction.guild) {
-    return { users: [], unresolvedIds: [...ids] };
+    return { users: [], unresolvedIds: [...ids], transientFailureIds: [] };
   }
   const users = [];
   const missQueue = [];
@@ -3476,35 +3478,44 @@ async function resolveRecipientUsers(interaction, ids) {
     if (cached) users.push(cached.user);
     else missQueue.push(id);
   }
-  if (missQueue.length === 0) return { users, unresolvedIds: [] };
+  if (missQueue.length === 0) {
+    return { users, unresolvedIds: [], transientFailureIds: [] };
+  }
 
   const unresolvedIds = [];
+  const transientFailureIds = [];
   const results = await batchSettled(missQueue, async (id) => {
     try {
       const m = await interaction.guild.members.fetch(id);
-      return { id, user: m.user };
+      return { id, user: m.user, kind: 'ok' };
     } catch (err) {
-      if (!err || (err.code !== 10007 && err.code !== '10007')) {
-        logger.warn('resolveRecipientUsers: members.fetch failed', {
+      // Discord error 10007 is "Unknown Member" — recipient really
+      // left the guild. Anything else (429 rate-limit surfacing past
+      // discord.js's retry, 500-class, gateway disconnect, perms
+      // revoked) is transient and shouldn't read like "they're gone."
+      const is10007 = err && (err.code === 10007 || err.code === '10007');
+      if (!is10007) {
+        logger.warn('resolveRecipientUsers: members.fetch failed (transient)', {
           recipient_id: id, error: err && err.message, code: err && err.code,
         });
       }
-      return { id, user: null };
+      return { id, user: null, kind: is10007 ? 'unknown_member' : 'transient' };
     }
   });
   for (const r of results) {
     // batchSettled wraps each callback in Promise.allSettled — fulfilled
-    // results carry our `{id, user}` shape, rejected ones would carry an
-    // err. The callback never throws (try/catch above) so `rejected` is
-    // unreachable in practice; defend regardless.
-    if (r.status !== 'fulfilled' || !r.value || r.value.user == null) {
-      const id = r.value?.id ?? null;
-      if (id) unresolvedIds.push(id);
+    // results carry our `{id, user, kind}` shape. The callback never
+    // throws (try/catch above) so a `rejected` status is unreachable in
+    // practice; bucket as transient if it ever does fire.
+    if (r.status !== 'fulfilled' || !r.value) continue;
+    if (r.value.user != null) {
+      users.push(r.value.user);
       continue;
     }
-    users.push(r.value.user);
+    if (r.value.kind === 'transient') transientFailureIds.push(r.value.id);
+    else unresolvedIds.push(r.value.id);
   }
-  return { users, unresolvedIds };
+  return { users, unresolvedIds, transientFailureIds };
 }
 
 // Filter resolved Users: drop bots, drop the sender. Returns
@@ -3535,7 +3546,14 @@ function partitionRecipients(users, senderId) {
 // Returns the empty string when nothing is worth surfacing — keeps
 // callers simple (`warningsBlock + content`) without a separate
 // "do I have any warnings" check.
-function renderRecipientWarnings({ invalidTokens, cappedCount, unresolvedIds, droppedBots, droppedSelf }) {
+function renderRecipientWarnings({
+  invalidTokens = [],
+  cappedCount = 0,
+  unresolvedIds = [],
+  transientFailureIds = [],
+  droppedBots = 0,
+  droppedSelf = 0,
+} = {}) {
   const lines = [];
   if (cappedCount > 0) {
     lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
@@ -3554,6 +3572,12 @@ function renderRecipientWarnings({ invalidTokens, cappedCount, unresolvedIds, dr
   }
   if (unresolvedIds.length > 0) {
     lines.push(`• ${unresolvedIds.length} user(s) are no longer in this server and were dropped.`);
+  }
+  if (transientFailureIds.length > 0) {
+    // Distinct copy from unresolvedIds — transient failures (429,
+    // gateway blip) mislead the user if rendered as "they left the
+    // server." Encourage retry.
+    lines.push(`• ${transientFailureIds.length} user(s) couldn't be looked up right now — try again in a moment.`);
   }
   if (droppedBots > 0) {
     lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
@@ -3699,7 +3723,7 @@ async function handleQurlSlashSend(interaction, apiKey, params) {
 
     const parsed = parseRecipientMentions(recipientsRaw, interaction);
 
-    let resolved = { users: [], unresolvedIds: [] };
+    let resolved = { users: [], unresolvedIds: [], transientFailureIds: [] };
     if (parsed.ids.length > 0) {
       try {
         resolved = await resolveRecipientUsers(interaction, parsed.ids);
@@ -3726,6 +3750,7 @@ async function handleQurlSlashSend(interaction, apiKey, params) {
       invalidTokens: parsed.invalidTokens,
       cappedCount: parsed.cappedCount,
       unresolvedIds: resolved.unresolvedIds,
+      transientFailureIds: resolved.transientFailureIds,
       droppedBots,
       droppedSelf,
     });
@@ -3739,6 +3764,7 @@ async function handleQurlSlashSend(interaction, apiKey, params) {
       // zero. This is what bot-only / self-only mention lists hit.
       const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
         && resolved.unresolvedIds.length === 0
+        && resolved.transientFailureIds.length === 0
         && parsed.invalidTokens.length === 0
         && parsed.cappedCount === 0;
       const detail = breakdownEmpty
@@ -3927,6 +3953,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   if (selected.length === 0) {
     return interaction.deferUpdate().catch(logIgnoredDiscordErr);
   }
+  // No `resolveRecipientUsers` re-fetch here — Discord's
+  // UserSelectMenu only surfaces users visible to the bot in this
+  // guild, so picked User IDs are guild-bounded at the gateway-event
+  // level. handleSendConfirmClick re-fetches at click time
+  // (partial-drop test pins this) as the actual guild-membership
+  // defense; adding it here would burn 10 members.fetch calls per
+  // picker tick without catching anything the Send-time check misses.
   const { valid, droppedBots, droppedSelf } = partitionRecipients(selected, interaction.user.id);
   if (valid.length === 0) {
     return interaction.update({

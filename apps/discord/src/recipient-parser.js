@@ -104,13 +104,18 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 const MAX_INPUT_LENGTH = 4000;
 
 // Max length applied to `/qurl file` / `/qurl map` `recipients:`
-// slash options. Discord enforces this server-side, so anything
-// past it never reaches the parser. Computed as half of
-// `MAX_INPUT_LENGTH` so the gap survives a future bump to either
-// constant — the relationship is code-enforced rather than a
-// hand-maintained literal. Both /qurl file and /qurl map builders
-// read this; 7b.3+ should continue to honor the gap.
-const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / 2);
+// slash options. Discord enforces this server-side, so anything past
+// it never reaches the parser — the parser's MAX_INPUT_LENGTH cap
+// (above) is genuine defense-in-depth, only reachable via a forged
+// interaction or a future non-slash caller.
+//
+// Picked at half of MAX_INPUT_LENGTH so the headroom relationship is
+// load-bearing: a future bump to MAX_INPUT_LENGTH (e.g. for a larger
+// guild's role-expansion needs) preserves the 2× gap automatically.
+// Both /qurl file and /qurl map builders read this; 7b.3+ should
+// continue to honor the gap.
+const SLASH_OPTION_HEADROOM_DIVISOR = 2;
+const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / SLASH_OPTION_HEADROOM_DIVISOR);
 
 // Per-token cap on entries in `invalidTokens`. Discord's embed total
 // is 4096 chars; a single ~4000-char garbage token (one giant string
