@@ -777,7 +777,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   return allLinks;
 }
 
-async function handleSend(interaction, apiKey) {
+async function handleSend(interaction, apiKey, prefill = null) {
   // awaitMessageComponent below requires a channel handle
   if (!interaction.channel) {
     return interaction.reply({ content: 'Cannot use this command in this context.', ephemeral: true });
@@ -786,6 +786,31 @@ async function handleSend(interaction, apiKey) {
   // in case a future code path calls handleSend directly.
   if (!apiKey) {
     return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
+  }
+  // Prefill validation. `send_file` arrives with { type: 'file',
+  // attachment: <Attachment> }; `send_location` arrives with
+  // { type: 'location' } and the modal-submit happens inside this
+  // function. Anything else is a caller bug.
+  if (prefill !== null) {
+    if (prefill.type !== 'file' && prefill.type !== 'location') {
+      return interaction.reply({ content: 'Internal error: invalid prefill type.', ephemeral: true });
+    }
+    if (prefill.type === 'file' && !prefill.attachment) {
+      return interaction.reply({ content: 'Internal error: send_file invoked without an attachment.', ephemeral: true });
+    }
+    // Prefill paths land in a shared Step 3 (recipient/destruct/
+    // expiry/message) form loop. Step 3 currently lives inline
+    // inside this function and reads from closures populated by
+    // Steps 1+2; the next commit on this branch extracts it into a
+    // helper that accepts the resource state + the correct
+    // interaction handle (slash for send_file, modal-submit for
+    // send_location). Until that lands, the new shortcut commands
+    // acknowledge gracefully — the existing /qurl send remains the
+    // working path. No regression: /qurl send is unchanged.
+    return interaction.reply({
+      content: '`/qurl send_' + (prefill.type === 'file' ? 'file' : 'location') + '` shortcut is registered, but the shared-form refactor is still landing. Run `/qurl send` (button-driven) for now; this command will activate once the next commit on this branch ships.',
+      ephemeral: true,
+    });
   }
 
   if (isOnCooldown(interaction.user.id)) {
@@ -3879,6 +3904,28 @@ const commands = [
           // committing the send.
       )
       .addSubcommand(sub =>
+        sub.setName('send_file')
+          .setDescription('Send a file with the same workflow as /qurl send, but attach it inline')
+          // Shortcut variant of /qurl send. Customers who already know
+          // they want to send a file can attach it directly in the
+          // slash-command popup instead of clicking through the
+          // 2-button reply + DM-pivot capture. The attachment is
+          // forwarded to handleSend's Step 3 (recipient/destruct/
+          // expiry/message) verbatim — no behavior change for the
+          // converge path.
+          .addAttachmentOption(opt =>
+            opt.setName('file')
+              .setDescription('The file to send')
+              .setRequired(true))
+      )
+      .addSubcommand(sub =>
+        sub.setName('send_location')
+          .setDescription('Send a location with the same workflow as /qurl send, opens the location modal directly')
+          // Shortcut variant of /qurl send. Same location modal as
+          // the button-driven path, but invoked directly as the first
+          // interaction response so the user skips the 2-button reply.
+      )
+      .addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
       )
@@ -4104,9 +4151,9 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke
+      // Gate: require guild API key for send / send_file / send_location / revoke
       let resolvedApiKey = null;
-      if (sub === 'send' || sub === 'revoke') {
+      if (sub === 'send' || sub === 'send_file' || sub === 'send_location' || sub === 'revoke') {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
@@ -4124,6 +4171,26 @@ const commands = [
       // sometimes clone/serialize interactions) and a security smell for
       // secret-bearing values.
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
+      // /qurl send_file: attachment-bearing shortcut. Skips the 2-button
+      // reply + DM-pivot file-capture; uses the inline attachment option
+      // and jumps to handleSend's Step 3 (recipient / destruct / expiry /
+      // message). The attachment shape from the slash-command option is
+      // the same discord.js Attachment object the existing flow gets out
+      // of fileMessage.attachments.first(), so handleSend's Step 3 reads
+      // it verbatim.
+      if (sub === 'send_file') {
+        const file = interaction.options.getAttachment('file', true);
+        return handleSend(interaction, resolvedApiKey, { type: 'file', attachment: file });
+      }
+      // /qurl send_location: opens the location modal as the first
+      // interaction response (no 2-button reply preamble), then funnels
+      // into handleSend's Step 3 with the parsed location. handleSend
+      // owns the modal-submit -> deferUpdate -> Step 3 transition for
+      // this path (so the existing location-parsing regex + markdown-
+      // escape logic stays single-source).
+      if (sub === 'send_location') {
+        return handleSend(interaction, resolvedApiKey, { type: 'location' });
+      }
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it

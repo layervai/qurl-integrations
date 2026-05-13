@@ -131,7 +131,7 @@ describe('Discord command registration (smoke)', () => {
       // Prepend scope to the expectation so a mismatch surfaces which
       // scope regressed in the Jest failure header.
       expect({ scope: qurl._scope, subcommands })
-        .toEqual({ scope: qurl._scope, subcommands: ['help', 'revoke', 'send', 'setup', 'status'] });
+        .toEqual({ scope: qurl._scope, subcommands: ['help', 'revoke', 'send', 'send_file', 'send_location', 'setup', 'status'] });
     }
   });
 
