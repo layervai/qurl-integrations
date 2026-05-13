@@ -363,6 +363,19 @@ describe('partitionRecipients', () => {
   test('empty input', () => {
     expect(partitionRecipients([], SENDER_ID)).toEqual({ valid: [], droppedBots: 0, droppedSelf: 0 });
   });
+
+  test('contract: does NOT re-dedup — dedup is upstream (parseRecipientMentions Set + Discord picker gateway-event)', () => {
+    // cr round 10 audit: confirm that duplicates passed in are preserved
+    // verbatim. parseRecipientMentions already dedupes via Set
+    // (recipient-parser.js:197-198) and Discord's UserSelectMenu
+    // gateway-event surfaces each picked user at most once. If a future
+    // refactor breaks the parser's dedup, the divergence between
+    // input.length and partition.valid.length must fail loudly here —
+    // silently re-deduping in partitionRecipients would mask the bug.
+    const dup = makeUser('100000000000000001');
+    const r = partitionRecipients([dup, dup, makeUser('100000000000000002')], SENDER_ID);
+    expect(r.valid.length).toBe(3);
+  });
 });
 
 describe('resolveRecipientUsers', () => {
@@ -604,6 +617,29 @@ describe('renderConfirmCardContent', () => {
     // followed by the ellipsis. Backed-off cut: index 79.
     expect(out).toContain(`> ${safePrefix}…`);
     expect(out).not.toMatch(/\\…/);
+  });
+
+  test('personal-message preview back-off handles odd-count multi-backslash boundary', () => {
+    // cr round 10: the previous heuristic only checked the last two
+    // chars (`\` at cut-1 + non-`\` at cut-2). With THREE consecutive
+    // `\` at cut-3..cut-1, the last one starts a fresh escape sequence
+    // but cut-2 also `\` would fool the old check into NOT backing off.
+    // The fix counts trailing `\` and backs off when the count is odd.
+    //
+    // Build: 77 chars + '\\\\\\*' (3 backslashes then `*`) + tail. The
+    // first `\\` is a literal-pair, the third `\` starts the `\*`
+    // escape. Cut lands at position 80 (= '*'); we want a back-off to
+    // 79 so the trailing escape-starter `\` is dropped.
+    const prefix = 'a'.repeat(77);  // 77 chars
+    const message = prefix + '\\\\\\*' + 'rest'.repeat(20);  // 77+4+80 = 161 chars
+    const out = renderConfirmCardContent({ ...baseProps, personalMessage: message });
+    // Backed-off cut: index 79. Preview ends with the literal-pair `\\`
+    // (positions 77-78) and the ellipsis. The escape-starter `\` at
+    // position 79 must be dropped.
+    expect(out).toContain(`> ${prefix}\\\\…`);
+    // Defense: the rendered preview must NOT end with three backslashes
+    // before the ellipsis — that would mean the escape-starter survived.
+    expect(out).not.toMatch(/\\\\\\…/);
   });
 
   test('personal-message renders pre-sanitized input verbatim (no double-escape)', () => {
@@ -1300,6 +1336,31 @@ describe('handleSendConfirmClick', () => {
     );
   });
 
+  test('forged Send click with empty recipientIds → distinct copy + deleteFlow (not the "all left" copy)', async () => {
+    // cr round 10: a legitimate Send click only lands when the card has
+    // at least one recipient (Send is disabled in the empty state).
+    // A click with payload.recipientIds === [] therefore implies a
+    // fabricated interaction. The all-unresolved branch's "they left
+    // the server" copy is wrong here — nobody left, nobody was ever
+    // selected. Distinct copy + deleteFlow.
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    await handleSendConfirmClick(int, {
+      flow_id: 'fid',
+      row: { payload: { ...validPayload, recipientIds: [] }, version: 1 },
+    });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/No recipients were selected/i),
+      components: [],
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/no longer reachable/i),
+    }));
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
+  });
+
   test('bot kicked between confirm and Send → distinct ephemeral, flow row deleted', async () => {
     // cr round 9: when the bot is removed from the guild between
     // confirm and Send, `interaction.guild` is null. Without an
@@ -1450,15 +1511,23 @@ describe('handleSendUserSelect', () => {
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
 
-  test('all bots picked → re-prompt warning + no transition', async () => {
+  test('all bots picked → re-prompt warning prepended to full confirm card (resource header preserved)', async () => {
+    // cr round 10: an invalid pick used to replace card content with
+    // just the warning string — the user lost the "Sending file:
+    // report.pdf / Expires: 24h" header they chose at /qurl file time.
+    // The fix re-renders the full confirm card with the warning
+    // banner prepended via warningsBlock; needsPicker:true keeps the
+    // pick prompt and the picker stays attached.
     const int = makeSelectInteraction({
       users: [makeUser(u1, { bot: true })],
     });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/bots/),
-    }));
+    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/bots/);
+    // Resource header survives — this is the regression cr round 10 caught.
+    expect(updated.content).toMatch(/Sending file/);
+    expect(updated.content).toMatch(/Expires/);
   });
 
   test('defense-in-depth: cap-exceeded pick rejected even though picker setMaxValues makes it unreachable today', async () => {
@@ -1473,9 +1542,11 @@ describe('handleSendUserSelect', () => {
     const int = makeSelectInteraction({ users });
     await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/Pick at most/),
-    }));
+    const updated = int.update.mock.calls[int.update.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Pick at most/);
+    // Same regression defense as the all-bots branch — resource header
+    // must survive the warning re-render.
+    expect(updated.content).toMatch(/Sending file/);
   });
 
   test('partial-bot pick → transitionFlow with non-bot users + warning surfaces on card', async () => {

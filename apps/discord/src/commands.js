@@ -3541,6 +3541,12 @@ async function resolveRecipientUsers(interaction, ids) {
 // budget that legitimate ops elsewhere could use. The durable fix is
 // the v2 resolve-then-cap refactor tracked in #304.
 function partitionRecipients(users, senderId) {
+  // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
+  // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
+  // gateway-event surfaces each picked user at most once. This loop
+  // therefore does NOT re-dedup; doing so would silently mask an
+  // upstream regression (parser dedup breakage) that should fail
+  // loudly via the recipient-count divergence test instead.
   const valid = [];
   let droppedBots = 0;
   let droppedSelf = 0;
@@ -3688,9 +3694,14 @@ function formatPersonalMessagePreview(message) {
   const oneLine = message.replace(NEWLINE_COLLAPSE_RE, ' ');
   if (oneLine.length <= 80) return `> ${oneLine}`;
   let cut = 80;
-  if (oneLine[cut - 1] === '\\' && oneLine[cut - 2] !== '\\') {
-    cut -= 1;
-  }
+  // Count trailing backslashes just before `cut`. An ODD count means
+  // the last `\` is starting a markdown-escape sequence (`\X`) whose
+  // target lands at `cut` and would be sliced off — back off by 1.
+  // EVEN counts represent complete `\\` literal-backslash pairs and
+  // can be kept. Handles single (`\*`), triple (`\\\*`), etc.
+  let bs = 0;
+  for (let i = cut - 1; i >= 0 && oneLine[i] === '\\'; i--) bs++;
+  if (bs % 2 === 1) cut -= 1;
   return `> ${oneLine.slice(0, cut)}…`;
 }
 
@@ -4080,13 +4091,32 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // (partial-drop test pins this) as the actual guild-membership
   // defense; adding it here would burn 10 members.fetch calls per
   // picker tick without catching anything the Send-time check misses.
+  const payload = row.payload || {};
   const { valid, droppedBots, droppedSelf } = partitionRecipients(selected, interaction.user.id);
+  // Both invalid-pick branches re-render the full confirm card with a
+  // warning banner prepended. Replacing card content with just the
+  // warning string strips the resource header ("Sending file:
+  // report.pdf / Expires: 24h / Self-destruct: …") that the user
+  // chose at /qurl file time — they shouldn't have to scroll back to
+  // remember what they're sending. needsPicker:true keeps the "Pick
+  // recipients below" prompt; sendDisabled:true keeps Send greyed.
+  const rejectPick = (warning) => interaction.update({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+    }),
+    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
+  }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
-    return interaction.update({
-      content: '⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
-        + ' Re-pick recipients below.',
-      components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
-    }).catch(logIgnoredDiscordErr);
+    return rejectPick('⚠\u{FE0F} ' + (droppedBots > 0 ? 'Cannot send to bots.' : 'Cannot send to yourself.')
+      + ' Re-pick recipients below.\n\n');
   }
   // Defense-in-depth — unreachable in production today: the picker's
   // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
@@ -4094,13 +4124,10 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // pick more than 25. Kept against a future bump to either constant
   // (or a forged interaction) so the cap stays honored.
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    return interaction.update({
-      content: `⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.`,
-      components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
-    }).catch(logIgnoredDiscordErr);
+    return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
 
-  const payload = row.payload || {};
+
   const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
   const result = await transitionFlow(flow_id, row.version, {
     stage_to: SEND_STAGE_AWAITING_CONFIRM,
@@ -4198,6 +4225,26 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   }
 
   const payload = row.payload || {};
+  // Forged-interaction defense: a legitimate Send click can only land
+  // when the card has at least one recipient (Send is disabled while
+  // recipientIds is empty — both at confirm-card-render time and in
+  // the picker re-render after an empty pick). A click with empty
+  // recipientIds therefore implies a fabricated interaction. The
+  // "all left the server" copy below would be misleading for this
+  // path (nobody left, nobody was ever there); distinct copy + flow
+  // delete keeps the dispatcher's outer catch from masking the signal.
+  if (!Array.isArray(payload.recipientIds) || payload.recipientIds.length === 0) {
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty-recipients failed', {
+      flow_id, error: err && err.message,
+    }));
+    return interaction.editReply({
+      content: '❌ No recipients were selected — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
   // Re-fetch users at click time — defensive against members leaving
   // the guild between confirm and Send. Both unresolved buckets
   // (10007 + transient fetch failure) reduce the delivered count,
@@ -5230,6 +5277,10 @@ const commands = [
             opt.setName('location')
               .setDescription('Google Maps URL, or a place / address to search')
               .setRequired(true)
+              // 500 chars covers full Google Maps URLs (which can be
+              // 200-400 chars after place params + coordinates) plus
+              // headroom; not tied to the recipients-parser cap because
+              // location is a single URL/address, not a token list.
               .setMaxLength(500)
           )
           .addStringOption(opt =>
