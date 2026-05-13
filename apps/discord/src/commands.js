@@ -38,6 +38,77 @@ const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } 
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
+// classifyMintFailure maps a thrown error from the upload + mint phase
+// of /qurl send into a small enum of reason strings. Used as the
+// `reason` field on the QURL_SEND_CREATE_LINK_FAILURE audit event
+// (qurl-integrations#276) so the CloudWatch metric filter can split
+// failures by class — 4xx (likely client/contract problem) vs 5xx
+// (likely upstream outage) vs timeout (likely network/cold-start).
+//
+// Don't add per-API-code branches here — that explodes the metric
+// cardinality. New reasons should map to one of the existing
+// categories or earn a new top-level category with a clear
+// dimensional purpose (e.g. a future "rate_limit" if we add upstream
+// 429 handling).
+function classifyMintFailure(error) {
+  if (!error) return 'unknown';
+  // AbortError is ambiguous: undici/fetch raises it on deadline-fired
+  // aborts AND on user-cancellations. error.cause is the only reliable
+  // disambiguator — bucket as `timeout` only when cause corroborates a
+  // timeout signal; otherwise fall through to `unknown` so a future
+  // cancel-button adoption doesn't silently mis-bucket cancellations
+  // as timeouts. See PR #300 review (Justin).
+  if (error.name === 'AbortError') {
+    const causeStr = String((error.cause && (error.cause.message || error.cause)) || '');
+    // Word-anchored to drop strange concatenations like "rtimeout" or
+    // "timeouted" — but it does NOT defend against "not due to timeout"
+    // because "timeout" is still a complete word in that string. The
+    // false-positive class for negation-containing causes is acceptable
+    // because real timeout-driven aborts in undici raise TimeoutError
+    // (handled above) rather than AbortError; this branch is a defense
+    // against libraries that use controller.abort('timeout') as their
+    // deadline signal, where the cause is the deliberate marker string.
+    if (/\btimed?\s*out\b/i.test(causeStr)) return 'timeout';
+    return 'unknown';
+  }
+  // libuv socket codes + undici/fetch TimeoutError DOMException — all
+  // unambiguous deadline-shaped failures. The message-regex branch was
+  // removed (round 11): `/timeout/i.test(error.message)` over-matched
+  // any string containing the substring "timeout" (e.g. "not a timeout
+  // related error") and a future upstream message like "completed
+  // after timeout retry" would mis-bucket. The name/code paths above
+  // cover every real shape we've seen.
+  if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' ||
+      error.name === 'TimeoutError') {
+    return 'timeout';
+  }
+  const status = error.status ?? 0;
+  if (status >= 500 && status < 600) return 'upstream_5xx';
+  if (status >= 400 && status < 500) return 'upstream_4xx';
+  return 'unknown';
+}
+
+// emitMintFailureAudit centralizes the QURL_SEND_CREATE_LINK_FAILURE
+// emission contract so the three catch sites (initial /qurl send +
+// addRecipients file branch + addRecipients location branch) cannot
+// drift on the skip rule or field shape. Adding a fourth call site
+// goes through here too — owns both the contract and the cardinality
+// discipline in one place. See #276.
+function emitMintFailureAudit(error, { sendId, kind }) {
+  if (error && error.apiCode === 'quota_exceeded') return;
+  logger.audit(AUDIT_EVENTS.QURL_SEND_CREATE_LINK_FAILURE, {
+    send_id: sendId,
+    reason: classifyMintFailure(error),
+    // `?? null` (not `|| null`) preserves an empty-string `apiCode` —
+    // `|| null` would collapse it to null and lose a forensic dimension.
+    // (Status 0 doesn't apply: native fetch throws on transport errors
+    // rather than returning a 0-status response.)
+    api_code: error?.apiCode ?? null,
+    status_code: error?.status ?? null,
+    kind,
+  });
+}
+
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
@@ -1139,7 +1210,27 @@ async function executeSendPipeline(interaction, {
       logger.audit(AUDIT_EVENTS.UPLOAD_SUCCESS, { send_id: sendId, kind: 'location' });
     }
   } catch (error) {
-    logger.error('Failed to prepare QURL links', { error: error.message, apiCode: error.apiCode });
+    // Audit emission for CloudWatch metric filter — pairs with the
+    // qurl_send_create_link_failure log-metric filter +
+    // qurl-bot-discord-send-failure alarm in
+    // qurl-integrations-infra qurl-bot-discord/terraform/monitoring.tf.
+    // Without this, the "Failed to create links" user surface goes
+    // un-instrumented and tonight's outage shape (4+ hours of users
+    // hitting this before anyone noticed) repeats. qurl-integrations#276.
+    //
+    // Explicit map (RESOURCE_TYPES.MAPS → 'location' for parity with the
+    // UPLOAD_SUCCESS / addRecipients vocabulary) instead of `=== FILE ?
+    // 'file' : 'location'` so a future third RESOURCE_TYPES value
+    // surfaces as `null` rather than silently bucketing as 'location'.
+    // quota_exceeded skip lives inside emitMintFailureAudit.
+    const kindMap = { [RESOURCE_TYPES.FILE]: 'file', [RESOURCE_TYPES.MAPS]: 'location' };
+    emitMintFailureAudit(error, { sendId, kind: kindMap[resourceType] ?? null });
+    logger.error('Failed to prepare QURL links', {
+      error: error.message,
+      apiCode: error.apiCode,
+      status: error.status,
+      sendId,
+    });
     clearCooldown(interaction.user.id); // allow retry on failure
     // Slot release lives in the `finally` block below — it ALWAYS runs
     // after a return-from-catch, and `releaseSlot` is idempotent via
@@ -2554,8 +2645,15 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // can both fire for a sendConfig that had both kinds, and a per-branch
   // recompute would invite drift.
   const inheritedDestruct = sendConfig.self_destruct_seconds ?? null;
+  // activeKind tracks which branch is in-flight when the outer catch
+  // fires. The inner file try/catch returns on file failure, so by the
+  // time we reach the outer catch the failure was NOT in the file
+  // branch — `hasFile ? 'file' : 'location'` would mis-label mixed
+  // sends. Per-branch assignment is the durable fix.
+  let activeKind = null;
   try {
     if (hasFile) {
+      activeKind = 'file';
       // Re-download from the stored Discord CDN URL, then upload a fresh
       // resource so the 10-token pool is full. Re-upload again every
       // TOKENS_PER_RESOURCE recipients. The original resource is drained by
@@ -2608,7 +2706,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         const msg = isExpired
           ? 'Original attachment URL has expired. Please create a new send.'
           : 'Failed to prepare links. Please try again, or create a new send if the issue persists.';
-        logger.error('addRecipients file re-upload failed', { sendId, error: err.message, isExpired });
+        logger.error('addRecipients file re-upload failed', {
+          sendId, error: err.message, apiCode: err.apiCode, status: err.status, isExpired,
+        });
+        // quota_exceeded skip lives inside emitMintFailureAudit.
+        emitMintFailureAudit(err, { sendId, kind: 'file' });
         return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
       }
 
@@ -2633,6 +2735,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       preparedKinds.push('file');
     }
     if (hasLocation) {
+      activeKind = 'location';
       const locPayload = { type: 'google-map', url: sendConfig.actual_url, name: sendConfig.location_name || 'Google Maps Location' };
       const firstUpload = await uploadJsonToConnector(locPayload, 'location.json', apiKey, inheritedDestruct);
       const expiresAt = expiryToISO(sendConfig.expires_in);
@@ -2659,11 +2762,20 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       preparedKinds.push('location');
     }
   } catch (error) {
-    logger.error('Failed to create links for additional recipients', { error: error.message });
+    logger.error('Failed to create links for additional recipients', {
+      sendId, error: error.message, apiCode: error.apiCode, status: error.status,
+    });
     const isPoolExhausted = error.message?.includes('429') || error.message?.includes('limit');
     const msg = isPoolExhausted
       ? 'Link pool exhausted for this resource. Please create a new send instead of adding recipients.'
       : 'Failed to create links for new recipients.';
+    // activeKind is set on entry to each hasFile/hasLocation block, so
+    // it's guaranteed populated by the time the catch fires — no
+    // fallback needed. If a future refactor adds throwable work before
+    // the branches, the audit emission will land with kind=null and
+    // surface in CloudWatch (discoverable, not silent).
+    // quota_exceeded skip lives inside emitMintFailureAudit.
+    emitMintFailureAudit(error, { sendId, kind: activeKind });
     return { msg, newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
@@ -4776,6 +4888,12 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
+      // classifyMintFailure: exposed so a unit test pins the
+      // reason-category contract (qurl-integrations#276). The
+      // cardinality-discipline comment on the helper says "don't
+      // add per-API-code branches" — without a test, that's just
+      // a docstring waiting to drift.
+      classifyMintFailure,
     },
   }),
 };

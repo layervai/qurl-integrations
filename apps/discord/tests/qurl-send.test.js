@@ -1817,6 +1817,19 @@ describe('handleAddRecipients', () => {
 
     const result = await handleAddRecipients('send-fail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toMatch(/Failed to prepare links/);
+
+    // Pin the QURL_SEND_CREATE_LINK_FAILURE emission from the INNER file
+    // catch at commands.js:2667. This catch site was un-instrumented before
+    // the round-6 fix — Add Recipients failures from the file branch went
+    // un-audited and the alarm under-counted. See #300 Claude review.
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-fail',
+      kind: 'file',
+      // 'Connector down' has no status/code/name → classifyMintFailure
+      // falls through to 'unknown'. Pin the exact category, not any-string.
+      reason: 'unknown',
+    }));
   });
 
   it('file send: batches > 10 new recipients into multiple mintLinks calls', async () => {
@@ -1915,6 +1928,94 @@ describe('handleAddRecipients', () => {
     const result = await handleAddRecipients('send-allfail', users, mockOriginalInteraction, 'test-api-key');
     expect(result.msg).toBe('Failed to create links for new recipients.');
     expect(mockSendDM).not.toHaveBeenCalled();
+
+    // Pin the QURL_SEND_CREATE_LINK_FAILURE emission from the OUTER catch
+    // at commands.js:2738. activeKind tracking guarantees kind='location'
+    // for a URL/location-resource send — `hasFile ? 'file' : 'location'`
+    // would mis-label mixed sends because the file branch returns early
+    // on its own failure. See #300 Claude review.
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-allfail',
+      kind: 'location',
+      // 'Connector upload failed' has no status/code/name → 'unknown'.
+      reason: 'unknown',
+    }));
+  });
+
+  // quota_exceeded skip rule for addRecipients sites. The skip lives in
+  // emitMintFailureAudit (commands.js helper) so it applies uniformly to
+  // all 3 emission sites. If a future refactor moves the guard back out
+  // of the helper, the addRecipients sites silently regress to paging on
+  // viral uploads via Add Recipients — this test catches that.
+  it('addRecipients: quota_exceeded does NOT emit QURL_SEND_CREATE_LINK_FAILURE', async () => {
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'file',
+      connector_resource_id: 'conn-res-q',
+      actual_url: null,
+      expires_in: '24h',
+      personal_message: null,
+      location_name: null,
+      attachment_name: 'viral.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/viral.pdf',
+    });
+
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'res-q', fileBuffer: new ArrayBuffer(4) });
+    const quotaErr = Object.assign(new Error('upstream quota'), { apiCode: 'quota_exceeded' });
+    mockMintLinks.mockRejectedValue(quotaErr);
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-1', bot: false, username: 'Alice' },
+    ]);
+
+    const logger = require('../src/logger');
+    logger.audit.mockClear();
+    await handleAddRecipients('send-quota', users, mockOriginalInteraction, 'test-api-key');
+
+    const failureCalls = logger.audit.mock.calls.filter(
+      (c) => c[0] === 'qurl_send_create_link_failure',
+    );
+    expect(failureCalls).toHaveLength(0);
+  });
+
+  // Mixed-resource sendConfig variant — exercises the `activeKind` fix
+  // for the case where hasFile && hasLocation are both true. Without the
+  // fix, the outer catch would emit kind='file' for a failure that
+  // happened in the location branch (file branch returns on its own
+  // failure). Pins the #300 round-7 correctness fix.
+  it('mixed send (file+location): outer catch from location failure emits kind=location, not file', async () => {
+    mockDb.getSendConfig.mockReturnValue({
+      resource_type: 'mixed',
+      connector_resource_id: null,
+      actual_url: 'https://maps.google.com/?q=test',
+      expires_in: '24h',
+      personal_message: null,
+      location_name: 'Mixed Send Location',
+      attachment_name: 'doc.pdf',
+      attachment_content_type: 'application/pdf',
+      attachment_url: 'https://cdn.discordapp.com/attachments/1/2/doc.pdf',
+    });
+
+    // File branch succeeds, location branch fails. activeKind must be
+    // 'location' at the moment the outer catch fires.
+    mockDownloadAndUpload.mockResolvedValue({ resource_id: 'mix-file-res', fileBuffer: new ArrayBuffer(4) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/m-1' }]);
+    mockUploadJsonToConnector.mockRejectedValue(Object.assign(new Error('connector 502'), { status: 502 }));
+
+    const users = makeUsersCollection([
+      { id: 'rcpt-1', bot: false, username: 'Alice' },
+    ]);
+
+    await handleAddRecipients('send-mixed-fail', users, mockOriginalInteraction, 'test-api-key');
+
+    const logger = require('../src/logger');
+    expect(logger.audit).toHaveBeenCalledWith('qurl_send_create_link_failure', expect.objectContaining({
+      send_id: 'send-mixed-fail',
+      kind: 'location', // NOT 'file' — pins the activeKind fix
+      reason: 'upstream_5xx',
+      status_code: 502,
+    }));
   });
 });
 
