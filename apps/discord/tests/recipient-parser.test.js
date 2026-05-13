@@ -325,10 +325,15 @@ describe('parseRecipientMentions — invalid tokens', () => {
       .toEqual({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
   });
 
-  test('custom emoji land in invalidTokens', () => {
+  test('custom emoji (static and animated) land in invalidTokens', () => {
+    // Both `<:name:id>` (static) and `<a:name:id>` (animated) hit
+    // the residue path — neither matches the USER_MENTION_RE
+    // (`<@!?(\d+)>`) or ROLE_MENTION_RE (`<@&(\d+)>`) shapes.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <:smile:789>', int))
       .toEqual({ ids: ['111'], invalidTokens: ['<:smile:789>'], cappedCount: 0 });
+    expect(parseRecipientMentions('<@111> <a:dance:790>', int))
+      .toEqual({ ids: ['111'], invalidTokens: ['<a:dance:790>'], cappedCount: 0 });
   });
 
   test('bare plaintext usernames land in invalidTokens', () => {
@@ -635,7 +640,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(logger.debug).toHaveBeenCalledTimes(1);
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('capping recipient list'),
-      expect.objectContaining({ unique_count: 26, cap: 25, capped_count: 1 }),
+      expect.objectContaining({ uniqueCount: 26, cap: 25, cappedCount: 1 }),
     );
     expect(logger.warn).not.toHaveBeenCalled();
 
@@ -668,7 +673,7 @@ describe('parseRecipientMentions — cap + length safety', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('capping recipient list'),
-      expect.objectContaining({ unique_count: 51, cap: 25, capped_count: 26 }),
+      expect.objectContaining({ uniqueCount: 51, cap: 25, cappedCount: 26 }),
     );
     expect(logger.debug).not.toHaveBeenCalled();
   });

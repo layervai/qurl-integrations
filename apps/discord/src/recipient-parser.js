@@ -95,11 +95,12 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // before the API ceiling. 7b.2 should narrow the option's
 // max_length to ≤4000 so this cap becomes defense-in-depth rather
 // than the user-visible truncation point.
-// KEEP IN SYNC with the slash-option `max_length` in 7b.2's
-// builder. If 7b.2 narrows the option's max_length to ≤ 4000,
-// this cap becomes defense-in-depth; if it doesn't, this is the
-// user-visible truncation point (and the partial-mention trim
-// below becomes lossy on legitimate over-cap content).
+// TODO(7b.2): KEEP IN SYNC with the slash-option `max_length` in
+// 7b.2's builder. If 7b.2 narrows the option's max_length to
+// ≤ 4000, this cap becomes defense-in-depth; if it doesn't, this
+// is the user-visible truncation point (and the partial-mention
+// trim below becomes lossy on legitimate over-cap content).
+// Grep `TODO(7b.2)` to find the 7b.1 → 7b.2 coordination markers.
 const MAX_INPUT_LENGTH = 4000;
 
 // Per-token cap on entries in `invalidTokens`. Discord's embed total
@@ -339,7 +340,7 @@ function parseRecipientMentions(raw, interaction) {
       ? logger.warn
       : logger.debug;
     logFn('recipient-parser: capping recipient list at QURL_SEND_MAX_RECIPIENTS', {
-      unique_count: seen.size, cap, capped_count: cappedCount,
+      uniqueCount: seen.size, cap, cappedCount,
     });
   }
 
