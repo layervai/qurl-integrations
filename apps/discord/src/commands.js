@@ -2534,6 +2534,12 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 // flip — see SEND_STAGE_AWAITING_CONFIRM above for the matching stage-
 // value drain. #316 was the post-7b.3 cleanup that dropped the legacy
 // `qurl_send_*` prefix; subsequent renames here need the same drain.
+//
+// The post-send Add Recipients / Revoke / Show All buttons live on
+// different customId prefixes (`qurl_add_*`, `qurl_revoke_*`,
+// `qurl_expand_*`) — they are NOT affected by renaming the confirm-
+// card literals here, so the 180s flow_state TTL is the only drain
+// that needs to clear.
 const CONFIRM_USER_SELECT_CUSTOM_ID = 'qurl_confirm_user_select';
 const CONFIRM_SEND_CUSTOM_ID = 'qurl_confirm_send';
 const CONFIRM_CANCEL_CUSTOM_ID = 'qurl_confirm_cancel';
@@ -5948,9 +5954,17 @@ module.exports = {
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
+      // All seven confirm-card customId literals exported so the
+      // contract test in qurl-file-map.test.js can pin every wire
+      // value — a typo in any of these silently breaks routing for
+      // in-flight confirm cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,
       CONFIRM_SEND_CUSTOM_ID,
       CONFIRM_CANCEL_CUSTOM_ID,
+      CONFIRM_EXPIRY_SELECT_CUSTOM_ID,
+      CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
+      CONFIRM_NOTE_BUTTON_CUSTOM_ID,
+      CONFIRM_NOTE_MODAL_CUSTOM_ID,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,
     },

@@ -181,6 +181,10 @@ const {
   CONFIRM_USER_SELECT_CUSTOM_ID,
   CONFIRM_SEND_CUSTOM_ID,
   CONFIRM_CANCEL_CUSTOM_ID,
+  CONFIRM_EXPIRY_SELECT_CUSTOM_ID,
+  CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
+  CONFIRM_NOTE_BUTTON_CUSTOM_ID,
+  CONFIRM_NOTE_MODAL_CUSTOM_ID,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -3083,14 +3087,30 @@ describe('constants + exports', () => {
   // SEND_STAGE_AWAITING_CONFIRM, ...})`) already pin them by
   // contract.
   test('customIds match the wire-protocol values Discord routes against', () => {
+    // Pin EVERY confirm-card customId constant. A typo in any one of
+    // these silently breaks routing for in-flight cards across a
+    // deploy, so the contract test asserts against the literal wire
+    // value rather than just the JS constant binding.
     expect(CONFIRM_USER_SELECT_CUSTOM_ID).toBe('qurl_confirm_user_select');
     expect(CONFIRM_SEND_CUSTOM_ID).toBe('qurl_confirm_send');
     expect(CONFIRM_CANCEL_CUSTOM_ID).toBe('qurl_confirm_cancel');
+    expect(CONFIRM_EXPIRY_SELECT_CUSTOM_ID).toBe('qurl_confirm_expiry');
+    expect(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID).toBe('qurl_confirm_self_destruct');
+    expect(CONFIRM_NOTE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_note_btn');
+    expect(CONFIRM_NOTE_MODAL_CUSTOM_ID).toBe('qurl_confirm_note_modal');
   });
 
   test('all customIds unique', () => {
-    const ids = new Set([CONFIRM_USER_SELECT_CUSTOM_ID, CONFIRM_SEND_CUSTOM_ID, CONFIRM_CANCEL_CUSTOM_ID]);
-    expect(ids.size).toBe(3);
+    const ids = new Set([
+      CONFIRM_USER_SELECT_CUSTOM_ID,
+      CONFIRM_SEND_CUSTOM_ID,
+      CONFIRM_CANCEL_CUSTOM_ID,
+      CONFIRM_EXPIRY_SELECT_CUSTOM_ID,
+      CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
+      CONFIRM_NOTE_BUTTON_CUSTOM_ID,
+      CONFIRM_NOTE_MODAL_CUSTOM_ID,
+    ]);
+    expect(ids.size).toBe(7);
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
