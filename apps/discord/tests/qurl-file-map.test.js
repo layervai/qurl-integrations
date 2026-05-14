@@ -889,6 +889,46 @@ describe('handleAutocomplete', () => {
     expect(choices.map(c => c.value)).toEqual([`qurl_place:${good1}`, `qurl_place:${good2}`]);
   });
 
+  test('drops a choice whose name is missing (Places returned no main_text + no description)', async () => {
+    // Places marks both main_text and description as optional. If both
+    // are missing, searchPlaces yields { name: undefined }, and a
+    // naive label would render as the literal string "undefined".
+    // Discord also rejects empty/whitespace names, so the choice must
+    // be skipped — pin both the skip behavior and that valid entries
+    // around it still render.
+    const valid = fakePlaceId('valid_for_label');
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: valid, name: 'Valid', address: 'addr' },
+      { placeId: fakePlaceId('no_name_entry'), name: undefined, address: 'addr2' },
+      { placeId: fakePlaceId('empty_name_xx'), name: '', address: 'addr3' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(1);
+    expect(choices[0].value).toBe(`qurl_place:${valid}`);
+  });
+
+  test('outer-catch handles a rejection from an early-return respond() (return await contract)', async () => {
+    // The early-return guards use `return await interaction.respond([])`
+    // (not bare `return`) so a rejected promise is routed through the
+    // outer try/catch instead of leaking out of the async function. A
+    // bare `return` would propagate the rejection to the dispatch
+    // caller (which would surface as "this command is unresponsive"
+    // to the user). Pin: the rejection IS caught + recovery fires.
+    const int = makeAutocompleteInteraction({ guildId: null });
+    let respondCallCount = 0;
+    int.respond = jest.fn(async () => {
+      respondCallCount += 1;
+      if (respondCallCount === 1) throw new Error('Unknown interaction');
+      // The outer-catch's best-effort fallback respond([]) — let this
+      // one resolve so we don't double-throw.
+    });
+    await handleAutocomplete(int);
+    // Outer catch fired its fallback respond([]) on the rejection.
+    expect(respondCallCount).toBe(2);
+  });
+
   test('drops a choice whose place_id fails the documented shape check', async () => {
     // Mirror of the decodePlaceIdSentinel shape gate at encode time.
     // If Google ever ships a malformed place_id (chars outside
@@ -2053,6 +2093,31 @@ describe('handleQurlMap — slash entry', () => {
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.locationUrl).toContain('query_place_id=ChIJ4zGFAZpYwokRGUGph3Mf37k');
     expect(payload.locationName).toMatch(/Central Park/);
+  });
+
+  test('free-text input is trimmed + 500-char-capped before reaching Places', async () => {
+    // handleQurlMap does `trim().slice(0, 500)` on the slash option;
+    // pin the boundary so a forged interaction can't smuggle a
+    // longer-than-the-server-side-cap query through. Whitespace at the
+    // boundary is trimmed FIRST (so the content slice gets the full
+    // 500 chars, not whitespace + 450 content chars).
+    mockFindPlaceFromText.mockResolvedValueOnce({
+      placeId: 'ChIJ4zGFAZpYwokRGUGph3Mf37k', name: 'X', address: 'Y',
+    });
+    const padding = '  '.repeat(40); // 80 chars of leading whitespace, trimmed first
+    const content = 'a'.repeat(600); // 600 chars of content, slice() caps at 500
+    const int = makeInteraction({
+      options: {
+        location: padding + content + padding,
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const calledWith = mockFindPlaceFromText.mock.calls[0][0];
+    expect(calledWith.length).toBe(500);
+    expect(calledWith.startsWith('a')).toBe(true);
+    expect(calledWith.endsWith('a')).toBe(true);
   });
 
   test('place_id sentinel from autocomplete → resolved through Place Details', async () => {

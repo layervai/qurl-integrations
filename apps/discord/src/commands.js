@@ -5929,6 +5929,11 @@ async function handleAutocomplete(interaction) {
       // to reject them — saves the user a "place no longer available"
       // error on a malformed Google response.
       if (!PLACE_ID_SHAPE_RE.test(p.placeId)) continue;
+      // Places marks `main_text` and `description` as optional; if both
+      // are missing, searchPlaces returns `name: undefined` and the
+      // label would render as the literal string "undefined". Discord
+      // also rejects empty/whitespace names, so just skip.
+      if (!p.name) continue;
       const value = encodePlaceIdSentinel(p.placeId);
       if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;

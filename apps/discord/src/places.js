@@ -91,6 +91,13 @@ const autocompleteInflight = new Map();
 // whitespace so "Whitehouse", "whitehouse", and " White House "
 // share the same entry — Places Autocomplete is case-insensitive,
 // so the cache should be too.
+//
+// NOTE: the key has no per-sender / per-geo dimension, so a cache hit
+// returns whoever-primed-the-cache's geo-biased predictions. End
+// behavior is still correct (the picked place_id is canonical), but
+// the dropdown UX may briefly surprise a second sender in a different
+// region. Acceptable for autocomplete (the picked destination is
+// always pinned); revisit if telemetry shows user confusion.
 function cacheKey(query) {
   return query.toLowerCase().replace(/\s+/g, ' ').trim();
 }
