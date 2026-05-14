@@ -423,20 +423,11 @@ function resolveRecipientAlias(r, interaction) {
   return sanitizeDisplayNamePlain(raw);
 }
 
-// Resolve a list of role IDs to display names for the
-// `roleMentionsDeniedNames` warning surface (#326). Falls back to
-// `'unknown-role'` when the role isn't in `guild.roles.cache` — race
-// case where the role was deleted between parse and render. Single-
-// sourced so a future change to the fallback string or cache shape
-// only touches one place (vs. the text-path and picker-path call
-// sites drifting).
-//
-// Uses `||` (not `??`) intentionally so empty-string names also fall
-// through to `unknown-role`. Discord enforces 1–100 char role names
-// server-side, so empty names shouldn't surface in legitimate flows,
-// but a forged interaction or future API shape could carry one. The
-// alternative under `??` would render `@` (the empty backtick block
-// is visually broken). Rendering `unknown-role` is strictly safer.
+// Resolve role IDs to display names for the `roleMentionsDeniedNames`
+// warning surface (#326). Single-sourced so the text-path and picker-
+// path call sites can't drift. `||` (not `??`) so an empty-string
+// name — forged interaction / future API shape — also falls through
+// to `unknown-role` rather than rendering `@`.
 function resolveRoleNames(guild, ids) {
   if (!ids || ids.length === 0) return [];
   return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
@@ -505,6 +496,17 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // UserSelectMenu AND the post-send "Add Recipients" flow both use this
 // — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
+
+// Shared render caps for warnings-block bullets that surface user-
+// or admin-controlled strings (invalidTokens, roleMentionsDeniedNames).
+// 10-bullet cap bounds the embed footprint under a forged-interaction
+// enumeration attempt; 80-codepoint per-string cap keeps a single
+// pathological role name / mention token from dwarfing the rest of
+// the card. Hoisted here (not inline in renderRecipientWarnings) so
+// the shared intent is explicit — one place to bump if Discord's
+// embed budget changes.
+const WARNING_LIST_DISPLAY_MAX = 10;
+const WARNING_NAME_CODEPOINT_CAP = 80;
 
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
 // `location:` consumes these — extracted to a single source so a
@@ -3057,18 +3059,6 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
-// Shared render-bound caps for warnings-block bullets that surface
-// user-controlled (or attacker-influenced) strings. The 80-codepoint
-// cap is shared between invalidTokens and role-name bullets — the
-// two values coincidentally matched when added in #326's review,
-// hoisted here to make the shared intent explicit (one place to
-// bump if Discord's embed budget changes). The display-cap (10
-// entries) bounds the bullet count for both surfaces; the tail count
-// discloses the rest so a forged-interaction enumeration attempt
-// gets surfaced without dwarfing the ephemeral.
-const WARNING_LIST_DISPLAY_MAX = 10;
-const WARNING_NAME_CODEPOINT_CAP = 80;
-
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
