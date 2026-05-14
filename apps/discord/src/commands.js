@@ -2529,11 +2529,11 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 // REVOKE_SELECT_CUSTOM_ID / SETUP_BUTTON_CUSTOM_ID use.
 //
 // WIRE-PROTOCOL: the `qurl_confirm_*` literals below are encoded into
-// every in-flight `flow_state` row for an open confirm card (cleared
-// by SEND_FLOW_TTL_SECONDS = 180s drain). Renaming them is a coordinated
-// flip — see SEND_STAGE_AWAITING_CONFIRM above for the matching stage-
-// value drain. #316 was the post-7b.3 cleanup that dropped the legacy
-// `qurl_send_*` prefix; subsequent renames here need the same drain.
+// every in-flight `flow_state` row for an open confirm card. Renaming
+// them is a coordinated flip — wait for a SEND_FLOW_TTL_SECONDS (180s)
+// drain on the prior deploy so in-flight rows expire before the new
+// dispatcher routes against the new literal. See
+// SEND_STAGE_AWAITING_CONFIRM above for the matching stage-value drain.
 //
 // The post-send Add Recipients / Revoke / Show All buttons live on
 // different customId prefixes (`qurl_add_*`, `qurl_revoke_*`,
@@ -3512,11 +3512,10 @@ async function handleQurlMap(interaction) {
 }
 
 // --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
-// Wire literals (`qurl_confirm_*`) and handler names were renamed away
-// from the legacy `qurl_send_*` / `handleSend*` prefix in #316, after
-// the 7b.3 drain. Any future rename here needs the same
-// SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so in-flight
-// `flow_state` rows don't orphan across the boundary.
+// Any future rename of the `qurl_confirm_*` wire literals (or these
+// handler names, since they're paired with them via registerFlow)
+// needs a SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so
+// in-flight `flow_state` rows don't orphan across the boundary.
 //
 // Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
 // `stage_to` === current stage advances the version (OCC guard) and
