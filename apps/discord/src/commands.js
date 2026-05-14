@@ -3071,6 +3071,13 @@ function renderRecipientWarnings({
   roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
+  // Shared sanitizer for user-/admin-controlled strings rendered inline
+  // in a bullet: strip backticks (prevent code-fence breakout) then
+  // codepoint-slice with ellipsis. Used by both the invalidTokens and
+  // roleMentionsDeniedNames bullets — single-sourced so the two paths
+  // can't drift.
+  const sanitizeForBullet = (s) =>
+    sliceWithEllipsis(s.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
   if (cappedCount > 0) {
     lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
   }
@@ -3091,9 +3098,7 @@ function renderRecipientWarnings({
     // rendering the attacker's entire payload. List cap
     // (WARNING_LIST_DISPLAY_MAX, 10) bounds the bullet count; both
     // constants are shared with the role-mentions-denied path below.
-    const shown = invalidTokens.slice(0, WARNING_LIST_DISPLAY_MAX).map(
-      (t) => sliceWithEllipsis(t.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…'),
-    );
+    const shown = invalidTokens.slice(0, WARNING_LIST_DISPLAY_MAX).map(sanitizeForBullet);
     const more = invalidTokens.length > WARNING_LIST_DISPLAY_MAX
       ? ` (+${invalidTokens.length - WARNING_LIST_DISPLAY_MAX} more)`
       : '';
@@ -3154,8 +3159,7 @@ function renderRecipientWarnings({
     //     set, so treat the input as untrusted for rendering.
     const shown = roleMentionsDeniedNames.slice(0, WARNING_LIST_DISPLAY_MAX);
     for (const name of shown) {
-      const safe = sliceWithEllipsis(name.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
-      lines.push(`• \`@${safe}\` requires the **Mention Everyone** permission or \`role.mentionable: true\` — skipped.`);
+      lines.push(`• \`@${sanitizeForBullet(name)}\` requires the **Mention Everyone** permission or \`role.mentionable: true\` — skipped.`);
     }
     if (roleMentionsDeniedNames.length > WARNING_LIST_DISPLAY_MAX) {
       lines.push(`• (+${roleMentionsDeniedNames.length - WARNING_LIST_DISPLAY_MAX} more role mention(s) skipped.)`);
