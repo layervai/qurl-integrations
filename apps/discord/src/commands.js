@@ -4193,7 +4193,14 @@ async function handleQurlSlashSend(interaction, params) {
       interaction,
     });
     const rows = renderConfirmCardRows({
-      attachPicker: needsPicker,
+      // Always attach the picker so the row layout is stable from
+      // frame 0 — without this, a slash entry that supplied
+      // `recipients:` would render 3 rows initially and then jump to
+      // 4 the first time the user touched any menu (rerenderConfirmCard
+      // hard-codes attachPicker: true). Always-attached also matches
+      // handleSendUserSelect's post-pick contract: the picker stays
+      // available for re-picks, even after a successful pick.
+      attachPicker: true,
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
       expiresIn,
       selfDestructSeconds,
@@ -4673,9 +4680,9 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 // who opened /qurl file without `recipients:` could change expiry
 // before picking and see an enabled Send button against an empty
 // recipient set.
-// `ack` lets modal-submit handlers pass `interaction.update` —
-// deferred-ACK menu handlers use the editReply default.
-async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => interaction.editReply(msg)) {
+// All four entry paths (picker, expiry, self-destruct, note modal)
+// defer-ack first, then re-render via editReply.
+async function rerenderConfirmCard(interaction, newPayload) {
   const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
   // Resolve each id through three layers, in priority order:
   //   1. members.cache — freshest data when populated
@@ -4705,7 +4712,7 @@ async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => inter
     needsPicker,
     interaction,
   });
-  return ack({
+  return interaction.editReply({
     content,
     components: renderConfirmCardRows({
       attachPicker: true,

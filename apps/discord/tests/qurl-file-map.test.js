@@ -2717,10 +2717,18 @@ describe('renderConfirmCardRows', () => {
     expect(lastCall.components).toHaveLength(4);
   });
 
-  test('with attachPicker=false → 3 rows (no picker, 2 selects + button row)', async () => {
-    // Provide a valid recipient via the `recipients:` slash option —
-    // partition resolves it, needsPicker becomes false, rows render
-    // without the UserSelectMenu.
+  test('slash-entry WITH recipients → 4 rows (picker still attached so layout is stable across menu interactions)', async () => {
+    // Round-4 cr surfaced: the picker was conditionally attached on
+    // initial render (3 rows when recipients supplied) but
+    // rerenderConfirmCard hard-codes attachPicker:true (4 rows). The
+    // row count jumped from 3 to 4 the first time the user clicked
+    // any menu, which was a visible mid-flow layout shift.
+    //
+    // Fix: always attach the picker on initial render too. The user
+    // sees the same 4-row layout from frame 0 through every menu
+    // interaction. The picker remaining available also matches
+    // handleSendUserSelect's post-pick contract — re-picks stay
+    // possible after a successful pick.
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
@@ -2728,7 +2736,7 @@ describe('renderConfirmCardRows', () => {
     await handleQurlFile(int);
     const editReplyCalls = int.editReply.mock.calls;
     const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
-    expect(lastCall.components).toHaveLength(3);
+    expect(lastCall.components).toHaveLength(4);
   });
 
   test('button row carries Note + Send + Cancel in that order (3 buttons, identifiable customIds)', async () => {
@@ -2839,5 +2847,41 @@ describe('constants + exports', () => {
 
   test('executeSendPipeline still exported (back-half hook)', () => {
     expect(typeof executeSendPipeline).toBe('function');
+  });
+
+  test('CONTRACT: executeSendPipeline never reads personalMessageRaw', () => {
+    // Static guard against future bit-rot. `personalMessageRaw` is
+    // for modal-prefill only — it's the trimmed user input WITHOUT
+    // NFKC + bidi-strip + markdown-escape passes. A future refactor
+    // that accidentally reads it from any rendering path or the
+    // pipeline would bypass sanitization and could render injected
+    // markdown / masked links into recipient DMs.
+    //
+    // The contract is preserved structurally today: executeSendPipeline
+    // destructures by explicit field name (not `...payload` spread).
+    // This test extracts the function body from source and pins that
+    // the substring `personalMessageRaw` does not appear inside it.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/commands.js'), 'utf8');
+    const startMarker = 'async function executeSendPipeline(';
+    const startIdx = src.indexOf(startMarker);
+    expect(startIdx).toBeGreaterThanOrEqual(0);
+    // Walk forward tracking brace depth; first time depth returns to
+    // 0 after entering the body marks the end of the function.
+    let i = src.indexOf('{', startIdx);
+    expect(i).toBeGreaterThanOrEqual(0);
+    let depth = 0;
+    let end = -1;
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    expect(end).toBeGreaterThan(startIdx);
+    const fnBody = src.slice(startIdx, end + 1);
+    expect(fnBody).not.toContain('personalMessageRaw');
   });
 });
