@@ -1922,9 +1922,11 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let sent = false;
     try {
       // Same Unix-seconds expiry computation as executeSendPipeline —
-      // see comment there. Computed once per recipient (cheap; the
+      // see comment there. Computed once per handleAddRecipients call
+      // (outside the .map below), so a single batch's recipients all
+      // share the same expiry. Cheap to recompute on each call; the
       // alternative would be threading a single timestamp through
-      // sendConfig).
+      // sendConfig at save time.
       const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
         // Same alias resolution as executeSendPipeline — see comment
