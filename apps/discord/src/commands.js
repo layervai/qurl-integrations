@@ -2528,26 +2528,29 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 // as a routing key, not an identity signal). Matches the convention
 // REVOKE_SELECT_CUSTOM_ID / SETUP_BUTTON_CUSTOM_ID use.
 //
-// WIRE-PROTOCOL FROZEN until #316. The `qurl_send_*` string literals
-// below are encoded into (a) every in-flight `flow_state` row in DDB
-// for confirm-card sessions (cleared by SEND_FLOW_TTL_SECONDS = 180s
-// drain), AND (b) every active button row on the message that hosted
-// the original confirm card (cleared once monitorLinkStatus stops
-// polling, which can take several minutes on large fan-outs). #316's
-// rename PR must wait for BOTH drains before flipping the literals.
-// See also: SEND_STAGE_AWAITING_CONFIRM above (same wire-protocol
-// constraint for the flow_state.stage column).
-const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
-const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
-const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
+// WIRE-PROTOCOL: the `qurl_confirm_*` literals below are encoded into
+// every in-flight `flow_state` row for an open confirm card. Renaming
+// them is a coordinated flip — wait for a SEND_FLOW_TTL_SECONDS (180s)
+// drain on the prior deploy so in-flight rows expire before the new
+// dispatcher routes against the new literal. See
+// SEND_STAGE_AWAITING_CONFIRM above for the matching stage-value drain.
+//
+// The post-send Add Recipients / Revoke / Show All buttons live on
+// different customId prefixes (`qurl_add_*`, `qurl_revoke_*`,
+// `qurl_expand_*`) — they are NOT affected by renaming the confirm-
+// card literals here, so the 180s flow_state TTL is the only drain
+// that needs to clear.
+const CONFIRM_USER_SELECT_CUSTOM_ID = 'qurl_confirm_user_select';
+const CONFIRM_SEND_CUSTOM_ID = 'qurl_confirm_send';
+const CONFIRM_CANCEL_CUSTOM_ID = 'qurl_confirm_cancel';
 // Confirm-card menus / button — slash options on /qurl file + /qurl map
 // remain as initial defaults (one-shot for power users), but a user who
 // didn't fill them in can still adjust expiry, self-destruct, and note
 // inline on the card.
-const SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_send_confirm_expiry';
-const SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_send_confirm_self_destruct';
-const SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_send_confirm_note_btn';
-const SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_send_confirm_note_modal';
+const CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_confirm_expiry';
+const CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_confirm_self_destruct';
+const CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_confirm_note_btn';
+const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // Local to the note modal — kept off the prefix-only customId
 // allowlist because flow-dispatch never routes modal-input fields,
 // only the parent modal customId.
@@ -2903,7 +2906,7 @@ function renderConfirmCardRows({
   const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
   rows.push(new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
-      .setCustomId(SEND_USER_SELECT_CUSTOM_ID)
+      .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
       .setPlaceholder(`Pick recipients (1–${maxValues})`)
       .setMinValues(1)
       .setMaxValues(maxValues)
@@ -2930,7 +2933,7 @@ function renderConfirmCardRows({
   }
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID)
+      .setCustomId(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID)
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
@@ -2961,7 +2964,7 @@ function renderConfirmCardRows({
   }
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
-      .setCustomId(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
+      .setCustomId(CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
@@ -2977,16 +2980,16 @@ function renderConfirmCardRows({
   // can tell at a glance whether a note is attached.
   rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID)
+      .setCustomId(CONFIRM_NOTE_BUTTON_CUSTOM_ID)
       .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note (optional)')
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
-      .setCustomId(SEND_CONFIRM_SEND_CUSTOM_ID)
+      .setCustomId(CONFIRM_SEND_CUSTOM_ID)
       .setLabel('\u{1F4E4} Send')
       .setStyle(ButtonStyle.Success)
       .setDisabled(sendDisabled),
     new ButtonBuilder()
-      .setCustomId(SEND_CONFIRM_CANCEL_CUSTOM_ID)
+      .setCustomId(CONFIRM_CANCEL_CUSTOM_ID)
       .setLabel('Cancel')
       .setStyle(ButtonStyle.Secondary),
   ));
@@ -3001,7 +3004,7 @@ function renderConfirmCardRows({
 //   locationName: string | null                          (map path)
 //   resourceLabel: string                                (rendered on card)
 // apiKey is INTENTIONALLY not threaded through the front-half.
-// handleSendConfirmClick re-fetches the guild API key at Send time
+// handleConfirmSendClick re-fetches the guild API key at Send time
 // — the key may rotate during the confirm card's 3-min TTL, and the
 // dispatcher's gate at the slash-command entry point only proves the
 // key was present at that single moment. Re-fetching at click time
@@ -3181,7 +3184,7 @@ async function handleQurlSlashSend(interaction, params) {
       // (no NFKC, no bidi/control strip, no @-mention defuse, no
       // markdown escape). Never read it from any rendering path or
       // downstream pipeline — only `personalMessage` (the sanitized
-      // derivative) is safe for those. `handleSendConfirmClick`
+      // derivative) is safe for those. `handleConfirmSendClick`
       // explicitly picks `personalMessage` (not `...payload`) when
       // calling `executeSendPipeline`, which keeps this safe today;
       // a contract test pins that invariant.
@@ -3509,24 +3512,20 @@ async function handleQurlMap(interaction) {
 }
 
 // --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
-// These `handleSend*` names refer to the Send BUTTON on the confirm card
-// (not the deleted `/qurl send` slash command). The associated customId
-// wire literals (`qurl_send_user_select`, `qurl_send_confirm_*`) are
-// preserved post-7b.3 because in-flight `flow_state` rows encode them —
-// renaming would orphan any open confirm card across the deploy
-// boundary. Rename of both the identifiers AND the customIds is tracked
-// in #316, scheduled for a deploy ≥ SEND_FLOW_TTL_SECONDS (180s) after
-// 7b.3 lands so the DDB rows have drained.
+// Any future rename of the `qurl_confirm_*` wire literals (or these
+// handler names, since they're paired with them via registerFlow)
+// needs a SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so
+// in-flight `flow_state` rows don't orphan across the boundary.
 //
 // Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
 // `stage_to` === current stage advances the version (OCC guard) and
 // refreshes the TTL, so repeated picker churn doesn't expire the row
 // while the user is still deciding.
-async function handleSendUserSelect(interaction, { flow_id, row }) {
+async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // `deferUpdate` first so the downstream `transitionFlow` (DDB OCC
   // update) can take more than Discord's 3-second hard ack deadline
   // without surfacing as an "interaction failed" toast. Mirrors
-  // handleSendConfirmClick / handleSendCancelClick. All `update`
+  // handleConfirmSendClick / handleConfirmCancelClick. All `update`
   // calls below become `editReply` (the interaction is now deferred).
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
 
@@ -3538,7 +3537,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // Delete the corrupt row + surface actionable "re-run" copy.
   const payloadResource = (row.payload || {}).resourceType;
   if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
-    logger.error('handleSendUserSelect: corrupt flow payload (unknown resourceType)', {
+    logger.error('handleConfirmUserSelect: corrupt flow payload (unknown resourceType)', {
       flow_id, resource_type: payloadResource,
     });
     await deleteFlow(flow_id, {
@@ -3574,7 +3573,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // No `resolveRecipientUsers` re-fetch here — Discord's
   // UserSelectMenu only surfaces users visible to the bot in this
   // guild, so picked User IDs are guild-bounded at the gateway-event
-  // level. handleSendConfirmClick re-fetches at click time
+  // level. handleConfirmSendClick re-fetches at click time
   // (partial-drop test pins this) as the actual guild-membership
   // defense; adding it here would burn 10 members.fetch calls per
   // picker tick without catching anything the Send-time check misses.
@@ -3611,7 +3610,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     // the same flow_state version. Log for forensics so a sudden spike
     // in invalid-pick churn surfaces in metrics without lowering log
     // verbosity.
-    logger.debug('handleSendUserSelect: all-invalid pick', {
+    logger.debug('handleConfirmUserSelect: all-invalid pick', {
       flow_id, dropped_bots: droppedBots, dropped_self: droppedSelf,
     });
     const reasons = [];
@@ -3652,7 +3651,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     warningsBlock: newWarningsBlock,
   };
   // Targeted catch around transitionFlow mirrors the same shape
-  // handleSendConfirmClick / handleSendCancelClick use around their
+  // handleConfirmSendClick / handleConfirmCancelClick use around their
   // DDB calls. A throw here would otherwise bubble to the dispatcher's
   // outer catch which surfaces a generic "superseded" message —
   // wrong, since nothing was actually superseded on a DDB blip.
@@ -3665,7 +3664,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
       set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
-    logger.error('handleSendUserSelect: transitionFlow threw', {
+    logger.error('handleConfirmUserSelect: transitionFlow threw', {
       flow_id, error: err && err.message,
     });
     return interaction.followUp({
@@ -3791,7 +3790,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
 // validation against EXPIRY_LABELS mirrors handleQurlSlashSend's slash-
 // option gate — Discord enforces the choice set server-side, but a
 // forged interaction could land an off-set value here.
-async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
+async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // `?.[0]` is paranoia, not load-bearing — Discord guarantees
   // `values` is an array for StringSelectMenu interactions. The
   // guard catches a forged interaction missing the field entirely;
@@ -3801,7 +3800,7 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
   // (the cheaper, single-call ack) instead of `followUp` after a
   // wasted deferUpdate. Symmetric with the self-destruct handler.
   if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
-    logger.warn('handleSendConfirmExpirySelect: forged off-set expiry value', {
+    logger.warn('handleConfirmExpirySelect: forged off-set expiry value', {
       flow_id, value: truncForLog(picked),
     });
     return interaction.reply({
@@ -3829,7 +3828,7 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
       set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
-    logger.error('handleSendConfirmExpirySelect: transitionFlow threw', {
+    logger.error('handleConfirmExpirySelect: transitionFlow threw', {
       flow_id, error: err && err.message,
     });
     return interaction.followUp({
@@ -3858,7 +3857,7 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
 // from the slash option's `'none'` value handled by
 // selfDestructOptionToSeconds. The helper falls back to null for any
 // unexpected value (forged interaction), which is the safe default.
-async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
+async function handleConfirmSelfDestructSelect(interaction, { flow_id, row }) {
   // `?.[0]` paranoia (see expiry handler) — legitimate
   // StringSelectMenu interactions always carry the values array.
   const pickedValue = interaction.values?.[0];
@@ -3868,7 +3867,7 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
   // to null would clear a user's previously-set timer on every probe
   // — symmetric with the expiry handler's reject-and-warn behavior.
   if (!isLegitimateSelfDestructSelectValue(pickedValue)) {
-    logger.warn('handleSendConfirmSelfDestructSelect: forged off-set self-destruct value', {
+    logger.warn('handleConfirmSelfDestructSelect: forged off-set self-destruct value', {
       flow_id, value: truncForLog(pickedValue),
     });
     return interaction.reply({
@@ -3894,7 +3893,7 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
       set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
-    logger.error('handleSendConfirmSelfDestructSelect: transitionFlow threw', {
+    logger.error('handleConfirmSelfDestructSelect: transitionFlow threw', {
       flow_id, error: err && err.message,
     });
     return interaction.followUp({
@@ -3919,15 +3918,15 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
 
 // Note button → opens a modal with the current personalMessage pre-
 // filled. Does NOT call transitionFlow — the flow row is untouched
-// until the modal SUBMITS (handleSendConfirmNoteModal below). This
+// until the modal SUBMITS (handleConfirmNoteModal below). This
 // asymmetry matters: clicking the button to peek at the current note
 // (or even to discard it via cancel) must not bump the flow version
 // and risk fencing out a concurrent picker/expiry/self-destruct
 // mutation.
-async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
+async function handleConfirmNoteButton(interaction, { flow_id, row }) {
   const payload = row.payload || {};
   const modal = new ModalBuilder()
-    .setCustomId(SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID)
+    .setCustomId(CONFIRM_NOTE_MODAL_CUSTOM_ID)
     .setTitle('Personal message');
   modal.addComponents(new ActionRowBuilder().addComponents(
     new TextInputBuilder()
@@ -3946,7 +3945,7 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
       .setValue(payload.personalMessageRaw || '')
   ));
   return interaction.showModal(modal).catch((err) => {
-    logger.warn('handleSendConfirmNoteButton: showModal failed', {
+    logger.warn('handleConfirmNoteButton: showModal failed', {
       flow_id, error: err && err.message,
     });
     // showModal failure leaves the button-click interaction
@@ -3969,7 +3968,7 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
 // interaction context. Post-defer error paths use followUp
 // (ephemeral) — reply / update would 409 against the acked
 // interaction.
-async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
+async function handleConfirmNoteModal(interaction, { flow_id, row }) {
   // Defer the modal-submit ack BEFORE the DDB write — without this,
   // a slow conditional write (throttled partition) can push past
   // Discord's 3-second hard deadline, after which `update()` /
@@ -3985,7 +3984,7 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   try {
     raw = (interaction.fields.getTextInputValue(SEND_NOTE_MODAL_FIELD_ID) || '').trim();
   } catch (err) {
-    logger.warn('handleSendConfirmNoteModal: getTextInputValue threw', {
+    logger.warn('handleConfirmNoteModal: getTextInputValue threw', {
       flow_id, error: err && err.message,
     });
     return interaction.followUp({
@@ -4024,7 +4023,7 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
       set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
     });
   } catch (err) {
-    logger.error('handleSendConfirmNoteModal: transitionFlow threw', {
+    logger.error('handleConfirmNoteModal: transitionFlow threw', {
       flow_id, error: err && err.message,
     });
     // Post-deferUpdate the only safe surface for an error toast is
@@ -4053,7 +4052,7 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
 // Send button → fire executeSendPipeline. deleteFlow first as the
 // dedup primitive (duplicate dispatch under future SQS at-least-once
 // must not double-send). Mirrors handleRevokeSelect's ordering.
-async function handleSendConfirmClick(interaction, { flow_id, row }) {
+async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // `deferUpdate` at the very top so the chain
   // `resolveRecipientUsers → getGuildApiKey → deleteFlow → editReply`
   // can take more than Discord's 3-second hard ack deadline without
@@ -4087,7 +4086,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
-    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on bot-kicked failed', {
+    }).catch((err) => logger.warn('handleConfirmSendClick: deleteFlow on bot-kicked failed', {
       flow_id, error: err && err.message,
     }));
     // Zero side effects (no DMs sent, no API calls) — unlock retry
@@ -4119,7 +4118,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       reason: 'terminal',
       expectedVersion: row.version,
     }).catch((err) => {
-      logger.warn('handleSendConfirmClick: deleteFlow on empty-recipients failed', {
+      logger.warn('handleConfirmSendClick: deleteFlow on empty-recipients failed', {
         flow_id, error: err && err.message,
       });
       return { deleted: false };
@@ -4151,7 +4150,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     db.getGuildApiKey(interaction.guildId),
   ]);
   if (resolveResult.status === 'rejected') {
-    logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
+    logger.error('handleConfirmSendClick: resolveRecipientUsers threw', {
       flow_id, error: resolveResult.reason && resolveResult.reason.message,
     });
     // Zero side effects — unlock retry so the user can re-click Send
@@ -4166,7 +4165,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   const partialLeftCount = unresolvedIds.length;
   const partialTransientCount = transientFailureIds.length;
   if (partialLeftCount > 0 || partialTransientCount > 0) {
-    logger.info('handleSendConfirmClick: partial drop at click time', {
+    logger.info('handleConfirmSendClick: partial drop at click time', {
       flow_id, left: partialLeftCount, transient: partialTransientCount,
     });
   }
@@ -4192,7 +4191,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       reason: 'terminal',
       expectedVersion: row.version,
     }).catch((err) => {
-      logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
+      logger.warn('handleConfirmSendClick: deleteFlow on empty failed', {
         flow_id, error: err && err.message,
       });
       return { deleted: false };
@@ -4236,7 +4235,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // row before discovering there's no key to send with would strand
   // the user on a dead card.
   if (apiKeyResult.status === 'rejected') {
-    logger.error('handleSendConfirmClick: getGuildApiKey threw', {
+    logger.error('handleConfirmSendClick: getGuildApiKey threw', {
       flow_id, error: apiKeyResult.reason && apiKeyResult.reason.message,
     });
     // Flow row stays alive; unlock retry so the user isn't stranded
@@ -4347,13 +4346,13 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
 // supersedeOrCreate DDB writes + Discord interactions with zero
 // throttle. The cooldown-loser branch leaves cooldown untouched
 // (Send is mid-fanout; bypassing is the abuse vector).
-async function handleSendCancelClick(interaction, { flow_id, row }) {
+async function handleConfirmCancelClick(interaction, { flow_id, row }) {
   // Defer-ack within the 3s window. The single deleteFlow call below
   // is fast in the happy path, but a DDB blip or slow region could
-  // still blow the budget. Same pattern handleSendConfirmClick uses
+  // still blow the budget. Same pattern handleConfirmSendClick uses
   // (deferUpdate at top, editReply / followUp downstream).
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
-  // Targeted catch around deleteFlow mirrors handleSendConfirmClick's
+  // Targeted catch around deleteFlow mirrors handleConfirmSendClick's
   // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
   // DDB throw propagates to the dispatcher's outer catch which
   // surfaces a generic "superseded" message — wrong for Cancel
@@ -4367,7 +4366,7 @@ async function handleSendCancelClick(interaction, { flow_id, row }) {
       expectedVersion: row.version,
     }));
   } catch (err) {
-    logger.error('handleSendCancelClick: deleteFlow threw', {
+    logger.error('handleConfirmCancelClick: deleteFlow threw', {
       flow_id, error: err && err.message,
     });
     return interaction.followUp({
@@ -5467,7 +5466,7 @@ const commands = [
       //
       // For /qurl file + /qurl map this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
-      // through to the back-half. handleSendConfirmClick re-fetches at
+      // through to the back-half. handleConfirmSendClick re-fetches at
       // Send-click time so a key rotation during the 3-minute confirm-
       // card window is honored. Threading resolvedApiKey through here
       // would break that rotation-safety property: a future optimization
@@ -5489,7 +5488,7 @@ const commands = [
       }
 
       // /qurl file and /qurl map deliberately don't accept the
-      // dispatcher-resolved apiKey — handleSendConfirmClick re-fetches
+      // dispatcher-resolved apiKey — handleConfirmSendClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
@@ -5824,9 +5823,9 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
 // message, all routed by stage. siblingMessage is registered on the
 // FIRST customId only; flow-dispatch rejects mismatched re-registrations
 // of the same stage so we don't repeat it.
-registerFlow(SEND_USER_SELECT_CUSTOM_ID, {
+registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendUserSelect,
+  handler: handleConfirmUserSelect,
   siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
 });
 // siblingMessage intentionally omitted on the SEND + CANCEL custom-
@@ -5835,13 +5834,13 @@ registerFlow(SEND_USER_SELECT_CUSTOM_ID, {
 // USER_SELECT above is reachable from any of the three customIds
 // at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
 // test in qurl-file-map.test.js pins this contract.
-registerFlow(SEND_CONFIRM_SEND_CUSTOM_ID, {
+registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendConfirmClick,
+  handler: handleConfirmSendClick,
 });
-registerFlow(SEND_CONFIRM_CANCEL_CUSTOM_ID, {
+registerFlow(CONFIRM_CANCEL_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendCancelClick,
+  handler: handleConfirmCancelClick,
 });
 // Confirm-card menus + note button/modal. All share the same
 // expectedStage as the original three customIds above; siblingMessage
@@ -5849,21 +5848,21 @@ registerFlow(SEND_CONFIRM_CANCEL_CUSTOM_ID, {
 // re-registration here. Each handler reads `row.payload` from the
 // dispatcher's loadFlow and uses `expectedVersion: row.version` on
 // transitionFlow for the picker-vs-menu race.
-registerFlow(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID, {
+registerFlow(CONFIRM_EXPIRY_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendConfirmExpirySelect,
+  handler: handleConfirmExpirySelect,
 });
-registerFlow(SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID, {
+registerFlow(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendConfirmSelfDestructSelect,
+  handler: handleConfirmSelfDestructSelect,
 });
-registerFlow(SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID, {
+registerFlow(CONFIRM_NOTE_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendConfirmNoteButton,
+  handler: handleConfirmNoteButton,
 });
-registerFlow(SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID, {
+registerFlow(CONFIRM_NOTE_MODAL_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
-  handler: handleSendConfirmNoteModal,
+  handler: handleConfirmNoteModal,
 });
 
 module.exports = {
@@ -5875,13 +5874,13 @@ module.exports = {
   handleRevokeSelect,
   handleSetupButton,
   handleSetupModal,
-  handleSendUserSelect,
-  handleSendConfirmClick,
-  handleSendCancelClick,
-  handleSendConfirmExpirySelect,
-  handleSendConfirmSelfDestructSelect,
-  handleSendConfirmNoteButton,
-  handleSendConfirmNoteModal,
+  handleConfirmUserSelect,
+  handleConfirmSendClick,
+  handleConfirmCancelClick,
+  handleConfirmExpirySelect,
+  handleConfirmSelfDestructSelect,
+  handleConfirmNoteButton,
+  handleConfirmNoteModal,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -5954,9 +5953,17 @@ module.exports = {
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
-      SEND_USER_SELECT_CUSTOM_ID,
-      SEND_CONFIRM_SEND_CUSTOM_ID,
-      SEND_CONFIRM_CANCEL_CUSTOM_ID,
+      // All seven confirm-card customId literals exported so the
+      // contract test in qurl-file-map.test.js can pin every wire
+      // value — a typo in any of these silently breaks routing for
+      // in-flight confirm cards, so they need to be test-asserted.
+      CONFIRM_USER_SELECT_CUSTOM_ID,
+      CONFIRM_SEND_CUSTOM_ID,
+      CONFIRM_CANCEL_CUSTOM_ID,
+      CONFIRM_EXPIRY_SELECT_CUSTOM_ID,
+      CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
+      CONFIRM_NOTE_BUTTON_CUSTOM_ID,
+      CONFIRM_NOTE_MODAL_CUSTOM_ID,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,
     },
