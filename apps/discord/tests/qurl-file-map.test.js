@@ -571,10 +571,43 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
-  test('returns the documented shape: { users, massMentionDenied }', () => {
+  test('bot-only role pick → droppedFromRoles counts the filtered bots', () => {
+    // Without this signal the call site has no way to differentiate a
+    // truly empty pick (silent return) from a role-of-bots pick (where
+    // the user clicked a role and the bot filtered everything) — the
+    // user would get zero feedback. Pin the count.
+    const bot1 = makeUser('100000000000000091', { bot: true });
+    const bot2 = makeUser('100000000000000092', { bot: true });
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({
+        id: 'role-bots',
+        members: [{ user: bot1 }, { user: bot2 }],
+      })],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users).toEqual([]);
+    expect(r.droppedFromRoles).toBe(2);
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('mixed role: non-bots survive, bots increment droppedFromRoles', () => {
+    const u1 = makeUser('100000000000000001');
+    const bot1 = makeUser('100000000000000091', { bot: true });
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({
+        id: 'role-eng',
+        members: [{ user: u1 }, { user: bot1 }],
+      })],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+    expect(r.droppedFromRoles).toBe(1);
+  });
+
+  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['massMentionDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'massMentionDenied', 'users']);
   });
 });
 
@@ -2587,6 +2620,32 @@ describe('handleConfirmUserSelect', () => {
     expect(recipientIds.sort()).toEqual([u2, u3].sort());
     // Bot members filtered out by resolveMentionableSelection.
     expect(recipientIds).not.toContain(bot1);
+  });
+
+  test('mentionable picker: bot-only role pick → all-invalid branch with role-specific reason (no silent swallow)', async () => {
+    // The UX regression cr #328 flagged: a picker-only flow where the
+    // user picks a role of bots would early-return silently (the helper
+    // filtered everything to zero, but `droppedBots` from
+    // partitionRecipients stayed 0 because nothing reached it). Without
+    // surfacing the role-specific reason, the user clicks the role and
+    // sees nothing — reads as "the bot is broken." Helper now tracks
+    // droppedFromRoles and the all-invalid branch surfaces the case.
+    const bot1 = makeUser('100000000000000091', { bot: true });
+    const bot2 = makeUser('100000000000000092', { bot: true });
+    const botRole = ['role-bots', {
+      id: 'role-bots',
+      members: new Map([[bot1.id, { user: bot1 }], [bot2.id, { user: bot2 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [botRole],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/no non-bot members/i);
+    // Resource header survives — same preserved-context contract.
+    expect(updated.content).toMatch(/Sending file/);
   });
 
   test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {

@@ -2746,10 +2746,14 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
     }
   }
   let massMentionDenied = false;
+  let droppedFromRoles = 0;
   if (interaction.roles && typeof interaction.roles.entries === 'function') {
-    for (const [roleId, role] of interaction.roles) {
+    for (const [roleId, role] of interaction.roles.entries()) {
       const isEveryoneRole = guild && roleId === guild.id;
       if (isEveryoneRole && !canMentionEveryone) {
+        // Surfaced even if userMap is already at cap — the gate firing
+        // is a user-visible signal worth showing regardless of whether
+        // expansion would have added anyone.
         massMentionDenied = true;
         continue;
       }
@@ -2759,15 +2763,22 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
       if (!source || typeof source.entries !== 'function') continue;
       // Cap short-circuit avoids building a 10k-entry userMap when a
       // large role is picked; downstream partition still enforces.
-      for (const [memberId, member] of source) {
+      for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
-        if (isBotMember(member)) continue;
+        if (isBotMember(member)) {
+          droppedFromRoles += 1;
+          continue;
+        }
+        // `has` check is load-bearing for cap-priority: keeps the
+        // first-seen User (the one from interaction.users) over the
+        // role-member view, which may differ in optional fields like
+        // `globalName` that downstream alias rendering reads.
         if (userMap.has(memberId)) continue;
         userMap.set(memberId, member.user);
       }
     }
   }
-  return { users: [...userMap.values()], massMentionDenied };
+  return { users: [...userMap.values()], massMentionDenied, droppedFromRoles };
 }
 
 /**
@@ -3659,14 +3670,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
-  const { users: selected, massMentionDenied } = resolveMentionableSelection({
+  const { users: selected, massMentionDenied, droppedFromRoles } = resolveMentionableSelection({
     interaction,
     canMentionEveryone,
   });
-  if (selected.length === 0 && !massMentionDenied) {
-    // Empty pick (no users, no roles, no @everyone) → already acked
-    // via deferUpdate above. Nothing to edit. The massMentionDenied
-    // branch is handled in the rejection path below.
+  if (selected.length === 0 && !massMentionDenied && droppedFromRoles === 0) {
+    // Truly empty pick (no users, no roles, no @everyone, no
+    // bot-only roles) → already acked via deferUpdate above. Other
+    // empty-selected cases fall through to the all-invalid branch
+    // below so the user sees a reason banner.
     return undefined;
   }
   // `interaction.user.id` IS the original sender's ID — Discord
@@ -3722,18 +3734,23 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // in invalid-pick churn surfaces in metrics without lowering log
     // verbosity.
     logger.debug('handleConfirmUserSelect: all-invalid pick', {
-      flow_id, dropped_bots: droppedBots, mass_mention_denied: massMentionDenied,
+      flow_id,
+      dropped_bots: droppedBots,
+      mass_mention_denied: massMentionDenied,
+      dropped_from_roles: droppedFromRoles,
     });
     // Reachable cases:
-    //   - bot-only pick (droppedBots > 0)
+    //   - bot-only individual pick (droppedBots > 0)
     //   - picked the @everyone role without MENTION_EVERYONE perm
     //     (massMentionDenied === true)
-    //   - picked a role with zero non-bot members
+    //   - picked a role whose only members are bots
+    //     (droppedFromRoles > 0, selected.length === 0)
     // List-builder pattern; the fallback prevents a degraded
     // `⚠ . Re-pick...` message if all conditions are false.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
+    if (droppedFromRoles > 0 && droppedBots === 0) reasons.push('Picked role(s) have no non-bot members');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
