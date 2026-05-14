@@ -3494,6 +3494,59 @@ describe('renderConfirmCardRows', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+// largeSendThreshold formula — covers the floor / half-cap branches +
+// degenerate cap guard.
+// ──────────────────────────────────────────────────────────────
+
+describe('largeSendThreshold', () => {
+  const { largeSendThreshold, LARGE_SEND_RECIPIENT_FLOOR } = commands._test;
+  const config = require('../src/config');
+
+  test('default cap (20k): floor wins (1000)', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 20000;
+    try {
+      expect(largeSendThreshold()).toBe(LARGE_SEND_RECIPIENT_FLOOR);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('small override (cap=500): half-cap wins (250)', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 500;
+    try {
+      expect(largeSendThreshold()).toBe(250);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('degenerate override (cap=1): floors at 1 (NOT 0 — would fire every send)', () => {
+    // Bug-guard: Math.floor(1/2) = 0 would make `>= threshold` true
+    // for every send, including 0-recipient ones. Math.max(1, …)
+    // floors at 1 so the threshold is always a positive integer.
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      expect(largeSendThreshold()).toBe(1);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('cap exactly at floor (1000): half-cap (500) wins', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1000;
+    try {
+      expect(largeSendThreshold()).toBe(500);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
 // Constants + registration assertions
 // ──────────────────────────────────────────────────────────────
 

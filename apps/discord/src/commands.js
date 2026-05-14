@@ -54,7 +54,13 @@ const TOKENS_PER_RESOURCE = 10;
 // so log volume tracks operational importance.
 const LARGE_SEND_RECIPIENT_FLOOR = 1000;
 function largeSendThreshold() {
-  return Math.min(LARGE_SEND_RECIPIENT_FLOOR, Math.floor(config.QURL_SEND_MAX_RECIPIENTS / 2));
+  // `Math.max(1, …)` on the inner half: a pathologically-low cap
+  // override (e.g., 1) would otherwise yield `Math.floor(1/2) = 0`,
+  // making `>= 0` always true and firing the WARN on every send.
+  // Floor at 1 so the threshold is always a positive integer; the
+  // `>= threshold` comparison at the call site still works correctly
+  // for any cap ≥ 1 (the config validator rejects cap ≤ 0).
+  return Math.min(LARGE_SEND_RECIPIENT_FLOOR, Math.max(1, Math.floor(config.QURL_SEND_MAX_RECIPIENTS / 2)));
 }
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
@@ -3997,7 +4003,15 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', {
       flow_id, interaction_id: interaction.id,
     });
-    return rerenderConfirmCard(interaction, { ...payload, voiceChannelId: null });
+    // Surface a warning banner alongside the re-render so the user
+    // can tell the voice button vanished intentionally (vs. an
+    // unexplained UI flicker). The button removal is automatic via
+    // `voiceChannelId: null` flowing through to renderConfirmCardRows.
+    return rerenderConfirmCard(interaction, {
+      ...payload,
+      voiceChannelId: null,
+      warningsBlock: `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`,
+    });
   }
 
   // Re-render with a warning banner. Same shape as the picker's
@@ -6399,6 +6413,11 @@ module.exports = {
       // alarm — table-driven tests pin every shape so a silent regex
       // breakage can't slip through.
       isAckTimeoutError,
+      // largeSendThreshold formula has non-trivial math + a
+      // degenerate-cap guard; exposed for direct unit testing
+      // rather than asserting via log-spy.
+      largeSendThreshold,
+      LARGE_SEND_RECIPIENT_FLOOR,
       // Setup-flow constants — exposed so tests assert against
       // production values, not stale duplicates that would silently
       // pass when the constants are tuned. The regex export lets

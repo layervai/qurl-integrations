@@ -152,10 +152,14 @@ const STAGE_VOICE_CHANNEL_TYPE = 13;
 // discord.js PermissionFlagsBits.ViewChannel pinned numerically (bit
 // 10 = 1 << 10) for the same reason as the channel-type constants:
 // no discord.js require in the parser, plus a test spec pins the
-// value against future discord.js renumbers. discord.js represents
-// permissions as BigInt; PermissionsBitField.has accepts either a
-// BigInt or a number, so the numeric literal works for both prod
-// (real PermissionsBitField) and tests (Map-shaped mock).
+// value against future discord.js renumbers.
+//
+// BigInt (vs the numeric `VOICE_CHANNEL_TYPE = 2` / `STAGE_VOICE_-
+// CHANNEL_TYPE = 13`): discord.js represents PERMISSIONS as BigInt
+// (single bits at positions 0..63), but represents CHANNEL TYPES as
+// small numeric enum values (0..15). PermissionsBitField.has accepts
+// either a BigInt or a Number for forward-compat, but the canonical
+// shape is BigInt — matching that here keeps comparisons type-true.
 const VIEW_CHANNEL_PERMISSION = 1n << 10n;
 
 // Hard cap on input length so an adversarial regex-blowup attack
@@ -400,6 +404,14 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // BEFORE the seen-check inside `consider`, so the "fully-duplicate
     // role isn't useless" test catches a future refactor reversing
     // that order.
+    //
+    // Intentionally NO `ids.size >= cap` early-break here (unlike the
+    // channel-expansion and @everyone loops): role expansion walks
+    // every member so `consider()` can grow `seen` past the cap,
+    // giving downstream `cappedCount` an accurate "you typed 55, we
+    // kept 25" signal. Early-breaking would zero out cappedCount
+    // because seen never grows past cap once break fires. Pinned by
+    // the "cappedCount accounts for role-expansion overflow" test.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
       if (isBotMember(roleMember)) continue;
@@ -481,12 +493,20 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // "cap was already filled by earlier expansions, voice silently
     // no-ops" — the latter must NOT push to invalidTokens, since the
     // channel itself was perfectly valid; the cap just had no room.
-    // Loop ordering mirrors the role-expansion loop above: cap check
-    // FIRST (so a bot-heavy channel doesn't waste cycles after the
-    // cap fills), then bot filter (a bot at index N where ids.size ===
-    // cap-1 correctly skips without claiming the last slot), then
-    // consider. Reversing cap-vs-bot order would let a bot's `continue`
-    // hide the cap fill from the next iteration.
+    //
+    // Loop ordering: cap check FIRST (avoid wasting cycles after the
+    // cap fills on a bot-heavy channel), then bot filter (a bot at
+    // index N where ids.size === cap-1 correctly skips without
+    // claiming the last slot), then consider. Reversing cap-vs-bot
+    // order would let a bot's `continue` hide the cap fill.
+    //
+    // Intentionally DIVERGES from the role-expansion loop above
+    // (which has no early-break): role expansion preserves the
+    // `cappedCount` overshoot signal by walking every member;
+    // voice/stage expansion can have ~10k-member iteration cost,
+    // and the user's mental model for "everyone in this voice
+    // channel" doesn't need a precise overshoot count the way
+    // `<@&role>` does.
     let usable = 0;
     let capHit = false;
     for (const [memberId, channelMember] of members) {

@@ -590,6 +590,27 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     expect(res.invalidTokens.length).toBe(1);
   });
 
+  test('<#voice> succeeds independently when sender lacks MENTION_EVERYONE (massMentionDenied stays orthogonal)', () => {
+    // Cross-feature interaction: a sender who can see the voice
+    // channel but lacks MENTION_EVERYONE should still get the
+    // voice expansion; @everyone should land in massMentionDenied
+    // independently. The two paths must not block each other —
+    // pinning the orthogonality so a future refactor doesn't
+    // entangle them (e.g., short-circuiting all expansions when
+    // any one is denied).
+    const int = makeInteraction({
+      users: { '111': {}, '222': {} },
+      channels: { '500': { type: 2, members: ['111', '222'] } },
+    });
+    const res = parseRecipientMentions('@everyone <#500>', int, { allowMassMention: false });
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.massMentionDenied).toBe(true);
+    // @everyone was stripped from invalidTokens (per the
+    // allowMassMention contract) AND the voice channel expanded
+    // cleanly — neither path interferes with the other.
+    expect(res.invalidTokens).toEqual([]);
+  });
+
   test('interaction.member undefined with present guild fails closed (no silent view bypass)', () => {
     // Defense-in-depth: real discord.js always populates member for
     // guild slash commands. A degraded interaction shape (test mock
