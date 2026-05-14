@@ -193,11 +193,27 @@ async function getPlaceDetails(placeId) {
     throw new Error('GOOGLE_MAPS_API_KEY not set');
   }
   const data = await placesFetch(PLACES_DETAILS_URL, {
+    // sanitizeQueryParam is a no-op when called from resolveLocation
+    // (the placeId already passed PLACE_ID_SHAPE_RE at decode time),
+    // but kept as defense-in-depth for any future caller that
+    // bypasses decode.
     place_id: sanitizeQueryParam(placeId),
     fields: 'place_id,name,formatted_address',
   });
   if (data.status !== 'OK') {
-    if (data.status === 'NOT_FOUND' || data.status === 'INVALID_REQUEST') return null;
+    if (data.status === 'NOT_FOUND') return null;
+    if (data.status === 'INVALID_REQUEST') {
+      // For a shape-validated sentinel place_id, INVALID_REQUEST
+      // signals key/scope misconfig or upstream-shape drift — NOT
+      // "deleted upstream." Surface so a misconfigured deploy doesn't
+      // hide behind the recipient-facing "place no longer available"
+      // message. (The caller still maps this to NOT_FOUND so the
+      // sender sees a graceful failure.)
+      logger.warn('getPlaceDetails: INVALID_REQUEST for shape-validated place_id (check API key scopes)', {
+        place_id: placeId,
+      });
+      return null;
+    }
     throw new Error(`Places API status: ${data.status}`);
   }
   const r = data.result;

@@ -480,10 +480,32 @@ describe('getPlaceDetails', () => {
     expect(r).toBeNull();
   });
 
-  test('returns null on INVALID_REQUEST (malformed place_id)', async () => {
+  test('returns null on INVALID_REQUEST AND warns (likely API-key/scope misconfig, not deleted-upstream)', async () => {
+    // Sentinel place_ids are shape-validated at decode time; if Places
+    // returns INVALID_REQUEST anyway, that signals misconfig or
+    // upstream-shape drift. Warn so a broken deploy doesn't hide
+    // behind the recipient-facing "place no longer available" message.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
     fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'INVALID_REQUEST' }));
-    const r = await getPlaceDetails('not-a-real-id');
+    const r = await getPlaceDetails('ChIJxxxxxxxxxxxxxxxx');
     expect(r).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('INVALID_REQUEST'),
+      expect.objectContaining({ place_id: 'ChIJxxxxxxxxxxxxxxxx' }),
+    );
+  });
+
+  test('returns null on NOT_FOUND WITHOUT warning (place legitimately deleted upstream)', async () => {
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'NOT_FOUND' }));
+    const r = await getPlaceDetails('ChIJxxxxxxxxxxxxxxxx');
+    expect(r).toBeNull();
+    // NOT_FOUND is the normal "place deleted" path — no operator
+    // signal needed; the recipient-facing "no longer available"
+    // message is the right surface.
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('throws on a non-OK Places status that is not a recognized null-case (OVER_QUERY_LIMIT)', async () => {
