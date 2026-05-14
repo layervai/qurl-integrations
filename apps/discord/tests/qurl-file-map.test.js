@@ -2465,6 +2465,49 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.content).not.toMatch(/No one is connected/i);
   });
 
+  test('sender is voice-connected → selfIncluded:true propagates to the new payload', async () => {
+    // Symmetric with handleConfirmUserSelect's "self-send" coverage —
+    // partitionRecipients flips selfIncluded when the invoking user
+    // appears in the resolved set. The confirm-card renderer reads
+    // this flag to surface the "Send includes you." neutral notice.
+    // Without this test, a future refactor that bypassed
+    // partitionRecipients (e.g., reading recipientIds directly from
+    // channel.members.keys()) would silently drop the notice.
+    const int = makeVoiceInteraction({ members: [SENDER_ID, u1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.selfIncluded).toBe(true);
+  });
+
+  test('sender NOT in voice channel → selfIncluded:false on the new payload', async () => {
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.selfIncluded).toBe(false);
+  });
+
+  test('transitionFlow conflict → superseded message (OCC race with sibling interaction)', async () => {
+    // Mirrors handleConfirmUserSelect's conflict-path test. The
+    // version-checked transitionFlow can lose to a concurrent picker
+    // click / menu change / cancel; the handler must surface
+    // "Send was superseded" rather than the generic editReply.
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/superseded/);
+    expect(lastCall.components).toEqual([]);
+  });
+
+  test('transitionFlow not_found → expired message (row TTL elapsed between click and write)', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/expired/);
+    expect(lastCall.components).toEqual([]);
+  });
+
   test('cap overshoot (env-overridden small cap): hard-rejects with subset-prompt copy', async () => {
     // With the production 20k default, voice-channel capacity (99
     // for voice, larger for stage) never trips this branch — it's
