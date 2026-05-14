@@ -1094,7 +1094,7 @@ async function executeSendPipeline(interaction, {
       threshold: sendThreshold,
       cap: config.QURL_SEND_MAX_RECIPIENTS,
       resource_type: resourceType,
-      sender_id: interaction.user.id,
+      user_id: interaction.user.id,
       guild_id: interaction.guildId,
     });
   }
@@ -3103,7 +3103,7 @@ function renderConfirmCardRows({
     // interaction; renderer-shape unit tests that drive layout-only
     // assertions may omit it. Either degraded case (no interaction,
     // missing channel, no members collection) lands the button in
-    // the disabled-with-count=null branch — `connectedCount === null`
+    // the disabled-with-count=null branch — `connectedCount == null`
     // is the single sentinel for "render the disabled button shell".
     //
     // Count is render-time, not click-time — members can join/leave
@@ -3112,6 +3112,16 @@ function renderConfirmCardRows({
     // the label is a freshness hint that re-derives on every other
     // confirm-card interaction (picker / expiry / note edits all flow
     // through renderConfirmCardRows again).
+    // Filter-drift contract: the render-time count below uses
+    // `isBotMember(m)` to compute (N), while click-time resolution
+    // in handleConfirmVoiceEveryone routes channel.members through
+    // `partitionRecipients` for the authoritative recipient set.
+    // Both apply the same bot filter today, so the count is honest.
+    // If `partitionRecipients` ever picks up additional drops (role-
+    // blocklist, self-filter toggle, etc.), the render-time `(N)`
+    // will silently overstate the click-time set — keep the two
+    // filter sources aligned, or accept a stale label and document
+    // the drift here.
     let connectedCount = null;
     let channelName = null;
     if (interaction) {
@@ -3163,7 +3173,7 @@ function renderConfirmCardRows({
         .setCustomId(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID)
         .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(connectedCount === null || connectedCount === 0),
+        .setDisabled(connectedCount == null || connectedCount === 0),
     );
   }
   bottomRow.addComponents(
