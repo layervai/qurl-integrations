@@ -514,8 +514,8 @@ function parseLocationInput(rawInput) {
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
-  // + 64-char cap + 'Someone' fallback. Same helper used at the channel
-  // announcement site so the spoof defense doesn't drift between sites.
+  // + 64-char cap + 'Someone' fallback. Centralized so a future caller
+  // adding another sender-name surface picks up the same spoof defense.
   const safeSender = sanitizeDisplayName(senderAlias);
 
   const embed = new EmbedBuilder()
@@ -1220,9 +1220,13 @@ async function executeSendPipeline(interaction, {
       // targetType is preserved on every row for the revoke-list
       // renderer's branch on `s.target_type` (historical /qurl send rows
       // can be 'channel'; new /qurl file + /qurl map rows are always
-      // 'user'). When all historical rows expire (max EXPIRY_LABELS
-      // window = 7 days post-deploy), the formatRevokeLabel non-'user'
-      // branch can be deleted too — tracker: #318.
+      // 'user'). #318 drops the formatRevokeLabel non-'user' branch
+      // once no revoke-visible row has `target_type !== 'user'` — the
+      // drain happens naturally as the revoke renderer filters on
+      // `expires_at`, so the gate is condition-driven (no live legacy
+      // rows surface in /qurl revoke) rather than date-driven. The
+      // EXPIRY_LABELS max window (7d) bounds when that condition is
+      // safe to assume post-deploy.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
     })));
   } catch (err) {
