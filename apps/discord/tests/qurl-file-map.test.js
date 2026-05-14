@@ -1360,12 +1360,11 @@ describe('handleQurlMap — slash entry', () => {
     expect(payload.locationName).not.toMatch(lone);
   });
 
-  test('forged interaction missing required `location` → actionable ephemeral, no flow row', async () => {
-    // Discord enforces required options server-side; only a forged
-    // interaction can hit the `getString('location', true)` throw.
-    // Targeted catch so the user sees an
-    // actionable message instead of the dispatcher's generic safety
-    // net.
+  test('forged interaction missing required `location` → actionable ephemeral, no flow row, cooldown cleared', async () => {
+    // Discord enforces required options server-side; the realistic
+    // cause of a hit is a client/schema desync during a redeploy,
+    // not abuse. Cooldown clears so the user can retry once the
+    // deploy stabilizes.
     const int = makeInteraction({ options: {} });
     int.options.getString = jest.fn((name, required) => {
       if (name === 'location' && required) {
@@ -1381,6 +1380,7 @@ describe('handleQurlMap — slash entry', () => {
       ephemeral: true,
     }));
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 });
 
@@ -1635,6 +1635,31 @@ describe('handleSendConfirmClick', () => {
     );
     // Zero side effects → cooldown cleared for immediate retry.
     expect(isOnCooldown(SENDER_ID)).toBe(false);
+  });
+
+  test('forged Send click with sender-only recipientIds → "Invalid recipient list" copy, NOT "all left"', async () => {
+    // Forged payload edge: recipientIds=[SENDER_ID] passes the empty-
+    // array guard, resolves fine (sender is in guild cache), then
+    // partitionRecipients drops the sender (droppedSelf=1) and
+    // valid.length === 0. Pre-fix this hit the all-unresolved branch
+    // and surfaced "Recipients are no longer reachable (all left the
+    // server)" — misleading. Distinguish by droppedSelf/droppedBots > 0.
+    const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
+    await handleSendConfirmClick(int, {
+      flow_id: 'fid',
+      row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 1 },
+    });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Invalid recipient list/i),
+      components: [],
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/all left the server/i),
+    }));
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
   });
 
   test('forged Send click with empty recipientIds → distinct copy + deleteFlow (not the "all left" copy)', async () => {

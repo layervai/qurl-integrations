@@ -4086,11 +4086,13 @@ async function handleQurlFile(interaction) {
   // Required-option lookups via `getAttachment(..., true)` /
   // `getString(..., true)` throw on a missing option. Discord enforces
   // required server-side, so production interactions can't trip
-  // these; a forged interaction is the only way. The targeted catch
-  // produces an actionable ephemeral rather than letting the throw
-  // hit the dispatcher's generic safety net. Cooldown stays set —
-  // forged interactions are abuse-aligned, same shape as the SSRF
-  // gate below.
+  // these — BUT the more likely cause of a hit in production is a
+  // client/schema desync (gateway has the new command schema, bot
+  // has the old, or vice versa) during a redeploy window, not abuse.
+  // Clear the cooldown so the user can retry once the deploy
+  // stabilizes. SSRF gate below still preserves cooldown (probing
+  // the allow-list IS abuse-aligned and doesn't have a redeploy
+  // explanation).
   let attachment;
   try {
     attachment = interaction.options.getAttachment('attachment', true);
@@ -4098,15 +4100,15 @@ async function handleQurlFile(interaction) {
     logger.warn('handleQurlFile: required attachment option missing', {
       user_id: interaction.user.id, error: err && err.message,
     });
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ The `attachment:` option is required. Re-run with a file attached.',
       ephemeral: true,
     });
   }
   if (!attachment || typeof attachment.url !== 'string') {
-    // Malformed attachment payload — Discord won't ship one, so this
-    // is forged-interaction territory. Cooldown stays set (abuse-
-    // aligned, same shape as SSRF).
+    // Same client/schema-desync rationale — clear cooldown for retry.
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Attachment is missing or malformed.',
       ephemeral: true,
@@ -4180,10 +4182,11 @@ async function handleQurlMap(interaction) {
   setCooldown(interaction.user.id);
 
   // `getString('location', true)` throws on a missing option. Discord
-  // enforces required server-side; only a forged interaction can hit
-  // this. Targeted catch matches handleQurlFile's required-option
-  // guard for symmetry + actionable user-visible copy. Cooldown stays
-  // set on the forged-interaction throw branch — abuse-aligned.
+  // enforces required server-side; the more likely cause in production
+  // is a client/schema desync (redeploy timing) than abuse. Clear
+  // cooldown on the throw catch so the user can retry once the deploy
+  // stabilizes — same rationale as handleQurlFile's required-option
+  // throw branch.
   let locationValue;
   try {
     // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
@@ -4196,6 +4199,7 @@ async function handleQurlMap(interaction) {
     logger.warn('handleQurlMap: required location option missing', {
       user_id: interaction.user.id, error: err && err.message,
     });
+    clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ The `location:` option is required. Re-run with a Google Maps URL or address.',
       ephemeral: true,
@@ -4502,19 +4506,28 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       flow_id, left: partialLeftCount, transient: partialTransientCount,
     });
   }
-  const { valid } = partitionRecipients(users, interaction.user.id);
+  const { valid, droppedBots, droppedSelf } = partitionRecipients(users, interaction.user.id);
   if (valid.length === 0) {
-    // Every recipient resolved at confirm time has since left the
-    // guild or become unreachable. Terminal for THIS attempt —
-    // delete the flow so a rerun claims a fresh slot.
+    // Distinguish the failure mode by what was dropped. The general
+    // case is "everyone left the guild between confirm and Send"
+    // (10007 / transient) — but a forged Send click with payload
+    // recipientIds containing only the sender or only bots would
+    // resolve fine and then partition would drop everything, hitting
+    // this branch with the WRONG copy ("they left the server"
+    // misdirects when nobody left — the recipient list was invalid).
+    // Terminal for THIS attempt either way: delete the flow so a
+    // rerun claims a fresh slot.
     await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
     }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
       flow_id, error: err && err.message,
     }));
+    const wasInvalidList = droppedBots > 0 || droppedSelf > 0;
     return interaction.editReply({
-      content: '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
+      content: wasInvalidList
+        ? '❌ Invalid recipient list — re-run the command with at least one real user.'
+        : '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
