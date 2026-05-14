@@ -3055,10 +3055,13 @@ function renderConfirmCardRows({
     // Name the target channel in the label so a user who invoked
     // from #voice-A and drifted to #voice-B mid-flow can tell the
     // button still targets the original channel. Discord button-label
-    // hard cap is 80 chars; budget enforced by truncating the channel
-    // name (the prefix + suffix is ~32 chars, leaving ~46 for the
-    // name — Discord channel names cap at 100 chars so truncation is
-    // possible). On cache miss (channel was deleted between render
+    // hard cap is 80 UTF-16 code units; the fixed prefix + suffix
+    // measures ~26-28 UTF-16 units depending on count width:
+    //   `🔊 ` (3) + `Everyone in #` (13) + ` (NNNNN)` (max 8) = 24
+    //   (🔊 is a surrogate pair = 2 UTF-16 units + a VS16/space).
+    // 46 leaves ~10 units of headroom for label evolution / emoji
+    // additions. Discord channel names cap at 100 chars so truncation
+    // is possible; on cache miss (channel was deleted between render
     // and re-render) the legacy "this voice channel" copy is correct,
     // since we can't name a channel we can't read.
     const channelName = channel?.name;
@@ -3901,6 +3904,11 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     logger.error('handleConfirmVoiceEveryone: corrupt flow payload (unknown resourceType)', {
       flow_id, resource_type: payloadResource,
     });
+    // deleteFlow is best-effort here — `.catch(logIgnoredDiscordErr)`
+    // swallows transient DDB failures so a flow-state-write blip
+    // doesn't block the user-visible error. The row will TTL out
+    // (3-min SEND_FLOW_TTL_SECONDS) even if this delete misses; the
+    // user-facing "Card data is corrupted" message lands either way.
     await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',

@@ -481,6 +481,12 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // "cap was already filled by earlier expansions, voice silently
     // no-ops" — the latter must NOT push to invalidTokens, since the
     // channel itself was perfectly valid; the cap just had no room.
+    // Loop ordering mirrors the role-expansion loop above: cap check
+    // FIRST (so a bot-heavy channel doesn't waste cycles after the
+    // cap fills), then bot filter (a bot at index N where ids.size ===
+    // cap-1 correctly skips without claiming the last slot), then
+    // consider. Reversing cap-vs-bot order would let a bot's `continue`
+    // hide the cap fill from the next iteration.
     let usable = 0;
     let capHit = false;
     for (const [memberId, channelMember] of members) {

@@ -42,19 +42,23 @@ assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl ma
 
 // Negative-intent canaries — pin that the bot has NOT silently
 // re-broadened gateway scope. Every intent listed here is either:
-//   - privileged (would re-introduce dev-portal toggle dependency:
-//     MessageContent, GuildPresences); or
+//   - privileged (would re-introduce dev-portal toggle dependency):
+//     - MessageContent
+//     - GuildPresences
 //   - non-privileged but only useful for code paths we deleted (the
 //     symbol was removed by PR #313 and doesn't exist in the tree —
 //     `git log --diff-filter=D` if you need the historical context):
 //     - DirectMessages → previously consumed by the deleted handleSend
 //       DM file-pivot via `awaitMessages`
-// `GuildVoiceStates` was previously listed here (dropped by PR #313
-// when its only consumer — `getChannelMembers`'s voice-channel branch
-// — was deleted). It was re-added in the voice-everyone restoration:
-// `channel.members` for voice/stage channels reads the voice-state
-// cache, which is only populated when the intent is declared. The
-// positive assertIntent above pins the load-bearing feature.
+//
+// `GuildVoiceStates` was previously listed in this negative-canary
+// block (dropped by PR #313 when its only consumer —
+// `getChannelMembers`'s voice-channel branch — was deleted), and was
+// re-added in the voice-everyone restoration: `channel.members` for
+// voice/stage channels reads the voice-state cache, which is only
+// populated when the intent is declared. The positive assertIntent
+// above pins the load-bearing feature.
+//
 // A future PR that re-adds any of these without a paired assertIntent
 // + use-case write-up will fail at boot rather than silently expanding
 // what crosses the Discord gateway. See PR #313 / issue #317 for
