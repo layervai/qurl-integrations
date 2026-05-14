@@ -5860,13 +5860,28 @@ const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
 const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 
-// Per Discord's contract, MUST respond within 3 s — Places errors fall
-// back to an empty result rather than a thrown handler (which would
-// surface as a "this command is unresponsive" toast).
+// Match the production-side decodePlaceIdSentinel shape gate. Filter
+// here too so a malformed Google response — `place_id` with a char
+// outside `[A-Za-z0-9_-]` or shorter than 16 chars — gets skipped at
+// the dropdown rather than rendered as a choice that's about to fail
+// the submit-time decode.
+const AUTOCOMPLETE_PLACE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{16,}$/;
+
+// Per Discord's contract, MUST respond within 3 s. Two-layer error
+// handling: the inner try catches Places I/O failures (ticks the
+// sampled SRE counter; that's its intent — "Places is degraded"); the
+// outer try catches anything else (early-return respond([]) throws on
+// expired token, etc.) without ticking the counter, since those aren't
+// Places-degradation signals.
 async function handleAutocomplete(interaction) {
   try {
+    // `return await` (not bare `return`) so a rejected `respond([])`
+    // promise is caught by the outer try/catch instead of leaking out
+    // of the async function unhandled. Each early-return is the
+    // contract handler — surface the rejection through the outer
+    // recovery path instead of propagating up to the dispatch caller.
     if (interaction.commandName !== 'qurl') {
-      return interaction.respond([]);
+      return await interaction.respond([]);
     }
     // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
     // (see commands.js:~3502) but Discord could still deliver an
@@ -5875,27 +5890,51 @@ async function handleAutocomplete(interaction) {
     // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
     // about to be rejected.
     if (!interaction.guildId) {
-      return interaction.respond([]);
+      return await interaction.respond([]);
     }
     const subcommand = interaction.options.getSubcommand(false);
     const focused = interaction.options.getFocused(true);
     if (subcommand !== 'map' || focused?.name !== 'location') {
-      return interaction.respond([]);
+      return await interaction.respond([]);
     }
     const rawQuery = (focused.value || '').trim();
     if (rawQuery.length < AUTOCOMPLETE_MIN_QUERY_LENGTH) {
-      return interaction.respond([]);
+      return await interaction.respond([]);
     }
     // A pasted URL is already a stable identifier — parseLocationInput
     // passes it through verbatim and suggestions would just clutter.
     if (/^https?:\/\//i.test(rawQuery)) {
-      return interaction.respond([]);
+      return await interaction.respond([]);
     }
 
-    const results = await searchPlaces(rawQuery);
+    let results;
+    try {
+      results = await searchPlaces(rawQuery);
+    } catch (err) {
+      // Per-call log at debug so keystroke-rate failures don't spam.
+      logger.debug('autocomplete handler failed', {
+        command: interaction.commandName,
+        error: err && err.message,
+      });
+      // Sampled SRE signal: emit one warn per BURST failures so a
+      // Places outage is visible (vs. silent autocomplete-only degrade).
+      if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
+        logger.warn('autocomplete handler failure burst', {
+          count: autocompleteFailureBurst,
+          error: err && err.message,
+        });
+        autocompleteFailureBurst = 0;
+      }
+      return await interaction.respond([]);
+    }
+
     const choices = [];
     for (const p of results) {
       if (choices.length >= AUTOCOMPLETE_MAX_CHOICES) break;
+      // Skip dud entries early instead of relying on submit-time decode
+      // to reject them — saves the user a "place no longer available"
+      // error on a malformed Google response.
+      if (!AUTOCOMPLETE_PLACE_ID_SHAPE_RE.test(p.placeId)) continue;
       const value = encodePlaceIdSentinel(p.placeId);
       if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;
@@ -5917,22 +5956,15 @@ async function handleAutocomplete(interaction) {
       const name = end === label.length ? label : label.slice(0, end);
       choices.push({ name, value });
     }
-    return interaction.respond(choices);
+    return await interaction.respond(choices);
   } catch (err) {
-    // Per-call log at debug so keystroke-rate failures don't spam.
-    logger.debug('autocomplete handler failed', {
+    // Non-Places-I/O failure (respond() on expired token, getSubcommand
+    // throw on malformed interaction, etc.). Doesn't advance the burst
+    // counter — those aren't Places-degradation signals.
+    logger.debug('autocomplete handler unhandled', {
       command: interaction.commandName,
       error: err && err.message,
     });
-    // Sampled SRE signal: emit one warn per BURST failures so a
-    // Places outage is visible (vs. silent autocomplete-only degrade).
-    if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
-      logger.warn('autocomplete handler failure burst', {
-        count: autocompleteFailureBurst,
-        error: err && err.message,
-      });
-      autocompleteFailureBurst = 0;
-    }
     try { await interaction.respond([]); } catch { /* ignore */ }
     return undefined;
   }

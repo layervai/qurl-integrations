@@ -730,6 +730,15 @@ describe('handleAutocomplete', () => {
     };
   }
 
+  // Generate a place_id-shaped string for tests. The autocomplete
+  // handler filters out entries that don't match the documented
+  // place_id char class + length floor, so any fake fixture must
+  // mimic the shape (>=16 chars of [A-Za-z0-9_-]).
+  function fakePlaceId(seed) {
+    const s = String(seed);
+    return s.length >= 16 ? s : `ChIJ${'a'.repeat(16 - s.length)}${s}`;
+  }
+
   test('responds empty for non-qurl commands', async () => {
     const int = makeAutocompleteInteraction();
     int.commandName = 'link';
@@ -786,8 +795,8 @@ describe('handleAutocomplete', () => {
 
   test('returns sentinel-encoded choices with name + address labels', async () => {
     mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: 'ChIJ1', name: 'The White House', address: '1600 Pennsylvania Ave NW, Washington, DC' },
-      { placeId: 'ChIJ2', name: 'Whitehouse Pub', address: 'Manchester, UK' },
+      { placeId: fakePlaceId('whitehouse_dc_id'), name: 'The White House', address: '1600 Pennsylvania Ave NW, Washington, DC' },
+      { placeId: fakePlaceId('whitehouse_uk_id'), name: 'Whitehouse Pub', address: 'Manchester, UK' },
     ]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
@@ -797,9 +806,9 @@ describe('handleAutocomplete', () => {
     expect(choices).toHaveLength(2);
     expect(choices[0]).toEqual({
       name: 'The White House — 1600 Pennsylvania Ave NW, Washington, DC',
-      value: 'qurl_place:ChIJ1',
+      value: `qurl_place:${fakePlaceId('whitehouse_dc_id')}`,
     });
-    expect(choices[1].value).toBe('qurl_place:ChIJ2');
+    expect(choices[1].value).toBe(`qurl_place:${fakePlaceId('whitehouse_uk_id')}`);
     // Disambiguation is the whole point: the user-visible label has
     // to differentiate "White House DC" from "Whitehouse Pub UK",
     // otherwise the autocomplete picker is no better than free text.
@@ -808,7 +817,7 @@ describe('handleAutocomplete', () => {
 
   test('truncates a label exceeding the 100-char Discord cap (UTF-16 units)', async () => {
     const longAddress = '1234 Very Long Street Name, Somewhere Far Away, In A Large City With A Long Name, Region, Country 99999';
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJlong', name: 'Place', address: longAddress }]);
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('longlabel'), name: 'Place', address: longAddress }]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
     const choice = int.respond.mock.calls[0][0][0];
@@ -830,7 +839,7 @@ describe('handleAutocomplete', () => {
     // pins the always-check contract).
     const malformed = 'a'.repeat(99) + '\uD83D'; // lone high surrogate at index 99 → length 100
     expect(malformed.length).toBe(100);
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJ1', name: malformed, address: '' }]);
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('boundary1'), name: malformed, address: '' }]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
     const choice = int.respond.mock.calls[0][0][0];
@@ -849,7 +858,7 @@ describe('handleAutocomplete', () => {
     // AND has no orphan surrogate.
     const emoji = '🏛️'; // 🏛 + variation selector — 3 UTF-16 units
     const name = (emoji + 'X').repeat(40); // 160 UTF-16 units of mixed surrogate + ASCII
-    mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJemoji', name, address: '' }]);
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('emojiplace'), name, address: '' }]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
     const choice = int.respond.mock.calls[0][0][0];
@@ -865,21 +874,45 @@ describe('handleAutocomplete', () => {
     // > 100 chars, which would fail Discord's API for the whole
     // response. Drop just that choice so the rest of the dropdown
     // still works.
+    const good1 = fakePlaceId('good1_id');
+    const good2 = fakePlaceId('good2_id');
     mockSearchPlaces.mockResolvedValueOnce([
-      { placeId: 'short', name: 'Good', address: 'addr' },
+      { placeId: good1, name: 'Good', address: 'addr' },
       { placeId: 'x'.repeat(95), name: 'Bad (too long)', address: 'addr' },
-      { placeId: 'also-short', name: 'Also Good', address: 'addr' },
+      { placeId: good2, name: 'Also Good', address: 'addr' },
     ]);
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
     const choices = int.respond.mock.calls[0][0];
     expect(choices).toHaveLength(2);
-    expect(choices.map(c => c.value)).toEqual(['qurl_place:short', 'qurl_place:also-short']);
+    expect(choices.map(c => c.value)).toEqual([`qurl_place:${good1}`, `qurl_place:${good2}`]);
+  });
+
+  test('drops a choice whose place_id fails the documented shape check', async () => {
+    // Mirror of the decodePlaceIdSentinel shape gate at encode time.
+    // If Google ever ships a malformed place_id (chars outside
+    // [A-Za-z0-9_-] or shorter than 16 chars), skip that entry rather
+    // than render a dud choice that submit-time decode would reject.
+    const valid = fakePlaceId('valid_id_one');
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: valid, name: 'Valid', address: 'addr' },
+      { placeId: 'tooshort', name: 'Bad short', address: 'addr' },
+      { placeId: 'has spaces in it just bad', name: 'Bad chars', address: 'addr' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(1);
+    expect(choices[0].value).toBe(`qurl_place:${valid}`);
   });
 
   test('caps results at 25 (Discord choice limit)', async () => {
     mockSearchPlaces.mockResolvedValueOnce(
-      Array.from({ length: 40 }, (_, i) => ({ placeId: `ChIJ${i}`, name: `Place ${i}`, address: 'addr' })),
+      Array.from({ length: 40 }, (_, i) => ({
+        placeId: fakePlaceId(`place_id_${i}_padding_xyz`),
+        name: `Place ${i}`,
+        address: 'addr',
+      })),
     );
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
@@ -929,6 +962,25 @@ describe('handleAutocomplete', () => {
       await handleAutocomplete(makeAutocompleteInteraction());
     }
     expect(burstWarns()).toBe(1);
+  });
+
+  test('failure burst counter does not increment when the early-return respond() throws', async () => {
+    // Narrow-catch contract: the burst counter is a "Places is
+    // degraded" signal, not a generic handler-failure counter. If an
+    // early-return `interaction.respond([])` throws (e.g. expired
+    // interaction token), that's a Discord-side issue, not a Places
+    // problem — the counter must NOT advance.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
+      const int = makeAutocompleteInteraction({ guildId: null }); // hits DM gate early-return
+      int.respond = jest.fn(async () => { throw new Error('Unknown interaction'); });
+      await handleAutocomplete(int);
+    }
+    const burstWarns = logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns).toBe(0);
   });
 
   test('failure burst counter does not increment on the success path', async () => {
