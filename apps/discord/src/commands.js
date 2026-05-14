@@ -182,6 +182,21 @@ function safeCodepointSlice(s, maxCodepoints) {
   return codepoints.slice(0, cut).join('');
 }
 
+/**
+ * Cap `s` to `maxCodepoints` codepoints and append `indicator` only
+ * when truncation actually occurred. Relies on `safeCodepointSlice`'s
+ * "return the input unchanged when below the cap" contract — reference
+ * equality (`=== s`) is the truncation sentinel, so both callers
+ * (`renderRecipientWarnings` per-token, `renderConfirmCardContent`
+ * total) can use the same shape without a separate length probe.
+ *
+ * Final output is at most `maxCodepoints + indicator.length` codepoints.
+ */
+function sliceWithEllipsis(s, maxCodepoints, indicator) {
+  const sliced = safeCodepointSlice(s, maxCodepoints);
+  return sliced === s ? s : sliced + indicator;
+}
+
 function sanitizeMessage(msg) {
   // Order matters:
   //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
@@ -3703,11 +3718,9 @@ function renderRecipientWarnings({
     // enough to spot the typo / paste error without rendering the
     // attacker's entire payload.
     const TOKEN_DISPLAY_MAX = 80;
-    const shown = invalidTokens.slice(0, 10).map((t) => {
-      const stripped = t.replace(/`/g, '');
-      const sliced = safeCodepointSlice(stripped, TOKEN_DISPLAY_MAX);
-      return sliced === stripped ? stripped : sliced + '…';
-    });
+    const shown = invalidTokens.slice(0, 10).map(
+      (t) => sliceWithEllipsis(t.replace(/`/g, ''), TOKEN_DISPLAY_MAX, '…'),
+    );
     const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
     lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
   }
@@ -3791,25 +3804,14 @@ function renderConfirmCardContent({
     content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
   }
   content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
-  // Discord's message-content cap is 2000 chars. Adversarial inputs
-  // (10 × 80-char invalidTokens + 256-char resourceLabel + 5 ×
-  // post-escape display names + personalMessage preview) can plausibly
-  // approach this; without a cap, `editReply` would reject with a 400
-  // and the throw would orphan the flow row (cleaned up by the
-  // safety-net catch, but the user sees a confusing generic error
-  // instead of the confirm card). Truncate at 1988 codepoints so the
-  // appended '…(truncated)' marker (12 codepoints) keeps the total at
-  // ≤ 2000 for typical ASCII / BMP-only content. Surrogate-pair-heavy
-  // adversarial input could exceed 2000 UTF-16 units, but real inputs
-  // funnel through `sanitizeContentLabel` / `safeCodepointSlice` which
-  // bound each section's codepoint budget; the pre-render upstream caps
-  // make a surrogate-pair-stuffed payload that crosses the cap exotic.
-  const CONFIRM_CARD_MAX_CODEPOINTS = 1988;
-  const trimmed = safeCodepointSlice(content, CONFIRM_CARD_MAX_CODEPOINTS);
-  // Reference equality is the truncation sentinel: safeCodepointSlice
-  // returns the input unchanged when below the cap (post-fast-path),
-  // so a strict !== means a real truncation occurred.
-  return trimmed === content ? content : trimmed + '…(truncated)';
+  // Fail-safe cap below Discord's 2000-char content limit so adversarial
+  // inputs can't trip a 400 from editReply and orphan the flow row.
+  // Cap (1988) + '…(truncated)' indicator (12 codepoints) = 2000 max
+  // for ASCII / BMP content. Surrogate-pair-stuffed input could still
+  // exceed 2000 UTF-16 units, but every contributing field
+  // (`resourceLabel`, display-name aliases, personalMessage preview)
+  // is already codepoint-capped upstream, so that path is exotic.
+  return sliceWithEllipsis(content, 1988, '…(truncated)');
 }
 
 // Truncate the pre-sanitized message to 80 chars MAX, then back off
