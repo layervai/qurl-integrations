@@ -3114,7 +3114,13 @@ async function handleQurlSlashSend(interaction, params) {
   let flow_id;
   let orphanFlowCreated = false;
   try {
-    await interaction.deferReply({ ephemeral: true });
+    // /qurl map may defer earlier (before its server-side Places resolve)
+    // to harden against the 3 s ACK window when Places is slow. Skip the
+    // second defer in that case — discord.js throws "Already replied or
+    // deferred" otherwise.
+    if (!interaction.deferred) {
+      await interaction.deferReply({ ephemeral: true });
+    }
 
     const recipientsRaw = interaction.options.getString('recipients');
     const expiresIn = interaction.options.getString('expires-in') || '24h';
@@ -3596,9 +3602,12 @@ async function handleQurlMap(interaction) {
     });
   }
 
-  // URL inputs pass through synchronously; sentinel + free-text inputs
-  // hit Places at send time so every recipient opens the same place_id
-  // regardless of viewer geo.
+  // Defer BEFORE the awaited Places call so a slow lookup can't blow
+  // Discord's 3 s ACK window. handleQurlSlashSend below detects
+  // `interaction.deferred` and skips its own deferReply. The
+  // resolveLocation error replies fall through to editReply since the
+  // interaction is now deferred.
+  await interaction.deferReply({ ephemeral: true });
   const resolved = await resolveLocation(parsedLocation);
   if (!resolved.ok) {
     clearCooldown(interaction.user.id);
@@ -3613,7 +3622,7 @@ async function handleQurlMap(interaction) {
       default:
         content = '❌ Location lookup failed. Please try again, or paste a Google Maps URL.';
     }
-    return interaction.reply({ content, ephemeral: true });
+    return interaction.editReply({ content });
   }
   let { locationUrl, locationName } = resolved;
 

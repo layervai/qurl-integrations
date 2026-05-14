@@ -287,7 +287,7 @@ function makeInteraction({
   });
   const optGetAttachment = jest.fn((name) => options[name] ?? null);
 
-  return {
+  const interaction = {
     user: { id: userId, username: 'Sender' },
     guildId,
     channelId,
@@ -300,13 +300,19 @@ function makeInteraction({
     },
     reply: jest.fn().mockResolvedValue(undefined),
     editReply: jest.fn().mockResolvedValue(undefined),
-    deferReply: jest.fn().mockResolvedValue(undefined),
     followUp: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(undefined),
     deferUpdate: jest.fn().mockResolvedValue(undefined),
     replied: false,
     deferred: false,
   };
+  // deferReply MUST flip `deferred` so the no-double-defer contract in
+  // handleQurlSlashSend (`if (!interaction.deferred)`) is actually
+  // exercised — otherwise handleQurlMap → handleQurlSlashSend would
+  // double-defer and the test would silently pass on a path that throws
+  // in production with "Already replied or deferred".
+  interaction.deferReply = jest.fn(async () => { interaction.deferred = true; });
+  return interaction;
 }
 
 const VALID_ATTACHMENT = Object.freeze({
@@ -1841,6 +1847,22 @@ describe('handleQurlMap — slash entry', () => {
     expect(payload.locationName).toMatch(/Eiffel Tower/);
   });
 
+  test('defers ONCE — handleQurlSlashSend skips its own defer when already deferred', async () => {
+    // Regression: handleQurlMap defers BEFORE resolveLocation so a slow
+    // Places call can't blow Discord's 3s ACK window. handleQurlSlashSend
+    // then guards its own deferReply on `!interaction.deferred`. Without
+    // that guard, the second deferReply would throw "Already replied or
+    // deferred" in production (in tests the mock just resolves twice
+    // silently — see makeInteraction's deferReply override).
+    mockFindPlaceFromText.mockResolvedValueOnce({ placeId: 'ChIJ1', name: 'Place', address: '' });
+    const int = makeInteraction({
+      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    expect(int.deferReply).toHaveBeenCalledTimes(1);
+  });
+
   test('arbitrary text → resolved through Places to a place_id-pinned URL', async () => {
     // Free-text inputs route through findPlaceFromText so every
     // recipient opens the same destination — Google's per-viewer
@@ -1900,7 +1922,11 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    // Defers BEFORE the Places call so a slow lookup can't blow
+    // Discord's 3s ACK window — resolveLocation errors land as
+    // editReply, not reply.
+    expect(int.deferReply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Couldn't find/),
     }));
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
@@ -1919,7 +1945,7 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/lookup failed/),
     }));
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
