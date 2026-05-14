@@ -813,6 +813,11 @@ describe('resolveMentionableSelection', () => {
   });
 
   test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold }', () => {
+    // Pinning test: a new return field added without updating this
+    // assertion will fail loudly here. If you're hitting this after
+    // adding a field, update the sorted-keys list AND verify every
+    // caller of resolveMentionableSelection handles the new field
+    // (handleConfirmUserSelect at minimum).
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'users']);
