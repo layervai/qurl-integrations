@@ -74,7 +74,7 @@ jest.mock('discord.js', () => {
   // method at the discord.js layer (setMaxLength, addChoices, etc.)
   // touches one site for the whole test suite — PR #301 regression
   // surfaced this exact gap when setMaxLength was added.
-  const { makeOptionBuilder } = require('./helpers/discord-mock');
+  const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
   return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
     const subBuilder = () => ({
@@ -128,12 +128,7 @@ jest.mock('discord.js', () => {
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
   })),
-  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    setMinValues: jest.fn().mockReturnThis(),
-    setMaxValues: jest.fn().mockReturnThis(),
-  })),
+  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setTitle: jest.fn().mockReturnThis(),

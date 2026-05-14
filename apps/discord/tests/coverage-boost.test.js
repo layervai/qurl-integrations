@@ -75,7 +75,7 @@ jest.mock('discord.js', () => {
   // Same instance used by commands-comprehensive.test.js so a new
   // chained method (setMaxLength, addChoices, etc.) at the
   // discord.js layer only touches one site.
-  const { makeOptionBuilder } = require('./helpers/discord-mock');
+  const { makeOptionBuilder, makeComponentChainable } = require('./helpers/discord-mock');
   return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
     const subBuilder = () => ({
@@ -129,12 +129,7 @@ jest.mock('discord.js', () => {
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
   })),
-  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => ({
-    setCustomId: jest.fn().mockReturnThis(),
-    setPlaceholder: jest.fn().mockReturnThis(),
-    setMinValues: jest.fn().mockReturnThis(),
-    setMaxValues: jest.fn().mockReturnThis(),
-  })),
+  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
     setCustomId: jest.fn().mockReturnThis(),
     setTitle: jest.fn().mockReturnThis(),

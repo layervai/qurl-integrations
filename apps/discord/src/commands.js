@@ -2519,6 +2519,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 
 const {
   parseRecipientMentions,
+  isBotMember,
   MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
 } = require('./recipient-parser');
 
@@ -2723,34 +2724,22 @@ function partitionRecipients(users, senderId) {
   return { valid, droppedBots, selfIncluded };
 }
 
-// Resolve a MentionableSelectMenu pick to a flat User[] suitable for
-// partitionRecipients. The picker surfaces both users + roles in one
-// menu — this helper merges them into one deduped User list with the
-// same shape partitionRecipients expects.
+// Merge a MentionableSelectMenu pick (users + roles) into a deduped
+// User[] for partitionRecipients. The `@everyone` role
+// (role.id === guild.id) is gated on `canMentionEveryone` — same
+// gate as the text-path #323. Non-@everyone role gating is tracked
+// in #326.
 //
-// Reads:
-//   - interaction.users  → Collection<id, User>  (picked individual users)
-//   - interaction.roles  → Collection<id, Role>  (picked roles, expanded
-//                                                  to non-bot members)
-//   - interaction.guild  → for the @everyone role detection (its ID
-//                                                  matches guild.id)
+// Picked users seed `userMap` BEFORE role expansion so they get cap
+// priority over role-expanded members (mirrors the text-path #323
+// round-4 fix).
 //
-// The `@everyone` role is gated on the caller-supplied
-// `canMentionEveryone` flag — same gate as the text-path #323. When
-// denied, the helper sets `massMentionDenied: true` and skips that
-// role's expansion. Other roles expand unconditionally; this PR is
-// scope-limited (the broader role-mentionable / MENTION_EVERYONE
-// gate parity for non-@everyone roles is tracked in #326).
-//
-// Bot members are filtered during role expansion (mirrors the parser).
-// Sender is NOT filtered — selfIncluded detection happens downstream
-// in partitionRecipients, consistent with the text-path contract.
+// For the @everyone role specifically, iterate `guild.members.cache`
+// instead of `role.members` — discord.js doesn't reliably surface
+// all members through @everyone's role.members.
 function resolveMentionableSelection({ interaction, canMentionEveryone }) {
   const guild = interaction.guild;
   const userMap = new Map();
-  // Picked individual users come as User objects with `.bot` directly
-  // accessible — partitionRecipients reads `.bot` so the shape is fine
-  // to pass through.
   if (interaction.users && typeof interaction.users.values === 'function') {
     for (const u of interaction.users.values()) {
       if (u && u.id) userMap.set(u.id, u);
@@ -2761,29 +2750,18 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
     for (const [roleId, role] of interaction.roles) {
       const isEveryoneRole = guild && roleId === guild.id;
       if (isEveryoneRole && !canMentionEveryone) {
-        // Gate parallel to the text path: surface a denial signal so
-        // the caller renders the permission-specific warning; skip
-        // this role's expansion.
         massMentionDenied = true;
         continue;
       }
-      // For the @everyone role specifically, iterate guild.members.cache
-      // — `role.members` for @everyone may not reliably surface all
-      // members in discord.js. For named roles, role.members is the
-      // pre-filtered Collection of role-bearers.
       const source = isEveryoneRole
         ? guild?.members?.cache
         : role?.members;
       if (!source || typeof source.entries !== 'function') continue;
-      // Same cap short-circuit logic as the text-path @everyone
-      // expansion: the picker can carry a role with thousands of
-      // members; we stop adding once we'd exceed the cap. Cap
-      // enforcement happens via the post-resolve partition; here we
-      // just avoid building a 10k-entry userMap.
+      // Cap short-circuit avoids building a 10k-entry userMap when a
+      // large role is picked; downstream partition still enforces.
       for (const [memberId, member] of source) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
-        if (!member?.user) continue;
-        if (member.user.bot) continue;
+        if (isBotMember(member)) continue;
         if (userMap.has(memberId)) continue;
         userMap.set(memberId, member.user);
       }
@@ -2980,27 +2958,16 @@ function formatPersonalMessagePreview(message) {
   return `> ${safeCodepointSlice(oneLine, 80)}…`;
 }
 
-// Build the ActionRow set for the confirm card. Always 4 rows:
-// MentionableSelectMenu (always attached so re-picks stay available
-// and the layout is stable from frame 0), Self-destruct
-// StringSelectMenu, Expiry StringSelectMenu (each select needs its
-// own row — Discord forbids combining selects with buttons in the
-// same ActionRow), and the bottom row packing Note button + Send +
-// Cancel.
+// Build the ActionRow set for the confirm card. Always 4 rows so the
+// layout is stable from frame 0 — each select needs its own row
+// (Discord forbids selects + buttons in the same ActionRow).
 //
-// MentionableSelect (not UserSelect) so the picker surfaces both
-// individual users AND roles (including the `@everyone` role).
-// Role picks expand to members in handleConfirmUserSelect via
-// resolveMentionableSelection; the `@everyone` role is gated on
-// MENTION_EVERYONE at expansion time, same gate the text-path
-// `@everyone` uses (#323).
-//
-// CONFIRM_USER_SELECT_CUSTOM_ID wire literal stays as-is despite the
-// shape change — the customId is just a routing key; renaming it
-// would need the same 180s flow_state drain coordination #316
-// covered, and the literal isn't semantically wrong (a picked role
-// resolves to users at expansion time). Internal JS constant name
-// also kept to avoid churn.
+// MentionableSelect surfaces users AND roles in one menu; role picks
+// expand in handleConfirmUserSelect via resolveMentionableSelection
+// with @everyone-role MENTION_EVERYONE gating (same gate as the
+// text-path #323). CONFIRM_USER_SELECT_CUSTOM_ID wire literal kept —
+// renaming would need the 180s flow_state drain coordination from
+// #316.
 //
 // Row math (Discord 5-row max):
 //   Mentionable + SelfDestruct + Expiry + [Note, Send, Cancel] = 4 rows
