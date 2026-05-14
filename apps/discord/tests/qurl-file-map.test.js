@@ -421,11 +421,16 @@ describe('resolveMentionableSelection', () => {
   // QURL_SEND_MAX_RECIPIENTS, gates the @everyone role on canMentionEveryone.
   const GUILD_ID = 'guild-1';
 
-  function makeRole({ id, members = [] }) {
+  // `mentionable` defaults to `true` so the existing test corpus
+  // continues to expand picked roles after the #326 gate landed.
+  // Per-test overrides (`mentionable: false`) exercise the deny path.
+  // `name` is consumed by the caller's `guild.roles.cache.get(id)
+  // ?.name` lookup (renderRecipientWarnings bullet text).
+  function makeRole({ id, members = [], mentionable = true, name }) {
     // role.members is a Discord.js Collection but only `.entries()`
     // (iterable of [id, member]) is read; a Map is shape-compatible.
     const memberMap = new Map(members.map((m) => [m.user.id, m]));
-    return [id, { id, members: memberMap }];
+    return [id, { id, name: name ?? `role-${id}`, members: memberMap, mentionable }];
   }
 
   function makeMentionableInteraction({
@@ -434,9 +439,18 @@ describe('resolveMentionableSelection', () => {
     guildMemberCache = new Map(),
     inDM = false,
   } = {}) {
+    // Mirror picked roles into guild.roles.cache so the caller-side
+    // name lookup (`guild.roles.cache.get(id)?.name`) used by
+    // renderRecipientWarnings to render denied-role bullets has
+    // something to find. Stays a no-op when no roles are picked.
+    const roleCache = new Map();
+    for (const [id, role] of pickedRoles) {
+      roleCache.set(id, role);
+    }
     const guild = inDM ? null : {
       id: GUILD_ID,
       members: { cache: guildMemberCache },
+      roles: { cache: roleCache },
     };
     return {
       guild,
@@ -846,6 +860,7 @@ describe('resolveMentionableSelection', () => {
     // Build members map directly (makeRole helper requires m.user.id).
     const role = ['role-eng', {
       id: 'role-eng',
+      mentionable: true,
       members: new Map([
         ['100000000000000091', { user: undefined }],
         [u1.id, { user: u1 }],
@@ -860,7 +875,7 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(0);
   });
 
-  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold }', () => {
+  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold, roleMentionsDenied }', () => {
     // Pinning test: a new return field added without updating this
     // assertion will fail loudly here. If you're hitting this after
     // adding a field, update the sorted-keys list AND verify every
@@ -868,7 +883,107 @@ describe('resolveMentionableSelection', () => {
     // (handleConfirmUserSelect at minimum).
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'roleMentionsDenied', 'users']);
+  });
+
+  describe('role-mention permission gate (#326)', () => {
+    // Picker-path parity with the parser-path #326 gate. Discord's
+    // picker filters non-mentionable roles client-side, but a forged
+    // interaction would otherwise bypass the gate — defense-in-depth.
+
+    test('mentionable: false WITHOUT canMentionEveryone → roleMentionsDenied entry, members NOT expanded', () => {
+      const u1 = makeUser('100000000000000001');
+      const u2 = makeUser('100000000000000002');
+      const role = makeRole({
+        id: 'role-admin',
+        members: [{ user: u1 }, { user: u2 }],
+        mentionable: false,
+      });
+      const int = makeMentionableInteraction({ pickedRoles: [role] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.users).toEqual([]);
+      expect(r.roleMentionsDenied).toEqual(['role-admin']);
+    });
+
+    test('mentionable: false WITH canMentionEveryone → expands normally, no deny', () => {
+      const u1 = makeUser('100000000000000001');
+      const role = makeRole({
+        id: 'role-admin',
+        members: [{ user: u1 }],
+        mentionable: false,
+      });
+      const int = makeMentionableInteraction({ pickedRoles: [role] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+      expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+      expect(r.roleMentionsDenied).toEqual([]);
+    });
+
+    test('mentionable: true WITHOUT canMentionEveryone → expands normally (per-role bypass)', () => {
+      const u1 = makeUser('100000000000000001');
+      const role = makeRole({
+        id: 'role-public',
+        members: [{ user: u1 }],
+        mentionable: true,
+      });
+      const int = makeMentionableInteraction({ pickedRoles: [role] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+      expect(r.roleMentionsDenied).toEqual([]);
+    });
+
+    test('multiple denied roles surface independently (array, not boolean)', () => {
+      const u1 = makeUser('100000000000000001');
+      const u2 = makeUser('100000000000000002');
+      const roleA = makeRole({ id: 'role-a', members: [{ user: u1 }], mentionable: false });
+      const roleB = makeRole({ id: 'role-b', members: [{ user: u2 }], mentionable: false });
+      const int = makeMentionableInteraction({ pickedRoles: [roleA, roleB] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.roleMentionsDenied.sort()).toEqual(['role-a', 'role-b']);
+      expect(r.users).toEqual([]);
+    });
+
+    test('mix of denied + allowed roles → only denied lands in roleMentionsDenied', () => {
+      const u1 = makeUser('100000000000000001');
+      const u2 = makeUser('100000000000000002');
+      const allowed = makeRole({ id: 'role-allowed', members: [{ user: u1 }], mentionable: true });
+      const denied = makeRole({ id: 'role-denied', members: [{ user: u2 }], mentionable: false });
+      const int = makeMentionableInteraction({ pickedRoles: [allowed, denied] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+      expect(r.roleMentionsDenied).toEqual(['role-denied']);
+    });
+
+    test('denied role does NOT increment droppedFromRoles (gate fires before bot filter)', () => {
+      // droppedFromRoles is "bots filtered from picked roles"; a denied
+      // role short-circuits before the bot filter loop runs, so it
+      // contributes 0 to that counter. Pin so a regression that moved
+      // the gate AFTER the bot filter (and double-counted bot members)
+      // surfaces here.
+      const bot = makeUser('100000000000000091', { bot: true });
+      const role = makeRole({
+        id: 'role-denied-bot',
+        members: [{ user: bot }],
+        mentionable: false,
+      });
+      const int = makeMentionableInteraction({ pickedRoles: [role] });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.droppedFromRoles).toBe(0);
+      expect(r.roleMentionsDenied).toEqual(['role-denied-bot']);
+    });
+
+    test('@everyone-role (role.id === guild.id) NOT routed to roleMentionsDenied — uses massMentionDenied', () => {
+      // The @everyone branch above (isEveryoneRole) catches role.id ===
+      // guild.id BEFORE the per-role gate fires, so massMentionDenied
+      // (not roleMentionsDenied) carries the @everyone-specific signal.
+      // A regression that ran the per-role gate FIRST would split the
+      // copy across two surfaces and confuse the user.
+      const int = makeMentionableInteraction({
+        pickedRoles: [[GUILD_ID, { id: GUILD_ID, members: new Map(), mentionable: false }]],
+      });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.massMentionDenied).toBe(true);
+      expect(r.roleMentionsDenied).toEqual([]);
+    });
   });
 });
 
@@ -1711,6 +1826,102 @@ describe('handleQurlFile — slash entry', () => {
     // Alice still made it into the recipient list.
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.recipientIds).toEqual([aliceId]);
+  });
+
+  // ── Issue #326 text-path handler tests ──
+  test('text path: <@&roleId> for non-mentionable role WITHOUT MENTION_EVERYONE → warning with role name, no expansion', async () => {
+    // Parser surfaces parsed.roleMentionsDenied with the role ID; the
+    // handler resolves the name via guild.roles.cache.get(id)?.name
+    // and renderRecipientWarnings emits "@<name> requires …" copy.
+    // Pin the end-to-end wiring.
+    const aliceId = '400000000000000010';
+    const bobId = '400000000000000011';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `<@${aliceId}> <@&7000>` },
+      guildMembers: { [aliceId]: {}, [bobId]: {} },
+    });
+    // Inject role-7000 as non-mentionable with Bob as a member. Without
+    // the gate, Bob would land in recipientIds via role expansion.
+    int.guild.roles.cache.set('7000', {
+      id: '7000',
+      name: 'admin-team',
+      mentionable: false,
+      members: new Map([[bobId, { user: { id: bobId, bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    // Alice (directly mentioned) IS in recipients; Bob (role member) is NOT.
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds).toEqual([aliceId]);
+    const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastEdit.content).toMatch(/@admin-team/);
+    expect(lastEdit.content).toMatch(/Mention Everyone/);
+    expect(lastEdit.content).toMatch(/role\.mentionable: true/);
+  });
+
+  test('text path: every recipient denied-role-only → "no valid recipients" but NOT misleading bot-only log nor transient-retry copy', async () => {
+    // Pin both predicate updates at commands.js (breakdownEmpty,
+    // transientOnly): a recipients string consisting only of denied
+    // <@&roleId> mentions must NOT log the "bot-only-or-self mention
+    // list" signal AND must NOT show "Could not look up recipients
+    // right now. Try again in a moment." copy — both would mislead
+    // the user. Without the `roleMentionsDeniedNames.length === 0`
+    // term in both predicates, a future refactor that drops it
+    // silently regresses to the bot-only log + retry copy.
+    const aliceId = '400000000000000030';
+    const logger = require('../src/logger');
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@&7002>' },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.guild.roles.cache.set('7002', {
+      id: '7002',
+      name: 'private-team',
+      mentionable: false,
+      members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Permission-specific copy present.
+    expect(reply.content).toMatch(/@private-team/);
+    expect(reply.content).toMatch(/No valid recipients/);
+    // Transient-retry copy must NOT fire.
+    expect(reply.content).not.toMatch(/Could not look up recipients right now/);
+    // bot-only-or-self log must NOT fire (would mislead operators
+    // analyzing the cap-skew metric).
+    const infoLogCalls = logger.info.mock.calls.filter(
+      ([msg]) => typeof msg === 'string' && msg.includes('bot-only-or-self mention list'),
+    );
+    expect(infoLogCalls).toEqual([]);
+  });
+
+  test('text path: <@&roleId> for non-mentionable role WITH MENTION_EVERYONE → expands normally, no warning', async () => {
+    // OR-gate: MENTION_EVERYONE bypasses role.mentionable. Pin the
+    // bypass at the handler boundary (parser-level coverage is in
+    // recipient-parser.test.js).
+    const aliceId = '400000000000000020';
+    const bobId = '400000000000000021';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `<@&7001>` },
+      guildMembers: { [aliceId]: {}, [bobId]: {} },
+    });
+    int.guild.roles.cache.set('7001', {
+      id: '7001',
+      name: 'admin-team',
+      mentionable: false,
+      members: new Map([
+        [aliceId, { user: { id: aliceId, bot: false } }],
+        [bobId, { user: { id: bobId, bot: false } }],
+      ]),
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds.sort()).toEqual([aliceId, bobId].sort());
+    const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastEdit.content).not.toMatch(/role\.mentionable/);
   });
 
   test('guild context + MENTION_EVERYONE permission → @everyone expands, no warning', async () => {
@@ -2812,6 +3023,7 @@ describe('handleConfirmUserSelect', () => {
     const u3 = '100000000000000003';
     const role = ['role-eng', {
       id: 'role-eng',
+      mentionable: true,
       members: new Map([
         [u2, { user: makeUser(u2) }],
         [u3, { user: makeUser(u3) }],
@@ -2895,6 +3107,7 @@ describe('handleConfirmUserSelect', () => {
     const bot2 = makeUser('100000000000000092', { bot: true });
     const botRole = ['role-bots', {
       id: 'role-bots',
+      mentionable: true,
       members: new Map([[bot1.id, { user: bot1 }], [bot2.id, { user: bot2 }]]),
     }];
     const int = makeSelectInteraction({
@@ -2918,6 +3131,7 @@ describe('handleConfirmUserSelect', () => {
     const senderUser = makeUser(SENDER_ID);
     const senderRole = ['role-sender', {
       id: 'role-sender',
+      mentionable: true,
       members: new Map([[SENDER_ID, { user: senderUser }]]),
     }];
     const int = makeSelectInteraction({
@@ -3043,6 +3257,7 @@ describe('handleConfirmUserSelect', () => {
     const bot1 = makeUser('100000000000000091', { bot: true });
     const mixedRole = ['role-mixed', {
       id: 'role-mixed',
+      mentionable: true,
       members: new Map([[u1.id, { user: u1 }], [bot1.id, { user: bot1 }]]),
     }];
     const int = makeSelectInteraction({
@@ -3065,6 +3280,7 @@ describe('handleConfirmUserSelect', () => {
     const roleBot = makeUser('100000000000000091', { bot: true });
     const botRole = ['role-bots', {
       id: 'role-bots',
+      mentionable: true,
       members: new Map([[roleBot.id, { user: roleBot }]]),
     }];
     const int = makeSelectInteraction({
@@ -3098,6 +3314,115 @@ describe('handleConfirmUserSelect', () => {
         personalMessageRaw: '**hi**',
       }),
     }));
+  });
+
+  // ── Issue #326 picker-path gate (handleConfirmUserSelect wiring) ──
+  test('mentionable picker: non-mentionable role WITHOUT MENTION_EVERYONE → all-invalid banner with role-specific reason', async () => {
+    // Picker-path parallel to the parser-path #326 gate. The role's
+    // members do NOT expand; the all-invalid branch surfaces a
+    // "Non-mentionable role" reason on the rejection banner (NOT
+    // "@everyone" copy — distinct gate, distinct reason).
+    const u1 = makeUser('100000000000000001');
+    const adminRole = ['role-admin', {
+      id: 'role-admin',
+      name: 'admin',
+      mentionable: false,
+      members: new Map([[u1.id, { user: u1 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [adminRole],
+      canMentionEveryone: false,
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Non-mentionable role/i);
+    expect(updated.content).toMatch(/Mention Everyone/);
+    // Resource header survives — preserved-context contract.
+    expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: non-mentionable role + valid user pick → partial-valid, warnings block lists role NAME', async () => {
+    // Mixed pick: a directly-picked user lands in recipients (flow
+    // advances), but the denied role surfaces in the warnings block
+    // with its NAME (per-role copy from renderRecipientWarnings). Pin
+    // the name resolution so a regression that dropped guild.roles.cache
+    // -> name fallback would surface here.
+    const u1 = makeUser('100000000000000001');
+    const u2 = makeUser('100000000000000002');
+    const adminRole = ['role-admin', {
+      id: 'role-admin',
+      name: 'admin-team',
+      mentionable: false,
+      members: new Map([[u2.id, { user: u2 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [u1],
+      roles: [adminRole],
+      canMentionEveryone: false,
+    });
+    // Mirror the picked role into guild.roles.cache so the caller's
+    // name lookup (`guild.roles.cache.get(id)?.name`) finds it.
+    int.guild.roles.cache.set('role-admin', { id: 'role-admin', name: 'admin-team', mentionable: false });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    // u2 (role member) NOT expanded; u1 (directly picked) IS.
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/@admin-team/);
+    expect(updated.content).toMatch(/Mention Everyone/);
+    expect(updated.content).toMatch(/role\.mentionable: true/);
+  });
+
+  test('mentionable picker: denied role with deleted-from-cache name → fallback "unknown-role" renders', async () => {
+    // Race condition: role denied at resolveMentionableSelection time
+    // but removed from guild.roles.cache before renderRecipientWarnings
+    // (e.g., admin deleted the role mid-flow). `guild.roles.cache.get
+    // (id)?.name` returns undefined; caller falls back to
+    // "unknown-role" so the bullet renders rather than collapsing
+    // to `@undefined`.
+    const u1 = makeUser('100000000000000001');
+    const denied = ['role-ghost', {
+      id: 'role-ghost',
+      name: 'ghost',
+      mentionable: false,
+      members: new Map(),
+    }];
+    const int = makeSelectInteraction({
+      users: [u1],
+      roles: [denied],
+      canMentionEveryone: false,
+    });
+    // Picker registers the role, but guild.roles.cache stays empty
+    // (the role was deleted from the guild between pick and render).
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Fallback name appears in the bullet so the user still sees the
+    // permission copy rather than a broken `@undefined` line.
+    expect(updated.content).toMatch(/@unknown-role/);
+  });
+
+  test('mentionable picker: non-mentionable role + canMentionEveryone → expands normally (no deny)', async () => {
+    // The gate is OR-ed: MENTION_EVERYONE permission bypasses the
+    // role.mentionable check. Pin the bypass — without it, even an
+    // admin couldn't pick a non-mentionable role through the picker.
+    const u1 = makeUser('100000000000000001');
+    const role = ['role-admin', {
+      id: 'role-admin',
+      name: 'admin',
+      mentionable: false,
+      members: new Map([[u1.id, { user: u1 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [role],
+      canMentionEveryone: true,
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
   });
 });
 

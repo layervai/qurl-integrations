@@ -217,8 +217,8 @@ function isBotMember(member) {
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
 // to a flat user-ID list with the cap + bot filter applied. Returns
-// `{ ids, invalidTokens, cappedCount, massMentionDenied }`; never
-// throws on parse errors — invalid tokens always land in
+// `{ ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied }`;
+// never throws on parse errors — invalid tokens always land in
 // `invalidTokens` for caller-side surfacing. Sender is NOT filtered —
 // self-send is supported; the confirm-card renderer surfaces a neutral
 // notice when sender appears in `ids`.
@@ -232,6 +232,18 @@ function isBotMember(member) {
 //               can surface "you don't have permission to @everyone".
 // Either way the token is stripped from `invalidTokens` to avoid
 // double-surfacing.
+//
+// `<@&roleId>` mentions follow the same privilege model Discord enforces
+// for in-chat role mentions:
+//   - `role.mentionable === true` → expanded unconditionally.
+//   - `role.mentionable === false` → requires `allowMassMention === true`;
+//     denied roles land in `roleMentionsDenied: [roleId, ...]` (array
+//     because a single send can attempt multiple denied roles) so the
+//     caller can emit per-role copy with the role name resolved via
+//     `guild.roles.cache`.
+// The `<@&{guildId}>` wire form (Discord's @everyone-role mention) is
+// routed through the `@everyone` channel above (massMentionDenied /
+// guild.members.cache expansion) rather than `role.members`.
 //
 // `interaction` is the slash-command interaction; we need it for:
 //   - interaction.guild               → role-mention expansion via
@@ -247,7 +259,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -255,7 +267,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -285,7 +297,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -380,11 +392,55 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     seenIds.add(id);
     invalidTokens.push(rawToken);
   }
+  // Roles that the sender attempted to mention but lacks the permission
+  // for (`role.mentionable !== true` AND `!allowMassMention`). Tracked
+  // as IDs; the caller resolves to names via `guild.roles.cache.get(id)
+  // ?.name` so renderRecipientWarnings can emit "@<roleName> requires
+  // the Mention Everyone permission or role.mentionable: true." Deduped
+  // via a parallel Set so `<@&999> <@&999>` yields one entry — same
+  // pattern as invalidRoleIds above.
+  const roleMentionsDenied = [];
+  const roleMentionsDeniedIds = new Set();
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
+    // `<@&{guildId}>` is Discord's wire form for the @everyone role —
+    // the @everyone role's ID always equals `guild.id`. Semantically
+    // this is the same action as the `@everyone` text token, so route
+    // through the existing massMentionDenied / everyonePresent channel:
+    //   - Allowed → set everyonePresent=true and skip the role-loop
+    //     branch; the dedicated @everyone expansion below walks
+    //     guild.members.cache (discord.js's @everyone role.members
+    //     doesn't reliably surface all members — see commands.js:2821).
+    //   - Denied  → mark massMentionDenied so the caller emits the
+    //     "@everyone requires Mention Everyone" copy (not the
+    //     "role mention requires …" copy, which would confuse the user).
+    if (guild && roleId === guild.id) {
+      if (allowMassMention) {
+        everyonePresent = true;
+      } else {
+        massMentionDenied = true;
+      }
+      continue;
+    }
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
       pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
+      continue;
+    }
+    // Permission gate (issue #326): non-mentionable roles require
+    // MENTION_EVERYONE — same rule Discord enforces for in-chat role
+    // mentions. Without this gate, a non-admin sender could
+    // `/qurl file recipients:<@&adminRoleId>` to fan a send to admin-
+    // role members, bypassing the same protection the @everyone path
+    // got in #323. `role.mentionable === true` is the per-role bypass
+    // (set explicitly by a role owner). Lands in `roleMentionsDenied`
+    // (NOT invalidTokens) so the caller can emit permission-specific
+    // copy with the role NAME rather than the generic "couldn't parse."
+    if (role.mentionable !== true && !allowMassMention) {
+      if (!roleMentionsDeniedIds.has(roleId)) {
+        roleMentionsDeniedIds.add(roleId);
+        roleMentionsDenied.push(roleId);
+      }
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
@@ -662,7 +718,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     });
   }
 
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied };
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the

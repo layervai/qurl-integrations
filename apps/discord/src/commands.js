@@ -423,6 +423,18 @@ function resolveRecipientAlias(r, interaction) {
   return sanitizeDisplayNamePlain(raw);
 }
 
+// Resolve a list of role IDs to display names for the
+// `roleMentionsDeniedNames` warning surface (#326). Falls back to
+// `'unknown-role'` when the role isn't in `guild.roles.cache` — race
+// case where the role was deleted between parse and render. Single-
+// sourced so a future change to the fallback string or cache shape
+// only touches one place (vs. the text-path and picker-path call
+// sites drifting).
+function resolveRoleNames(guild, ids) {
+  if (!ids || ids.length === 0) return [];
+  return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
+}
+
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
 // embed copy is intentionally evocative ("opened a door", "Door closes")
@@ -2811,8 +2823,12 @@ function partitionRecipients(users, senderId) {
 // Merge a MentionableSelectMenu pick (users + roles) into a deduped
 // User[] for partitionRecipients. The `@everyone` role
 // (role.id === guild.id) is gated on `canMentionEveryone` — same
-// gate as the text-path #323. Non-@everyone role gating is tracked
-// in #326.
+// gate as the text-path #323. Non-mentionable role gating (#326)
+// requires the same MENTION_EVERYONE permission (or `role.mentionable
+// === true` as a per-role bypass) — Discord's picker filters this
+// client-side, but a forged interaction would otherwise bypass it.
+// Denied non-@everyone roles surface via `roleMentionsDenied:
+// string[]` so the caller can render per-role copy with the name.
 //
 // Picked users seed `userMap` BEFORE role expansion so they get cap
 // priority over role-expanded members (mirrors the text-path #323
@@ -2849,6 +2865,15 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // silent deferUpdate-only no-op the user-visible path would
   // otherwise hit.
   let everyoneCacheCold = false;
+  // Per-role denied list (issue #326): a picked role that's not
+  // `mentionable: true` AND the sender lacks MENTION_EVERYONE lands
+  // here as `roleId`. Dedup via parallel Set so a future picker that
+  // surfaces the same role twice doesn't double-render. Tracked as
+  // IDs; the caller resolves names via `guild.roles.cache.get(id)
+  // ?.name` so renderRecipientWarnings stays pure (no guild
+  // dependency).
+  const roleMentionsDenied = [];
+  const roleMentionsDeniedIds = new Set();
   // Distinct bot IDs filtered across all picked roles — caller renders
   // .size as "N bot(s) filtered." Tracking as a Set (not a counter)
   // so overlap (bot in two roles, or directly-picked bot also in a
@@ -2879,6 +2904,21 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         // is a user-visible signal worth showing regardless of whether
         // expansion would have added anyone.
         massMentionDenied = true;
+        continue;
+      }
+      // Per-role MENTION_EVERYONE gate (issue #326), parallel to the
+      // text-path gate in recipient-parser.js. Discord's picker filters
+      // non-mentionable roles client-side for users without the perm —
+      // this gate is defense-in-depth against a forged interaction or
+      // a future client-side filter regression. The @everyone-role
+      // branch above already handled (isEveryoneRole), so this gate
+      // only fires for non-@everyone roles. `role.mentionable === true`
+      // is the per-role bypass (set explicitly by a role owner).
+      if (!isEveryoneRole && role?.mentionable !== true && !canMentionEveryone) {
+        if (!roleMentionsDeniedIds.has(roleId)) {
+          roleMentionsDeniedIds.add(roleId);
+          roleMentionsDenied.push(roleId);
+        }
         continue;
       }
       // `guild` is provably truthy in the @everyone branch (gated by
@@ -2961,6 +3001,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
     everyoneCacheCold,
+    roleMentionsDenied,
   };
 }
 
@@ -2975,10 +3016,17 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * builds its own joined-sentence reasons list with shorter copy
  * (rejection banner vs. warnings block — different UI contexts).
  * Both surface the SAME set of signals (droppedBots,
- * droppedFromRoles, massMentionDenied, everyoneCacheCold). When
- * adding or renaming a signal, update BOTH surfaces in lockstep —
- * the helpers don't share a copy table, so a future contributor
- * could easily land one half and not the other.
+ * droppedFromRoles, massMentionDenied, everyoneCacheCold,
+ * roleMentionsDeniedNames). When adding or renaming a signal, update
+ * BOTH surfaces in lockstep — the helpers don't share a copy table,
+ * so a future contributor could easily land one half and not the
+ * other.
+ *
+ * `roleMentionsDeniedNames` is a pre-resolved list of role NAMES
+ * (caller maps role IDs through `guild.roles.cache.get(id)?.name`,
+ * falling back to a placeholder for cache-miss / deleted roles).
+ * Keeping the helper pure of guild lookups mirrors how
+ * `invalidTokens` arrives pre-formatted from the parser.
  *
  * @param {{
  *   invalidTokens?: string[],
@@ -2989,6 +3037,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  *   everyoneCacheCold?: boolean,
+ *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -3000,6 +3049,7 @@ function renderRecipientWarnings({
   droppedFromRoles = 0,
   massMentionDenied = false,
   everyoneCacheCold = false,
+  roleMentionsDeniedNames = [],
 } = {}) {
   const lines = [];
   if (cappedCount > 0) {
@@ -3061,6 +3111,35 @@ function renderRecipientWarnings({
     // this in DM context (where @everyone has no meaning) so the
     // copy here doesn't need a context qualifier.
     lines.push('• `@everyone` requires the **Mention Everyone** permission — skipped.');
+  }
+  if (roleMentionsDeniedNames.length > 0) {
+    // One bullet per denied role so the user can tell which mention
+    // tripped the gate (the @everyone bullet above doesn't enumerate
+    // because it's always a single semantic action). Cap the list at
+    // 10 to bound the embed footprint under a forged-interaction
+    // attempt to enumerate every guild role; tail-count discloses
+    // the rest.
+    //
+    // Sanitization mirrors the invalidTokens path above:
+    //   - inline code fence (single backtick) so a role name
+    //     containing Discord markdown renders literally;
+    //   - backticks inside the name stripped to prevent fence
+    //     breakout;
+    //   - codepoint-aware slice via sliceWithEllipsis (80 codepoints)
+    //     so a 100-codepoint role name can't dwarf the rest of the
+    //     card. Role names are admin-controlled but Discord doesn't
+    //     restrict the character set, so treat the input as untrusted
+    //     for rendering purposes.
+    const ROLE_DISPLAY_MAX = 10;
+    const ROLE_NAME_CODEPOINT_CAP = 80;
+    const shown = roleMentionsDeniedNames.slice(0, ROLE_DISPLAY_MAX);
+    for (const name of shown) {
+      const safe = sliceWithEllipsis(name.replace(/`/g, ''), ROLE_NAME_CODEPOINT_CAP, '…');
+      lines.push(`• \`@${safe}\` requires the **Mention Everyone** permission or \`role.mentionable: true\` — skipped.`);
+    }
+    if (roleMentionsDeniedNames.length > ROLE_DISPLAY_MAX) {
+      lines.push(`• (+${roleMentionsDeniedNames.length - ROLE_DISPLAY_MAX} more role mention(s) skipped.)`);
+    }
   }
   if (lines.length === 0) return '';
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
@@ -3515,8 +3594,19 @@ async function handleQurlSlashSend(interaction, params) {
     // @everyone has no meaning in a DM (Discord doesn't expand it
     // there) and "requires the Mention Everyone permission" reads
     // strangely when there's no permission to grant. The other
-    // warnings (bot/capped/unresolved) still apply and surface.
+    // warnings (bot/capped/unresolved) still apply and surface. Same
+    // suppression applies to `roleMentionsDenied` — role mentions
+    // can't resolve in DM either (the parser's guild.roles.cache is
+    // empty), so this is defense-in-depth: in DM the array is
+    // empty already, but keep the gate consistent with @everyone.
     const isDmContext = !interaction.guild;
+    // Resolve denied role IDs to names for the warnings block.
+    // `resolveRoleNames` falls back to `'unknown-role'` for cache
+    // misses (e.g., role deleted between parse and render) so the
+    // bullet still renders rather than collapsing to `@undefined`.
+    const roleMentionsDeniedNames = !isDmContext
+      ? resolveRoleNames(interaction.guild, parsed.roleMentionsDenied)
+      : [];
     const warningsBlock = renderRecipientWarnings({
       invalidTokens: parsed.invalidTokens,
       cappedCount: parsed.cappedCount,
@@ -3524,6 +3614,7 @@ async function handleQurlSlashSend(interaction, params) {
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
       massMentionDenied: parsed.massMentionDenied && !isDmContext,
+      roleMentionsDeniedNames,
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
@@ -3535,7 +3626,8 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && droppedBots === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0;
+        && parsed.cappedCount === 0
+        && roleMentionsDeniedNames.length === 0;
       if (transientOnly) {
         return interaction.editReply({
           content: warningsBlock + '❌ **Could not look up recipients right now.** Try again in a moment.',
@@ -3551,7 +3643,8 @@ async function handleQurlSlashSend(interaction, params) {
         && resolved.unresolvedIds.length === 0
         && resolved.transientFailureIds.length === 0
         && parsed.invalidTokens.length === 0
-        && parsed.cappedCount === 0;
+        && parsed.cappedCount === 0
+        && roleMentionsDeniedNames.length === 0;
       const detail = breakdownEmpty
         ? '\n\nMake sure you @-mention real users (bots are skipped automatically).'
         : '';
@@ -4013,16 +4106,22 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     massMentionDenied,
     droppedFromRoles,
     everyoneCacheCold,
+    roleMentionsDenied,
   } = resolveMentionableSelection({
     interaction,
     canMentionEveryone,
     flow_id,
   });
+  // Resolve denied role IDs to names (with fallback for cache miss /
+  // deleted role) for the warnings block. Kept caller-side so the
+  // renderer stays pure of guild lookups, mirroring the text path.
+  const roleMentionsDeniedNames = resolveRoleNames(interaction.guild, roleMentionsDenied);
   if (
     selected.length === 0
     && !massMentionDenied
     && droppedFromRoles === 0
     && !everyoneCacheCold
+    && roleMentionsDenied.length === 0
   ) {
     // Truly empty pick (no users, no roles, no @everyone, no
     // bot-only roles, cache not cold) → already acked via deferUpdate
@@ -4090,6 +4189,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
       everyone_cache_cold: everyoneCacheCold,
+      role_mentions_denied: roleMentionsDenied.length,
     });
     // Reachable cases:
     //   - bot-only individual pick (droppedBots > 0)
@@ -4113,6 +4213,14 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
+    if (roleMentionsDenied.length > 0) {
+      // Condensed copy (count, not per-role) for the rejection banner —
+      // the warnings block (renderRecipientWarnings) does per-role
+      // bullets. Different UI contexts, COPY PARITY noted in
+      // renderRecipientWarnings's docstring.
+      const noun = roleMentionsDenied.length === 1 ? 'role' : 'roles';
+      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission`);
+    }
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
@@ -4139,6 +4247,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedFromRoles,
     massMentionDenied,
     everyoneCacheCold,
+    roleMentionsDeniedNames,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
