@@ -3594,19 +3594,17 @@ async function handleQurlSlashSend(interaction, params) {
     // @everyone has no meaning in a DM (Discord doesn't expand it
     // there) and "requires the Mention Everyone permission" reads
     // strangely when there's no permission to grant. The other
-    // warnings (bot/capped/unresolved) still apply and surface. Same
-    // suppression applies to `roleMentionsDenied` — role mentions
-    // can't resolve in DM either (the parser's guild.roles.cache is
-    // empty), so this is defense-in-depth: in DM the array is
-    // empty already, but keep the gate consistent with @everyone.
+    // warnings (bot/capped/unresolved) still apply and surface.
+    //
+    // `roleMentionsDenied` does NOT need an isDmContext guard: the
+    // parser's role loop won't fire without a `guild`, so
+    // `parsed.roleMentionsDenied` is always `[]` in DM —
+    // `resolveRoleNames` returns `[]` for empty input. Symmetric
+    // with the picker-path call site, which calls `resolveRoleNames`
+    // unconditionally (the picker path can't reach DM context at
+    // all because `canMentionEveryone` requires `interaction.guild`).
     const isDmContext = !interaction.guild;
-    // Resolve denied role IDs to names for the warnings block.
-    // `resolveRoleNames` falls back to `'unknown-role'` for cache
-    // misses (e.g., role deleted between parse and render) so the
-    // bullet still renders rather than collapsing to `@undefined`.
-    const roleMentionsDeniedNames = !isDmContext
-      ? resolveRoleNames(interaction.guild, parsed.roleMentionsDenied)
-      : [];
+    const roleMentionsDeniedNames = resolveRoleNames(interaction.guild, parsed.roleMentionsDenied);
     const warningsBlock = renderRecipientWarnings({
       invalidTokens: parsed.invalidTokens,
       cappedCount: parsed.cappedCount,
@@ -4217,9 +4215,12 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       // Condensed copy (count, not per-role) for the rejection banner —
       // the warnings block (renderRecipientWarnings) does per-role
       // bullets. Different UI contexts, COPY PARITY noted in
-      // renderRecipientWarnings's docstring.
+      // renderRecipientWarnings's docstring. Surfaces the
+      // `role.mentionable: true` bypass inline so a user who hits
+      // this banner knows the workaround without having to find the
+      // per-role copy (which only the partial-valid surface renders).
       const noun = roleMentionsDenied.length === 1 ? 'role' : 'roles';
-      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission`);
+      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission (or mark the role as mentionable)`);
     }
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
     if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');

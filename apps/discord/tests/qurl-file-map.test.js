@@ -3339,6 +3339,10 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Non-mentionable role/i);
     expect(updated.content).toMatch(/Mention Everyone/);
+    // Per-role-bypass mention surfaces inline on the banner so the
+    // user doesn't have to find the per-role bullet copy (which only
+    // the partial-valid surface renders) to learn the workaround.
+    expect(updated.content).toMatch(/mark the role as mentionable/i);
     // Resource header survives — preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
   });
