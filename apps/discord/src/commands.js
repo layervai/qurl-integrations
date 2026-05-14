@@ -1217,9 +1217,10 @@ async function executeSendPipeline(interaction, {
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
       // targetType is preserved on every row for the revoke-list
       // renderer's branch on `s.target_type` (historical /qurl send rows
-      // can be 'channel'/'voice'; new /qurl file + /qurl map rows are
-      // always 'user'). When all historical rows expire, the
-      // formatRevokeLabel non-'user' branch can be deleted too.
+      // can be 'channel'; new /qurl file + /qurl map rows are always
+      // 'user'). When all historical rows expire (max EXPIRY_LABELS
+      // window = 7 days post-deploy), the formatRevokeLabel non-'user'
+      // branch can be deleted too — tracker: #318.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
     })));
   } catch (err) {

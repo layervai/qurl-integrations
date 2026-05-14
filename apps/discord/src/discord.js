@@ -50,6 +50,14 @@ assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map re
 // what crosses the Discord gateway. See PR #313 / issue #317 for
 // context on why this matters operationally (event volume + portal-
 // toggle drift).
+// `bit === undefined` is INTENTIONALLY permissive here (asymmetric vs
+// assertIntent, which is strict on undefined). Rationale: assertIntent
+// fails closed because a missing intent silently breaks a known feature;
+// assertNoIntent has nothing to defend against when the bit doesn't
+// exist (a Discord.js bump that drops an intent name from
+// GatewayIntentBits can't have silently re-added it). The test at
+// `discord.test.js` ('does not throw when the bit is undefined') pins
+// the asymmetry.
 function assertNoIntent(intentsList, bit, name) {
   if (bit !== undefined && intentsList.includes(bit)) {
     throw new Error(`Intent \`${name}\` was re-added without justification. If the new use case is legitimate, document it via assertIntent at apps/discord/src/discord.js and remove the assertNoIntent below; otherwise drop the intent from the \`intents\` array.`);
