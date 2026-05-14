@@ -266,11 +266,13 @@ function isAllowedFileType(contentType) {
   return ALLOWED_FILE_TYPES.some(prefix => ct.startsWith(prefix));
 }
 
-// Global per-sendId mutex for the "Add Recipients" flow. The collector
-// callback in monitorLinkStatus can fire concurrently for the same sendId
-// (rapid button clicks within the polling window); this Set is the
-// single source of truth for "an addRecipients pass is in progress."
-// Acquire at handler entry, release in the finally.
+// Global per-sendId mutex for the "Add Recipients" flow. Discord's
+// `createMessageComponentCollector` in executeSendPipeline can fire the
+// "Add Recipients" button callback concurrently for the same sendId
+// (rapid clicks before the prior callback finishes its userSelect prompt
+// or DDB write); this Set is the single source of truth for "an
+// addRecipients pass is in progress." Acquire at handler entry, release
+// in the finally.
 const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();

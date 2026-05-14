@@ -244,13 +244,13 @@ function setupWeeklyDigest() {
 // so misconfigurations surface immediately. Non-fatal: we still boot in
 // case the permission gap is intentional for a staging tenant.
 //
-// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla /qurl
-// send tool only needs 4 perms (ViewChannel for target:channel/voice
-// member enumeration, SendMessages for interaction replies, EmbedLinks
-// for qURL link previews, UseApplicationCommands for slash commands).
-// ManageRoles/ManageChannels are OpenNHP-only — demanding them in every
-// guild would produce a confusing "missing permissions" error in guilds
-// that correctly granted only the 4 runtime perms.
+// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla qURL
+// sharing tool only needs 4 perms (ViewChannel so the bot can see and
+// reply in the invoking channel, SendMessages for interaction replies,
+// EmbedLinks for qURL link previews, UseApplicationCommands for slash
+// commands). ManageRoles/ManageChannels are OpenNHP-only — demanding
+// them in every guild would produce a confusing "missing permissions"
+// error in guilds that correctly granted only the 4 runtime perms.
 async function verifyBotPermissions() {
   try {
     const { PermissionFlagsBits } = require('discord.js');
