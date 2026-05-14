@@ -327,6 +327,28 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(stepThrough.setURL).toHaveBeenCalledWith('https://qurl.link/#at_unique_token');
   });
 
+  // Contract pin: buildDeliveryPayload does NOT escape markdown in
+  // personalMessage. By contract (documented at commands.js:631-639),
+  // the call sites pipe raw input through sanitizeMessage before
+  // passing it here. This test pins that the function renders the
+  // string as-is — so a future refactor that adds an internal escape
+  // pass (changing the contract) will surface the change loudly via
+  // this test, not silently double-escape sanitized input.
+  //
+  // The senderAlias path is the opposite: sanitizeDisplayName is called
+  // inside buildDeliveryPayload and DOES escape, pinned by the
+  // 'escapes markdown chars in alias' test above.
+  it('renders personalMessage as-is (no internal markdown escape — by contract)', () => {
+    const raw = '[click](https://evil.com) **bold**';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: raw });
+    const desc = capturedEmbeds[0]._description;
+    // Brackets, parens, and asterisks are NOT backslash-escaped —
+    // verifies buildDeliveryPayload passes them through verbatim.
+    expect(desc).toContain(`> *"${raw}"*`);
+    expect(desc).not.toContain('\\[click');
+    expect(desc).not.toContain('\\*\\*bold');
+  });
+
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
     const desc = capturedEmbeds[0]._description;
@@ -357,12 +379,15 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
       expiresAt: 1735689600,
     });
     const desc = capturedEmbeds[0]._description;
-    const senderIdx = desc.indexOf('**Vik**');
-    const messageIdx = desc.indexOf('Quarterly numbers');
-    const expiryIdx = desc.indexOf('Closes <t:');
-    expect(senderIdx).toBeGreaterThanOrEqual(0);
-    expect(messageIdx).toBeGreaterThan(senderIdx);
-    expect(expiryIdx).toBeGreaterThan(messageIdx);
+    // split-then-index-by-line over indexOf-substring-position: an
+    // `indexOf` check would false-pass if a future personalMessage
+    // happened to contain the literal substring `"Closes <t:"`,
+    // ordering both indices the same way. Pin position by line.
+    const lines = desc.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toContain('Quarterly numbers');
+    expect(lines[2]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
     // And no addFields call — folded entirely into description.
     expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
   });

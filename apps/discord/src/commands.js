@@ -443,12 +443,8 @@ function resolveRecipientAlias(r, interaction) {
 // — it lives in a top-level component row alongside it. Callers pass the
 // returned payload directly to `sendDM`.
 //
-// Example of what the recipient sees AFTER Discord renders the embed
-// (blank rows between sections represent Discord's natural line-spacing
-// padding around the description block + below the button row, not
-// literal newlines — the actual `descLines.join('\n')` produces single-
-// newline separators, which Discord then displays with the spacing
-// shown below):
+// Rendered output (blank rows = Discord's natural section spacing,
+// NOT literal `\n` separators — descLines.join('\n') is single-newline):
 //
 //     ┌─────────────────────────────────────────────────────────────┐
 //     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
