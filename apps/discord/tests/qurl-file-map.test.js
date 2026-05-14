@@ -203,6 +203,8 @@ const {
   resolveLocation,
   RESOLVE_REASON,
   handleAutocomplete,
+  _resetAutocompleteFailureBurst,
+  AUTOCOMPLETE_FAILURE_LOG_BURST,
   safeDecodeURIComponent,
   softenCooldown,
   SEND_STAGE_AWAITING_CONFIRM,
@@ -703,6 +705,10 @@ describe('handleAutocomplete', () => {
   // the server-side fallback uses.
   beforeEach(() => {
     mockSearchPlaces.mockReset().mockResolvedValue([]);
+    // The autocomplete-failure burst counter is module-level state;
+    // reset between tests so a leftover count can't trip the sampled
+    // warn on a later test's first failure.
+    _resetAutocompleteFailureBurst();
   });
 
   function makeAutocompleteInteraction({ subcommand = 'map', focused = { name: 'location', value: 'whitehouse' } } = {}) {
@@ -849,6 +855,56 @@ describe('handleAutocomplete', () => {
     const int = makeAutocompleteInteraction();
     await handleAutocomplete(int);
     expect(int.respond).toHaveBeenCalledWith([]);
+  });
+
+  test('failure burst counter emits one warn per BURST failures (SRE outage signal)', async () => {
+    // Per-call log is `debug` to avoid keystroke-rate spam. The sampled
+    // `warn` is the visible signal for SRE that autocomplete is degraded
+    // (vs. just no traffic). Pins the contract: one warn fires when the
+    // burst counter crosses AUTOCOMPLETE_FAILURE_LOG_BURST, and resets.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
+      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    // Just below the burst threshold — no warn yet.
+    const burstWarns = () => logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns()).toBe(0);
+
+    // The BURST-th failure trips the sampled warn.
+    mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+    await handleAutocomplete(makeAutocompleteInteraction());
+    expect(burstWarns()).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'autocomplete handler failure burst',
+      expect.objectContaining({ count: AUTOCOMPLETE_FAILURE_LOG_BURST }),
+    );
+
+    // Counter reset — next burst starts fresh.
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
+      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    expect(burstWarns()).toBe(1);
+  });
+
+  test('failure burst counter does not increment on the success path', async () => {
+    // A successful autocomplete must NOT advance the burst counter,
+    // otherwise the sampled warn would fire eventually during normal
+    // operation and look like an outage in logs.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    mockSearchPlaces.mockResolvedValue([{ placeId: 'ChIJ1', name: 'X', address: 'Y' }]);
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    const burstWarns = logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns).toBe(0);
   });
 });
 

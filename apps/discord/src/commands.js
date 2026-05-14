@@ -5843,6 +5843,15 @@ function isAckTimeoutError(err) {
 // cost isn't justified.
 const AUTOCOMPLETE_MIN_QUERY_LENGTH = 2;
 
+// Sampled-warn cadence for autocomplete failures. The catch logs at
+// `debug` per-call to avoid keystroke-rate log spam during a Places
+// outage; this counter emits one `warn` per AUTOCOMPLETE_FAILURE_LOG_BURST
+// failures so SRE has a coarse signal that autocomplete is degraded
+// (vs. no traffic) without flooding logs. resolveLocation's send-time
+// `warn` carries the load-bearing signal — this is secondary visibility.
+const AUTOCOMPLETE_FAILURE_LOG_BURST = 50;
+let autocompleteFailureBurst = 0;
+
 // Discord caps each choice's `name` (label) and `value` (handler input)
 // at 100 chars. Labels (name + address) often need truncation; values
 // (`qurl_place:<placeId>`) almost never do, but we drop pathological
@@ -5899,13 +5908,20 @@ async function handleAutocomplete(interaction) {
     }
     return interaction.respond(choices);
   } catch (err) {
-    // Debug, not warn: Places outages would otherwise spam logs at
-    // keystroke rate. The empty-response fallback IS the contract here;
-    // resolveLocation's send-time call carries the load-bearing warn.
+    // Per-call log at debug so keystroke-rate failures don't spam.
     logger.debug('autocomplete handler failed', {
       command: interaction.commandName,
       error: err && err.message,
     });
+    // Sampled SRE signal: emit one warn per BURST failures so a
+    // Places outage is visible (vs. silent autocomplete-only degrade).
+    if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
+      logger.warn('autocomplete handler failure burst', {
+        count: autocompleteFailureBurst,
+        error: err && err.message,
+      });
+      autocompleteFailureBurst = 0;
+    }
     try { await interaction.respond([]); } catch { /* ignore */ }
     return undefined;
   }
@@ -6191,6 +6207,11 @@ module.exports = {
       resolveLocation,
       RESOLVE_REASON,
       handleAutocomplete,
+      // Test-only reset: the autocomplete-failure burst counter is
+      // module-level state that accumulates across tests within a
+      // file unless explicitly cleared.
+      _resetAutocompleteFailureBurst: () => { autocompleteFailureBurst = 0; },
+      AUTOCOMPLETE_FAILURE_LOG_BURST,
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
