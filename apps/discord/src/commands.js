@@ -2518,6 +2518,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 
 const {
   parseRecipientMentions,
+  isVoiceChannelType,
   MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
 } = require('./recipient-parser');
 
@@ -2552,6 +2553,16 @@ const CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_confirm_expiry';
 const CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_confirm_self_destruct';
 const CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_confirm_note_btn';
 const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
+// Confirm-card "Everyone in this voice channel" button. Rendered only
+// when the slash command was invoked from a voice / stage-voice channel
+// (`payload.voiceChannelId` is set by `handleQurlSlashSend`). Mirrors
+// the role-mention/`<#voice>` parser path: resolve voice-connected
+// non-bot members via `channel.members` AT CLICK TIME, not render time,
+// so a 30s-old member snapshot doesn't silently send to people who
+// left. PR #174's "voice-connected only" semantics are restored here
+// (replacing the legacy `/qurl send`'s wizard option deleted in
+// PR #313 alongside `getChannelMembers`).
+const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 // Local to the note modal — kept off the prefix-only customId
 // allowlist because flow-dispatch never routes modal-input fields,
 // only the parent modal customId.
@@ -2915,12 +2926,24 @@ function formatPersonalMessagePreview(message) {
 // the layout is stable from frame 0), Self-destruct StringSelectMenu,
 // Expiry StringSelectMenu (each select needs its own row — Discord
 // forbids combining selects with buttons in the same ActionRow),
-// and the bottom row packing Note button + Send + Cancel.
+// and the bottom row packing the optional voice-everyone button +
+// Note button + Send + Cancel.
 //
-// Row math (Discord 5-row max):
-//   UserSelect + SelfDestruct + Expiry + [Note, Send, Cancel] = 4 rows
+// Row math (Discord 5-row max, 5-buttons-per-row max):
+//   UserSelect + SelfDestruct + Expiry +
+//   [(optional 🔊 Voice), Note, Send, Cancel] = 4 rows, ≤ 4 buttons
+//
+// The voice button is rendered only when `voiceChannelId` is non-null
+// (snapshot into payload by `handleQurlSlashSend` when the slash
+// command was invoked from a voice / stage-voice channel). Disabled
+// with a `(0)` count when the channel has no connected non-bot members
+// at render time — honest UX so the user can see WHY the button is
+// inert. The actual member resolution still happens at click time
+// (see `handleConfirmVoiceEveryone`); the count here is a snapshot
+// hint so the label isn't blank.
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
+  voiceChannelId, interaction,
 }) {
   const rows = [];
   const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
@@ -2995,10 +3018,35 @@ function renderConfirmCardRows({
         }))
       )
   ));
-  // Bottom row: Note button + Send + Cancel. Label flips between
-  // "Add a note" and "Edit note" based on current state so the user
-  // can tell at a glance whether a note is attached.
-  rows.push(new ActionRowBuilder().addComponents(
+  // Bottom row: [optional 🔊 Voice] + Note + Send + Cancel. Note label
+  // flips between "Add a note" and "Edit note" based on current state
+  // so the user can tell at a glance whether a note is attached.
+  const bottomRow = new ActionRowBuilder();
+  if (voiceChannelId) {
+    // Live count via interaction.guild for the label. interaction may
+    // be absent on the (rare) test path that builds rows without it;
+    // fall back to `?` so the button still renders without crashing.
+    // The button itself is disabled in either degraded case (no count
+    // = nothing to send to anyway from this affordance).
+    const channel = interaction?.guild?.channels?.cache?.get?.(voiceChannelId);
+    let connectedCount = null;
+    if (channel?.members) {
+      let n = 0;
+      for (const [, m] of channel.members) {
+        if (!m?.user?.bot) n++;
+      }
+      connectedCount = n;
+    }
+    const labelCount = connectedCount == null ? '?' : String(connectedCount);
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID)
+        .setLabel(`\u{1F50A} Everyone in this voice channel (${labelCount})`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(connectedCount === null || connectedCount === 0),
+    );
+  }
+  bottomRow.addComponents(
     new ButtonBuilder()
       .setCustomId(CONFIRM_NOTE_BUTTON_CUSTOM_ID)
       .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note (optional)')
@@ -3012,7 +3060,8 @@ function renderConfirmCardRows({
       .setCustomId(CONFIRM_CANCEL_CUSTOM_ID)
       .setLabel('Cancel')
       .setStyle(ButtonStyle.Secondary),
-  ));
+  );
+  rows.push(bottomRow);
   return rows;
 }
 
@@ -3094,9 +3143,10 @@ async function handleQurlSlashSend(interaction, params) {
     // `@everyone` is gated on the sender's MENTION_EVERYONE permission
     // in this channel (Discord's own gate for mass-mention). Without
     // this, any guild member could blast a /qurl send to every member
-    // in the cache, bounded only by the 25-recipient cap. The parser
-    // surfaces `massMentionDenied: true` when the sender tried but
-    // lacks permission — the caller renders a permission-specific
+    // in the cache, bounded only by the QURL_SEND_MAX_RECIPIENTS cap
+    // (now 20k — sized for voice/stage-everyone, see config.js). The
+    // parser surfaces `massMentionDenied: true` when the sender tried
+    // but lacks permission — the caller renders a permission-specific
     // warning instead of the generic "couldn't parse" copy.
     //
     // `interaction.memberPermissions` is the resolved channel-effective
@@ -3208,6 +3258,24 @@ async function handleQurlSlashSend(interaction, params) {
     const recipientAliases = Object.fromEntries(
       valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
     );
+    // Voice-channel context snapshot. The "Everyone in this voice
+    // channel" confirm-card button is rendered when this is set.
+    // Snapshot at slash-command time (NOT re-derived at button-click)
+    // because:
+    //   - interaction.channel at click time tracks the channel the
+    //     ephemeral message lives in, which DOES match invocation
+    //     channel in practice — but pinning via payload is the durable
+    //     contract and matches the rest of the flow-state pattern.
+    //   - A user who opens /qurl file from a voice channel, then
+    //     drags themselves into a different channel mid-confirm,
+    //     should still see "Everyone in this voice channel" target
+    //     the channel they invoked from, not the channel they're now
+    //     in.
+    // The actual member resolution still happens at click time via
+    // channel.members — see handleConfirmVoiceEveryone.
+    const voiceChannelId = isVoiceChannelType(interaction.channel?.type)
+      ? interaction.channel.id
+      : null;
     const payload = {
       resourceType: params.resourceType,
       attachment: params.attachment,
@@ -3216,6 +3284,7 @@ async function handleQurlSlashSend(interaction, params) {
       resourceLabel: params.resourceLabel,
       recipientIds,
       recipientAliases,
+      voiceChannelId,
       expiresIn,
       selfDestructSeconds,
       personalMessage,
@@ -3292,6 +3361,8 @@ async function handleQurlSlashSend(interaction, params) {
       expiresIn,
       selfDestructSeconds,
       personalMessage,
+      voiceChannelId,
+      interaction,
     });
     // `return await` (not bare `return`) is load-bearing: without it
     // a Discord-side rejection on the confirm-card delivery would
@@ -3653,6 +3724,8 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
       personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
     }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
@@ -3767,6 +3840,186 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
       personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
+    }),
+  }).catch(logIgnoredDiscordErr);
+}
+
+// Confirm-card "Everyone in this voice channel" button. Mirrors the
+// UserSelectMenu handler's shape (deferUpdate → resolve → partition →
+// transitionFlow → re-render) but reads the voice-connected member
+// set AT CLICK TIME from the guild's voice-state cache rather than
+// taking the selection from a Discord-emitted picker payload. This
+// click-time read is load-bearing: a 30s-old snapshot would silently
+// send to users who already left voice.
+//
+// The button is only rendered when payload.voiceChannelId is set
+// (snapshot at slash-command time). A click without that field is
+// either a forged interaction or a malformed flow row — treat as a
+// corrupt payload and surface re-run copy, same shape as
+// handleConfirmUserSelect's resourceType guard.
+async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  const payload = row.payload || {};
+  // resourceType guard mirrors handleConfirmUserSelect:3626 — a
+  // corrupt/stale row would otherwise throw from renderConfirmCardContent.
+  const payloadResource = payload.resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleConfirmVoiceEveryone: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const voiceChannelId = payload.voiceChannelId;
+  if (!voiceChannelId) {
+    // Button shouldn't have rendered without this field. A click here
+    // is either a forged interaction or a payload that lost the field
+    // (schema drift). Re-render the card without the button rather
+    // than deleting the row — the user can still pick recipients
+    // through the UserSelectMenu.
+    logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', { flow_id });
+    return undefined;
+  }
+
+  // Re-render with a warning banner. Same shape as the picker's
+  // rejectPick path so the user sees why the button didn't take.
+  const rejectVoice = (warning) => interaction.editReply({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+    }),
+    components: renderConfirmCardRows({
+      sendDisabled: true,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
+    }),
+  }).catch(logIgnoredDiscordErr);
+
+  // Resolve voice-connected members AT CLICK TIME from the voice-state
+  // cache (populated by the GuildVoiceStates intent). channel.members
+  // is a Collection<Snowflake, GuildMember> filtered to currently-
+  // connected members for voice/stage-voice channels. A cache miss
+  // (channel was deleted between render and click, voice intent was
+  // recently dropped, etc.) lands in the warning branch.
+  const channel = interaction.guild?.channels?.cache?.get(voiceChannelId);
+  if (!channel || !channel.members) {
+    return rejectVoice(`⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`);
+  }
+  // Filter bots inline (mirrors recipient-parser's voice-expansion
+  // pass) and convert GuildMember → User so partitionRecipients sees
+  // the same shape the picker hands it.
+  const selectedUsers = [];
+  for (const [, m] of channel.members) {
+    if (m?.user?.bot) continue;
+    if (m?.user) selectedUsers.push(m.user);
+  }
+  if (selectedUsers.length === 0) {
+    return rejectVoice(`⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`);
+  }
+  const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
+  if (valid.length === 0) {
+    // Defense-in-depth — the pre-filter above already dropped bots,
+    // so reaching here means every connected non-bot got filtered by
+    // a future addition to partitionRecipients. Surface generic copy.
+    const reasons = [];
+    if (droppedBots > 0) reasons.push('Cannot send to bots');
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in voice channel';
+    return rejectVoice(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
+  }
+  // The 20k QURL_SEND_MAX_RECIPIENTS default is sized to accommodate
+  // voice/stage capacity (Discord's voice channel caps at 99; stage
+  // channels are higher), so a hard cap rejection here is defense-in-
+  // depth against a misconfigured smaller env override rather than the
+  // common path. The picker's similar guard at handleConfirmUserSelect
+  // is identically structured.
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} connected (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+  }
+
+  const newWarningsBlock = renderRecipientWarnings({
+    droppedBots,
+  });
+  const newRecipientAliases = Object.fromEntries(
+    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+  );
+  const newPayload = {
+    ...payload,
+    recipientIds: valid.map((u) => u.id),
+    recipientAliases: newRecipientAliases,
+    warningsBlock: newWarningsBlock,
+    selfIncluded,
+  };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleConfirmVoiceEveryone: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your selection right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const content = renderConfirmCardContent({
+    resourceType: payload.resourceType,
+    resourceLabel: payload.resourceLabel,
+    validRecipients: valid,
+    expiresIn: payload.expiresIn,
+    selfDestructSeconds: payload.selfDestructSeconds,
+    personalMessage: payload.personalMessage,
+    warningsBlock: newWarningsBlock,
+    needsPicker: false,
+    interaction,
+    selfIncluded,
+  });
+  return interaction.editReply({
+    content,
+    components: renderConfirmCardRows({
+      sendDisabled: false,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -3842,6 +4095,8 @@ async function rerenderConfirmCard(interaction, newPayload) {
       expiresIn: newPayload.expiresIn,
       selfDestructSeconds: newPayload.selfDestructSeconds,
       personalMessage: newPayload.personalMessage,
+      voiceChannelId: newPayload.voiceChannelId,
+      interaction,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -5924,6 +6179,14 @@ registerFlow(CONFIRM_NOTE_MODAL_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmNoteModal,
 });
+// Voice-everyone button — only present on the confirm card when the
+// slash command was invoked from a voice / stage-voice channel.
+// Same stage + siblingMessage-keyed-by-stage contract as the other
+// CONFIRM_* registrations above.
+registerFlow(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleConfirmVoiceEveryone,
+});
 
 module.exports = {
   commands,
@@ -5941,6 +6204,7 @@ module.exports = {
   handleConfirmSelfDestructSelect,
   handleConfirmNoteButton,
   handleConfirmNoteModal,
+  handleConfirmVoiceEveryone,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -6013,7 +6277,7 @@ module.exports = {
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
-      // All seven confirm-card customId literals exported so the
+      // All eight confirm-card customId literals exported so the
       // contract test in qurl-file-map.test.js can pin every wire
       // value — a typo in any of these silently breaks routing for
       // in-flight confirm cards, so they need to be test-asserted.
@@ -6024,6 +6288,7 @@ module.exports = {
       CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
       CONFIRM_NOTE_BUTTON_CUSTOM_ID,
       CONFIRM_NOTE_MODAL_CUSTOM_ID,
+      CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,
     },

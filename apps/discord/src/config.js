@@ -277,7 +277,19 @@ module.exports = {
   // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
-  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
+  //
+  // 20,000 default chosen to accommodate the voice-everyone path against
+  // stage channels (Discord's largest gathering surface). Operational
+  // implications a max-size send carries:
+  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
+  //     qurl-service per send (`mintLinksInBatches`).
+  //   - DM delivery is bounded by Discord's per-bot DM rate limit
+  //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
+  //     `monitorLinkStatus`'s interval-based progress tracking must
+  //     survive that duration.
+  // Per-guild operators can dial this down via the env override if
+  // their qurl-service plan or DM-throughput posture demands it.
+  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 
   SHARD_ID,

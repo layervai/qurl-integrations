@@ -22,7 +22,14 @@ jest.mock('../src/config', () => ({
   QURL_SEND_MAX_RECIPIENTS: 25,
 }));
 
-const { parseRecipientMentions, MAX_INPUT_LENGTH, MAX_INVALID_TOKEN_LENGTH } = require('../src/recipient-parser');
+const {
+  parseRecipientMentions,
+  isVoiceChannelType,
+  MAX_INPUT_LENGTH,
+  MAX_INVALID_TOKEN_LENGTH,
+  VOICE_CHANNEL_TYPE,
+  STAGE_VOICE_CHANNEL_TYPE,
+} = require('../src/recipient-parser');
 const logger = require('../src/logger');
 
 // Build a synthetic interaction with the cache shape the parser reads.
@@ -31,7 +38,7 @@ const logger = require('../src/logger');
 // IDs are all-numeric to match real Discord snowflakes — the parser's
 // regex is `/<@!?(\d+)>/` so letter-prefixed test fixtures would silently
 // drop every mention, masking real coverage.
-function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {} } = {}) {
+function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {}, channels = {} } = {}) {
   const memberCache = new Map();
   for (const [id, attrs] of Object.entries(users)) {
     memberCache.set(id, { user: { id, bot: !!attrs.bot } });
@@ -50,11 +57,28 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
     }
     roleCache.set(roleId, { members: roleMembers });
   }
+  // Channel shape: { id → { type, members: [id, ...] } } where type
+  // is the numeric ChannelType (2 = GuildVoice, 13 = GuildStageVoice;
+  // any other value tests the non-voice rejection path). Voice-
+  // connected members are added to the guild member cache so the
+  // bot filter (and post-filter dedupe semantics) match production.
+  const channelCache = new Map();
+  for (const [channelId, attrs] of Object.entries(channels)) {
+    const memberIds = attrs.members || [];
+    const chMembers = new Map();
+    for (const mid of memberIds) {
+      const existing = memberCache.get(mid) ?? { user: { id: mid, bot: false } };
+      memberCache.set(mid, existing);
+      chMembers.set(mid, existing);
+    }
+    channelCache.set(channelId, { id: channelId, type: attrs.type, members: chMembers });
+  }
   return {
     user: { id: senderId },
     guild: {
       members: { cache: memberCache },
       roles: { cache: roleCache },
+      channels: { cache: channelCache },
     },
   };
 }
@@ -326,6 +350,166 @@ describe('parseRecipientMentions — role mentions', () => {
     const res = parseRecipientMentions('<@&7000> <@&7000> <@&7000>', int);
     expect(res.ids.sort()).toEqual(['101', '102']);
     expect(res.invalidTokens).toEqual([]);
+  });
+});
+
+describe('voice-channel type constants (discord.js ChannelType pin)', () => {
+  // Pins the numeric values the parser hard-codes (`channel.type ===
+  // 2 || channel.type === 13`). A discord.js bump that renumbers
+  // GuildVoice / GuildStageVoice would break the voice-everyone path
+  // silently without these assertions — the parser would treat real
+  // voice channels as non-voice and reject the mention.
+  test('VOICE_CHANNEL_TYPE is 2 (GuildVoice)', () => {
+    expect(VOICE_CHANNEL_TYPE).toBe(2);
+  });
+  test('STAGE_VOICE_CHANNEL_TYPE is 13 (GuildStageVoice)', () => {
+    expect(STAGE_VOICE_CHANNEL_TYPE).toBe(13);
+  });
+  test('isVoiceChannelType matches both voice + stage-voice', () => {
+    expect(isVoiceChannelType(2)).toBe(true);
+    expect(isVoiceChannelType(13)).toBe(true);
+  });
+  test('isVoiceChannelType rejects every other channel type (text, category, forum, etc.)', () => {
+    expect(isVoiceChannelType(0)).toBe(false);   // GuildText
+    expect(isVoiceChannelType(4)).toBe(false);   // GuildCategory
+    expect(isVoiceChannelType(5)).toBe(false);   // GuildAnnouncement
+    expect(isVoiceChannelType(10)).toBe(false);  // AnnouncementThread
+    expect(isVoiceChannelType(15)).toBe(false);  // GuildForum
+    expect(isVoiceChannelType(undefined)).toBe(false);
+    expect(isVoiceChannelType(null)).toBe(false);
+  });
+});
+
+describe('parseRecipientMentions — channel mentions (voice / stage-voice)', () => {
+  // ChannelType numeric values mirrored from discord.js:
+  //   GuildVoice = 2
+  //   GuildStageVoice = 13
+  //   GuildText = 0 (rejected — non-voice)
+  const GUILD_VOICE = 2;
+  const GUILD_STAGE_VOICE = 13;
+  const GUILD_TEXT = 0;
+
+  test('voice channel expands to currently-connected non-bot members', () => {
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222', '333'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222', '333']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('stage-voice channel expands the same way as voice', () => {
+    const int = makeInteraction({
+      channels: {
+        '501': { type: GUILD_STAGE_VOICE, members: ['111', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#501>', int);
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('voice channel filters bots from the connected set', () => {
+    const int = makeInteraction({
+      users: { '801': { bot: true } },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '801', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('empty voice channel lands in invalidTokens (no silent empty expansion)', () => {
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: [] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('voice channel with only bots lands in invalidTokens', () => {
+    const int = makeInteraction({
+      users: { '801': { bot: true }, '802': { bot: true } },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['801', '802'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('text channel mention is rejected into invalidTokens (no @everyone-in-text-channel regression)', () => {
+    // Pins PR #174's fix: text-channel "everyone" used to expand to
+    // every ViewChannel-permission holder, which on default Discord
+    // is the entire guild. We REJECT non-voice channel mentions
+    // outright so a user typing `<#text-channel>` doesn't accidentally
+    // blast the whole server.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_TEXT, members: ['111', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('unknown channel (cache miss) lands in invalidTokens', () => {
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+  });
+
+  test('dedupes repeated channel mentions into one invalidTokens entry', () => {
+    // Symmetric with the role-error dedup path (`<@&999> <@&999>`
+    // produces one entry, not two). A caller's "couldn't parse: X, X"
+    // embed is hostile.
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999> <#999>', int);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+  });
+
+  test('voice expansion combines with explicit user mentions (dedupe across paths)', () => {
+    const int = makeInteraction({
+      users: { '111': {}, '222': {}, '333': {} },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222'] },
+      },
+    });
+    // '111' appears in both the explicit mention AND the voice
+    // channel; should dedupe to one entry. '333' is mention-only.
+    const res = parseRecipientMentions('<@111> <@333> <#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222', '333']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('channel mention does not show up in invalidTokens twice (channel-expansion + residue-strip)', () => {
+    // The residue-strip pass also strips <#id>; without that, a
+    // resolved voice channel would surface as both an expansion AND
+    // a leftover invalid token. Test pins the strip.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('DM-context (no guild) lands channel mention in invalidTokens', () => {
+    // Same cold-cache / DM degradation path as user mentions.
+    const res = parseRecipientMentions('<#500>', { user: { id: '900000000000000001' } });
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
   });
 });
 

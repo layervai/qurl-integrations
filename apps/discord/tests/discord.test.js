@@ -104,7 +104,14 @@ const mockClient = {
 
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
-  GatewayIntentBits: { Guilds: 1, GuildMembers: 2 },
+  // GuildVoiceStates (=128 in production discord.js) is load-bearing
+  // for the /qurl file + /qurl map voice-channel-everyone path —
+  // channel.members for voice channels reads the voice-state cache
+  // which is only populated when the intent is declared. The discord.js
+  // module's assertIntent at boot would throw if this bit is missing
+  // from the mock; the value here matches discord.js's enum so future
+  // production-shape canary tests can rely on it.
+  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128 },
   EmbedBuilder: jest.fn().mockImplementation(() => ({
     setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
     setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),
@@ -642,14 +649,27 @@ describe('discord module', () => {
         '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)'))
         .toThrow(/\/qurl file \+ \/qurl map recipient resolution/);
     });
+
+    // GuildVoiceStates is the second load-bearing intent: its boot
+    // canary at discord.js pins the voice-everyone resolution path.
+    // A future PR that drops the intent without removing the feature
+    // (channel.members for voice channels reads the voice-state cache)
+    // must trip this assertion at module load.
+    it('production assertIntent for GuildVoiceStates surfaces the voice-everyone resolution feature label', () => {
+      expect(() => discord.assertIntent([1 /* Guilds */, 2 /* GuildMembers */], 128 /* GuildVoiceStates */,
+        '/qurl file + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)'))
+        .toThrow(/voice-channel-everyone resolution/);
+    });
   });
 
   describe('assertNoIntent (negative canary)', () => {
     // Pins the negative-intent guard: if a future PR silently adds back
-    // MessageContent / GuildPresences / DirectMessages / GuildVoiceStates
-    // to the intents array, the assertNoIntent invocations at
-    // discord.js:~45-50 fail loud at boot. This test pins both branches
-    // (re-added intent throws; absent intent doesn't).
+    // MessageContent / GuildPresences / DirectMessages to the intents
+    // array, the assertNoIntent invocations at discord.js fail loud at
+    // boot. This test pins both branches (re-added intent throws;
+    // absent intent doesn't). GuildVoiceStates was previously listed
+    // here but was re-added (with paired assertIntent above) when the
+    // voice-everyone path was restored.
     it('throws when the disallowed intent IS in the intents list', () => {
       const intentsList = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
       expect(() => discord.assertNoIntent(intentsList, 4096, 'DirectMessages'))

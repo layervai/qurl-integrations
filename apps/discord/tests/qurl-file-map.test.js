@@ -185,6 +185,7 @@ const {
   CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
   CONFIRM_NOTE_BUTTON_CUSTOM_ID,
   CONFIRM_NOTE_MODAL_CUSTOM_ID,
+  CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -207,6 +208,7 @@ const {
   handleConfirmSelfDestructSelect,
   handleConfirmNoteButton,
   handleConfirmNoteModal,
+  handleConfirmVoiceEveryone,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -2348,6 +2350,125 @@ describe('handleConfirmUserSelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+// handleConfirmVoiceEveryone — "Everyone in this voice channel"
+// button on the confirm card, rendered only when the slash command
+// was invoked from a voice / stage-voice channel. Resolves voice-
+// connected non-bot members AT CLICK TIME from the voice-state
+// cache rather than trusting a render-time snapshot.
+// ──────────────────────────────────────────────────────────────
+
+describe('handleConfirmVoiceEveryone', () => {
+  const VOICE_CH = 'voice-ch-1';
+  const u1 = '100000000000000001';
+  const u2 = '100000000000000002';
+  const bot1 = '100000000000000099';
+
+  // Build a guild whose channels.cache contains a voice channel with
+  // the supplied member list. Bots in `members` get bot:true on the
+  // member-cache user so partitionRecipients drops them.
+  function makeVoiceInteraction({ members = [], channelType = 2, botIds = [] } = {}) {
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map();
+    const chanMembers = new Map();
+    for (const mid of members) {
+      const isBot = botIds.includes(mid);
+      const member = { user: { id: mid, bot: isBot } };
+      int.guild.members.cache.set(mid, member);
+      chanMembers.set(mid, member);
+    }
+    int.guild.channels.cache.set(VOICE_CH, {
+      id: VOICE_CH, type: channelType, members: chanMembers,
+    });
+    return int;
+  }
+
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+    voiceChannelId: VOICE_CH,
+  };
+
+  test('happy path: voice-connected non-bot members populate recipientIds and advance the flow', async () => {
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({
+        recipientIds: expect.arrayContaining([u1, u2]),
+        voiceChannelId: VOICE_CH,
+      }),
+      terminal: false,
+    }));
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    expect(ids).toHaveLength(2);
+  });
+
+  test('happy path: bots are filtered out of the connected set', async () => {
+    const int = makeVoiceInteraction({ members: [u1, bot1, u2], botIds: [bot1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    expect(ids.sort()).toEqual([u1, u2].sort());
+    expect(ids).not.toContain(bot1);
+  });
+
+  test('missing voiceChannelId in payload: early-return without throwing or calling transitionFlow', async () => {
+    // The button should not have rendered without voiceChannelId; a
+    // click here means a forged interaction or schema drift. Handler
+    // logs and returns undefined rather than deleting the row.
+    const int = makeVoiceInteraction({ members: [u1] });
+    const payloadWithoutVoice = { ...basePayload, voiceChannelId: null };
+    await expect(
+      handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } })
+    ).resolves.toBeUndefined();
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
+
+  test('channel deleted between render and click: rejectVoice path runs (warning re-render, no transition)', async () => {
+    // Cache miss simulates the channel being deleted (or the voice
+    // intent dropping mid-flow). The handler should NOT call
+    // transitionFlow — it re-renders the card with a warning banner.
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map(); // no entry for VOICE_CH
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Couldn't read the voice channel/i);
+  });
+
+  test('empty voice channel: rejectVoice path runs (no-one-connected copy, no transition)', async () => {
+    const int = makeVoiceInteraction({ members: [] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/No one is connected/i);
+  });
+
+  test('corrupt payload (unknown resourceType): deleteFlow + actionable re-run copy', async () => {
+    // Mirrors handleConfirmUserSelect's resourceType guard — a
+    // corrupt/stale row would otherwise crash the renderer with a
+    // generic "superseded" toast.
+    const int = makeVoiceInteraction({ members: [u1] });
+    const corruptPayload = { ...basePayload, resourceType: 'bogus' };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: corruptPayload, version: 1 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Card data is corrupted/);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
 // handleConfirmExpirySelect — inline expiry edit on confirm card
 // ──────────────────────────────────────────────────────────────
 
@@ -3239,6 +3360,7 @@ describe('constants + exports', () => {
     expect(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID).toBe('qurl_confirm_self_destruct');
     expect(CONFIRM_NOTE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_note_btn');
     expect(CONFIRM_NOTE_MODAL_CUSTOM_ID).toBe('qurl_confirm_note_modal');
+    expect(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_voice_everyone');
   });
 
   test('all customIds unique', () => {
@@ -3250,8 +3372,9 @@ describe('constants + exports', () => {
       CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
       CONFIRM_NOTE_BUTTON_CUSTOM_ID,
       CONFIRM_NOTE_MODAL_CUSTOM_ID,
+      CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
     ]);
-    expect(ids.size).toBe(7);
+    expect(ids.size).toBe(8);
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
