@@ -1,19 +1,13 @@
 /**
- * Additional tests to boost line coverage to 90%+ on commands.js.
+ * Residual coverage tests for commands.js — narrow branches that aren't
+ * covered by the focused specs (qurl-file-map, qurl-send-back-half,
+ * commands-comprehensive, qurl-send).
  *
  * Covers:
- * - buildDeliveryPayload (location path, personalMessage)
- * - buildConfirmMsg truncation with > 5 recipients + expand toggle
- * - collector button handlers (revoke, expand, add recipients)
- * - collector end timeout
- * - executeSendPipeline: fewer mintLinks than recipients, no attachment
- *   guard, all links fail
- * - handleCommand: double error (reply + followUp fail)
- * - bulklink: already-linked and forceLink throw paths
- * - Google Maps URL edge cases
- * - voice target with members
- * - autocomplete rate limiting and search error
- * - DM batch with rejected promise
+ * - handleCommand: double error path (reply + followUp both fail)
+ * - bulklink: already-linked-to-another-user, forceLink throw
+ * - handleCommand autocomplete early-return
+ * - isGoogleMapsURL edge cases (goo.gl path-shape rejection)
  */
 
 // ---------------------------------------------------------------------------
@@ -251,7 +245,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'send'),
+      getSubcommand: jest.fn(() => 'file'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),

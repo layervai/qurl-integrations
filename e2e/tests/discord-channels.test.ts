@@ -82,7 +82,6 @@ describe('Discord: Voice State', () => {
     expect(voiceChannel.guild_id).toBe(env.GUILD_ID);
     console.log(`Verified voice channel: #${voiceChannel.name}`);
   });
-
 });
 
 describe('Discord: Guild Members', () => {

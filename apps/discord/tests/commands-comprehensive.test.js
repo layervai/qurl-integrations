@@ -281,7 +281,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'send'),
+      getSubcommand: jest.fn(() => 'file'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
