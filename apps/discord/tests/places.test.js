@@ -268,6 +268,42 @@ describe('searchPlaces', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  test('FIFO eviction at AUTOCOMPLETE_CACHE_MAX — oldest entry drops when cap is hit', async () => {
+    // Don't pin the constant value here (avoid coupling to the
+    // implementation detail), but pin the BEHAVIOR: when the cache is
+    // saturated, the next miss-and-fetch evicts the oldest entry.
+    // Test it by saturating, then re-querying the oldest key — that
+    // re-query should miss and fetch again (proving it was evicted).
+    //
+    // We fetch (CAP) distinct queries to fill the cache, then one more
+    // distinct query to trigger eviction of the oldest, then re-query
+    // the oldest and verify it re-fetches.
+    const places = require('../src/places');
+    places._resetAutocompleteCache();
+    // Mock 502 distinct fetches with unique payloads so each goes
+    // through the API. CAP=500 + 1 overflow + 1 re-query = 502.
+    const CAP = 500;
+    for (let i = 0; i <= CAP + 1; i++) {
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        status: 'OK',
+        predictions: [{ place_id: `ChIJ${i}`, description: `Place ${i}` }],
+      }));
+    }
+    // Fill the cache.
+    for (let i = 0; i < CAP; i++) {
+      await searchPlaces(`q${i}`);
+    }
+    // One more query — triggers FIFO eviction of "q0" (oldest insert).
+    await searchPlaces('overflow');
+    expect(fetchMock).toHaveBeenCalledTimes(CAP + 1);
+    // Re-query the oldest — if it was evicted, this hits the API again.
+    await searchPlaces('q0');
+    expect(fetchMock).toHaveBeenCalledTimes(CAP + 2);
+    // Re-query a still-resident middle entry — should be cached, no fetch.
+    await searchPlaces(`q${Math.floor(CAP / 2)}`);
+    expect(fetchMock).toHaveBeenCalledTimes(CAP + 2);
+  });
+
   test('cached results are defensive-copied (caller mutation does not poison the cache)', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({
       status: 'OK',

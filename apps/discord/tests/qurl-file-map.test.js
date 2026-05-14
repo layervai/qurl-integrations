@@ -817,6 +817,27 @@ describe('handleAutocomplete', () => {
     expect(choice.value.length).toBeLessThanOrEqual(100);
   });
 
+  test('boundary — exactly 100 UTF-16 units ending in a lone high surrogate gets backed off', async () => {
+    // Defense-in-depth: a label that's exactly at the cap AND ends
+    // mid-surrogate-pair would otherwise slip past a truncation-only
+    // gate. The check runs on every choice, not just truncated ones.
+    // 98 ASCII + 1 high surrogate + 1 low surrogate = 100 UTF-16
+    // units; the final pair is the boundary. We then trim the source
+    // to 98 + 1 high surrogate = 99 units, ending in a lone high
+    // surrogate (this is contrived — Places wouldn't return this — but
+    // pins the always-check contract).
+    const malformed = 'a'.repeat(99) + '\uD83D'; // lone high surrogate at index 99 → length 100
+    expect(malformed.length).toBe(100);
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJ1', name: malformed, address: '' }]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choice = int.respond.mock.calls[0][0][0];
+    // Backed off by 1 — no lone high surrogate at the boundary.
+    expect(choice.name.length).toBe(99);
+    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    expect(choice.name).not.toMatch(loneHigh);
+  });
+
   test('truncation does not split a surrogate pair (emoji-heavy label stays valid UTF-16)', async () => {
     // Discord measures name length in UTF-16 code units; a naïve
     // codepoint slice could ship a string whose .length > 100 if the

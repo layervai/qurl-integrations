@@ -6,9 +6,12 @@ const PLACES_FINDPLACE_URL = 'https://maps.googleapis.com/maps/api/place/findpla
 const PLACES_DETAILS_URL = 'https://maps.googleapis.com/maps/api/place/details/json';
 
 // Wire literal that round-trips a chosen place_id through the Discord
-// slash-option `location:` value. Stable across deploys — any in-flight
-// confirm-card flow_state row carrying a placeId-sentinel in actualUrl
-// is keyed against this literal.
+// slash-option `location:` value (autocomplete encodes → submit decodes).
+// The vulnerable window is autocomplete-pick → slash-submit (seconds);
+// DDB flow_state rows always carry the resolved place_id-pinned URL,
+// not the sentinel. A rename still wants a coordinated deploy so an
+// already-rendered dropdown choice doesn't 404 the resolver, but it's
+// not a multi-minute drain.
 const PLACE_ID_SENTINEL_PREFIX = 'qurl_place:';
 
 function encodePlaceIdSentinel(placeId) {
@@ -111,7 +114,10 @@ function cacheSet(key, results) {
 
 async function searchPlaces(query) {
   if (!config.GOOGLE_MAPS_API_KEY) {
-    logger.warn('GOOGLE_MAPS_API_KEY not set, skipping places autocomplete');
+    // Debug, not warn: fires per keystroke on a misconfigured deploy.
+    // The send-time path surfaces RESOLVE_REASON.NO_API_KEY as a single
+    // visible ephemeral, which is the load-bearing operator signal.
+    logger.debug('GOOGLE_MAPS_API_KEY not set, skipping places autocomplete');
     return [];
   }
   const safeQuery = sanitizeQueryParam(query);

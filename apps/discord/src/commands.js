@@ -5900,19 +5900,21 @@ async function handleAutocomplete(interaction) {
       if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;
       // Discord validates name length in UTF-16 code units, not code
-      // points, so we cap by `.length`. Back off by 1 if the cap would
-      // land on a lone high surrogate so we don't ship a half-emoji
-      // (which Discord renders as tofu). Deliberately NOT
+      // points, so we cap by `.length`. Back off by 1 if the boundary
+      // would leave a lone high surrogate so we don't ship a
+      // half-emoji (which Discord renders as tofu). Deliberately NOT
       // `safeCodepointSlice` — that helper counts codepoints, which
-      // can ship a string whose `.length` > 100 for emoji-heavy labels
-      // (each surrogate pair is 2 UTF-16 units but 1 codepoint).
-      let name = label;
-      if (label.length > AUTOCOMPLETE_CHOICE_NAME_MAX) {
-        let end = AUTOCOMPLETE_CHOICE_NAME_MAX;
+      // can ship a string whose `.length` > 100 for emoji-heavy
+      // labels (each surrogate pair is 2 UTF-16 units but 1 codepoint).
+      // Always-check (not just on truncation): a label that's exactly
+      // 100 UTF-16 units AND ends with a lone high surrogate would
+      // otherwise slip through the fast path.
+      let end = Math.min(label.length, AUTOCOMPLETE_CHOICE_NAME_MAX);
+      if (end > 0) {
         const lastUnit = label.charCodeAt(end - 1);
         if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) end -= 1;
-        name = label.slice(0, end);
       }
+      const name = end === label.length ? label : label.slice(0, end);
       choices.push({ name, value });
     }
     return interaction.respond(choices);
