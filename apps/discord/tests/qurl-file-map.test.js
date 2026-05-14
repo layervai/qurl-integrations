@@ -2952,6 +2952,29 @@ describe('constants + exports', () => {
     expect(msg).toBeTruthy();
   });
 
+  test('all four new confirm-card menu customIds are registered (duplicate-register throws)', () => {
+    // Pins the registration of expiry / self-destruct / note button /
+    // note modal customIds. Their siblingMessage is inherited from the
+    // SEND_STAGE_AWAITING_CONFIRM keyed entry above — so a refactor
+    // that fails to register one of these would surface as an
+    // unrouted dispatch, not a wrong siblingMessage. This test exists
+    // to catch the registration-omission shape directly: a duplicate
+    // registerFlow on each customId must throw "already registered".
+    const { registerFlow } = require('../src/flow-dispatch');
+    const newCustomIds = [
+      'qurl_send_confirm_expiry',
+      'qurl_send_confirm_self_destruct',
+      'qurl_send_confirm_note_btn',
+      'qurl_send_confirm_note_modal',
+    ];
+    for (const id of newCustomIds) {
+      expect(() => registerFlow(id, {
+        expectedStage: 'noop_stage_for_collision_check',
+        handler: () => undefined,
+      })).toThrow(/already registered/);
+    }
+  });
+
   test('executeSendPipeline still exported (back-half hook)', () => {
     expect(typeof executeSendPipeline).toBe('function');
   });

@@ -4031,10 +4031,15 @@ async function handleQurlSlashSend(interaction, params) {
     // Trim once and derive both forms — raw for Edit-note pre-fill,
     // sanitized for render. Without the raw, the modal would pre-fill
     // the escaped form and a no-op resubmit would double-escape.
-    const personalMessageRawTrimmed = personalMessageRaw
+    const initialRawTrimmed = personalMessageRaw
       ? safeCodepointSlice(personalMessageRaw.trim(), PERSONAL_MESSAGE_INPUT_MAX)
       : null;
-    const personalMessage = personalMessageRawTrimmed ? sanitizeMessage(personalMessageRawTrimmed) : null;
+    const personalMessage = initialRawTrimmed ? sanitizeMessage(initialRawTrimmed) : null;
+    // Null out raw if sanitize stripped to empty (e.g. ZWSP-only input
+    // survives `.trim()` but sanitizeMessage's bidi-strip removes it).
+    // Without this, the Edit-note button would label as "Add a note"
+    // (personalMessage is empty/falsy) but pre-fill with invisible chars.
+    const personalMessageRawTrimmed = personalMessage ? initialRawTrimmed : null;
 
     const parsed = parseRecipientMentions(recipientsRaw, interaction);
 
@@ -4706,11 +4711,11 @@ async function rerenderConfirmCard(interaction, newPayload) {
   // no-op because NFKC + bidi/zero-width strip have fixed points
   // after one pass. If sanitize semantics ever stop being idempotent,
   // this becomes a double-sanitize bug.
-  const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
+  const memberCache = interaction.guild?.members?.cache;
   const persistedAliases = newPayload.recipientAliases || {};
   const validRecipients = recipientIds.map((id) => {
-    const cached = memberCache && memberCache.get && memberCache.get(id);
-    if (cached && cached.user) return cached.user;
+    const cached = memberCache?.get?.(id);
+    if (cached?.user) return cached.user;
     // Both fallback branches set `displayName` (NOT `username`) so
     // resolveRecipientAlias's precedence (displayName → globalName →
     // username → user-${id}) hits the first branch consistently.
@@ -4923,8 +4928,12 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   }
   // Cap matches the slash-entry path; both forms derive from the same
   // trimmed-and-capped raw so an Edit round-trip is idempotent.
-  const personalMessageRaw = raw ? safeCodepointSlice(raw, PERSONAL_MESSAGE_INPUT_MAX) : null;
-  const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
+  const rawCapped = raw ? safeCodepointSlice(raw, PERSONAL_MESSAGE_INPUT_MAX) : null;
+  const personalMessage = rawCapped ? sanitizeMessage(rawCapped) : null;
+  // Null out raw if sanitize stripped to empty (ZWSP-only / bidi-only
+  // input). Keeps the button label and the modal pre-fill consistent
+  // — see slash-entry site for the rationale.
+  const personalMessageRaw = personalMessage ? rawCapped : null;
   const payload = row.payload || {};
   const newPayload = { ...payload, personalMessage, personalMessageRaw };
   let result;
