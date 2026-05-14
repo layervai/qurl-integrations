@@ -4782,6 +4782,14 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
   }
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const payload = row.payload || {};
+  // No-op re-pick (same value as current state) → skip the DDB write
+  // + version bump. A version bump would needlessly fence any
+  // concurrent sibling interaction (picker / self-destruct / note
+  // modal) that's mid-flight. Still re-render the card so the user
+  // gets visible feedback that their click registered.
+  if (picked === payload.expiresIn) {
+    return rerenderConfirmCard(interaction, payload);
+  }
   const newPayload = { ...payload, expiresIn: picked };
   let result;
   try {
@@ -4842,6 +4850,11 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
   const payload = row.payload || {};
+  // No-op re-pick (same value as current state) → skip the write +
+  // version bump (see expiry handler for the full rationale).
+  if (selfDestructSeconds === payload.selfDestructSeconds) {
+    return rerenderConfirmCard(interaction, payload);
+  }
   const newPayload = { ...payload, selfDestructSeconds };
   let result;
   try {

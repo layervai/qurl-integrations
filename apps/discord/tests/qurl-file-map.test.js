@@ -2241,6 +2241,18 @@ describe('handleSendConfirmExpirySelect', () => {
     expect(lastEdit.content).toMatch(/7 days/);
   });
 
+  test('no-op re-pick (same value as payload) → skip transitionFlow + version bump, still re-render', async () => {
+    // Pin the no-op optimization: re-picking the current value
+    // doesn't fence concurrent sibling interactions via a needless
+    // version bump. Visible feedback (rerender) still fires so the
+    // user knows their click registered.
+    const int = makeSelectInteraction({ value: '24h' });  // same as basePayload.expiresIn
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
   test('forged off-set expiry value → reply warn BEFORE defer, NO transitionFlow', async () => {
     // Defense-in-depth: Discord enforces the choice set, but a forged
     // interaction could land an arbitrary string. Validate BEFORE
@@ -2369,13 +2381,27 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     expect(lastEdit.content).toMatch(/30 seconds/);
   });
 
-  test('"no-timer" form-side sentinel → null', async () => {
+  test('no-op re-pick (same selfDestructSeconds as payload) → skip transitionFlow + version bump, still re-render', async () => {
+    // Symmetric with the expiry handler's no-op test. `no-timer`
+    // sentinel maps to null; basePayload.selfDestructSeconds is null
+    // so this is a no-op.
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
+  test('"no-timer" form-side sentinel → null (when changing FROM a previous timer)', async () => {
     // Form value-space uses SELF_DESTRUCT_NO_TIMER_VALUE (distinct
     // from the slash-option side's 'none'). The helper maps it to
     // null. Pin so a refactor that conflates the two value-spaces
-    // fails this test.
+    // fails this test. Use a non-null current value so the no-op
+    // short-circuit doesn't skip the write (separate test pins the
+    // no-op path).
+    const payloadWithTimer = { ...basePayload, selfDestructSeconds: 30 };
     const int = makeSelectInteraction({ value: 'no-timer' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: payloadWithTimer, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ selfDestructSeconds: null }),
     }));
@@ -2892,9 +2918,11 @@ describe('renderConfirmCardRows', () => {
   // or by inspecting what renderConfirmCardRows would attach (via the
   // editReply calls). Simpler: drive via the entry path and inspect.
 
-  test('with attachPicker=true → 4 rows (picker + 2 selects + button row)', async () => {
-    // handleQurlSlashSend's needsPicker branch (recipients omitted)
-    // renders with attachPicker:true. Inspect the editReply payload.
+  test('slash-entry WITHOUT recipients → 4 rows (picker + 2 selects + button row)', async () => {
+    // Renderer always produces 4 rows (picker + self-destruct +
+    // expiry + bottom button row). The slash-entry "no recipients"
+    // path is one of two entry shapes; the "with recipients" test
+    // below pins the other half (picker still attached for re-picks).
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },  // no `recipients` → needsPicker
     });
@@ -2907,13 +2935,13 @@ describe('renderConfirmCardRows', () => {
   test('slash-entry WITH recipients → 4 rows (picker still attached so layout is stable across menu interactions)', async () => {
     // Round-4 cr surfaced: the picker was conditionally attached on
     // initial render (3 rows when recipients supplied) but
-    // rerenderConfirmCard hard-codes attachPicker:true (4 rows). The
-    // row count jumped from 3 to 4 the first time the user clicked
-    // any menu, which was a visible mid-flow layout shift.
+    // rerenderConfirmCard always rendered 4. The row count jumped
+    // from 3 to 4 the first time the user clicked any menu, which
+    // was a visible mid-flow layout shift.
     //
-    // Fix: always attach the picker on initial render too. The user
-    // sees the same 4-row layout from frame 0 through every menu
-    // interaction. The picker remaining available also matches
+    // Round-13 cr removed the conditional entirely: renderer now
+    // always produces 4 rows. The user sees the same layout from
+    // frame 0 through every menu interaction. Matches
     // handleSendUserSelect's post-pick contract — re-picks stay
     // possible after a successful pick.
     const int = makeInteraction({
