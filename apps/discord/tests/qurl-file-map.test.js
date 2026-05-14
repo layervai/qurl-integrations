@@ -634,6 +634,32 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(1);
   });
 
+  test('named-role overlap: directly-picked user object identity preserved (cap-priority parity with @everyone)', () => {
+    // Symmetric with the @everyone-via-guild.members.cache cap-priority
+    // test, but for a named role. The directly-picked User object must
+    // survive when the same id also appears in a picked role's
+    // .members — userMap.has(memberId) continue skips the role-side
+    // overwrite, so optional fields like `globalName` on the picker's
+    // User stick around for downstream alias rendering.
+    const u1Picked = makeUser('100000000000000001');
+    // A separate, distinguishable User object with the SAME id — what
+    // role.members would surface (it's a different object reference).
+    const u1FromRole = { ...makeUser('100000000000000001'), tag: 'from-role-view' };
+    const role = makeRole({
+      id: 'role-eng',
+      members: [{ user: u1FromRole }],
+    });
+    const int = makeMentionableInteraction({
+      pickedUsers: [u1Picked],
+      pickedRoles: [role],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.length).toBe(1);
+    // Object identity preserved: it's u1Picked, NOT u1FromRole.
+    expect(r.users[0]).toBe(u1Picked);
+    expect(r.users[0]).not.toBe(u1FromRole);
+  });
+
   test('directly-picked bot + same bot in role → droppedFromRoles 0 (partition reports it via droppedBots)', () => {
     // The role-side dedupe-before-bot-check skip means a bot that's
     // already in userMap (from interaction.users) doesn't ALSO tick
