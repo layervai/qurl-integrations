@@ -68,24 +68,30 @@ const makeEmbed = () => {
   return embed;
 };
 
-jest.mock('discord.js', () => ({
+jest.mock('discord.js', () => {
+  // Shared option-builder chainable. Centralized so a new chained
+  // method at the discord.js layer (setMaxLength, addChoices, etc.)
+  // touches one site for the whole test suite — PR #301 regression
+  // surfaced this exact gap when setMaxLength was added.
+  const { makeOptionBuilder } = require('./helpers/discord-mock');
+  return {
   SlashCommandBuilder: jest.fn().mockImplementation(() => {
     const subBuilder = () => ({
       setName: jest.fn().mockReturnThis(),
       setDescription: jest.fn().mockReturnThis(),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return this; }),
-      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
-      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
-      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return this; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
+      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return this; }),
     });
     const builder = {
       setName: jest.fn(function (n) { builder.name = n; return builder; }),
       setDescription: jest.fn().mockReturnThis(),
       addSubcommand: jest.fn(function (fn) { if (typeof fn === 'function') fn(subBuilder()); return builder; }),
-      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis(), addChoices: jest.fn().mockReturnThis(), setAutocomplete: jest.fn().mockReturnThis() }); return builder; }),
-      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
-      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
-      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn({ setName: jest.fn().mockReturnThis(), setDescription: jest.fn().mockReturnThis(), setRequired: jest.fn().mockReturnThis() }); return builder; }),
+      addStringOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
+      addUserOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
+      addAttachmentOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
+      addIntegerOption: jest.fn(function (fn) { if (typeof fn === 'function') fn(makeOptionBuilder()); return builder; }),
       setDefaultMemberPermissions: jest.fn().mockReturnThis(),
       toJSON: jest.fn().mockReturnValue({}),
     };
@@ -136,7 +142,8 @@ jest.mock('discord.js', () => ({
     setRequired: jest.fn().mockReturnThis(),
   })),
   TextInputStyle: { Short: 1, Paragraph: 2 },
-}));
+  };
+});
 
 const mockDb = {
   getLinkByDiscord: jest.fn(),
@@ -1176,8 +1183,10 @@ describe('/qurl help subcommand', () => {
     // (3) Terms block disambiguates "protected resource" from "qURL"
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
-    // (4) Large-servers note uses plain language, not GUILD_PRESENCES jargon
-    expect(content).toContain('Large servers');
+    // (4) Help text doesn't leak internal jargon. The "Large servers"
+    // section explains the /qurl send fanout caveat to end-users
+    // without naming the underlying GUILD_PRESENCES intent. That
+    // section goes away when 7b.3 deletes /qurl send.
     expect(content).not.toContain('GUILD_PRESENCES');
   });
 });

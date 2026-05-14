@@ -90,18 +90,32 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // Hard cap on input length so an adversarial regex-blowup attack
 // (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
 // slash-command STRING option max is 6000 chars (when not narrowed
-// via setMaxLength); 4000 is a conservative budget that comfortably
-// fits any legitimate recipient-list paste while leaving headroom
-// before the API ceiling. 7b.2 should narrow the option's
-// max_length to ≤4000 so this cap becomes defense-in-depth rather
-// than the user-visible truncation point.
-// TODO(7b.2): KEEP IN SYNC with the slash-option `max_length` in
-// 7b.2's builder. If 7b.2 narrows the option's max_length to
-// ≤ 4000, this cap becomes defense-in-depth; if it doesn't, this
-// is the user-visible truncation point (and the partial-mention
-// trim below becomes lossy on legitimate over-cap content).
-// Grep `TODO(7b.2)` to find the 7b.1 → 7b.2 coordination markers.
+// via setMaxLength).
+//
+// 7b.2 narrows the slash option to MAX_SLASH_OPTION_LENGTH (2000)
+// — well below this parser cap (4000) — so:
+//   * the parser cap is genuine defense-in-depth (only reachable
+//     via a forged interaction OR a future non-slash caller), and
+//   * the partial-mention trim below is unreachable from `/qurl
+//     file` / `/qurl map`'s slash path.
+// Legitimate recipient lists peak around 25 mentions × ~24 chars =
+// ~600 chars; 2000 leaves headroom for role-mention expansion and
+// pasted formatting without ever hitting the parser cap.
 const MAX_INPUT_LENGTH = 4000;
+
+// Max length applied to `/qurl file` / `/qurl map` `recipients:`
+// slash options. Discord enforces this server-side, so anything past
+// it never reaches the parser — the parser's MAX_INPUT_LENGTH cap
+// (above) is genuine defense-in-depth, only reachable via a forged
+// interaction or a future non-slash caller.
+//
+// Picked at half of MAX_INPUT_LENGTH so the headroom relationship is
+// load-bearing: a future bump to MAX_INPUT_LENGTH (e.g. for a larger
+// guild's role-expansion needs) preserves the 2× gap automatically.
+// Both /qurl file and /qurl map builders read this; 7b.3+ should
+// continue to honor the gap.
+const SLASH_OPTION_HEADROOM_DIVISOR = 2;
+const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / SLASH_OPTION_HEADROOM_DIVISOR);
 
 // Per-token cap on entries in `invalidTokens`. Discord's embed total
 // is 4096 chars; a single ~4000-char garbage token (one giant string
@@ -351,4 +365,5 @@ module.exports = {
   parseRecipientMentions,
   MAX_INPUT_LENGTH,
   MAX_INVALID_TOKEN_LENGTH,
+  MAX_SLASH_OPTION_LENGTH,
 };

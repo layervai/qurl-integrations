@@ -135,7 +135,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain } = require('./utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -144,23 +144,90 @@ function safeUrlHost(url) {
   try { return new URL(url).host; } catch { return 'invalid-url'; }
 }
 
+/**
+ * Codepoint-aware truncation with an odd-backslash backoff. Two
+ * concerns this guards against:
+ *  1. Surrogate split — bare String.prototype.slice operates on UTF-16
+ *     code units, so cutting at a boundary that lands inside a
+ *     surrogate pair (e.g. \u{1F600}) emits a lone high surrogate
+ *     that Discord renders as tofu.
+ *  2. Dangling escape backslash — a markdown-escaped input may have
+ *     `\X` sequences. A slice that lands ON the `\` separates the
+ *     escape from its target. Count trailing `\` chars; odd count →
+ *     back off by 1 so the escape stays intact.
+ *
+ * Returns the truncated string (no ellipsis appended — callers add
+ * their own truncation indicator if desired).
+ *
+ * Edge case: if `cut === 1` and the only char before it is `\`, the
+ * backoff sets `cut = 0` and the slice returns `''`. Safe failure
+ * mode for the 500-codepoint cap (callers don't depend on the result
+ * being non-empty), but worth knowing if you wire this into a smaller
+ * cap or a UI surface that distinguishes empty from truncated.
+ */
+function safeCodepointSlice(s, maxCodepoints) {
+  // Fast path: UTF-16 code-unit count is an upper bound on codepoint
+  // count (every codepoint is 1 or 2 code units), so a string whose
+  // `.length` is below the cap CANNOT exceed the cap in codepoints.
+  // Skips the `Array.from` allocation on the common case where the
+  // input is already well under the cap (the confirm-card render
+  // path hits this branch for every typical-sized message).
+  if (s.length <= maxCodepoints) return s;
+  const codepoints = Array.from(s);
+  if (codepoints.length <= maxCodepoints) return s;
+  let cut = maxCodepoints;
+  let bs = 0;
+  for (let i = cut - 1; i >= 0 && codepoints[i] === '\\'; i--) bs++;
+  if (bs % 2 === 1) cut -= 1;
+  return codepoints.slice(0, cut).join('');
+}
+
+/**
+ * Cap `s` to `maxCodepoints` codepoints and append `indicator` only
+ * when truncation actually occurred. Relies on `safeCodepointSlice`'s
+ * "return the input unchanged when below the cap" contract — reference
+ * equality (`=== s`) is the truncation sentinel, so both callers
+ * (`renderRecipientWarnings` per-token, `renderConfirmCardContent`
+ * total) can use the same shape without a separate length probe.
+ *
+ * Final output is at most `maxCodepoints + indicator.length` codepoints.
+ */
+function sliceWithEllipsis(s, maxCodepoints, indicator) {
+  const sliced = safeCodepointSlice(s, maxCodepoints);
+  return sliced === s ? s : sliced + indicator;
+}
+
 function sanitizeMessage(msg) {
-  // Order matters: strip @-mention abuse first (the closing `>` of `<@123>`
-  // would otherwise be escaped and the mention regex wouldn't match). Then
-  // escape Discord markdown so a crafted message like
-  // `[Free Prizes](https://phishing.com)` can't render as a masked link.
-  // The `[mention]` literal we insert below is re-applied post-escape as a
-  // plain substitution so the brackets stay visible to the user.
-  // Sentinel survives the markdown-escape pass unchanged: it contains no
-  // chars in the escape regex ([\*~`>|\[\]()\\_]). Suffix/prefix of random
-  // hex so it can't collide with anything a user would plausibly type.
+  // Order matters:
+  //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
+  //     (stripBidiAndControls) \u2014 defends against U+202E RLO spoofing in
+  //     the recipient's DM body AND the sender's confirm-card preview.
+  //     Without this, a crafted personal-message containing U+202E
+  //     flips text direction in the rendered embed/blockquote.
+  //  2. Strip @-mention abuse next (the closing `>` of `<@123>` would
+  //     otherwise be escaped by step 3 and the mention regex wouldn't
+  //     match).
+  //  3. Escape Discord markdown so a crafted message like
+  //     `[Free Prizes](https://phishing.com)` can't render as a masked
+  //     link.
+  // The `[mention]` literal is re-applied post-escape as a plain
+  // substitution so the brackets stay visible to the user.
+  // Sentinel survives the markdown-escape pass unchanged: it contains
+  // no chars in the escape regex ([\*~`>|\[\]()\\_]). Suffix/prefix of
+  // random hex so it can't collide with anything a user would
+  // plausibly type.
   const MENTION_SENTINEL = 'XMENTIONX74caf3b0e79aXMENTIONX';
-  const stripped = msg
+  const stripped = stripBidiAndControls(msg)
     .replace(/@(everyone|here)/gi, '@\u200b$1')
     .replace(/<@[!&]?\d+>/g, MENTION_SENTINEL);
-  return escapeDiscordMarkdown(stripped)
-    .replaceAll(MENTION_SENTINEL, '[mention]')
-    .slice(0, 500);
+  const escaped = escapeDiscordMarkdown(stripped)
+    .replaceAll(MENTION_SENTINEL, '[mention]');
+  // safeCodepointSlice: codepoint-aware + odd-backslash backoff. Bare
+  // String.prototype.slice could split a surrogate pair (emoji) at the
+  // 500 boundary or leave a dangling `\` from a mid-cut markdown
+  // escape. The slash option's setMaxLength(280) usually keeps us
+  // well under 500, but this is defense-in-depth.
+  return safeCodepointSlice(escaped, 500);
 }
 
 const ALLOWED_FILE_TYPES = [
@@ -241,6 +308,11 @@ function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
   // Map's insertion order. Combined with the bulk 10%-drop eviction below,
   // active users stay resident while stale entries roll out.
+  //
+  // CAUTION: softenCooldown (below) rides on the same insertion-order
+  // contract — if the eviction strategy ever changes (priority-based,
+  // TTL-based, etc.), softenCooldown's iteration-order test will fail
+  // loudly and both helpers will need rethinking together.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
   if (sendCooldowns.size > 10000) {
@@ -263,6 +335,26 @@ function setCooldown(userId) {
 
 function clearCooldown(userId) {
   sendCooldowns.delete(userId);
+}
+
+// Soften an existing cooldown so `residualMs` remain. Monotonic SHRINK
+// — only reduces remaining time, never extends. Used by Cancel paths
+// so a legitimate "I changed my mind" doesn't lock the full window
+// out, but rapid /qurl file → Cancel → /qurl file → Cancel spam still
+// pays a small throttle on each iteration (preventing supersedeOrCreate
+// + interaction-reply abuse).
+function softenCooldown(userId, residualMs) {
+  if (!sendCooldowns.has(userId)) return;
+  const target = Date.now() - Math.max(0, config.QURL_SEND_COOLDOWN_MS - residualMs);
+  const existing = sendCooldowns.get(userId);
+  if (target < existing) {
+    // delete-then-set re-inserts at the end of Map iteration order so
+    // the bulk eviction in setCooldown (line ~248) preserves active
+    // users. Matches the same LRU pattern setCooldown uses; a bare
+    // `set` on an existing key would NOT re-order.
+    sendCooldowns.delete(userId);
+    sendCooldowns.set(userId, target);
+  }
 }
 
 async function batchSettled(items, fn, batchSize = 5) {
@@ -379,6 +471,62 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // target select AND the channel-target's "Add more recipients" flow
 // use this — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
+
+// Shared Google Maps URL patterns. Both `/qurl send`'s modal-driven
+// location-text capture and `/qurl file`/`/qurl map`'s slash-option
+// `location:` consume these — extracted to a single source so a
+// future "new URL shape" tweak only happens here.
+//
+// Each pattern bounds character-class repetition (`{1,500}`, `{1,32}`,
+// etc.) to keep ReDoS-resistant against pathological inputs.
+const MAPS_URL_PATTERNS = [
+  /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
+  /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
+  // Defense-in-depth: exclude `<>"'|\` from the embed-tail character
+  // class. `isGoogleMapsURL` re-validates host and downstream sanitizers
+  // escape rendering, so these chars aren't exploitable today — but
+  // narrowing the regex here makes the bound tighter against URL
+  // shapes that would never come from a legitimate maps embed link.
+  /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s<>"'|\\`]{1,500}/,
+];
+
+// decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
+// Swallow + return the raw string — a garbled label is preferable to a
+// crashed command handler.
+function safeDecodeURIComponent(s) {
+  try { return decodeURIComponent(s); } catch { return s; }
+}
+
+// Parse a free-form `location:` input into `{ locationUrl, locationName }`.
+// Detection order:
+//   1. Google Maps URL embedded anywhere in the input → preserve URL,
+//      extract name from `?q=` or `/place/<name>`.
+//   2. Anything else → synthesize a `/maps/search/<input>` URL with the
+//      whole input as the name.
+//
+// Returns BOTH fields; caller is responsible for escaping the name
+// (markdown injection defense) and applying any cap. The two call
+// sites — `handleSend`'s modal branch and `handleQurlMap`'s slash
+// entry — share this so a pattern tweak lands in one place.
+function parseLocationInput(rawInput) {
+  let detectedUrl = null;
+  for (const pattern of MAPS_URL_PATTERNS) {
+    const match = rawInput.match(pattern);
+    if (match) { detectedUrl = match[0]; break; }
+  }
+  if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
+    const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+    const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
+    let name = null;
+    if (queryMatch) name = safeDecodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+    else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+    return { locationUrl: detectedUrl, locationName: name };
+  }
+  return {
+    locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
+    locationName: rawInput,
+  };
+}
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
@@ -883,7 +1031,10 @@ async function executeSendPipeline(interaction, {
   locationUrl,
   locationName,
   // MUTATES: the Add Recipients post-send branch dedupe-pushes into
-  // this array (see docstring's "transferred ownership" note).
+  // this array (see docstring's "transferred ownership" note). The
+  // initial `recipients` is already deduped + bot/sender-filtered by
+  // partitionRecipients (see contract pin at commands.js:~3552):
+  // upstream owns dedup, this function does NOT re-dedup the initial set.
   recipients,
   target,
   // REQUIRED — validated at entry (see assertion below). NO default
@@ -2041,42 +2192,16 @@ async function handleSend(interaction, apiKey) {
 
     // Hard-cap input length BEFORE regex matching to prevent ReDoS on
     // pathological strings against the unbounded character classes
-    // below. Real Google Maps URLs peak around ~300 chars.
+    // inside MAPS_URL_PATTERNS. Real Google Maps URLs peak around ~300 chars.
     const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
     await modalSubmit.deferUpdate();
 
-    const mapsPatterns = [
-      /https?:\/\/(?:www\.)?google\.com\/maps\/(?:place|search|dir|@)[\w/.,@?=&+%-]{1,500}/,
-      /https?:\/\/(?:goo\.gl\/maps|maps\.app\.goo\.gl)\/[\w-]{1,100}/,
-      /https?:\/\/(?:www\.)?google\.com\/maps\/embed\/v1\/\w{1,32}\?[^\s]{1,500}/,
-    ];
-
-    let detectedUrl = null;
-    for (const pattern of mapsPatterns) {
-      const match = locationValue.match(pattern);
-      if (match) { detectedUrl = match[0]; break; }
-    }
-
-    if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
-      locationUrl = detectedUrl;
-      const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
-      const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
-      // decodeURIComponent throws URIError on malformed %-encoding (e.g. %ZZ).
-      // Swallow and fall back to the raw string — a garbled label is better
-      // than a crashed command handler.
-      const safeDecode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
-      if (queryMatch) locationName = safeDecode(queryMatch[1].replace(/\+/g, ' '));
-      else if (placeMatch) locationName = safeDecode(placeMatch[1].replace(/\+/g, ' '));
-    } else if (detectedUrl) {
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-    } else {
-      locationName = locationValue;
-      locationUrl = `https://www.google.com/maps/search/${encodeURIComponent(locationValue)}`;
-    }
-    // Cap + escape markdown so a crafted place name can't inject
-    // **bold** / links / code / spoilers into the recipient embed.
-    if (locationName) locationName = escapeDiscordMarkdown(locationName.slice(0, 256));
+    ({ locationUrl, locationName } = parseLocationInput(locationValue));
+    // sanitizeContentLabel: NFKC + bidi/zero-width/control strip +
+    // codepoint-aware 256-cap + markdown-escape. Matches the
+    // /qurl map slash entry's defense at handleQurlMap so a U+202E
+    // RLO can't visually spoof a Maps URL via the modal path either.
+    if (locationName) locationName = sanitizeContentLabel(locationName);
   }
 
   // ── Step 3: Common final step ──
@@ -3355,6 +3480,1414 @@ async function handleSetupModal(interaction, { flow_id }) {
   }).catch(logIgnoredDiscordErr);
 }
 
+// ─────────────────────────────────────────────────────────────
+// /qurl file + /qurl map — slash-driven sends.
+//
+// Two new subcommands replace `/qurl send`'s button-driven wizard
+// with all-options-up-front slash commands. The flow:
+//
+//   /qurl file recipients:<text> attachment:<file> [expires-in]
+//                                                  [self-destruct]
+//                                                  [personal-message]
+//   /qurl map  recipients:<text> location:<text>   [location-name]
+//                                                  [expires-in]
+//                                                  [self-destruct]
+//                                                  [personal-message]
+//
+// After parsing/validating the slash options, the bot renders an
+// in-channel ephemeral confirm card with the resolved recipient list
+// (or a UserSelectMenu when `recipients:` was omitted) plus Send /
+// Cancel buttons. The confirm card is flow_state-backed so the Send
+// dedup gate fires on `deleteFlow` (consistent with /qurl revoke,
+// /qurl setup).
+// ─────────────────────────────────────────────────────────────
+
+const {
+  parseRecipientMentions,
+  MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
+} = require('./recipient-parser');
+
+const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
+
+// CustomIds — PREFIX-ONLY (no nonce). flow-dispatch's loadFlow already
+// gates routing on stage + version; encoding identity into customId
+// would not add safety (the dispatcher's trust model treats customId
+// as a routing key, not an identity signal). Matches the convention
+// REVOKE_SELECT_CUSTOM_ID / SETUP_BUTTON_CUSTOM_ID use.
+const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
+const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
+const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
+
+// 3-minute confirm-card window. Matches /qurl send's Step-3 form
+// timeout at line ~2293 so users have the same time-to-finish budget
+// whichever entry point they use.
+const SEND_FLOW_TTL_SECONDS = 180;
+
+// On a successful Cancel, soften (don't clear) the cooldown so 5s of
+// throttle remain — defuses the rapid /qurl file → Cancel → /qurl file
+// → Cancel spam vector (which would otherwise rack up supersedeOrCreate
+// DDB writes with zero throttle).
+const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
+
+// Subcommands that require the guild API key resolution + cooldown gate.
+// Single-source allowlist: adding a new send-style subcommand only
+// requires touching this set, not the dispatcher fall-through.
+const API_KEY_GATED_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
+
+// Slash-option choice arrays. Reuse the existing /qurl send wording
+// so users see the same labels in autocomplete as in the form's
+// dropdowns. EXPIRY_CHOICES already exists. SELF_DESTRUCT_CHOICES is
+// new here because /qurl send wires self-destruct via a StringSelect
+// post-invocation rather than a slash option.
+const SELF_DESTRUCT_NO_TIMER_CHOICE = 'none';
+const SELF_DESTRUCT_CHOICES = [
+  { name: 'No timer (default)', value: SELF_DESTRUCT_NO_TIMER_CHOICE },
+  ...SELF_DESTRUCT_PRESETS.map((p) => ({ name: p.label, value: String(p.seconds) })),
+];
+
+// Map the slash option's string value to a seconds integer or null.
+// Mirrors `selfDestructSelectValueToSeconds` in utils/time but for the
+// slash-option value space (which uses 'none' instead of the form's
+// SELF_DESTRUCT_NO_TIMER_VALUE).
+//
+// Defense-in-depth: validate against the SELF_DESTRUCT_PRESETS closed
+// set the same way handleQurlSlashSend validates `expiresIn` against
+// EXPIRY_LABELS. Discord enforces the choice set server-side, but a
+// forged interaction could pass `'999999999'` and that value would
+// otherwise land unchecked in the flow payload + connector upload.
+// Wrong values fall back to null (no timer) so the failure is safe.
+const SELF_DESTRUCT_PRESET_SECONDS = new Set(SELF_DESTRUCT_PRESETS.map((p) => p.seconds));
+function selfDestructOptionToSeconds(value) {
+  if (!value || value === SELF_DESTRUCT_NO_TIMER_CHOICE) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // Match the parsed Number directly — SELF_DESTRUCT_PRESETS contains
+  // 0.5 (the "1/2 second" preset), so a Math.floor here would map 0.5
+  // → 0 (not in the set) and silently downgrade to "no timer." The
+  // form path (selfDestructSelectValueToSeconds in utils/time.js) uses
+  // strict string equality against `String(p.seconds)` and gets this
+  // right; matching the parsed numeric value against the Set keeps
+  // the two entry points consistent.
+  if (!SELF_DESTRUCT_PRESET_SECONDS.has(n)) return null;
+  return n;
+}
+
+// Resolve a list of recipient IDs to User-shaped objects via the guild
+// member cache (with fallback fetch on miss). Returns
+// `{ users, unresolvedIds, transientFailureIds }` — callers surface
+// each bucket with appropriate copy:
+//   * `unresolvedIds` — Discord API 10007 "Unknown Member". The
+//     canonical "user left the guild" signal. Stable / deterministic.
+//   * `transientFailureIds` — any other fetch error (rate limit
+//     surfacing past discord.js's retry, gateway blip, perms
+//     revoked mid-fetch). User-visible copy should encourage retry
+//     rather than imply the recipient is gone.
+//
+// Splitting the buckets prevents the 429-rendered-as-"left the
+// server" misdirection.
+//
+// Fetches the cache-miss tail in parallel via `batchSettled` (the
+// same helper used by the DM fan-out path; honors Discord's per-route
+// rate-limit bucket by capping concurrent in-flight calls).
+async function resolveRecipientUsers(interaction, ids) {
+  if (!interaction.guild) {
+    return { users: [], unresolvedIds: [...ids], transientFailureIds: [] };
+  }
+  const users = [];
+  const missQueue = [];
+  for (const id of ids) {
+    const cached = interaction.guild.members.cache.get(id);
+    if (cached) users.push(cached.user);
+    else missQueue.push(id);
+  }
+  if (missQueue.length === 0) {
+    return { users, unresolvedIds: [], transientFailureIds: [] };
+  }
+
+  const unresolvedIds = [];
+  const transientFailureIds = [];
+  const results = await batchSettled(missQueue, async (id) => {
+    try {
+      const m = await interaction.guild.members.fetch(id);
+      return { id, user: m.user, kind: 'ok' };
+    } catch (err) {
+      // Discord error 10007 is "Unknown Member" — recipient really
+      // left the guild. Anything else (429 rate-limit surfacing past
+      // discord.js's retry, 500-class, gateway disconnect, perms
+      // revoked) is transient and shouldn't read like "they're gone."
+      const is10007 = err && (err.code === 10007 || err.code === '10007');
+      if (!is10007) {
+        logger.warn('resolveRecipientUsers: members.fetch failed (transient)', {
+          recipient_id: id, error: err && err.message, code: err && err.code,
+        });
+      }
+      return { id, user: null, kind: is10007 ? 'unknown_member' : 'transient' };
+    }
+  });
+  for (const r of results) {
+    // batchSettled wraps each callback in Promise.allSettled — fulfilled
+    // results carry our `{id, user, kind}` shape. The callback never
+    // throws (try/catch above) so a `rejected` status is unreachable in
+    // practice; bucket as transient if it ever does fire.
+    if (r.status !== 'fulfilled' || !r.value) continue;
+    if (r.value.user != null) {
+      users.push(r.value.user);
+      continue;
+    }
+    if (r.value.kind === 'transient') transientFailureIds.push(r.value.id);
+    else unresolvedIds.push(r.value.id);
+  }
+  return { users, unresolvedIds, transientFailureIds };
+}
+
+// Filter resolved Users: drop bots, drop the sender. Returns
+// `{ valid, droppedBots, droppedSelf }` so the caller can surface
+// "X bots / your-own-id were dropped" as a distinct error from
+// "no recipients at all".
+//
+// Known v1 cap-skew: parseRecipientMentions caps to QURL_SEND_MAX_RECIPIENTS
+// BEFORE knowing which IDs are bots. A mention list of
+// [bot1, bot2, ..., bot25, user1] with cap=25 yields ids=[bot1..bot25]
+// and post-filter valid=[]. The user sees "all recipients dropped" and
+// has to re-run with bots removed. Acceptable since (a) it requires a
+// pathological mention list to trip, (b) the failure mode is loud
+// rather than silent. Cost dimension worth flagging: 25 cache-miss
+// bot mentions still hit `members.fetch` 25 times (via batchSettled's
+// 5-at-a-time fan-out, in 5 rate-limit-budget burns) before partition
+// drops them all — small absolute cost but burns per-guild rate-limit
+// budget that legitimate ops elsewhere could use. The durable fix is
+// the v2 resolve-then-cap refactor tracked in #304.
+function partitionRecipients(users, senderId) {
+  // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
+  // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
+  // gateway-event surfaces each picked user at most once. This loop
+  // therefore does NOT re-dedup; doing so would silently mask an
+  // upstream regression (parser dedup breakage) that should fail
+  // loudly via the recipient-count divergence test instead.
+  const valid = [];
+  let droppedBots = 0;
+  let droppedSelf = 0;
+  for (const u of users) {
+    if (u.bot) { droppedBots++; continue; }
+    if (u.id === senderId) { droppedSelf++; continue; }
+    valid.push(u);
+  }
+  return { valid, droppedBots, droppedSelf };
+}
+
+/**
+ * Render a warnings block for the confirm card. Returns the empty
+ * string when nothing is worth surfacing — keeps callers simple
+ * (`warningsBlock + content`) without a separate "do I have any
+ * warnings" check.
+ *
+ * @param {{
+ *   invalidTokens?: string[],
+ *   cappedCount?: number,
+ *   unresolvedIds?: string[],
+ *   transientFailureIds?: string[],
+ *   droppedBots?: number,
+ *   droppedSelf?: number,
+ * }} [opts]
+ */
+function renderRecipientWarnings({
+  invalidTokens = [],
+  cappedCount = 0,
+  unresolvedIds = [],
+  transientFailureIds = [],
+  droppedBots = 0,
+  droppedSelf = 0,
+} = {}) {
+  const lines = [];
+  if (cappedCount > 0) {
+    lines.push(`• Capped at ${config.QURL_SEND_MAX_RECIPIENTS} — ${cappedCount} recipient(s) past the cap were dropped.`);
+  }
+  if (invalidTokens.length > 0) {
+    // recipient-parser.js's docstring is explicit: invalidTokens are
+    // NOT markdown-escaped — callers wrap or escape. We code-fence
+    // for literal rendering, but a token containing ``` would close
+    // the fence early and inject markdown / masked-links into the
+    // ephemeral. Strip backticks from each token before joining;
+    // also cap the listed count at 10 so a pathological list can't
+    // blow the Discord content budget.
+    //
+    // Per-token codepoint cap (80) keeps the worst case bounded:
+    // recipient-parser.js caps each token at 256 chars, so 10 × 256
+    // = 2.5KB of code-fenced text would dwarf the rest of the card
+    // and risk crowding out the action prompt. 80 codepoints is
+    // enough to spot the typo / paste error without rendering the
+    // attacker's entire payload.
+    const TOKEN_DISPLAY_MAX = 80;
+    const shown = invalidTokens.slice(0, 10).map(
+      (t) => sliceWithEllipsis(t.replace(/`/g, ''), TOKEN_DISPLAY_MAX, '…'),
+    );
+    const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
+    lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
+  }
+  if (unresolvedIds.length > 0) {
+    lines.push(`• ${unresolvedIds.length} user(s) are no longer in this server and were dropped.`);
+  }
+  if (transientFailureIds.length > 0) {
+    // Distinct copy from unresolvedIds — transient failures (429,
+    // gateway blip) mislead the user if rendered as "they left the
+    // server." Encourage retry.
+    lines.push(`• ${transientFailureIds.length} user(s) couldn't be looked up right now — try again in a moment.`);
+  }
+  if (droppedBots > 0) {
+    lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
+  }
+  if (droppedSelf > 0) {
+    lines.push('• You cannot send a qURL to yourself — skipped.');
+  }
+  if (lines.length === 0) return '';
+  return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
+}
+
+// Build the confirm-card content string. Mirrors /qurl send's Step-3
+// content shape (formContent at ~line 2130) so users see consistent
+// wording across both entry points. Brand spelling is `qURL` per
+// CLAUDE.md — the user-visible copy here, the slash-command
+// descriptions, and any logger.audit user-facing fields all preserve
+// the case.
+function renderConfirmCardContent({
+  resourceType, resourceLabel, validRecipients,
+  expiresIn, selfDestructSeconds, personalMessage,
+  warningsBlock, needsPicker, interaction,
+}) {
+  let content = warningsBlock || '';
+  // Explicit branch per RESOURCE_TYPES value — a future resource
+  // type (audio, contact card, etc.) MUST add its own branch here.
+  // Throwing on unknown beats silently rendering the new type as a
+  // location, which would propagate the misdirection into every
+  // confirm card the new type ever shows.
+  if (resourceType === RESOURCE_TYPES.FILE) {
+    content += `📁 **Sending file:** ${resourceLabel}\n`;
+  } else if (resourceType === RESOURCE_TYPES.MAPS) {
+    content += `🗺\u{FE0F} **Sending location:** ${resourceLabel}\n`;
+  } else {
+    throw new TypeError(`renderConfirmCardContent: unknown resourceType ${JSON.stringify(resourceType)}`);
+  }
+  if (needsPicker) {
+    content += '\n**Pick recipients below** (1–'
+      + String(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
+      + ' users), then click **Send**.\n';
+  } else {
+    // First-N preview keeps the card scannable when a paste resolves
+    // to many users. resolveRecipientAlias prefers nickname > globalName >
+    // username (NFKC + bidi/zero-width strip baked in), matching the
+    // post-send confirmation wording exactly. The escapeDiscordMarkdown
+    // wrap is still required — resolveRecipientAlias returns the PLAIN
+    // form (its docstring at commands.js:~305 calls this out).
+    const PREVIEW = 5;
+    const previewNames = validRecipients.slice(0, PREVIEW)
+      .map((u) => escapeDiscordMarkdown(resolveRecipientAlias(u, interaction)))
+      .join(', ');
+    const more = validRecipients.length > PREVIEW ? `, +${validRecipients.length - PREVIEW} more` : '';
+    content += `\n**To:** ${validRecipients.length} user${validRecipients.length === 1 ? '' : 's'} (${previewNames}${more})\n`;
+  }
+  content += `**Expires:** ${EXPIRY_LABELS[expiresIn] || expiresIn}\n`;
+  if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
+    content += `**Self-destruct:** ${formatSelfDestructLabel(selfDestructSeconds)}\n`;
+  }
+  if (personalMessage) {
+    // `personalMessage` is pre-sanitized: sanitizeMessage already
+    // ran markdown-escape + @-mention strip at the slash-option
+    // boundary. Re-escaping here would render `\*\*bold\*\*`
+    // literals on the card. Same shape /qurl send's Step-3
+    // formContent uses (commands.js:~2164).
+    //
+    // Quote-block syntax `> ` (instead of `"..."` wraps) avoids the
+    // ragged-look failure mode when the message itself contains a
+    // literal `"` character. Discord renders `> ` as a left-bar
+    // blockquote which visually offsets the preview from the rest
+    // of the card.
+    content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
+  }
+  content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
+  // Fail-safe cap below Discord's 2000-char content limit so adversarial
+  // inputs can't trip a 400 from editReply and orphan the flow row.
+  // Cap (1988) + '…(truncated)' indicator (12 codepoints) = 2000 max
+  // for ASCII / BMP content. Surrogate-pair-stuffed input could still
+  // exceed 2000 UTF-16 units, but every contributing field
+  // (`resourceLabel`, display-name aliases, personalMessage preview)
+  // is already codepoint-capped upstream, so that path is exotic.
+  return sliceWithEllipsis(content, 1988, '…(truncated)');
+}
+
+// Truncate the pre-sanitized message to 80 chars MAX, then back off
+// to the last completed markdown-escape so a slice doesn't leave a
+// lone trailing `\`. Embedded `\n` is collapsed to a single space —
+// Discord blockquotes are per-LINE (only the line starting with `> `
+// gets the left-bar), so a multi-line message would render with a
+// quoted first line and flush-left subsequent lines. The single-line
+// preview also keeps the card's vertical rhythm predictable.
+//
+// The "back off" handles the case where `sanitizeMessage` emitted a
+// `\` immediately before the slice boundary (e.g. `\*` becomes `\`
+// at index 79, `*` at index 80 — slicing at 80 leaves a dangling
+// `\` that Discord would render as a literal backslash). Trimming
+// to index 79 in that case is the conservative fix.
+// Newlines and Unicode line/paragraph separators (U+2028, U+2029) all
+// render as line breaks in Discord — collapse the lot to single spaces
+// so the blockquote preview stays a single rendered line. Built via
+// `new RegExp(...)` (instead of a literal) so the \uXXXX escapes go
+// through string parsing — keeps the source ASCII-only and avoids
+// editor/tool-chain confusion over raw line-separator codepoints in a
+// regex literal. Same pattern STRIP_RE in utils/sanitize.js uses.
+const NEWLINE_COLLAPSE_RE = new RegExp('[\\r\\n\\u2028\\u2029]+', 'g');
+
+function formatPersonalMessagePreview(message) {
+  const oneLine = message.replace(NEWLINE_COLLAPSE_RE, ' ');
+  // safeCodepointSlice handles surrogate-safe truncation + odd-trailing-
+  // backslash backoff. The early-return at 80 codepoints avoids the
+  // `…` ellipsis when there's nothing to truncate.
+  //
+  // Caveat: codepoint-aware ≠ grapheme-aware. ZWJ-joined emoji
+  // sequences (e.g. 👨‍👩‍👧 = man + ZWJ + woman + ZWJ + girl, three
+  // codepoints + two joiners = 5 codepoints) can be sliced mid-cluster
+  // and render only the first segment. Acceptable: the preview is
+  // an 80-codepoint truncation indicator (followed by `…`), so a
+  // partial emoji renders as exactly that — a partial display, not
+  // garbled text. Full grapheme-segmentation would need Intl.Segmenter
+  // which isn't justified for a preview cap.
+  if (Array.from(oneLine).length <= 80) return `> ${oneLine}`;
+  return `> ${safeCodepointSlice(oneLine, 80)}…`;
+}
+
+// Build the ActionRow set for the confirm card. When `attachPicker`,
+// row 0 is a UserSelectMenu (recipients absent OR a prior pick is in
+// the payload and the user might want to re-pick); otherwise no
+// picker row. Send/Cancel always in the last row.
+//
+// Renamed from `needsPicker` so the content/rows divergence at the
+// post-pick call site (content rendered WITHOUT picker, rows rendered
+// WITH picker — to let the user re-pick) is impossible to silently
+// merge in a future refactor.
+function renderConfirmCardRows({ attachPicker, sendDisabled }) {
+  const rows = [];
+  if (attachPicker) {
+    const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+    rows.push(new ActionRowBuilder().addComponents(
+      new UserSelectMenuBuilder()
+        .setCustomId(SEND_USER_SELECT_CUSTOM_ID)
+        .setPlaceholder(`Pick recipients (1–${maxValues})`)
+        .setMinValues(1)
+        .setMaxValues(maxValues)
+    ));
+  }
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(SEND_CONFIRM_SEND_CUSTOM_ID)
+      .setLabel('\u{1F4E4} Send')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(sendDisabled),
+    new ButtonBuilder()
+      .setCustomId(SEND_CONFIRM_CANCEL_CUSTOM_ID)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary),
+  ));
+  return rows;
+}
+
+// Shared entry point — both `/qurl file` and `/qurl map` route here
+// after collecting their resource-specific options. `params` carries:
+//   resourceType: RESOURCE_TYPES.FILE | RESOURCE_TYPES.MAPS
+//   attachment:   {url, name, contentType, size} | null  (file path)
+//   locationUrl:  string | null                          (map path)
+//   locationName: string | null                          (map path)
+//   resourceLabel: string                                (rendered on card)
+// apiKey is INTENTIONALLY not threaded through the front-half.
+// handleSendConfirmClick re-fetches the guild API key at Send time
+// — the key may rotate during the confirm card's 3-min TTL, and the
+// dispatcher's gate at the slash-command entry point only proves the
+// key was present at that single moment. Re-fetching at click time
+// is the durable check. The dispatcher's gate (API_KEY_GATED_SUBCOMMANDS
+// set) still runs to fail fast on the no-key-at-all case.
+async function handleQurlSlashSend(interaction, params) {
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+  // Cooldown gate is owned by the front-half handlers (handleQurlFile /
+  // handleQurlMap) so invalid inputs are throttled too. By the time we
+  // get here the cooldown is already set; legitimate clearCooldown calls
+  // on individual error branches below still unlock retry.
+
+  // Top-level try/catch fences unanticipated throws (a TypeError from
+  // a malformed cached member, a future parser change, etc.) from
+  // leaving the user stranded in a cooldown window for a failure
+  // that never produced a visible response. Every known failure
+  // mode below has its own targeted clearCooldown + ephemeral
+  // editReply; this catch is the safety net for everything else.
+  //
+  // Hoisted out of the try: `flow_id` (deterministic from the
+  // interaction id) and `orphanFlowCreated` (flipped true ONLY after
+  // supersedeOrCreate.created === true) so the catch can tell whether
+  // a throw between supersedeOrCreate success and the final editReply
+  // left an orphan DDB row that needs cleaning up.
+  let flow_id;
+  let orphanFlowCreated = false;
+  try {
+    await interaction.deferReply({ ephemeral: true });
+
+    const recipientsRaw = interaction.options.getString('recipients');
+    const expiresIn = interaction.options.getString('expires-in') || '24h';
+    const selfDestructValue = interaction.options.getString('self-destruct') || SELF_DESTRUCT_NO_TIMER_CHOICE;
+    const personalMessageRaw = interaction.options.getString('personal-message');
+
+    // Defense-in-depth: expiresIn comes from the slash command's choice
+    // list which Discord enforces server-side, but a forged interaction
+    // could carry an off-set value. EXPIRY_LABELS owns the closed set.
+    if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+      clearCooldown(interaction.user.id);
+      return interaction.editReply({
+        content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
+      });
+    }
+    const selfDestructSeconds = selfDestructOptionToSeconds(selfDestructValue);
+    const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
+
+    const parsed = parseRecipientMentions(recipientsRaw, interaction);
+
+    let resolved = { users: [], unresolvedIds: [], transientFailureIds: [] };
+    if (parsed.ids.length > 0) {
+      try {
+        resolved = await resolveRecipientUsers(interaction, parsed.ids);
+      } catch (err) {
+        clearCooldown(interaction.user.id);
+        logger.error('qurl file/map: resolveRecipientUsers threw', {
+          user_id: interaction.user.id, error: err && err.message,
+        });
+        return interaction.editReply({
+          content: '❌ Could not resolve recipients. Please try again.',
+        });
+      }
+    }
+
+    const { valid, droppedBots, droppedSelf } = partitionRecipients(resolved.users, interaction.user.id);
+
+    // `needsPicker` is true when the user supplied no `recipients:`
+    // value at all. When they DID supply one but it post-filtered to
+    // empty, hard-fail with a specific error so the user knows why
+    // (vs. silently dropping into the picker, which would mask the
+    // underlying mention-list problem).
+    const recipientsOmitted = recipientsRaw == null || recipientsRaw.trim().length === 0;
+    const warningsBlock = renderRecipientWarnings({
+      invalidTokens: parsed.invalidTokens,
+      cappedCount: parsed.cappedCount,
+      unresolvedIds: resolved.unresolvedIds,
+      transientFailureIds: resolved.transientFailureIds,
+      droppedBots,
+      droppedSelf,
+    });
+    if (!recipientsOmitted && valid.length === 0) {
+      clearCooldown(interaction.user.id);
+      // Transient-only: every mentioned ID hit a 429 / gateway blip in
+      // members.fetch. Generic "no valid recipients" misleads — the
+      // user's mentions were valid, the lookup just failed. Encourage
+      // retry instead of asking them to re-pick.
+      const transientOnly = resolved.transientFailureIds.length > 0
+        && resolved.unresolvedIds.length === 0
+        && droppedBots === 0
+        && droppedSelf === 0
+        && parsed.invalidTokens.length === 0
+        && parsed.cappedCount === 0;
+      if (transientOnly) {
+        return interaction.editReply({
+          content: warningsBlock + '❌ **Could not look up recipients right now.** Try again in a moment.',
+        });
+      }
+      // Parser silently strips bots + the sender from `<@id>` mentions
+      // when the cache reports them (recipient-parser.js:205, 214) —
+      // those IDs never reach `partitionRecipients`. If post-parse `ids`
+      // is empty AND the user supplied non-empty `recipients`, surface
+      // a "nothing usable" message even when partition's breakdown is
+      // zero. This is what bot-only / self-only mention lists hit.
+      const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
+        && resolved.unresolvedIds.length === 0
+        && resolved.transientFailureIds.length === 0
+        && parsed.invalidTokens.length === 0
+        && parsed.cappedCount === 0;
+      const detail = breakdownEmpty
+        ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
+        : '';
+      // Metric signal for the v1 cap-skew tracked in #304: a
+      // mention-list that resolved to NOTHING (parser-stripped bots
+      // before partition saw them) is exactly the failure mode the v2
+      // resolve-then-cap refactor would fix. Log at INFO so #304's
+      // prioritization has data without dialing verbosity up.
+      if (breakdownEmpty && !recipientsOmitted) {
+        logger.info('handleQurlSlashSend: bot-only-or-self mention list', {
+          user_id: interaction.user.id, resource_type: params.resourceType,
+        });
+      }
+      return interaction.editReply({
+        content: warningsBlock + '❌ **No valid recipients to send to.** Re-run with at least one valid user mention.' + detail,
+      });
+    }
+
+    const needsPicker = recipientsOmitted;
+    const recipientIds = valid.map((u) => u.id);
+
+    // supersedeOrCreate handles the "another /qurl file/map is open"
+    // case — sibling-flow disambig surfaces a stage-specific message;
+    // same-stage rerun atomically claims the slot. Mirrors /qurl
+    // revoke's pattern.
+    flow_id = flowIdForInteraction(interaction);
+    const sendNonce = crypto.randomBytes(8).toString('hex');
+    const payload = {
+      resourceType: params.resourceType,
+      attachment: params.attachment,
+      locationUrl: params.locationUrl,
+      locationName: params.locationName,
+      resourceLabel: params.resourceLabel,
+      recipientIds,
+      expiresIn,
+      selfDestructSeconds,
+      personalMessage,
+      sendNonce,
+    };
+    let supersede;
+    try {
+      supersede = await supersedeOrCreate({
+        flow_id,
+        stage: SEND_STAGE_AWAITING_CONFIRM,
+        payload,
+        ttl_seconds: SEND_FLOW_TTL_SECONDS,
+      });
+    } catch (err) {
+      clearCooldown(interaction.user.id);
+      logger.warn('handleQurlSlashSend: supersedeOrCreate threw', {
+        flow_id, error: err && err.message,
+      });
+      return interaction.editReply({
+        content: '❌ Could not start a send — please try again.',
+      });
+    }
+    if (!supersede.created) {
+      clearCooldown(interaction.user.id);
+      const siblingMsg = siblingMessageForStage(supersede.surviving?.stage);
+      return interaction.editReply({
+        content: siblingMsg || '❌ Could not start a send — please try again.',
+      });
+    }
+    // We own the row from here on — a throw before the final editReply
+    // would orphan it. The catch below uses this flag to fire a
+    // best-effort version-checked deleteFlow.
+    orphanFlowCreated = true;
+
+    const content = renderConfirmCardContent({
+      resourceType: params.resourceType,
+      resourceLabel: params.resourceLabel,
+      validRecipients: valid,
+      expiresIn,
+      selfDestructSeconds,
+      personalMessage,
+      warningsBlock,
+      needsPicker,
+      interaction,
+    });
+    const rows = renderConfirmCardRows({
+      attachPicker: needsPicker,
+      sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
+    });
+    // `return await` (not bare `return`) is load-bearing: without it
+    // a Discord-side rejection on the confirm-card delivery would
+    // bypass the outer catch entirely, leaving the user with a set
+    // cooldown AND an orphan flow row from the supersedeOrCreate
+    // we just landed.
+    return await interaction.editReply({ content, components: rows });
+  } catch (err) {
+    // Unanticipated throw. Always clear cooldown — the user got no
+    // visible response, so they must not be locked out for the full
+    // cooldown window. Try editReply first (interaction was deferred
+    // up-front); if it also throws (the deferReply ITSELF failed, so
+    // there's no deferred state to edit), fall back to reply() as
+    // ephemeral. The double .catch keeps a failed fallback silent —
+    // worst case the user sees nothing, but the cooldown is cleared
+    // so they can retry.
+    clearCooldown(interaction.user.id);
+    logger.error('handleQurlSlashSend: unexpected throw', {
+      user_id: interaction.user.id, flow_id, error: err && err.message, stack: err && err.stack,
+    });
+    // Best-effort cleanup of any orphan flow row we created. Only
+    // fires when supersedeOrCreate succeeded and the throw happened
+    // between then and the final editReply — otherwise the row
+    // would sit in DDB until TTL eviction, blocking a fresh /qurl
+    // file or /qurl map invocation under the sibling-flow guard.
+    // Version-gated stage check keeps a concurrent confirm-click
+    // from racing the delete and removing a row that's already
+    // advanced past awaiting-confirm.
+    if (orphanFlowCreated) {
+      deleteFlow(flow_id, {
+        stage: SEND_STAGE_AWAITING_CONFIRM,
+        reason: 'terminal',
+      }).catch((cleanupErr) => {
+        logger.warn('handleQurlSlashSend: orphan-flow cleanup failed', {
+          flow_id, error: cleanupErr && cleanupErr.message,
+        });
+      });
+    }
+    const errContent = '❌ Something went wrong — please try again.';
+    return interaction.editReply({ content: errContent })
+      .catch(() => interaction.reply({ content: errContent, ephemeral: true }).catch(logIgnoredDiscordErr));
+  }
+}
+
+async function handleQurlFile(interaction) {
+  // DM rejection first — no cooldown burned on a guild-only invocation
+  // attempted from DMs.
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+
+  // UX fast-fail BEFORE setCooldown — "bot too busy" is server-side
+  // backpressure, not user fault; locking the user out for 30s on a
+  // capacity rejection would be punitive.
+  if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+    // Log at INFO so capacity-tuning has a trend signal — a sudden
+    // burst of these would indicate either MAX_CONCURRENT_FILE_SENDS
+    // is undersized or a downstream pipeline is stuck holding slots.
+    logger.info('handleQurlFile: capacity backpressure', {
+      user_id: interaction.user.id,
+      active_file_sends: activeFileSends,
+      max_concurrent: MAX_CONCURRENT_FILE_SENDS,
+    });
+    return interaction.reply({
+      content: 'The bot is processing too many file sends right now. Please try again in a moment.',
+      ephemeral: true,
+    });
+  }
+
+  // Cooldown gate at entry — after capacity backpressure but BEFORE
+  // any input-validation so invalid inputs (malformed attachment,
+  // SSRF host, wrong type, oversize) still throttle. Matches the
+  // pattern at commands.js:~1677.
+  if (isOnCooldown(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before sending again.',
+      ephemeral: true,
+    });
+  }
+  setCooldown(interaction.user.id);
+
+  // Required-option lookups via `getAttachment(..., true)` /
+  // `getString(..., true)` throw on a missing option. Discord enforces
+  // required server-side, so production interactions can't trip
+  // these — BUT the more likely cause of a hit in production is a
+  // client/schema desync (gateway has the new command schema, bot
+  // has the old, or vice versa) during a redeploy window, not abuse.
+  // Clear the cooldown so the user can retry once the deploy
+  // stabilizes. SSRF gate below still preserves cooldown (probing
+  // the allow-list IS abuse-aligned and doesn't have a redeploy
+  // explanation).
+  let attachment;
+  try {
+    attachment = interaction.options.getAttachment('attachment', true);
+  } catch (err) {
+    logger.warn('handleQurlFile: required attachment option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ The `attachment:` option is required. Re-run with a file attached.',
+      ephemeral: true,
+    });
+  }
+  if (!attachment || typeof attachment.url !== 'string') {
+    // Same client/schema-desync rationale — clear cooldown for retry.
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ Attachment is missing or malformed.',
+      ephemeral: true,
+    });
+  }
+  if (!isAllowedSourceUrl(attachment.url)) {
+    logger.warn('handleQurlFile: attachment.url failed SSRF gate', {
+      user_id: interaction.user.id, host: safeUrlHost(attachment.url),
+    });
+    return interaction.reply({
+      content: '❌ Attachment source not allowed. Files must be uploaded via Discord, not linked from external URLs.',
+      ephemeral: true,
+    });
+  }
+  if (!isAllowedFileType(attachment.contentType)) {
+    // Honest user error (picked the wrong file in the OS dialog); not
+    // an abuse signal. Unlock so retry with a valid file is immediate.
+    // SSRF rejection above stays throttled — probing the allow-list is
+    // an abuse signal, type/size rejections are not.
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: `❌ File type not allowed: \`${escapeDiscordMarkdown(String(attachment.contentType || 'unknown'))}\`.`,
+      ephemeral: true,
+    });
+  }
+  if (attachment.size > MAX_FILE_SIZE) {
+    // Same shape as the file-type rejection — honest user error.
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: `❌ File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB.`,
+      ephemeral: true,
+    });
+  }
+
+  return handleQurlSlashSend(interaction, {
+    resourceType: RESOURCE_TYPES.FILE,
+    attachment: {
+      url: attachment.url,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.size,
+    },
+    locationUrl: null,
+    locationName: null,
+    // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
+    // codepoint-aware 256-cap + markdown-escape. The codepoint slice
+    // prevents UTF-16 surrogate splits at the 256 boundary; the bidi
+    // strip defends against U+202E spoofing in filenames (a crafted
+    // upload could otherwise visually fake a different filename in
+    // the confirm card).
+    resourceLabel: sanitizeContentLabel(attachment.name),
+  });
+}
+
+async function handleQurlMap(interaction) {
+  // DM rejection first — no cooldown burned on a DM invocation.
+  if (!interaction.guildId || !interaction.guild) {
+    return interaction.reply({
+      content: 'This command can only be used in a server, not in DMs.',
+      ephemeral: true,
+    });
+  }
+  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlFile).
+  // The capacity gate guards the connector upload path that file sends
+  // hit during back-half dispatch; map sends never touch that resource.
+  // Sharing the gate would punish maps for file-pipeline saturation.
+  //
+  // Cooldown gate — cross-command bucket shared with /qurl send and
+  // /qurl file (sendCooldowns Map). Tests pin the contract.
+  if (isOnCooldown(interaction.user.id)) {
+    return interaction.reply({
+      content: 'Please wait before sending again.',
+      ephemeral: true,
+    });
+  }
+  setCooldown(interaction.user.id);
+
+  // `getString('location', true)` throws on a missing option. Discord
+  // enforces required server-side; the more likely cause in production
+  // is a client/schema desync (redeploy timing) than abuse. Clear
+  // cooldown on the throw catch so the user can retry once the deploy
+  // stabilizes — same rationale as handleQurlFile's required-option
+  // throw branch.
+  let locationValue;
+  try {
+    // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
+    // The slash option's setMaxLength(500) enforces this server-side, so
+    // legitimate clients can't exceed it — the slice is forged-interaction
+    // defense.
+    //
+    // Order: trim() FIRST so the 500-char slice measures CONTENT, not
+    // whitespace. Slicing first would let a payload like
+    // `<100 leading spaces> + <450 chars of content>` lose 50 content
+    // chars to the cap; trimming first preserves the full content.
+    locationValue = interaction.options.getString('location', true).trim().slice(0, 500);
+  } catch (err) {
+    logger.warn('handleQurlMap: required location option missing', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ The `location:` option is required. Re-run with a Google Maps URL or address.',
+      ephemeral: true,
+    });
+  }
+  const locationNameRaw = interaction.options.getString('location-name');
+  if (locationValue.length === 0) {
+    // Honest user error (pasted only whitespace, or empty string) —
+    // unlock retry. Same shape as the file-type / size cap branches
+    // in handleQurlFile.
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ Location is empty.',
+      ephemeral: true,
+    });
+  }
+
+  // Shared parser: see `parseLocationInput` near the top of this file.
+  // `/qurl send`'s modal-driven location text calls it too — keep both
+  // entry points in lockstep so they produce identical delivered URLs
+  // for the same input. Wrap in try/catch as a defensive symmetry with
+  // handleQurlFile's catches: a future regex change in parseLocationInput
+  // or a pathological input could throw synchronously before reaching
+  // handleQurlSlashSend's safety net, leaving cooldown set with no
+  // visible response.
+  let locationUrl;
+  let locationName;
+  try {
+    ({ locationUrl, locationName } = parseLocationInput(locationValue));
+  } catch (err) {
+    logger.error('handleQurlMap: parseLocationInput threw', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ Could not parse location — please re-run with a Google Maps URL or address.',
+      ephemeral: true,
+    });
+  }
+  // Explicit location-name override wins over the URL-derived name.
+  if (locationNameRaw && locationNameRaw.trim().length > 0) {
+    locationName = locationNameRaw.trim();
+  }
+  // sanitizeContentLabel: NFKC + strip bidi/zero-width/control +
+  // codepoint-aware 256-cap + markdown-escape. The bidi strip is
+  // load-bearing here — /qurl map's slash option is a new
+  // attack surface (no modal friction) and a crafted U+202E in
+  // `location-name` would otherwise let the sender visually spoof
+  // a Maps URL inside the rendered confirm card. Also handles the
+  // UTF-16 surrogate-split risk at the 256 boundary.
+  if (locationName) locationName = sanitizeContentLabel(locationName);
+
+  return handleQurlSlashSend(interaction, {
+    resourceType: RESOURCE_TYPES.MAPS,
+    attachment: null,
+    locationUrl,
+    locationName,
+    resourceLabel: locationName || 'location',
+  });
+}
+
+// Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
+// `stage_to` === current stage advances the version (OCC guard) and
+// refreshes the TTL, so repeated picker churn doesn't expire the row
+// while the user is still deciding.
+async function handleSendUserSelect(interaction, { flow_id, row }) {
+  // `deferUpdate` first so the downstream `transitionFlow` (DDB OCC
+  // update) can take more than Discord's 3-second hard ack deadline
+  // without surfacing as an "interaction failed" toast. Mirrors
+  // handleSendConfirmClick / handleSendCancelClick. All `update`
+  // calls below become `editReply` (the interaction is now deferred).
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  // Validate payload.resourceType BEFORE renderConfirmCardContent
+  // would throw on it. A corrupt/stale DDB row (manual mutation,
+  // schema drift, etc.) with an unknown resourceType would otherwise
+  // throw TypeError from the renderer and surface the dispatcher's
+  // generic "superseded" copy — wrong, since nothing was superseded.
+  // Delete the corrupt row + surface actionable "re-run" copy.
+  const payloadResource = (row.payload || {}).resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleSendUserSelect: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // `interaction.users` is a discord.js Collection in production,
+  // duck-typed as a Map in tests — both support `.values()` so the
+  // iteration here is interchangeable. A future test refactor that
+  // switches to Collection-only methods (`.first()`, `.filter()`)
+  // would break the test harness without breaking prod; keep the
+  // Map-compatible API surface.
+  const selected = [...interaction.users.values()];
+  if (selected.length === 0) {
+    // Empty pick → already acked via deferUpdate above. Nothing to edit.
+    return undefined;
+  }
+  // `interaction.user.id` IS the original sender's ID — Discord
+  // enforces "only the user who triggered an ephemeral interaction
+  // can click its components" at the gateway level, so the clicker
+  // === the sender. This invariant is LOAD-BEARING: partitioning
+  // by clicker also drops the SENDER from the pick (droppedSelf),
+  // and a future refactor that flips the confirm card to
+  // non-ephemeral would need to thread the original sender ID
+  // through the flow payload + read it here instead.
+  //
+  // No `resolveRecipientUsers` re-fetch here — Discord's
+  // UserSelectMenu only surfaces users visible to the bot in this
+  // guild, so picked User IDs are guild-bounded at the gateway-event
+  // level. handleSendConfirmClick re-fetches at click time
+  // (partial-drop test pins this) as the actual guild-membership
+  // defense; adding it here would burn 10 members.fetch calls per
+  // picker tick without catching anything the Send-time check misses.
+  const payload = row.payload || {};
+  const { valid, droppedBots, droppedSelf } = partitionRecipients(selected, interaction.user.id);
+  // Both invalid-pick branches re-render the full confirm card with a
+  // warning banner prepended. Replacing card content with just the
+  // warning string strips the resource header ("Sending file:
+  // report.pdf / Expires: 24h / Self-destruct: …") that the user
+  // chose at /qurl file time — they shouldn't have to scroll back to
+  // remember what they're sending. needsPicker:true keeps the "Pick
+  // recipients below" prompt; sendDisabled:true keeps Send greyed.
+  const rejectPick = (warning) => interaction.editReply({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+    }),
+    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
+  }).catch(logIgnoredDiscordErr);
+  if (valid.length === 0) {
+    // No transitionFlow on the all-invalid branch — the card stays at
+    // the same flow_state version. Log for forensics so a sudden spike
+    // in invalid-pick churn surfaces in metrics without lowering log
+    // verbosity.
+    logger.debug('handleSendUserSelect: all-invalid pick', {
+      flow_id, dropped_bots: droppedBots, dropped_self: droppedSelf,
+    });
+    const reasons = [];
+    if (droppedBots > 0) reasons.push('Cannot send to bots');
+    if (droppedSelf > 0) reasons.push('Cannot send to yourself');
+    return rejectPick(`⚠\u{FE0F} ${reasons.join('. ')}. Re-pick recipients below.\n\n`);
+  }
+  // Defense-in-depth — unreachable in production today: the picker's
+  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
+  // QURL_SEND_MAX_RECIPIENTS=25) = 10, so the user physically can't
+  // pick more than 25. Kept against a future bump to either constant
+  // (or a forged interaction) so the cap stays honored.
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
+  }
+
+  const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
+  // Targeted catch around transitionFlow mirrors the same shape
+  // handleSendConfirmClick / handleSendCancelClick use around their
+  // DDB calls. A throw here would otherwise bubble to the dispatcher's
+  // outer catch which surfaces a generic "superseded" message —
+  // wrong, since nothing was actually superseded on a DDB blip.
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleSendUserSelect: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your pick right now. Try selecting recipients again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Recompute warnings against the new pick. `droppedBots` AND
+  // `droppedSelf` can flip here — Discord's UserSelectMenu doesn't
+  // exclude the invoker, so a user picking themselves bumps
+  // droppedSelf; bots present in the picker bump droppedBots.
+  // `cappedCount` / `invalidTokens` / unresolved / transient buckets
+  // are string-path-only (parser never ran on the picker selection),
+  // so they stay empty here. The earlier zero-valid short-circuit
+  // already handled the empty case; what's left below is the
+  // partial-pick UX where SOME picked users are valid but the
+  // warning still surfaces the dropped ones.
+  const warningsBlock = renderRecipientWarnings({
+    droppedBots,
+    droppedSelf,
+  });
+  // Intentional flag divergence: the CONTENT renders the resolved
+  // recipient summary ("**To:** N user(s)") — needsPicker:false —
+  // while the ROWS keep the UserSelectMenu attached so the user can
+  // re-pick. Send is enabled because we now have a valid recipient
+  // set. The two flags are deliberately fed opposite values; the
+  // rename from `needsPicker` to `attachPicker` on the rows side
+  // makes this asymmetry impossible to silently consolidate.
+  const content = renderConfirmCardContent({
+    resourceType: payload.resourceType,
+    resourceLabel: payload.resourceLabel,
+    validRecipients: valid,
+    expiresIn: payload.expiresIn,
+    selfDestructSeconds: payload.selfDestructSeconds,
+    personalMessage: payload.personalMessage,
+    warningsBlock,
+    needsPicker: false,
+    interaction,
+  });
+  return interaction.editReply({
+    content,
+    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: false }),
+  }).catch(logIgnoredDiscordErr);
+}
+
+// Send button → fire executeSendPipeline. deleteFlow first as the
+// dedup primitive (duplicate dispatch under future SQS at-least-once
+// must not double-send). Mirrors handleRevokeSelect's ordering.
+async function handleSendConfirmClick(interaction, { flow_id, row }) {
+  // `deferUpdate` at the very top so the chain
+  // `resolveRecipientUsers → getGuildApiKey → deleteFlow → editReply`
+  // can take more than Discord's 3-second hard ack deadline without
+  // surfacing as an "interaction failed" toast to the user. Cold
+  // cache + 25 cache-miss `members.fetch` calls in `resolveRecipientUsers`
+  // alone can chew through the budget. The .catch swallows the
+  // (rare) race where Discord's gateway already acked the
+  // interaction; a duplicate defer there throws InteractionAlreadyReplied
+  // and the subsequent editReply still works.
+  //
+  // All ephemeral error-replies below switch from `interaction.reply`
+  // to `interaction.followUp` (the interaction is now in the
+  // deferred state and `.reply` would throw); main-message updates
+  // switch from `interaction.update` to `interaction.editReply`.
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  // Bot-kicked-between-confirm-and-Send: `interaction.guild` is null.
+  // Without this guard the user sees "all recipients left the server"
+  // (the all-unresolved branch's copy below) — misleading, because
+  // the bot left, not the recipients. Delete the flow row so a
+  // future re-invite + rerun starts fresh.
+  //
+  // No `expectedVersion` on this deleteFlow (unlike the happy-path /
+  // empty-recipients / all-unresolved branches): if the bot has been
+  // kicked, every subsequent interaction for this guild is dead
+  // (Discord won't deliver further events to this bot for this guild)
+  // — there's no concurrent path that could bump the version. The
+  // version-gate fences picker-vs-Send and Cancel-vs-Send races; both
+  // require an active gateway session that bot-kicked has terminated.
+  if (!interaction.guild) {
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on bot-kicked failed', {
+      flow_id, error: err && err.message,
+    }));
+    // Zero side effects (no DMs sent, no API calls) — unlock retry
+    // immediately after re-invite without paying the cooldown window.
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: '❌ qURL bot is no longer in this server. Re-invite the bot and re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const payload = row.payload || {};
+  // Forged-interaction defense: a legitimate Send click can only land
+  // when the card has at least one recipient (Send is disabled while
+  // recipientIds is empty — both at confirm-card-render time and in
+  // the picker re-render after an empty pick). A click with empty
+  // recipientIds therefore implies a fabricated interaction. The
+  // "all left the server" copy below would be misleading for this
+  // path (nobody left, nobody was ever there); distinct copy + flow
+  // delete keeps the dispatcher's outer catch from masking the signal.
+  if (!Array.isArray(payload.recipientIds) || payload.recipientIds.length === 0) {
+    // Version-gate the delete: a concurrent UserSelect could have
+    // transitioned the row between the dispatcher's loadFlow (which
+    // fed our stale `payload` view) and this click. If `deleted:
+    // false`, the more-recent row is preserved and the user sees the
+    // "card moved" recovery copy instead of a silently wiped pick.
+    const deleteResult = await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: row.version,
+    }).catch((err) => {
+      logger.warn('handleSendConfirmClick: deleteFlow on empty-recipients failed', {
+        flow_id, error: err && err.message,
+      });
+      return { deleted: false };
+    });
+    if (!deleteResult.deleted) {
+      return interaction.followUp({
+        content: 'The card moved — re-check it and click Send again.',
+        ephemeral: true,
+      }).catch(logIgnoredDiscordErr);
+    }
+    return interaction.editReply({
+      content: '❌ No recipients were selected — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  // Re-fetch users + resolve apiKey IN PARALLEL at click time. Both
+  // are idempotent reads (rule from handleRevokeSelect: parallelize
+  // ONLY with idempotent reads), so the cold-cache happy path saves
+  // a DDB round-trip vs. running them sequentially. allSettled keeps
+  // each failure routable to its own user-actionable copy below; a
+  // rejection in one doesn't short-circuit the other.
+  //
+  // Both unresolved buckets (10007 + transient fetch failure) reduce
+  // the delivered count, so both are surfaced to the sender via
+  // followUp below — without the split, a 429 / gateway blip would
+  // silently shrink the delivered set with no signal.
+  const [resolveResult, apiKeyResult] = await Promise.allSettled([
+    resolveRecipientUsers(interaction, payload.recipientIds),
+    db.getGuildApiKey(interaction.guildId),
+  ]);
+  if (resolveResult.status === 'rejected') {
+    logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
+      flow_id, error: resolveResult.reason && resolveResult.reason.message,
+    });
+    // Zero side effects — unlock retry so the user can re-click Send
+    // immediately after the transient blip clears.
+    clearCooldown(interaction.user.id);
+    return interaction.followUp({
+      content: '❌ Could not look up recipients right now. Try **Send** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  const { users, unresolvedIds, transientFailureIds } = resolveResult.value;
+  const partialLeftCount = unresolvedIds.length;
+  const partialTransientCount = transientFailureIds.length;
+  if (partialLeftCount > 0 || partialTransientCount > 0) {
+    logger.info('handleSendConfirmClick: partial drop at click time', {
+      flow_id, left: partialLeftCount, transient: partialTransientCount,
+    });
+  }
+  const { valid, droppedBots, droppedSelf } = partitionRecipients(users, interaction.user.id);
+  if (valid.length === 0) {
+    // Distinguish the failure mode by what was dropped. The general
+    // case is "everyone left the guild between confirm and Send"
+    // (10007 / transient) — but a forged Send click with payload
+    // recipientIds containing only the sender or only bots would
+    // resolve fine and then partition would drop everything, hitting
+    // this branch with the WRONG copy ("they left the server"
+    // misdirects when nobody left — the recipient list was invalid).
+    // Terminal for THIS attempt either way: delete the flow so a
+    // rerun claims a fresh slot.
+    //
+    // Version-gate the delete (same shape as the happy-path Send and
+    // the empty-recipientIds branch): a concurrent UserSelect could
+    // have advanced the row between the dispatcher's loadFlow and
+    // this point. If `deleted: false`, the more-recent row is
+    // preserved and the user sees the "card moved" recovery copy.
+    const deleteResult = await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: row.version,
+    }).catch((err) => {
+      logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
+        flow_id, error: err && err.message,
+      });
+      return { deleted: false };
+    });
+    if (!deleteResult.deleted) {
+      return interaction.followUp({
+        content: 'The card moved — re-check it and click Send again.',
+        ephemeral: true,
+      }).catch(logIgnoredDiscordErr);
+    }
+    const wasInvalidList = droppedBots > 0 || droppedSelf > 0;
+    return interaction.editReply({
+      content: wasInvalidList
+        ? '❌ Invalid recipient list — re-run the command with at least one real user.'
+        : '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // apiKey was resolved in parallel with resolveRecipientUsers above.
+  // Check the rejection branch before consuming the value.
+  //
+  // `expectedVersion: row.version` (used below on deleteFlow) fences
+  // the picker-then-Send race: if a UserSelectMenu interaction landed
+  // and transitioned the flow between the dispatcher's loadFlow (which
+  // fed `row` here) and our deleteFlow, the version would have
+  // advanced. Without the version gate, we'd deleteFlow successfully
+  // and call executeSendPipeline with the STALE recipientIds captured
+  // in `payload` above. `deleted: false` collapses duplicate dispatch
+  // AND mid-flight picker mutation; both map to the same user
+  // recovery ("the card moved under you, re-click Send").
+  // `interaction.guildId` is guaranteed non-null at this point —
+  // handleQurlSlashSend rejects DM invocations BEFORE the flow row
+  // is created, so a row at SEND_STAGE_AWAITING_CONFIRM only ever
+  // belongs to a guild interaction.
+  //
+  // apiKey gate runs BEFORE deleteFlow: if both guildApiKey AND
+  // config.QURL_API_KEY are null (rare — key rotation removed the
+  // key), the flow row stays alive and the user can re-click Send
+  // within the TTL after the admin reruns `/qurl setup`. Burning the
+  // row before discovering there's no key to send with would strand
+  // the user on a dead card.
+  if (apiKeyResult.status === 'rejected') {
+    logger.error('handleSendConfirmClick: getGuildApiKey threw', {
+      flow_id, error: apiKeyResult.reason && apiKeyResult.reason.message,
+    });
+    // Flow row stays alive; unlock retry so the user isn't stranded
+    // for 30s waiting for a DDB blip to clear.
+    clearCooldown(interaction.user.id);
+    return interaction.followUp({
+      content: '❌ Could not look up the qURL API key right now. Try **Send** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  const guildApiKey = apiKeyResult.value;
+  // Check the resolved key BEFORE deleteFlow. If both guildApiKey and
+  // config.QURL_API_KEY are null (rare: key rotation removed the key
+  // between dispatcher pre-check and Send click), there's nothing to
+  // send with — preserving the flow row lets the user retry after the
+  // admin re-runs `/qurl setup` without re-invoking the slash command.
+  // Cooldown clears so the user isn't stranded for the 30s window
+  // while waiting on the admin.
+  const apiKey = guildApiKey || config.QURL_API_KEY;
+  if (!apiKey) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  const deleteResult = await deleteFlow(flow_id, {
+    stage: SEND_STAGE_AWAITING_CONFIRM,
+    reason: 'terminal',
+    expectedVersion: row.version,
+  });
+  if (!deleteResult.deleted) {
+    return interaction.followUp({
+      content: 'Recipients changed before Send fired — re-check the card and click Send again.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Ack with a "Preparing send…" placeholder; executeSendPipeline
+  // takes over the editReply from here. Matches handleSend's hand-off
+  // shape at commands.js:~2307.
+  await interaction.editReply({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
+
+  // Surface partial drops (members who left the guild between confirm
+  // and Send, OR who failed lookup transiently) as a separate
+  // ephemeral followUp BEFORE the back-half takes over the main
+  // reply. Without this the user would see "Sent to N users" with no
+  // signal that N != the count shown on the card. Distinct wording
+  // for the two buckets — "left the server" is stable, "lookup
+  // blipped" encourages a fresh rerun if they want to include the
+  // missed recipients. The rerun hint names the actual subcommand
+  // they invoked (resourceType drives /qurl file vs /qurl map).
+  //
+  // followUp (not edited into the "Preparing send…" editReply) is
+  // INTENTIONAL: executeSendPipeline will rewrite editReply to
+  // "Sent to N users" / failure copy as the send progresses, which
+  // would clobber the partial-drop banner if it lived in the same
+  // message. followUp is a separate ephemeral that persists past
+  // the back-half's editReply rewrites.
+  if (partialLeftCount > 0 || partialTransientCount > 0) {
+    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl file';
+    const parts = [];
+    if (partialLeftCount > 0) {
+      parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
+    }
+    if (partialTransientCount > 0) {
+      parts.push(`${partialTransientCount} couldn't be looked up just now (rerun ${rerunCommand} to retry them)`);
+    }
+    await interaction.followUp({
+      // "Attempting to" (not "sending to") so a downstream pipeline
+      // failure doesn't leave the user reading a confident "sending"
+      // message alongside a subsequent failure message.
+      content: `ℹ\u{FE0F} ${parts.join('; ')} — attempting to send to the remaining ${valid.length}.`,
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  return executeSendPipeline(interaction, {
+    apiKey,
+    resourceType: payload.resourceType,
+    attachment: payload.attachment,
+    locationUrl: payload.locationUrl,
+    locationName: payload.locationName,
+    recipients: valid,
+    target: 'user',
+    isVoiceContext: false,
+    expiresIn: payload.expiresIn,
+    selfDestructSeconds: payload.selfDestructSeconds,
+    personalMessage: payload.personalMessage,
+    sendNonce: payload.sendNonce,
+  });
+}
+
+// Cancel button → version-gated deleteFlow + acknowledge.
+//
+// expectedVersion fences two distinct races, both serious:
+//  1. Cancel vs. Send: if Send is mid-dispatch (already deleted the
+//     flow), Cancel must NOT clear the cooldown — the first send is
+//     fanning out DMs and the user could otherwise immediately rerun
+//     and bypass the per-user cooldown window mid-send.
+//  2. Cancel vs. UserSelect: a Cancel click that lands while a
+//     UserSelectMenu transition is in flight would otherwise silently
+//     kill the row out from under the user's pick. The version gate
+//     surfaces that as the dedup-loser path (user re-clicks Cancel on
+//     the new row if they still want to abort).
+//
+// On a successful Cancel, `softenCooldown` retains 5s of throttle
+// instead of fully clearing — a full clear would let a user spam
+// /qurl file → Cancel → /qurl file → Cancel and rack up
+// supersedeOrCreate DDB writes + Discord interactions with zero
+// throttle. The cooldown-loser branch leaves cooldown untouched
+// (Send is mid-fanout; bypassing is the abuse vector).
+async function handleSendCancelClick(interaction, { flow_id, row }) {
+  // Defer-ack within the 3s window. The single deleteFlow call below
+  // is fast in the happy path, but a DDB blip or slow region could
+  // still blow the budget. Same pattern handleSendConfirmClick uses
+  // (deferUpdate at top, editReply / followUp downstream).
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  // Targeted catch around deleteFlow mirrors handleSendConfirmClick's
+  // guards on resolveRecipientUsers + getGuildApiKey. Without it, a
+  // DDB throw propagates to the dispatcher's outer catch which
+  // surfaces a generic "superseded" message — wrong for Cancel
+  // (the user wanted to abort; the flow row may still be alive
+  // and Send may still be in flight, so cooldown stays set).
+  let deleted;
+  try {
+    ({ deleted } = await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+      expectedVersion: row.version,
+    }));
+  } catch (err) {
+    logger.error('handleSendCancelClick: deleteFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not cancel right now — try clicking **Cancel** again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (!deleted) {
+    // Dedup-loser: either Send won the race (deletedFlow already, fan-out
+    // in progress) or a UserSelect transition advanced the row version.
+    // Distinct branches share the same recovery (re-check the card),
+    // but the wording avoids implying the flow was "processed" on the
+    // picker-race path where nothing actually committed.
+    return interaction.followUp({
+      content: 'The card moved — re-check it.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  softenCooldown(interaction.user.id, CANCEL_SOFTEN_RESIDUAL_MS);
+  return interaction.editReply({
+    content: 'Send cancelled.',
+    components: [],
+  }).catch(logIgnoredDiscordErr);
+}
+
 // Pure rendering / wording logic lives in `./revoke-render` so the
 // e2e smoke test can require it without pulling in `discord.js`.
 const {
@@ -4124,18 +5657,91 @@ const commands = [
       .addSubcommand(sub =>
         sub.setName('send')
           .setDescription('Send a file or location to users via one-time secure link')
-          // No options — the redesigned flow is button-driven. Customer
-          // feedback (April 2026): the prior 4-option shape (target,
-          // expiry_optional, file_optional, message_optional) confused
-          // users at the slash-command-popup stage because they had to
-          // pre-decide file-vs-location AND fill in target before
-          // seeing the actual flow. New flow: `/qurl send` opens a
-          // 2-button reply (Send File / Send Location); each path
-          // collects its specific resource (drop-file in chat for
-          // file via awaitMessages, modal text input for location)
-          // then converges on a shared final step that gathers
-          // recipient(s), optional message, and expiry before
-          // committing the send.
+          // No options — the redesigned flow is button-driven. The prior
+          // 4-option shape (target, expiry_optional, file_optional,
+          // message_optional) confused users at the slash-command-popup
+          // stage because they had to pre-decide file-vs-location AND
+          // fill in target before seeing the actual flow. Current flow:
+          // a 2-button reply opens, each path collects its specific
+          // resource (drop-file via awaitMessages, modal for location),
+          // then converges on the shared final step.
+      )
+      .addSubcommand(sub =>
+        sub.setName('file')
+          .setDescription('Share a file via one-time qURL links')
+          .addAttachmentOption(opt =>
+            opt.setName('attachment')
+              .setDescription('The file to share')
+              .setRequired(true)
+          )
+          .addStringOption(opt =>
+            opt.setName('recipients')
+              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+              .setRequired(false)
+              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+          )
+          .addStringOption(opt =>
+            opt.setName('expires-in')
+              .setDescription('How long the qURL links stay valid (default: 24 hours)')
+              .setRequired(false)
+              .addChoices(...EXPIRY_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('self-destruct')
+              .setDescription('Optional countdown after first open (default: no timer)')
+              .setRequired(false)
+              .addChoices(...SELF_DESTRUCT_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('personal-message')
+              .setDescription('Optional note included in each recipient\'s DM')
+              .setRequired(false)
+              .setMaxLength(280)
+          )
+      )
+      .addSubcommand(sub =>
+        sub.setName('map')
+          .setDescription('Share a Google Maps location via one-time qURL links')
+          .addStringOption(opt =>
+            opt.setName('location')
+              .setDescription('Google Maps URL, or a place / address to search')
+              .setRequired(true)
+              // 500 chars covers full Google Maps URLs (which can be
+              // 200-400 chars after place params + coordinates) plus
+              // headroom; not tied to the recipients-parser cap because
+              // location is a single URL/address, not a token list.
+              .setMaxLength(500)
+          )
+          .addStringOption(opt =>
+            opt.setName('recipients')
+              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+              .setRequired(false)
+              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+          )
+          .addStringOption(opt =>
+            opt.setName('location-name')
+              .setDescription('Override the label shown to recipients (defaults to URL/address)')
+              .setRequired(false)
+              .setMaxLength(256)
+          )
+          .addStringOption(opt =>
+            opt.setName('expires-in')
+              .setDescription('How long the qURL links stay valid (default: 24 hours)')
+              .setRequired(false)
+              .addChoices(...EXPIRY_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('self-destruct')
+              .setDescription('Optional countdown after first open (default: no timer)')
+              .setRequired(false)
+              .addChoices(...SELF_DESTRUCT_CHOICES)
+          )
+          .addStringOption(opt =>
+            opt.setName('personal-message')
+              .setDescription('Optional note included in each recipient\'s DM')
+              .setRequired(false)
+              .setMaxLength(280)
+          )
       )
       .addSubcommand(sub =>
         sub.setName('revoke')
@@ -4363,9 +5969,20 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/revoke
+      // Gate: require guild API key for send/file/map/revoke.
+      // API_KEY_GATED_SUBCOMMANDS hoisted to module scope.
+      //
+      // For /qurl file + /qurl map this read is a fail-fast presence
+      // check — the resolved value is intentionally NOT threaded
+      // through to the back-half. handleSendConfirmClick re-fetches at
+      // Send-click time so a key rotation during the 3-minute confirm-
+      // card window is honored. Threading resolvedApiKey through here
+      // would break that rotation-safety property: a future optimization
+      // pass that "saves the redundant DDB read" would silently
+      // re-introduce stale-key dispatches. The handleQurlSlashSend
+      // docstring documents the contract explicitly.
       let resolvedApiKey = null;
-      if (sub === 'send' || sub === 'revoke') {
+      if (API_KEY_GATED_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
@@ -4383,12 +6000,19 @@ const commands = [
       // sometimes clone/serialize interactions) and a security smell for
       // secret-bearing values.
       if (sub === 'send') return handleSend(interaction, resolvedApiKey);
+      // /qurl file and /qurl map deliberately don't accept the
+      // dispatcher-resolved apiKey — handleSendConfirmClick re-fetches
+      // at Send time so a mid-flow rotation still uses the live key.
+      // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
+      // fail-fast presence check.
+      if (sub === 'file') return handleQurlFile(interaction);
+      if (sub === 'map') return handleQurlMap(interaction);
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it
         // works), then admin-only setup (now the OAuth-redirect flow per
         // PR #177), then glossary (Terms), then operational caveat
-        // (Large servers). The "Setting up" section pivots based on
+        // The "Setting up" section pivots based on
         // whether OAuth is configured — when it is, we describe the
         // /qurl setup OAuth flow + the "Add to Discord" install-flow
         // entry point. When unset (sandbox before Auth0 secrets land),
@@ -4406,7 +6030,9 @@ const commands = [
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
-            '  `/qurl send` — send a file or location to users\n' +
+            '  `/qurl file` — share a file with users via one-time qURL links\n' +
+            '  `/qurl map` — share a Google Maps location via one-time qURL links\n' +
+            '  `/qurl send` — legacy button-driven flow (use `/qurl file` or `/qurl map` instead)\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -4416,17 +6042,18 @@ const commands = [
             // misalign "1." with "2.", "3.", "4."). The tab indent now
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
-            '\t1. Run `/qurl send` and pick **Send File** or **Send Location**\n' +
-            '  2. (Files only) I\'ll DM you privately — attach the file there, not in the public channel\n' +
-            '  3. Choose recipient(s), expiry, and optionally a personal message — then click **Send**\n' +
+            '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n' +
+            '  2. Optionally `recipients:@a @b @role` (up to 25 users via @mentions or role expansion) — '
+              + 'leave blank to pick from a menu (up to 10 at a time)\n' +
+            '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
-            'You create a qurl for a protected resource each time you run `/qurl send`.\n\n' +
-            '**Large servers (~1000+ members):** when sending to **Everyone in this channel** ' +
-            'or **Everyone in your voice channel**, members who appear offline in Discord may be skipped. ' +
-            'If you need to reach a specific person for sure, pick **A specific user**.\n\n' +
+            'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
+            '**Large servers (~1000+ members):** `/qurl send` with **Everyone in this channel** ' +
+            'or **Everyone in your voice channel** may skip members who appear offline in Discord. ' +
+            'If you need to reach a specific person for sure, prefer `/qurl file` or `/qurl map` with an explicit @mention.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });
@@ -4703,6 +6330,32 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
   siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
+// /qurl file + /qurl map confirm-card components. All three customIds
+// share the same expectedStage — they're three component types
+// (button + user-select + button) attached to the same confirm-card
+// message, all routed by stage. siblingMessage is registered on the
+// FIRST customId only; flow-dispatch rejects mismatched re-registrations
+// of the same stage so we don't repeat it.
+registerFlow(SEND_USER_SELECT_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendUserSelect,
+  siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
+});
+// siblingMessage intentionally omitted on the SEND + CANCEL custom-
+// id registrations below — flow-dispatch's `siblingMessages` map is
+// keyed by stage (not by customId), so the message registered on
+// USER_SELECT above is reachable from any of the three customIds
+// at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
+// test in qurl-file-map.test.js pins this contract.
+registerFlow(SEND_CONFIRM_SEND_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmClick,
+});
+registerFlow(SEND_CONFIRM_CANCEL_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendCancelClick,
+});
+
 module.exports = {
   commands,
   registerCommands,
@@ -4712,6 +6365,9 @@ module.exports = {
   handleRevokeSelect,
   handleSetupButton,
   handleSetupModal,
+  handleSendUserSelect,
+  handleSendConfirmClick,
+  handleSendCancelClick,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -4776,6 +6432,25 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
+      // /qurl file + /qurl map handlers + flow constants. Tests pin
+      // against production values via these exports rather than
+      // re-stating the strings.
+      handleQurlFile,
+      handleQurlMap,
+      resolveRecipientUsers,
+      partitionRecipients,
+      selfDestructOptionToSeconds,
+      renderRecipientWarnings,
+      renderConfirmCardContent,
+      parseLocationInput,
+      safeDecodeURIComponent,
+      softenCooldown,
+      SEND_STAGE_AWAITING_CONFIRM,
+      SEND_USER_SELECT_CUSTOM_ID,
+      SEND_CONFIRM_SEND_CUSTOM_ID,
+      SEND_CONFIRM_CANCEL_CUSTOM_ID,
+      SEND_FLOW_TTL_SECONDS,
+      SELF_DESTRUCT_NO_TIMER_CHOICE,
     },
   }),
 };

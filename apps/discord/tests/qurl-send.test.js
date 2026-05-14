@@ -202,6 +202,21 @@ describe('Helper functions', () => {
       expect(isGoogleMapsURL('https://goo.gl.evil.com/maps/abc')).toBe(false);
     });
 
+    it('host-anchor contract: hostname must END at google.{tld} — no suffix attack', () => {
+      // Defense-in-depth pin: even if a future MAPS_URL_PATTERNS
+      // relaxation lets `google.com.evil.com` through the regex,
+      // isGoogleMapsURL is the second line of defense and MUST reject
+      // any host that has additional segments after the google.{tld}
+      // suffix. The host-anchor regex /^(www\.)?google\.[a-z]{2,3}...$/
+      // is what makes this work.
+      expect(isGoogleMapsURL('https://google.com.evil.com/maps/place/x')).toBe(false);
+      expect(isGoogleMapsURL('https://www.google.com.evil.com/maps')).toBe(false);
+      expect(isGoogleMapsURL('https://google.co.uk.evil.com/maps')).toBe(false);
+      // Pre-suffix attacks (e.g. evil-google.com) also rejected.
+      expect(isGoogleMapsURL('https://evil-google.com/maps')).toBe(false);
+      expect(isGoogleMapsURL('https://notgoogle.com/maps')).toBe(false);
+    });
+
     it('handles edge cases', () => {
       expect(isGoogleMapsURL('')).toBe(false);
       expect(isGoogleMapsURL('not a url')).toBe(false);
@@ -287,6 +302,31 @@ describe('Helper functions', () => {
     it('handles case-insensitive @Everyone / @HERE', () => {
       expect(sanitizeMessage('@Everyone')).toContain('@\u200b');
       expect(sanitizeMessage('@HERE')).toContain('@\u200b');
+    });
+
+    it('strips bidi / zero-width / control codepoints (RLO spoofing defense)', () => {
+      // U+202E (RLO) flips text direction in Discord renders \u2014 a
+      // crafted personal-message could visually spoof phishing in the
+      // recipient's DM body AND the sender's confirm-card preview.
+      const rlo = String.fromCharCode(0x202E);
+      const zwsp = String.fromCharCode(0x200B);
+      const result = sanitizeMessage(`Hello${rlo}gnitsihP${zwsp}world`);
+      expect(result).not.toMatch(/[\u202e\u200b]/);
+      expect(result).toContain('Hello');
+      expect(result).toContain('gnitsihP');
+      expect(result).toContain('world');
+    });
+
+    it('strips zero-width chars that would otherwise obfuscate @-mentions', () => {
+      // ZWSP between `@` and `everyone` previously slipped past the
+      // @-mention regex because the literal sequence didn't match.
+      // sanitizeMessage now strips bidi/zero-width FIRST, so the
+      // @-mention defense catches the obfuscated form too.
+      const obfuscated = '@every\u200bone heads up';
+      const result = sanitizeMessage(obfuscated);
+      // ZWSP stripped, @everyone caught + neutered with \u200b INSERTED
+      // by the @-mention defense (different position).
+      expect(result).toMatch(/@\u200beveryone/i);
     });
   });
 
