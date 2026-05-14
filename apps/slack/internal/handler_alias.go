@@ -185,6 +185,40 @@ func requireAlias(tok string) (alias, userMsg string) {
 	return alias, ""
 }
 
+// aliasPreamble is the shared prelude for both alias verbs after
+// argument parsing: pull team_id + channel_id off the form, verify
+// the AliasStore is wired, and set up the worker context. Returns
+// (ctx, cancel, teamID, channelID, ok); on !ok the helper has
+// already written the user-facing response and the caller must
+// return without dialing the store. cancel is always callable
+// (no-op when !ok) so caller-side `defer cancel()` is unconditional.
+func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb string) (ctx context.Context, cancel context.CancelFunc, teamID, channelID string, ok bool) {
+	cancel = func() {}
+	teamID = strings.TrimSpace(values.Get(fieldTeamID))
+	channelID = strings.TrimSpace(values.Get(fieldChannelID))
+	if teamID == "" || channelID == "" {
+		// Slack always sends these on a slash-command payload; the
+		// guard catches a malformed test fixture or a future
+		// regression in form parsing rather than silently writing a
+		// row with empty keys.
+		slog.Warn("alias verb missing team_id or channel_id", "verb", verb, "team_id_present", teamID != "", "channel_id_present", channelID != "")
+		respondSlack(w, "Could not read your Slack workspace or channel ID from the command payload.")
+		return
+	}
+	if h.aliasStore == nil {
+		// Soft-fail when AliasStore is not configured (sandbox /
+		// pre-#231/#233 deploys). Surfacing a configuration error
+		// rather than silently dropping makes the bot's state
+		// debuggable from the operator side.
+		slog.Warn("alias verb invoked with no AliasStore wired — refusing", "verb", verb)
+		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
+		return
+	}
+	ctx, cancel = context.WithTimeout(h.baseCtx, asyncWorkTimeout)
+	ok = true
+	return
+}
+
 // handleSetAlias routes `/qurl setalias $<alias> <target>`.
 //
 // **Admin restriction:** This handler is admin-gated at the Slack app
@@ -214,29 +248,10 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	teamID := strings.TrimSpace(values.Get(fieldTeamID))
-	channelID := strings.TrimSpace(values.Get(fieldChannelID))
-	if teamID == "" || channelID == "" {
-		// Slack always sends these on a slash-command payload; the
-		// guard catches a malformed test fixture or a future
-		// regression in form parsing rather than silently writing a
-		// row with empty keys.
-		slog.Warn("setalias missing team_id or channel_id", "team_id_present", teamID != "", "channel_id_present", channelID != "")
-		respondSlack(w, "Could not read your Slack workspace or channel ID from the command payload.")
+	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "setalias")
+	if !ok {
 		return
 	}
-
-	if h.aliasStore == nil {
-		// Soft-fail when AliasStore is not configured (sandbox /
-		// pre-#231/#233 deploys). Surfacing a configuration error
-		// rather than silently dropping makes the bot's state
-		// debuggable from the operator side.
-		slog.Warn("setalias invoked with no AliasStore wired — refusing")
-		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(h.baseCtx, asyncWorkTimeout)
 	defer cancel()
 
 	existingAlias, existingRID, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID)
@@ -295,21 +310,10 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		return
 	}
 
-	teamID := strings.TrimSpace(values.Get(fieldTeamID))
-	channelID := strings.TrimSpace(values.Get(fieldChannelID))
-	if teamID == "" || channelID == "" {
-		slog.Warn("unsetalias missing team_id or channel_id", "team_id_present", teamID != "", "channel_id_present", channelID != "")
-		respondSlack(w, "Could not read your Slack workspace or channel ID from the command payload.")
+	ctx, cancel, teamID, channelID, ok := h.aliasPreamble(w, values, "unsetalias")
+	if !ok {
 		return
 	}
-
-	if h.aliasStore == nil {
-		slog.Warn("unsetalias invoked with no AliasStore wired — refusing")
-		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(h.baseCtx, asyncWorkTimeout)
 	defer cancel()
 
 	existingAlias, _, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID)
