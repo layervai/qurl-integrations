@@ -686,8 +686,8 @@ describe('discord module', () => {
     // silently degrade the assertion. These tests pin the contract.
     it('throws when the required intent is not in the intents list', () => {
       const intentsWithoutVoice = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
-      expect(() => discord.assertIntent(intentsWithoutVoice, 128, 'voice-channel /qurl send'))
-        .toThrow(/Missing required Discord intent for voice-channel \/qurl send/);
+      expect(() => discord.assertIntent(intentsWithoutVoice, 128, 'voice-channel send'))
+        .toThrow(/Missing required Discord intent for voice-channel send/);
     });
 
     it('throws when the required intent is undefined (partially-mocked GatewayIntentBits)', () => {
@@ -699,7 +699,7 @@ describe('discord module', () => {
     });
 
     it('does not throw when the required intent is present', () => {
-      expect(() => discord.assertIntent([1, 2, 128, 4096], 128, 'voice-channel /qurl send'))
+      expect(() => discord.assertIntent([1, 2, 128, 4096], 128, 'voice-channel send'))
         .not.toThrow();
     });
   });

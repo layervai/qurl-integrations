@@ -1,11 +1,8 @@
 /**
- * /qurl send back-half tests — monitorLinkStatus polling, revokeAllLinks
- * direct path, and handleAddRecipients flow.
- *
- * These exercises were the gap that lowered the jest coverage thresholds
- * when commands-comprehensive / coverage-boost were removed in the
- * state-machine redesign. The state-machine spec stops at the "Sent to N"
- * confirmation; this file picks up after that, covering:
+ * Send-pipeline back-half tests — monitorLinkStatus polling,
+ * revokeAllLinks direct path, and handleAddRecipients flow. Covers the
+ * code paths exercised after `/qurl file` or `/qurl map` reaches the
+ * "Sent to N" confirmation:
  *   - monitorLinkStatus's setInterval body (init, status diff, pending →
  *     opened/expired transitions, addRecipients() generation bump,
  *     stop() race, allDone, max-duration cap, getResourceStatus errors,
@@ -17,17 +14,13 @@
  *     DM batch + status update)
  *
  * The functions are accessed via the `_test` export rather than driven
- * through handleSend so each spec can target one branch without the
- * 300-line front-half setup. handleSend's integration with these
- * functions is already covered by qurl-send-state-machine.test.js's
- * end-to-end happy paths.
+ * through executeSendPipeline so each spec can target one branch without
+ * the front-half setup.
  */
 
 // ---------------------------------------------------------------------------
-// Mocks — same shape as qurl-send-state-machine.test.js so both files share
-// a coherent module surface; copied (not imported) because each test file
-// gets its own jest module registry and the mock implementations diverge
-// per file (mockMintLinks etc. are file-private to keep tests isolated).
+// Mocks — each test file gets its own jest module registry, so mocks are
+// file-private (mockMintLinks etc.) to keep specs isolated.
 // ---------------------------------------------------------------------------
 
 jest.mock('../src/config', () => ({
@@ -1525,7 +1518,7 @@ describe('executeSendPipeline — isVoiceContext strict gate', () => {
   });
 
   test('clears cooldown before throwing so caller is not locked out', async () => {
-    // Caller-side convention (see handleSend): setCooldown fires
+    // Caller-side convention (see handleQurlFile/handleQurlMap): setCooldown fires
     // before the pipeline call so a rapid second invocation gets
     // a "wait" reply. If the pipeline throws BEFORE clearing the
     // cooldown, the user is locked out for the full window with
@@ -1690,12 +1683,12 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
 });
 
 // Defensive guards for the `recipients` invariants — non-empty and
-// ≤ config.QURL_SEND_MAX_RECIPIENTS. handleSend's front-half
-// already enforces these before the pipeline call; the gates are
-// defense-in-depth for a future caller (deserialized payload,
-// programmatic retry) that skips those checks. Without them, a
-// trip would surface deep inside mintLinksInBatches as "Failed
-// to create any links" with no caller-side breadcrumb.
+// ≤ config.QURL_SEND_MAX_RECIPIENTS. The `/qurl file` + `/qurl map`
+// front-half already enforces these before the pipeline call; the
+// gates are defense-in-depth for a future caller (deserialized
+// payload, programmatic retry) that skips those checks. Without
+// them, a trip would surface deep inside mintLinksInBatches as
+// "Failed to create any links" with no caller-side breadcrumb.
 describe('executeSendPipeline — recipients shape + cap gates', () => {
   // Read the cap once from the same config module the gate consults
   // so the tests don't drift if the cap is bumped. Hoisting out of

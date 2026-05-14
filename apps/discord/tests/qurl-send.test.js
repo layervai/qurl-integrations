@@ -1,6 +1,7 @@
 /**
- * Tests for /qurl send feature — helper functions, qURL client, connector client,
- * places client, and database methods.
+ * Tests for the qurl send pipeline (shared back-half of /qurl file +
+ * /qurl map) — helper functions, qURL client, connector client, places
+ * client, and database methods.
  */
 
 const Database = require('better-sqlite3');
@@ -1607,7 +1608,7 @@ describe('handleAddRecipients', () => {
   });
 
   it('file send: inherits the original send\'s self-destruct timer into the re-upload', async () => {
-    // Pins the inheritance contract — when /qurl send recipients is run
+    // Pins the inheritance contract — when "Add Recipients" is clicked
     // against an original send that had a timer set, the additional
     // recipients' re-uploaded resource carries the same timer through to
     // the connector. Without this, Add Recipients would silently strip

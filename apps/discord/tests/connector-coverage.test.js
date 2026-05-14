@@ -194,9 +194,9 @@ describe('Connector client — coverage boost', () => {
     it('omits viewer_ttl_seconds for non-positive / non-finite / wrong-type input', async () => {
       // Defensive: an upstream caller passing 0, NaN, or a string by
       // mistake shouldn't cause the field to land on the form. The
-      // /qurl send dropdown is the contract (only the 7 preset
-      // numeric values reach this layer); the append helper is
-      // belt-and-suspenders.
+      // confirm-card self-destruct dropdown is the contract (only the
+      // 7 preset numeric values reach this layer); the append helper
+      // is belt-and-suspenders.
       const cases = [0, -1, NaN, Infinity, '30', null, undefined, {}];
       for (const v of cases) {
         globalThis.fetch = jest.fn().mockResolvedValueOnce({
@@ -218,9 +218,9 @@ describe('Connector client — coverage boost', () => {
     // The connector wraps upstream qURL API errors as
     //   { success: false, error: "QURL API error (403): quota exceeded: token limit per QURL reached (12/10)", links: [] }
     // throwConnectorError must surface this as Error.apiCode = 'quota_exceeded'
-    // so the /qurl send catch block can show a specific user-facing message
-    // instead of a generic "Failed to create links. Please try again." (which
-    // is unhelpful — the user needs to re-upload, not retry).
+    // so the send-pipeline catch block can show a specific user-facing
+    // message instead of a generic "Failed to create links. Please try
+    // again." (which is unhelpful — the user needs to re-upload, not retry).
     it('tags quota_exceeded when error string contains "quota exceeded"', async () => {
       globalThis.fetch = jest.fn().mockResolvedValue({
         ok: false,

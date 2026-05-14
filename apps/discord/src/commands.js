@@ -5,7 +5,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
@@ -45,7 +44,7 @@ const TOKENS_PER_RESOURCE = 10;
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-const { getChannelMembers, sendDM } = require('./discord');
+const { sendDM } = require('./discord');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -267,38 +266,15 @@ function isAllowedFileType(contentType) {
   return ALLOWED_FILE_TYPES.some(prefix => ct.startsWith(prefix));
 }
 
-// Global per-sendId mutex for the "Add Recipients" flow. Each /qurl send
-// has a unique sendId, so in today's code paths the per-closure flag below
-// already prevents double-entry. This Map is belt-and-suspenders: if a
-// future refactor ever shares a sendId across contexts (e.g. bot restart
-// loads unfinished sends from DB), the global lock still holds.
+// Global per-sendId mutex for the "Add Recipients" flow. The collector
+// callback in monitorLinkStatus can fire concurrently for the same sendId
+// (rapid button clicks within the polling window); this Set is the
+// single source of truth for "an addRecipients pass is in progress."
+// Acquire at handler entry, release in the finally.
 const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();
 
-// Per-userId generation counter for the DM late-drop catcher. Each
-// time the 60s file-capture window times out, we arm a fire-and-
-// forget 5-min awaitMessages on the DM channel. discord.js
-// MessageCollectors do NOT consume — multiple stale catchers from
-// repeated timeouts (default cooldown 30s, capture window 60s, so
-// stacking is realistic) would all observe the same late drop and
-// each fire a "60 seconds expired" reply. Counter approach: each
-// new catcher captures the post-increment value and bails in its
-// .then() if a newer catcher has been armed. The Map is cleaned in
-// the catcher's .then() (whether or not it fires the reply); a
-// stale catcher whose .then() never fires before the user is
-// forgotten will just see a future (unrelated) catcher's increment
-// and bail naturally on its own resolution.
-//
-// No eviction ceiling here (unlike sendCooldowns above): the Map is
-// bounded to at most one entry per user with an active catcher,
-// because each new arm both increments the user's entry and the
-// catcher's terminal .then()/.catch() deletes it. A user with a
-// pending catcher contributes exactly one entry; a user with no
-// active catcher contributes zero. So the steady-state size is
-// bounded by the number of users currently inside their 5-min
-// late-drop window, which is naturally small.
-const lateDropGenerations = new Map();
 // Hard ceiling so a bad actor spraying unique user IDs (or a bug generating
 // them) can't grow the Map beyond this. Above this, the 10%-drop eviction
 // still fires; if that fails to reclaim, setCooldown drops the oldest
@@ -479,9 +455,8 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // use this — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
 
-// Shared Google Maps URL patterns. Both `/qurl send`'s modal-driven
-// location-text capture and `/qurl file`/`/qurl map`'s slash-option
-// `location:` consume these — extracted to a single source so a
+// Shared Google Maps URL patterns. `/qurl map`'s slash-option
+// `location:` consumes these — extracted to a single source so a
 // future "new URL shape" tweak only happens here.
 //
 // Each pattern bounds character-class repetition (`{1,500}`, `{1,32}`,
@@ -512,9 +487,7 @@ function safeDecodeURIComponent(s) {
 //      whole input as the name.
 //
 // Returns BOTH fields; caller is responsible for escaping the name
-// (markdown injection defense) and applying any cap. The two call
-// sites — `handleSend`'s modal branch and `handleQurlMap`'s slash
-// entry — share this so a pattern tweak lands in one place.
+// (markdown injection defense) and applying any cap.
 function parseLocationInput(rawInput) {
   let detectedUrl = null;
   for (const pattern of MAPS_URL_PATTERNS) {
@@ -546,11 +519,12 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
-    // CONTRACT: `personalMessage` arrives pre-sanitized — handleSend pipes
-    // raw input through `sanitizeMessage` (markdown escape + @-mention
-    // strip) before constructing this payload, and the addRecipients
-    // path reads from `sendConfig.personal_message` which was sanitized
-    // at write time. Raw interpolation into the template below is safe
+    // CONTRACT: `personalMessage` arrives pre-sanitized — `/qurl file`
+    // and `/qurl map` pipe raw input through `sanitizeMessage` (markdown
+    // escape + @-mention strip) before constructing this payload, and
+    // the addRecipients path reads from `sendConfig.personal_message`
+    // which was sanitized at write time. Raw interpolation into the
+    // template below is safe
     // ONLY because of that upstream pass. A future caller that bypasses
     // sanitizeMessage (or a DB row read that skips re-sanitize) would
     // silently regress to markdown injection — keep the contract.
@@ -617,10 +591,11 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
 }
 
 // --- Link status monitor ---
-// Track live monitors so a burst of /qurl send commands can't stack more
-// than MAX_CONCURRENT_MONITORS setIntervals. When we cross the cap, the
-// oldest monitor is stopped to make room (the user can still `/qurl revoke`;
-// they just stop seeing live status updates in the original message).
+// Track live monitors so a burst of `/qurl file` + `/qurl map` commands
+// can't stack more than MAX_CONCURRENT_MONITORS setIntervals. When we
+// cross the cap, the oldest monitor is stopped to make room (the user
+// can still `/qurl revoke`; they just stop seeing live status updates in
+// the original message).
 const activeMonitors = new Set();
 
 function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, expiresIn, baseMsg, buttonRowArg, delivered, apiKey) {
@@ -842,50 +817,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   return control;
 }
 
-// --- Guild member fetch cache (30s TTL, per-guild). Also coalesces concurrent
-// callers for the same guild so two simultaneous /qurl send commands don't
-// each fire a separate fetch.
-const memberFetchCache = new Map(); // guildId -> { timestamp, inFlight }
-// 60s TTL. guild.members.fetch() is slow on large guilds (rate-limited,
-// paginates) so a longer cache reduces latency on repeat /qurl send calls
-// within the same minute. 60s is still short enough that a user who just
-// joined/left won't be missed for long.
-//
-// Intent dependency: this fetch relies on the GuildMembers privileged
-// intent (declared in src/discord.js — boot-time assertion guards against
-// removal). With that intent, guild.members.fetch() handles gateway
-// pagination transparently and returns the full member list regardless
-// of guild size. Without it, the call is rejected by Discord. The
-// 100-guild verification gate is for the GuildMembers intent itself
-// (the "Server Members Intent" toggle in the dev portal) — not a
-// per-call cap.
-const MEMBER_FETCH_TTL = 60000;
-async function fetchGuildMembers(guild) {
-  const now = Date.now();
-  const entry = memberFetchCache.get(guild.id);
-  // Decide both checks inside a single `if (entry)` branch so a concurrent
-  // caller can't observe the entry AFTER inFlight cleared but BEFORE a new
-  // one was set, slipping through both gates and firing a duplicate fetch.
-  // Order: inFlight (join it) → TTL (cache hit, skip) → fall through (refresh).
-  if (entry) {
-    if (entry.inFlight) return entry.inFlight;
-    if (now - entry.timestamp < MEMBER_FETCH_TTL) return;
-  }
-  const promise = guild.members.fetch();
-  memberFetchCache.set(guild.id, { timestamp: now, inFlight: promise });
-  try {
-    await promise;
-    // Only stamp success — on failure, drop the entry so the next caller
-    // retries immediately instead of sitting on a stale-or-empty member list
-    // for the full TTL window.
-    memberFetchCache.set(guild.id, { timestamp: Date.now(), inFlight: null });
-  } catch (err) {
-    memberFetchCache.delete(guild.id);
-    throw err;
-  }
-}
-
-// --- /qurl send handler ---
+// --- qurl send pipeline (back-half shared by /qurl file + /qurl map) ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 //
 // REVIEW NOTE: The size of commands.js is tracked as a follow-up in
@@ -898,9 +830,9 @@ async function fetchGuildMembers(guild) {
  * TOKENS_PER_RESOURCE tokens. When a resource is exhausted, the caller's
  * `reuploadFn` is invoked to produce a new one.
  *
- * Extracted from four near-identical copies across handleSend (file/location)
- * and handleAddRecipients (file/location). Centralizing this means a fix to
- * the re-upload / batching / quota logic lands in one place.
+ * Centralizes the re-upload / batching / quota logic so a fix lands in one
+ * place across the send pipeline (file/location) and handleAddRecipients
+ * (file/location).
  *
  * @param {object} opts
  * @param {string} opts.initialResourceId — resource_id from the first upload
@@ -932,10 +864,12 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
   return allLinks;
 }
 
-// executeSendPipeline — back-half of the /qurl send lifecycle. The
-// destructure signature is the authoritative param surface; the
-// notes below capture only non-obvious contract guarantees that a
-// reader couldn't infer from the call sites alone.
+// executeSendPipeline — back-half of the qurl send lifecycle, shared
+// by `/qurl file` and `/qurl map` after the user clicks the Send
+// button on the confirm card. The destructure signature is the
+// authoritative param surface; the notes below capture only non-obvious
+// contract guarantees that a reader couldn't infer from the call sites
+// alone.
 //
 // Entry gates (fire-and-forget cancel-edit + throw):
 //   - `isVoiceContext` must be a strict boolean.
@@ -1083,7 +1017,7 @@ async function executeSendPipeline(interaction, {
   // in the non-ephemeral channel-announce — the silent-regression
   // shape every other input either lands in a grep-discoverable
   // DB column or fails loudly inside the upload/mint stack. The
-  // clearCooldown ahead of the throw matches handleSend's "clear
+  // clearCooldown ahead of the throw matches the pipeline's "clear
   // on every error path" convention so a caller that hit the
   // gate doesn't strand the user in a cooldown window.
   if (typeof isVoiceContext !== 'boolean') {
@@ -1105,9 +1039,10 @@ async function executeSendPipeline(interaction, {
     failGate(TypeError, `executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
   }
 
-  // Defense-in-depth SSRF re-check. handleSend's Step-2 validates
-  // attachment.url against isAllowedSourceUrl BEFORE calling the
-  // pipeline; this gate catches a future caller that forgets.
+  // Defense-in-depth SSRF re-check. `/qurl file`'s front-half
+  // validates attachment.url against isAllowedSourceUrl BEFORE
+  // calling the pipeline; this gate catches a future caller that
+  // forgets.
   // FILE-only because location sends carry no attacker-controlled
   // URL (locationUrl is built from sanitized user-text via
   // google.com/maps/search). logger.warn fires before failGate so
@@ -1123,7 +1058,7 @@ async function executeSendPipeline(interaction, {
     }
   }
 
-  // `expiresIn` allowed-set gate. Today only handleSend's
+  // `expiresIn` allowed-set gate. Today only the confirm card's
   // expiry-select dropdown can supply it, so the set is closed.
   // A future caller reconstructing from a persisted payload could
   // ship an off-set value (`'25h'`, `'bogus'`) that lands in the
@@ -1145,10 +1080,11 @@ async function executeSendPipeline(interaction, {
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
-  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by handleSend's
-  // front-half today; this is defense-in-depth for a future caller
-  // (deserialized payload, programmatic retry, admin tool) that
-  // skips those checks. Trips here would otherwise surface deep
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the
+  // `/qurl file` + `/qurl map` front-half today; this is defense-
+  // in-depth for a future caller (deserialized payload, programmatic
+  // retry, admin tool) that skips those checks. Trips here would
+  // otherwise surface deep
   // inside mintLinksInBatches as "Failed to create any links" with
   // no caller-side breadcrumb. The non-empty check ALSO fences the
   // chain of `recipients.length` reads that follow (the cap check
@@ -1359,8 +1295,9 @@ async function executeSendPipeline(interaction, {
   // response since `mintLinks` doesn't currently surface `expires_at`.
   // Drift between this clock and the API's enforcement clock is bounded
   // by the time between this line and the mint call (sub-second on
-  // handleSend; can be a few seconds on handleAddRecipients which
-  // re-downloads + re-uploads + re-mints first). Negligible at the
+  // the send-pipeline path; can be a few seconds on
+  // handleAddRecipients which re-downloads + re-uploads + re-mints
+  // first). Negligible at the
   // 30m–7d horizon — recipients see "in 24 hours" instead of
   // "in 23h 59m 56s" on the worst-case path.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
@@ -1523,7 +1460,7 @@ async function executeSendPipeline(interaction, {
     }
   }
 
-  logger.info('/qurl send completed', {
+  logger.info('qurl send pipeline completed', {
     sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
   });
 
@@ -1766,873 +1703,6 @@ async function executeSendPipeline(interaction, {
   }
 }
 
-async function handleSend(interaction, apiKey) {
-  // awaitMessageComponent below requires a channel handle
-  if (!interaction.channel) {
-    return interaction.reply({ content: 'Cannot use this command in this context.', ephemeral: true });
-  }
-  // Defensive: execute() should always pass an apiKey for `send`, but guard
-  // in case a future code path calls handleSend directly.
-  if (!apiKey) {
-    return interaction.reply({ content: 'qURL API key is not configured.', ephemeral: true });
-  }
-
-  if (isOnCooldown(interaction.user.id)) {
-    return interaction.reply({ content: 'Please wait before sending again.', ephemeral: true });
-  }
-  // Set cooldown immediately to prevent concurrent request bypass
-  setCooldown(interaction.user.id);
-
-  // Hoisted once for reuse across the form (dropdown labels, channel-target
-  // resolution, fetchGuildMembers skip) and the back-half (channel-
-  // announcement wording). The invocation channel type is fixed for the
-  // lifetime of this handler — Discord doesn't reroute live interactions.
-  // `interaction.channel` was non-null-guarded above, but read .type
-  // through optional chaining as belt-and-suspenders so a future refactor
-  // that moves this above the guard doesn't strand a cooldown via a
-  // null-deref throw.
-  const channelType = interaction.channel?.type;
-  const isVoiceContext = (
-    channelType === ChannelType.GuildVoice
-    || channelType === ChannelType.GuildStageVoice
-  );
-
-  const sendNonce = crypto.randomBytes(8).toString('hex');
-
-  // ── Step 1: Initial 2-button reply (Send File / Send Location) ──
-  // Replaces the previous 4-options-on-the-slash-command shape per
-  // April 2026 customer feedback (the slash popup was confusing —
-  // users had to pre-decide file-vs-location AND fill in target
-  // before seeing the actual flow). Now: zero options, button-driven
-  // wizard. After the button click, the OTHER button disappears
-  // because the message is `update`d into the next stage.
-  const initRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`qurl_init_file_${sendNonce}`)
-      .setLabel('\u{1F4C1} Send File')
-      .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`qurl_init_loc_${sendNonce}`)
-      .setLabel('\u{1F5FA}\u{FE0F} Send Location')
-      .setStyle(ButtonStyle.Primary),
-  );
-
-  await interaction.reply({
-    content: 'What would you like to send?',
-    components: [initRow],
-    ephemeral: true,
-  });
-
-  let initBtn;
-  try {
-    initBtn = await interaction.channel.awaitMessageComponent({
-      filter: (i) => i.user.id === interaction.user.id &&
-        (i.customId === `qurl_init_file_${sendNonce}` || i.customId === `qurl_init_loc_${sendNonce}`),
-      time: 60000,
-    });
-  } catch {
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({ content: 'No selection made. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
-  }
-
-  // ── Step 2: Resource collection ──
-  // FILE: prompt the user to drop a file in the channel; capture via
-  //   awaitMessages with attachment filter. There is no Discord
-  //   component that accepts a file upload post-dispatch — only the
-  //   slash-command attachment option (which we removed) or this
-  //   drop-into-chat pattern can pull a file from the user.
-  // LOCATION: open a modal with a single URL/place text input
-  //   (modals can ONLY hold TextInput components, so the older shape
-  //   stays — minus the optional message and expiry inputs, which
-  //   moved to the common final step per the redesign).
-  let resourceType;
-  let attachment = null;
-  let locationUrl = null;
-  let locationName = null;
-
-  if (initBtn.customId === `qurl_init_file_${sendNonce}`) {
-    resourceType = RESOURCE_TYPES.FILE;
-
-    // Pivot the file capture to a DM with the user when /qurl send was
-    // invoked from a guild channel. Dropping the file in the public
-    // channel exposes the CDN URL to every channel member — even with
-    // an immediate `delete()`, the 1-2s race window leaks the file. A
-    // DM between the user and the bot is 1:1 and doesn't have that
-    // exposure. If the user invoked /qurl send already in a DM with
-    // the bot, just await in the same channel — no pivot needed.
-    let captureChannel;
-    // Tracks the bot's file-prompt message in the DM so we can delete
-    // it after capture. Only set in the DM-pivot path (the DM-already
-    // path uses initBtn.update which is the ephemeral interaction
-    // reply — no separate DM bot message to clean up).
-    let dmPromptMessage = null;
-    if (interaction.channel.type === ChannelType.DM) {
-      captureChannel = interaction.channel;
-      await initBtn.update({
-        content: '\u{1F4C1} **Attach a file** — tap **+** to upload (or drag-drop on desktop). I\'ll wait 60 seconds.',
-        components: [],
-      });
-    } else {
-      // Try to open a DM and post the prompt there. If the user has
-      // server-DMs disabled (DiscordAPIError 50007), bail with a clear
-      // next-step message — don't silently fall back to dropping in the
-      // guild channel, which is exactly the privacy regression the
-      // pivot was added to prevent.
-      let dm;
-      try {
-        dm = await interaction.user.createDM();
-        dmPromptMessage = await dm.send('\u{1F4C1} **Ready!** Tap **+** to attach a file (or drag-drop on desktop). I\'ll wait 60 seconds.');
-      } catch (err) {
-        const dmsBlocked = err && (err.code === 50007 || err.code === '50007');
-        if (!dmsBlocked) {
-          logger.error('Failed to open DM for file capture', {
-            sendNonce, userId: interaction.user.id, error: err?.message, code: err?.code,
-          });
-        }
-        clearCooldown(interaction.user.id);
-        return initBtn.update({
-          content: dmsBlocked
-            ? 'I tried to DM you but your DMs from server members are blocked. Enable them in your privacy settings, or open a DM with me directly and run `/qurl send` there.'
-            : 'Could not open a DM right now. Please try again.',
-          components: [],
-        }).catch(logIgnoredDiscordErr);
-      }
-      captureChannel = dm;
-      await initBtn.update({
-        content: '\u{1F4EC} **I sent you a DM — attach your file there and come back here to send it.** I\'ll wait 60 seconds.',
-        components: [],
-      });
-    }
-
-    // awaitMessages — attachments aren't gated by MessageContent intent,
-    // and the filter restricts to the invoking user's NEXT message in
-    // `captureChannel` bearing an attachment.
-    let fileMessage;
-    try {
-      const messages = await captureChannel.awaitMessages({
-        filter: (m) => m.author.id === interaction.user.id && m.attachments.size > 0,
-        max: 1,
-        time: 60000,
-        errors: ['time'],
-      });
-      fileMessage = messages.first();
-    } catch (err) {
-      // awaitMessages with errors:['time'] rejects with the collected
-      // Collection on timeout (discord.js v14 contract). Anything that's
-      // an Error (channel destroyed, permissions revoked mid-await,
-      // gateway disconnect) is unexpected and worth a log line so a user
-      // reporting "I dropped the file but it didn't take" doesn't go
-      // uninvestigated.
-      const isUnexpected = err instanceof Error;
-      if (isUnexpected) {
-        logger.warn('awaitMessages failed unexpectedly during file capture', {
-          sendNonce, userId: interaction.user.id, error: err?.message,
-        });
-      }
-      // Tear down the DM prompt — bots can't delete it later, so a
-      // leftover orphans in the user's DM forever. Fire-and-forget
-      // so a delete failure doesn't mask the user-facing message.
-      if (dmPromptMessage) {
-        dmPromptMessage.delete().catch((dErr) => logger.warn('Failed to delete stale DM prompt after capture timeout/error', {
-          sendNonce, userId: interaction.user.id, error: dErr?.message,
-        }));
-      }
-      // Late-drop catcher: users routinely come back to the DM and drop
-      // the file after the 60s window has already passed, then wonder
-      // why nothing happened. Set up a fire-and-forget listener for the
-      // next 5 min on the DM channel and reply once with a reattach
-      // hint if a late attachment arrives. Single-shot (max:1) so it
-      // auto-tears down.
-      //
-      // Two concurrency hazards both apply, both guarded:
-      //
-      // 1. STACKING — repeated timeouts within 5 min (achievable since
-      //    QURL_SEND_COOLDOWN_MS defaults to 30s while the capture window
-      //    is 60s) would otherwise arm multiple catchers; a single late
-      //    drop would fire each catcher's .then() and produce N reply
-      //    messages. lateDropGenerations bumps a per-userId counter on
-      //    each arm; each catcher captures its own generation and bails
-      //    if a newer one has been armed.
-      //
-      // 2. RACE WITH FRESH SEND — discord.js MessageCollectors do NOT
-      //    consume, so a stale catcher and a fresh /qurl send's 60s
-      //    collector both observe the same DM message. Without a guard,
-      //    a user who retries inside the 5-min window would see their
-      //    successful retry produce a contradictory "60 seconds expired"
-      //    reply. setCooldown fires synchronously at handleSend entry,
-      //    so sendCooldowns.has(userId) is true while a fresh send is
-      //    in flight (entry is removed by clearCooldown on every exit
-      //    path — the guard window is the in-flight duration only, NOT
-      //    the full QURL_SEND_COOLDOWN_MS). The fresh flow's own
-      //    collector handles the attachment in that case.
-      //
-      // Catcher is NOT armed on non-timeout errors (channel destroyed,
-      // gateway disconnect, perms revoked). In those cases there was
-      // never a working capture path, so a fresh awaitMessages on the
-      // same channel would just fail again.
-      //
-      // The DM-type check is belt-and-suspenders: both branches that
-      // assign captureChannel above today set a DM channel, so this is
-      // effectively always true. The gate pins the invariant against a
-      // future refactor that introduces a non-DM capture path (e.g. a
-      // staff-only ephemeral capture in a guild channel).
-      if (!isUnexpected && captureChannel.type === ChannelType.DM) {
-        const senderUserId = interaction.user.id;
-        const myGeneration = (lateDropGenerations.get(senderUserId) || 0) + 1;
-        lateDropGenerations.set(senderUserId, myGeneration);
-        captureChannel.awaitMessages({
-          filter: (m) => m.author.id === senderUserId && m.attachments.size > 0,
-          max: 1,
-          time: 5 * 60000,
-        }).then((late) => {
-          // Stale-catcher bail: a newer late-drop catcher has been armed
-          // (user timed out again). Only the newest catcher fires.
-          if (lateDropGenerations.get(senderUserId) !== myGeneration) return;
-          lateDropGenerations.delete(senderUserId);
-          const lateMsg = late.first();
-          if (!lateMsg) return;
-          if (sendCooldowns.has(senderUserId)) return;
-          lateMsg.reply('⏳ 60 seconds expired — please run `/qurl send` again to reattach.').catch((rErr) => logger.warn('Failed to send late-drop reattach hint', {
-            sendNonce, userId: senderUserId, error: rErr?.message,
-          }));
-        }).catch((err) => {
-          // awaitMessages without errors:['time'] resolves with an empty
-          // Collection on timeout (handled above as !lateMsg) — anything
-          // reaching this catch is an actual fetch / permission failure,
-          // which means the late-drop feature is non-functional for this
-          // user this session. logger.warn (not debug) so it surfaces.
-          //
-          // Mirror the .then() generation gate: under stacking, N stale
-          // catchers can reject simultaneously on a real channel failure
-          // (gateway disconnect drops them all). Without this gate, that
-          // produces N warn lines for the same incident.
-          if (lateDropGenerations.get(senderUserId) !== myGeneration) return;
-          lateDropGenerations.delete(senderUserId);
-          logger.warn('Late-drop awaitMessages rejected (non-timeout)', {
-            sendNonce, userId: senderUserId, error: err?.message,
-          });
-        });
-      }
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'No file received within 60 seconds. Send cancelled.', components: [] }).catch(logIgnoredDiscordErr);
-    }
-
-    attachment = fileMessage.attachments.first();
-
-    // No fileMessage.delete() — bots can't delete user messages in
-    // DMs, and the file's in a 1:1 thread anyway. We DO delete the
-    // bot-authored prompt + "Got your file" confirmation for visual
-    // cleanup; the user can clear their own attachment message.
-    if (dmPromptMessage) {
-      const cleanup = async () => {
-        // Build a Link button back to the channel where /qurl send was
-        // invoked. Discord URL format: discord.com/channels/<guild>/<channel>.
-        // Clicking takes the user straight back to the channel where the
-        // ephemeral form is waiting (ephemeral messages live for the
-        // duration of the interaction token, ~15 min).
-        const channelUrl = `https://discord.com/channels/${interaction.guild?.id ?? '@me'}/${interaction.channelId}`;
-        const rawName = interaction.channel?.name;
-        const channelLabel = rawName
-          ? `Go back to #${rawName}`.slice(0, 80) // Discord button label cap is 80
-          : 'Go back to the channel';
-        const goBackRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setStyle(ButtonStyle.Link)
-            .setLabel(channelLabel)
-            .setURL(channelUrl)
-        );
-
-        let confirmMsg;
-        try {
-          confirmMsg = await captureChannel.send({
-            content: '✓ **Got your file.** Click below to finish your send.',
-            components: [goBackRow],
-          });
-        } catch (err) {
-          logger.warn('Failed to post DM confirmation after file capture', {
-            sendNonce, userId: interaction.user.id, error: err?.message,
-          });
-        }
-        // Delete the original "Ready!" prompt right away — it's stale.
-        dmPromptMessage.delete().catch((err) => logger.warn('Failed to delete DM prompt message', {
-          sendNonce, userId: interaction.user.id, error: err?.message,
-        }));
-        // Delete the confirmation+button after 3 min — matches the
-        // Step-3 form-loop timeout, so the navigation aid stays alive
-        // for as long as the form itself is alive. setTimeout is fire-
-        // and-forget; if the EC2 dies mid-flow the cleanup never fires
-        // and the bot-side debris is low-impact (user can still delete
-        // it manually).
-        if (confirmMsg) {
-          setTimeout(() => {
-            confirmMsg.delete().catch((err) => logger.warn('Failed to delete DM confirmation', {
-              sendNonce, userId: interaction.user.id, error: err?.message,
-            }));
-          }, 3 * 60000).unref?.();
-        }
-      };
-      // Fire-and-forget but explicitly catch — guards against any future
-      // edit that throws synchronously inside cleanup() and would
-      // otherwise surface as UnhandledPromiseRejection.
-      cleanup().catch((err) => logger.warn('DM cleanup failed', {
-        sendNonce, userId: interaction.user.id, error: err?.message,
-      }));
-    }
-
-    // Every error-path editReply below is wrapped with `.catch(logIgnoredDiscordErr)`
-    // for parity with the timeout/cancel paths. Up to a few minutes can pass
-    // between the user dropping the file and these guards firing on a slow form-loop, and
-    // an `editReply` against a stale interaction can reject with "Unknown
-    // Interaction" — swallow + log instead of surfacing as an unhandled rejection.
-    if (!isAllowedFileType(attachment.contentType)) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: `File type \`${attachment.contentType}\` is not allowed. Supported: images, PDFs, videos, audio, Office docs, text, CSV, ZIP.`,
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
-    if (attachment.size > MAX_FILE_SIZE) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: `File too large (${Math.round(attachment.size / 1024 / 1024)}MB). Maximum is 25MB.`,
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
-    // Defense in depth — connector's downloadAndUpload validates this URL
-    // again, but mirroring the same check inside handleAddRecipients keeps the SSRF
-    // check at every callsite that hands an untrusted URL to the connector.
-    // If discord.js ever changes how attachments report URL, the local
-    // check fails fast with a clear message instead of relying on the
-    // downstream module to remain in lockstep.
-    if (!isAllowedSourceUrl(attachment.url)) {
-      clearCooldown(interaction.user.id);
-      logger.warn('File send rejected: attachment.url failed isAllowedSourceUrl', {
-        sendNonce, userId: interaction.user.id, urlHost: safeUrlHost(attachment.url),
-      });
-      return interaction.editReply({
-        content: 'The attached file URL is not from a recognized Discord CDN. Cancelled.',
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
-    // No early concurrency-cap check here. The original placement was
-    // before the redesign added the up-to-3-minute Step-3 form loop;
-    // by the time the user finishes the form, slot state has shifted
-    // and the early "too busy" message is no longer informative — it
-    // would also reject users who'd actually have a slot by Send-time.
-    // The atomic re-check at the slot-claim site below (the
-    // `if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS)` guard inside
-    // the back-half try-block) is the authoritative gate now and
-    // produces the same user-facing message when the cap is genuinely
-    // full at decision time.
-  } else {
-    resourceType = RESOURCE_TYPES.MAPS;
-
-    const modal = new ModalBuilder()
-      .setCustomId(`qurl_loc_modal_${sendNonce}`)
-      .setTitle('Share a Location');
-
-    const locationInput = new TextInputBuilder()
-      .setCustomId('location_value')
-      .setLabel('Google Maps link or place name')
-      .setPlaceholder('https://maps.app.goo.gl/... or Eiffel Tower, Paris')
-      .setStyle(TextInputStyle.Short)
-      .setMaxLength(500)
-      .setRequired(true);
-
-    modal.addComponents(new ActionRowBuilder().addComponents(locationInput));
-    // Fast-fail if showModal itself rejects (Unknown Interaction, expired
-    // token, Discord 5xx). Without this, the handler would still proceed
-    // to a 90-second awaitModalSubmit that can never resolve, surfacing as
-    // a confusing "Location input timed out" message for what was really
-    // an immediate API failure.
-    let modalShown = true;
-    try {
-      await initBtn.showModal(modal);
-    } catch (err) {
-      modalShown = false;
-      logger.warn('Location modal showModal rejected', {
-        sendNonce, userId: interaction.user.id, error: err?.message,
-      });
-    }
-    if (!modalShown) {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: 'Could not open the location input. Please try again.',
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
-
-    // Clear the underlying ephemeral message's components — without this,
-    // the original 2-button reply (Send File / Send Location) stays
-    // clickable while the modal is up. A click on Send File there has no
-    // listener and Discord renders an "Interaction failed" toast. The
-    // file path didn't have this issue because initBtn.update({components:
-    // []}) clears the row before awaitMessages.
-    await interaction.editReply({ components: [] }).catch(logIgnoredDiscordErr);
-
-    let modalSubmit;
-    try {
-      modalSubmit = await initBtn.awaitModalSubmit({
-        // Discord scopes modal-submit interactions to the user who saw
-        // the modal, but defense-in-depth: match the personal-message
-        // modal filter so a future reader can't spot a "missing user
-        // check here" inconsistency.
-        filter: (i) => i.customId === `qurl_loc_modal_${sendNonce}` && i.user.id === interaction.user.id,
-        // 90s, not 120s. Trimmed to keep the location-path worst case
-        // (60s init + 90s modal + 180s form = 5.5min) symmetric with the
-        // file-path worst case (60s init + 60s awaitMessages + 180s form
-        // = 5min) before the back-half starts. Both paths leave ~9-10
-        // min of the 15-min interaction-token window for the back-half.
-        time: 90000,
-      });
-    } catch (err) {
-      const isTimeout = err?.code === 'InteractionCollectorError' || /time/.test(err?.message || '');
-      if (!isTimeout) {
-        logger.error('Modal submit failed unexpectedly', { sendNonce, error: err?.message });
-      }
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({
-        content: isTimeout ? 'Location input timed out. Send cancelled.' : 'Could not collect location input. Send cancelled.',
-        components: [],
-      }).catch(logIgnoredDiscordErr);
-    }
-
-    // Hard-cap input length BEFORE regex matching to prevent ReDoS on
-    // pathological strings against the unbounded character classes
-    // inside MAPS_URL_PATTERNS. Real Google Maps URLs peak around ~300 chars.
-    const locationValue = modalSubmit.fields.getTextInputValue('location_value').trim().slice(0, 2000);
-    await modalSubmit.deferUpdate();
-
-    ({ locationUrl, locationName } = parseLocationInput(locationValue));
-    // sanitizeContentLabel: NFKC + bidi/zero-width/control strip +
-    // codepoint-aware 256-cap + markdown-escape. Matches the
-    // /qurl map slash entry's defense at handleQurlMap so a U+202E
-    // RLO can't visually spoof a Maps URL via the modal path either.
-    if (locationName) locationName = sanitizeContentLabel(locationName);
-  }
-
-  // ── Step 3: Common final step ──
-  // Single component message that gathers: target type → recipient
-  // (UserSelect or auto-resolved channel/voice members) → optional
-  // message (modal-driven button) → expiry (default 24h) → Send/Cancel.
-  // Loop on component interactions until the user clicks Send or Cancel
-  // (or the 3-min component timeout fires). State is held in closure
-  // vars and re-rendered via `compInt.update(...)` on each change.
-  let target = null;
-  let recipients = [];
-  let personalMessage = null;
-  let expiresIn = '24h';
-  // Self-destruct timer — one of SELF_DESTRUCT_PRESETS in seconds, or null
-  // for no timer (default). Set via the form's StringSelectMenu;
-  // forwarded to the connector as `viewer_ttl_seconds` at upload time.
-  let selfDestructSeconds = null;
-
-  const formId = `qurl_form_${sendNonce}`;
-  // Component customIds for the form-loop filter. Every entry must be a
-  // top-level component the loop's awaitMessageComponent can dispatch on
-  // (button, string select, user select). Modal customIds are NOT here —
-  // they live as local consts inside their own handler so the form-loop
-  // filter set stays tight.
-  const ids = {
-    targetSelect: `${formId}_target`,
-    userSelect: `${formId}_user`,
-    selfDestructSelect: `${formId}_destruct_select`,
-    expirySelect: `${formId}_expiry`,
-    messageBtn: `${formId}_msg_btn`,
-    sendBtn: `${formId}_send`,
-    cancelBtn: `${formId}_cancel`,
-  };
-  // Modal customIds — local to their respective button handlers; never
-  // consumed by the form-loop filter, kept out of `ids` so
-  // Object.values(ids) doesn't grow noise.
-  const messageModalId = `${formId}_msg_modal`;
-
-  // Sender's own filename in their own ephemeral form preview is low-blast,
-  // but match the same defense the location path applies to locationName so
-  // a future copy-paste of formContent() into a non-ephemeral surface
-  // doesn't quietly leak a markdown-injection vector. Computed once per
-  // send (the attachment doesn't change after Step 2) so formContent()
-  // doesn't re-escape on every form re-render.
-  const safeAttachmentName = attachment ? escapeDiscordMarkdown(attachment.name) : '';
-
-  // `warning` is an optional reason string prepended with the ⚠️ glyph
-  // INSTEAD of the default ✅ prefix. Caller-side string concatenation
-  // would rendered "⚠️ ... \n\n✅ Got X" — visually mixed signals — so the
-  // helper owns the leading glyph and switches on the warning shape.
-  const formContent = ({ warning } = {}) => {
-    let content = warning ? `⚠\u{FE0F} ${warning}\n\n` : '✅ ';
-    if (resourceType === RESOURCE_TYPES.FILE) content += `Got **${safeAttachmentName}**. You can delete the file in DM after send.`;
-    else content += `Got **${locationName || 'location'}**.`;
-    content += '\n\nChoose recipient(s), optionally add a message, pick expiry, then **Send**.';
-    if (personalMessage) {
-      const preview = personalMessage.length > 80 ? personalMessage.slice(0, 80) + '…' : personalMessage;
-      content += `\n\n_Note:_ "${preview}"`;
-    }
-    // Same isFinite + > 0 invariant the dropdown's `default` flag uses
-    // (see `hasTimer` in formRows below) — a corrupted DDB row carrying
-    // Infinity is truthy and would otherwise surface as
-    // "_Self-destruct timer:_ (invalid)" in the form preview.
-    if (Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0) {
-      content += `\n\n_Self-destruct timer:_ ${formatSelfDestructLabel(selfDestructSeconds)}`;
-    }
-    return content;
-  };
-
-  // Contextual label — voice/stage-voice paths resolve to voice-connected
-  // only (see `getChannelMembers`'s doc-comment in src/discord.js for
-  // the v14 polymorphism + the bug this avoids).
-  const channelOptionLabel = isVoiceContext
-    ? 'Everyone in this voice channel'
-    : 'Everyone in this channel';
-  const channelOptionDescription = isVoiceContext
-    ? 'Members currently connected via voice (excl. bots and you)'
-    : 'All members of this text channel (excl. bots and you)';
-
-  const formRows = () => {
-    const rows = [];
-
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(ids.targetSelect)
-        .setPlaceholder('Recipient(s) — choose type')
-        .addOptions(
-          { label: 'A specific user', value: 'user', description: 'Pick one or more users to send to', default: target === 'user' },
-          { label: channelOptionLabel, value: 'channel', description: channelOptionDescription, default: target === 'channel' },
-        )
-    ));
-
-    if (target === 'user') {
-      rows.push(new ActionRowBuilder().addComponents(
-        new UserSelectMenuBuilder()
-          .setCustomId(ids.userSelect)
-          .setPlaceholder('Pick one or more users')
-          .setMinValues(1)
-          .setMaxValues(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
-      ));
-    }
-
-    // Self-destruct timer dropdown — true select-from-list rather than a
-    // modal interstitial. Discord StringSelectMenus need their own
-    // ActionRow (can't combine with buttons), so the messageBtn moves
-    // into the send/cancel row below to keep the form within the 5-row
-    // max when target=user.
-    //
-    // The "default" flag must match the current state so re-renders show
-    // the user's pick as the select's collapsed-header text. Same
-    // isFinite + > 0 invariant the form preview uses — a corrupted DDB
-    // row carrying Infinity is truthy and would otherwise mark a wrong
-    // option default.
-    // hasTimer = current state has a positive-finite seconds value.
-    // hasMatchingPreset = that value matches one of the 7 presets.
-    // The two diverge only for off-preset finite values (only reachable
-    // today via a hypothetical backfilled sendConfig.self_destruct_seconds
-    // outside the preset set). Defaulting the no-timer option on
-    // `!hasMatchingPreset` keeps the dropdown header sensible — without
-    // it, every option is un-defaulted and Discord falls back to
-    // rendering the first option's label in the collapsed header,
-    // which would conflict with the formContent preview line that
-    // echoes the off-preset value via formatSelfDestructLabel.
-    const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
-    const hasMatchingPreset = hasTimer && SELF_DESTRUCT_PRESETS.some((p) => p.seconds === selfDestructSeconds);
-    // No setPlaceholder — the No-timer option ships default-true when
-    // !hasTimer, so the dropdown header always reflects the current
-    // state and a placeholder would never render. Same default-true
-    // convention expirySelect uses for its current-value option.
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(ids.selfDestructSelect)
-        // Explicit min/max=1 (Discord's default, matches userSelect's
-        // explicit settings on this form). The empty-values defense in
-        // the handler stays as belt-and-suspenders for forged payloads.
-        .setMinValues(1)
-        .setMaxValues(1)
-        .addOptions(
-          { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasMatchingPreset },
-          ...SELF_DESTRUCT_PRESETS.map((p) => ({
-            label: `\u{1F4A5} ${p.label}`,
-            value: String(p.seconds),
-            default: hasMatchingPreset && selfDestructSeconds === p.seconds,
-          }))
-        )
-    ));
-
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(ids.expirySelect)
-        .setPlaceholder('Link expiry')
-        .addOptions(
-          ...EXPIRY_CHOICES.map(c => ({ label: c.name, value: c.value, default: c.value === expiresIn }))
-        )
-    ));
-
-    const recipientsResolved = (target === 'user' && recipients.length >= 1)
-      || (target === 'channel' && recipients.length > 0);
-    // Bottom row packs the optional-note button + send + cancel. Discord
-    // allows up to 5 buttons per ActionRow; 3 fits comfortably. Left-
-    // to-right reading order puts the optional affordance before the
-    // commit action, which matches how the rest of the form is laid out
-    // (target → user → optional bits → submit).
-    rows.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(ids.messageBtn)
-        .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note (optional)')
-        .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(ids.sendBtn)
-        .setLabel('\u{1F4E4} Send')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(!recipientsResolved),
-      new ButtonBuilder()
-        .setCustomId(ids.cancelBtn)
-        .setLabel('Cancel')
-        .setStyle(ButtonStyle.Secondary)
-    ));
-
-    return rows;
-  };
-
-  await interaction.editReply({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
-
-  // Pre-build the customId set once; the form-loop filter runs on every
-  // component event for the next 3 min and Object.values(ids) would
-  // otherwise rebuild the array on each dispatch.
-  const formCompIdSet = new Set(Object.values(ids));
-
-  // Wrap every component-update call in the form loop with the same
-  // .catch(logIgnoredDiscordErr) the front-half error-path editReplys
-  // use. The compInt is freshly issued by awaitMessageComponent so a
-  // rejection is rare in practice (a user closing Discord between the
-  // click landing and the update going out is the realistic case),
-  // but mirroring the editReply convention keeps the unhandled-
-  // rejection surface uniform across handleSend.
-  const safeCompUpdate = (ci, payload) => ci.update(payload).catch(logIgnoredDiscordErr);
-  const safeCompDefer = (ci) => ci.deferUpdate().catch(logIgnoredDiscordErr);
-
-  let sendApproved = false;
-  while (!sendApproved) {
-    let compInt;
-    try {
-      compInt = await interaction.channel.awaitMessageComponent({
-        filter: (i) => i.user.id === interaction.user.id && formCompIdSet.has(i.customId),
-        // 3 min, not 5: total time-since-original-`reply()` must stay under
-        // Discord's 15-min interaction-token expiry, including 60s init
-        // wait + 60s file awaitMessages + back-half (download → re-upload
-        // → mint batches → DM fan-out). 5 min on the form alone left only
-        // ~9 min for the back-half, which a 25 MB file with batched
-        // re-uploads on a slow upstream can blow through. 3 min keeps the
-        // back-half headroom comfortable while still being plenty of
-        // recipient-picking time for any realistic flow.
-        time: 3 * 60000,
-      });
-    } catch {
-      clearCooldown(interaction.user.id);
-      return interaction.editReply({ content: 'Send timed out (3 min). Cancelled.', components: [] }).catch(logIgnoredDiscordErr);
-    }
-
-    if (compInt.customId === ids.cancelBtn) {
-      clearCooldown(interaction.user.id);
-      await safeCompUpdate(compInt, { content: 'Send cancelled.', components: [] });
-      return;
-    }
-
-    if (compInt.customId === ids.sendBtn) {
-      await safeCompUpdate(compInt, { content: 'Preparing send…', components: [] });
-      sendApproved = true;
-      break;
-    }
-
-    if (compInt.customId === ids.targetSelect) {
-      const newTarget = compInt.values[0];
-      // For user-target, re-selecting 'user' is a no-op (UserSelect drives
-      // the actual recipient pick). For channel, ALWAYS re-resolve.
-      // Staleness sources differ by context:
-      //   - text channel: members can join/leave the guild during the
-      //     up-to-3-min form-loop window; the guild member cache (warmed
-      //     by fetchGuildMembers below) goes stale.
-      //   - voice / stage-voice: users can join/leave voice during the
-      //     window; the gateway-driven voice state cache reflects this
-      //     live, but a captured recipients array snapshot would not.
-      // A stale recipients array would mint links for ghosts.
-      if (newTarget !== target || newTarget === 'channel') {
-        target = newTarget;
-        recipients = [];
-        if (target === 'channel') {
-          // Voice / stage-voice channels source members from the voice
-          // state cache (populated automatically via gateway events) — no
-          // guild.members.fetch needed. Text channels need the cache warm.
-          if (!isVoiceContext) {
-            try {
-              await fetchGuildMembers(interaction.guild);
-            } catch (err) {
-              logger.error('Failed to fetch guild members', { error: err.message, sendNonce, userId: interaction.user.id, guildId: interaction.guild?.id });
-              clearCooldown(interaction.user.id);
-              await safeCompUpdate(compInt, { content: 'Failed to load channel members. Send cancelled.', components: [] });
-              return;
-            }
-          }
-          recipients = getChannelMembers(interaction.channel, interaction.user.id);
-          if (recipients.length === 0) {
-            target = null;
-            const warning = isVoiceContext
-              ? 'No other users currently connected to this voice channel. Pick **A specific user** instead.'
-              : 'No other members in this channel. Pick **A specific user** instead.';
-            await safeCompUpdate(compInt, { content: formContent({ warning }), components: formRows() });
-            continue;
-          }
-        }
-        // Surface the per-send cap NOW, while the user can change targets,
-        // not 3 minutes later after they've filled in the rest of the form.
-        // The post-Send check below stays as a final defense; this is a UX
-        // fast-fail so the user isn't sandbagged.
-        if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-          const resolvedCount = recipients.length;
-          target = null;
-          recipients = [];
-          await safeCompUpdate(compInt, {
-            content: formContent({ warning: `This ${newTarget} has ${resolvedCount} members — over the per-send cap of ${config.QURL_SEND_MAX_RECIPIENTS}. Pick a different target or split into multiple \`/qurl send\` runs.` }),
-            components: formRows(),
-          });
-          continue;
-        }
-      }
-      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
-      continue;
-    }
-
-    if (compInt.customId === ids.userSelect) {
-      // REPLACE semantic (not append): Discord's user-select shows
-      // the previously-picked set as the default and the user edits
-      // it; un-picking Bob and adding Carol must yield [Carol], not
-      // [Bob, Carol]. Use the channel-target's "Add more recipients"
-      // button for the additive path.
-      const selected = [...compInt.users.values()];
-      if (selected.length === 0) {
-        await safeCompDefer(compInt);
-        continue;
-      }
-      // Fail-loud over silent-drop — operator re-picks without the
-      // offender. Matches the prior single-pick UX.
-      if (selected.some(u => u.bot)) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to a bot. Re-pick without any bot users.' }), components: formRows() });
-        continue;
-      }
-      if (selected.some(u => u.id === interaction.user.id)) {
-        await safeCompUpdate(compInt, { content: formContent({ warning: 'Cannot send to yourself. Re-pick without your own user.' }), components: formRows() });
-        continue;
-      }
-      recipients = selected;
-      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
-      continue;
-    }
-
-    if (compInt.customId === ids.messageBtn) {
-      // Local-only — modal text inputs are read by customId inside this
-      // handler, never dispatched through the form-loop filter. Keeping
-      // it out of `ids` avoids polluting Object.values(ids) lookups.
-      const messageInputId = 'message_value';
-      const msgModal = new ModalBuilder()
-        .setCustomId(messageModalId)
-        .setTitle('Personal message');
-      msgModal.addComponents(new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId(messageInputId)
-          .setLabel('Optional note (leave blank to clear)')
-          .setStyle(TextInputStyle.Paragraph)
-          .setMaxLength(280)
-          .setRequired(false)
-          .setValue(personalMessage || '')
-      ));
-      await compInt.showModal(msgModal).catch(logIgnoredDiscordErr);
-
-      let msgSubmit;
-      try {
-        msgSubmit = await compInt.awaitModalSubmit({
-          filter: (i) => i.customId === messageModalId && i.user.id === interaction.user.id,
-          time: 120000,
-        });
-      } catch {
-        // Intentional silent no-op on modal timeout: the form state is
-        // unchanged (personalMessage holds whatever it was before the
-        // user opened the modal), so re-rendering would just redraw the
-        // same form. We deliberately skip a "modal closed" toast here
-        // because it would also fire on the legitimate close-without-
-        // typing case, which is normal user behavior.
-        continue;
-      }
-
-      const raw = msgSubmit.fields.getTextInputValue(messageInputId).trim();
-      personalMessage = raw ? sanitizeMessage(raw) : null;
-      await msgSubmit.update({ content: formContent(), components: formRows() }).catch(logIgnoredDiscordErr);
-      continue;
-    }
-
-    if (compInt.customId === ids.selfDestructSelect) {
-      // Single-pick StringSelectMenu — value is one of the option values
-      // we set on the form: the no-timer sentinel or `String(preset.seconds)`.
-      // selfDestructSelectValueToSeconds owns the conversion and falls
-      // back to null (no timer) for any unexpected value (forged
-      // interaction / option-list drift), which is the safe default.
-      // Optional chaining is defense-in-depth — discord.js normalizes
-      // the gateway payload to `values: []` for String selects, so
-      // missing `values` is only reachable via a constructed-by-hand
-      // compInt (test path or forged event). The `?.` is still cheap.
-      selfDestructSeconds = selfDestructSelectValueToSeconds(compInt.values?.[0]);
-      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
-      continue;
-    }
-
-    if (compInt.customId === ids.expirySelect) {
-      expiresIn = compInt.values[0];
-      await safeCompUpdate(compInt, { content: formContent(), components: formRows() });
-      continue;
-    }
-  }
-
-  // Defense in depth: the Send button is `setDisabled` until recipients
-  // resolve, but a spoofed component interaction could still fire it with
-  // an empty recipient set. Bail early so the back-half doesn't mint zero
-  // links and surface a confusing "Failed to create any links" message.
-  if (recipients.length === 0) {
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({
-      content: 'No recipients selected. Send cancelled.',
-      components: [],
-    });
-  }
-
-  if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    clearCooldown(interaction.user.id);
-    const overBy = recipients.length - config.QURL_SEND_MAX_RECIPIENTS;
-    return interaction.editReply({
-      content: `This send targets ${recipients.length} recipients, but the per-send cap is ${config.QURL_SEND_MAX_RECIPIENTS}. Trim ${overBy} recipient${overBy === 1 ? '' : 's'} from the channel/group, or split into multiple \`/qurl send\` runs.`,
-      components: [],
-    });
-  }
-
-  // --- Step 4: Process and send (back-half — extracted to executeSendPipeline). ---
-  // `return await` (not bare `await`) so the docstring's "Resolved value"
-  // contract matches the call shape. `return await` keeps the async
-  // frame on the stack until the awaited promise settles, which
-  // preserves the executeSendPipeline frame in rejection traces —
-  // `return promise` (no await) would detach it, costing forensic
-  // signal. There's a ~1-microtask perf cost vs the no-await form;
-  // negligible at this scale, worth the better traces.
-  return await executeSendPipeline(interaction, {
-    apiKey,
-    resourceType,
-    attachment,
-    locationUrl,
-    locationName,
-    recipients,
-    target,
-    isVoiceContext,
-    expiresIn,
-    selfDestructSeconds,
-    personalMessage,
-    sendNonce,
-  });
-}
-
 // Handle adding new recipients to an existing send. senderDiscordId is
 // derived from originalInteraction directly so no caller can pass a
 // mismatched value and accidentally let one user add recipients to another
@@ -2823,8 +1893,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  // Same guarantee as handleSend: if the DB write fails, abort BEFORE any
-  // DMs go out so we don't leave live QURL links with no local record.
+  // Same guarantee as executeSendPipeline: if the DB write fails, abort
+  // BEFORE any DMs go out so we don't leave live QURL links with no
+  // local record.
   try {
     await db.recordQURLSendBatch(batchSends);
   } catch (err) {
@@ -2860,22 +1931,25 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // with their corresponding embed. Multi-link UX would benefit from
     // per-link button labels (e.g. "Step Through · report.pdf"), but
     // today links.length is always 1 so labels are uniform.
-    // try/finally + before-DB-write — see handleSend's batchSettled
-    // callback for the full rationale (payload-build, sendDM-throws,
-    // AND DB-throw must all still emit the metric). Wraps the entire
+    // try/finally + before-DB-write — see executeSendPipeline's
+    // batchSettled callback for the full rationale (payload-build,
+    // sendDM-throws, AND DB-throw must all still emit the metric).
+    // Wraps the entire
     // dispatch attempt — payload assembly, button re-packing, network
     // call — so a malformed sendConfig (e.g. pathological
     // personalMessage that throws inside buildDeliveryPayload) still
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;
     try {
-      // Same Unix-seconds expiry computation as handleSend — see comment
-      // there. Computed once per recipient (cheap; the alternative would
-      // be threading a single timestamp through sendConfig).
+      // Same Unix-seconds expiry computation as executeSendPipeline —
+      // see comment there. Computed once per recipient (cheap; the
+      // alternative would be threading a single timestamp through
+      // sendConfig).
       const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-        // Same alias resolution as handleSend — see comment there for
-        // the nickname > globalName > username fallback rationale.
+        // Same alias resolution as executeSendPipeline — see comment
+        // there for the nickname > globalName > username fallback
+        // rationale.
         senderAlias: resolveSenderAlias(originalInteraction),
         qurlLink: link.qurlLink,
         expiresAt,
@@ -3220,7 +2294,7 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 // hardcoding a copy that drifts.
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
-  + 'Your team can use `/qurl send` to share files and locations securely.\n'
+  + 'Your team can use `/qurl file` and `/qurl map` to share files and locations securely.\n'
   + 'All qURL usage will be billed to your API key.';
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -3490,8 +2564,8 @@ async function handleSetupModal(interaction, { flow_id }) {
 // ─────────────────────────────────────────────────────────────
 // /qurl file + /qurl map — slash-driven sends.
 //
-// Two new subcommands replace `/qurl send`'s button-driven wizard
-// with all-options-up-front slash commands. The flow:
+// All-options-up-front slash commands that render an in-channel
+// ephemeral confirm card. The flow:
 //
 //   /qurl file recipients:<text> attachment:<file> [expires-in]
 //                                                  [self-destruct]
@@ -3524,10 +2598,10 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
 const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
 const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
-// Confirm-card menus / button restored from the OLD `/qurl send` UX —
-// slash options on /qurl file + /qurl map remain as initial defaults
-// (one-shot for power users), but a user who didn't fill them in can
-// still adjust expiry, self-destruct, and note inline on the card.
+// Confirm-card menus / button — slash options on /qurl file + /qurl map
+// remain as initial defaults (one-shot for power users), but a user who
+// didn't fill them in can still adjust expiry, self-destruct, and note
+// inline on the card.
 const SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_send_confirm_expiry';
 const SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_send_confirm_self_destruct';
 const SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_send_confirm_note_btn';
@@ -3537,9 +2611,9 @@ const SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_send_confirm_note_modal';
 // only the parent modal customId.
 const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 
-// 3-minute confirm-card window. Matches /qurl send's Step-3 form
-// timeout at line ~2293 so users have the same time-to-finish budget
-// whichever entry point they use.
+// 3-minute confirm-card window — the time-to-finish budget a user has
+// to review the confirm card and click Send/Cancel after invoking
+// /qurl file or /qurl map.
 const SEND_FLOW_TTL_SECONDS = 180;
 
 // On a successful Cancel, soften (don't clear) the cooldown so 5s of
@@ -3551,13 +2625,14 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
-const API_KEY_GATED_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
+const API_KEY_GATED_SUBCOMMANDS = new Set(['file', 'map', 'revoke']);
 
-// Slash-option choice arrays. Reuse the existing /qurl send wording
-// so users see the same labels in autocomplete as in the form's
-// dropdowns. EXPIRY_CHOICES already exists. SELF_DESTRUCT_CHOICES is
-// new here because /qurl send wires self-destruct via a StringSelect
-// post-invocation rather than a slash option.
+// Slash-option choice arrays. The same wording flows into both the
+// slash-command autocomplete and the confirm-card dropdowns so users
+// see consistent labels at every step. EXPIRY_CHOICES already exists.
+// SELF_DESTRUCT_CHOICES is new here because the confirm card's
+// self-destruct StringSelect mirrors a slash option, so both surfaces
+// share one source of truth.
 const SELF_DESTRUCT_NO_TIMER_CHOICE = 'none';
 const SELF_DESTRUCT_CHOICES = [
   { name: 'No timer (default)', value: SELF_DESTRUCT_NO_TIMER_CHOICE },
@@ -3762,10 +2837,8 @@ function renderRecipientWarnings({
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
 }
 
-// Build the confirm-card content string. Mirrors /qurl send's Step-3
-// content shape (formContent at ~line 2130) so users see consistent
-// wording across both entry points. Brand spelling is `qURL` per
-// CLAUDE.md — the user-visible copy here, the slash-command
+// Build the confirm-card content string. Brand spelling is `qURL`
+// per CLAUDE.md — the user-visible copy here, the slash-command
 // descriptions, and any logger.audit user-facing fields all preserve
 // the case.
 function renderConfirmCardContent({
@@ -3812,8 +2885,7 @@ function renderConfirmCardContent({
     // `personalMessage` is pre-sanitized: sanitizeMessage already
     // ran markdown-escape + @-mention strip at the slash-option
     // boundary. Re-escaping here would render `\*\*bold\*\*`
-    // literals on the card. Same shape /qurl send's Step-3
-    // formContent uses (commands.js:~2164).
+    // literals on the card.
     //
     // Quote-block syntax `> ` (instead of `"..."` wraps) avoids the
     // ragged-look failure mode when the message itself contains a
@@ -3894,8 +2966,8 @@ function renderConfirmCardRows({
       .setMinValues(1)
       .setMaxValues(maxValues)
   ));
-  // Self-destruct StringSelectMenu. Mirrors the OLD /qurl send form's
-  // shape at commands.js:~2334: "No self-destruct timer" + 7 presets.
+  // Self-destruct StringSelectMenu: "No self-destruct timer" + 7
+  // curated presets sourced from SELF_DESTRUCT_PRESETS in utils/time.
   // The `default: true` flag on the matching option keeps the
   // collapsed-header text reflective of the current value across
   // re-renders. `hasTimer` + `hasMatchingPreset` defend against a
@@ -4402,8 +3474,8 @@ async function handleQurlMap(interaction) {
   // hit during back-half dispatch; map sends never touch that resource.
   // Sharing the gate would punish maps for file-pipeline saturation.
   //
-  // Cooldown gate — cross-command bucket shared with /qurl send and
-  // /qurl file (sendCooldowns Map). Tests pin the contract.
+  // Cooldown gate — cross-command bucket shared with /qurl file
+  // (sendCooldowns Map). Tests pin the contract.
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({
       content: 'Please wait before sending again.',
@@ -4453,9 +3525,7 @@ async function handleQurlMap(interaction) {
   }
 
   // Shared parser: see `parseLocationInput` near the top of this file.
-  // `/qurl send`'s modal-driven location text calls it too — keep both
-  // entry points in lockstep so they produce identical delivered URLs
-  // for the same input. Wrap in try/catch as a defensive symmetry with
+  // Wrap in try/catch as a defensive symmetry with
   // handleQurlFile's catches: a future regex change in parseLocationInput
   // or a pathological input could throw synchronously before reaching
   // handleQurlSlashSend's safety net, leaving cooldown set with no
@@ -5255,8 +4325,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   }
 
   // Ack with a "Preparing send…" placeholder; executeSendPipeline
-  // takes over the editReply from here. Matches handleSend's hand-off
-  // shape at commands.js:~2307.
+  // takes over the editReply from here.
   await interaction.editReply({ content: 'Preparing send…', components: [] }).catch(logIgnoredDiscordErr);
 
   // Surface partial drops (members who left the guild between confirm
@@ -6141,18 +5210,6 @@ const commands = [
       .setName('qurl')
       .setDescription('Share resources securely via qURL')
       .addSubcommand(sub =>
-        sub.setName('send')
-          .setDescription('Send a file or location to users via one-time secure link')
-          // No options — the redesigned flow is button-driven. The prior
-          // 4-option shape (target, expiry_optional, file_optional,
-          // message_optional) confused users at the slash-command-popup
-          // stage because they had to pre-decide file-vs-location AND
-          // fill in target before seeing the actual flow. Current flow:
-          // a 2-button reply opens, each path collects its specific
-          // resource (drop-file via awaitMessages, modal for location),
-          // then converges on the shared final step.
-      )
-      .addSubcommand(sub =>
         sub.setName('file')
           .setDescription('Share a file via one-time qURL links')
           .addAttachmentOption(opt =>
@@ -6455,8 +5512,8 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for send/file/map/revoke.
-      // API_KEY_GATED_SUBCOMMANDS hoisted to module scope.
+      // Gate: require guild API key for file/map/revoke (the set
+      // in API_KEY_GATED_SUBCOMMANDS, hoisted to module scope).
       //
       // For /qurl file + /qurl map this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
@@ -6481,11 +5538,6 @@ const commands = [
         resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
-      // Pass API key as an explicit parameter rather than monkey-patching
-      // the discord.js interaction object — that pattern is fragile (libs
-      // sometimes clone/serialize interactions) and a security smell for
-      // secret-bearing values.
-      if (sub === 'send') return handleSend(interaction, resolvedApiKey);
       // /qurl file and /qurl map deliberately don't accept the
       // dispatcher-resolved apiKey — handleSendConfirmClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
@@ -6518,7 +5570,6 @@ const commands = [
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl file` — share a file with users via one-time qURL links\n' +
             '  `/qurl map` — share a Google Maps location via one-time qURL links\n' +
-            '  `/qurl send` — legacy button-driven flow (use `/qurl file` or `/qurl map` instead)\n' +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -6537,9 +5588,9 @@ const commands = [
             '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
-            '**Large servers (~1000+ members):** `/qurl send` with **Everyone in this channel** ' +
-            'or **Everyone in your voice channel** may skip members who appear offline in Discord. ' +
-            'If you need to reach a specific person for sure, prefer `/qurl file` or `/qurl map` with an explicit @mention.\n\n' +
+            '**Large servers (~1000+ members):** `/qurl file` or `/qurl map` with role @mentions ' +
+            'may skip members who appear offline in Discord. ' +
+            'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
         });
@@ -6560,7 +5611,7 @@ const commands = [
 // The full command set is only registered when the bot is in "OpenNHP
 // mode": GUILD_ID points at a real guild AND ENABLE_OPENNHP_FEATURES is
 // true. Every other configuration (multi-tenant, OR single-guild-plain
-// /qurl send install like the test playground or a customer server) gets
+// /qurl install like the test playground or a customer server) gets
 // only the allowlist.
 //
 // Keep the allowlist explicit and near the commands array so adding a
@@ -6896,17 +5947,16 @@ module.exports = {
       batchSettled,
       expiryToISO,
       sendCooldowns,
-      lateDropGenerations,
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these
       // hooks, coverage of the polling/revoke/add-recipients code paths
-      // can only be reached via full handleSend integration tests, which
-      // require mocking the entire state-machine front-half before the
-      // back-half even runs. Direct exposure means each function gets a
-      // focused spec without that setup overhead.
+      // can only be reached via full /qurl file + /qurl map integration
+      // tests, which require mocking the entire state-machine front-half
+      // before the back-half even runs. Direct exposure means each
+      // function gets a focused spec without that setup overhead.
       monitorLinkStatus,
       revokeAllLinks,
       renderRevokeMsg,
@@ -6917,18 +5967,13 @@ module.exports = {
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
       // its contract against a constructed param object — without
-      // re-driving handleSend's Step-1-through-Step-3 wizard or the
-      // future flow_state-backed form-fill.
+      // re-driving the full /qurl file + /qurl map confirm-card flow.
       executeSendPipeline,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
       // be tested without a parallel-send harness.
       getActiveFileSends: () => activeFileSends,
       setActiveFileSends: (n) => { activeFileSends = n; },
-      // The guild-member fetch cache is module-private; tests need to
-      // reset it between cases so a prior test's cached members don't
-      // mask a `members.fetch` rejection in the next test.
-      memberFetchCache,
       // The ACK_TIMEOUT_MSG_RE fallback shape drives the failure_type
       // alarm — table-driven tests pin every shape so a silent regex
       // breakage can't slip through.

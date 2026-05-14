@@ -85,12 +85,12 @@ describe('Discord: Voice State', () => {
 
   test('"Everyone in this voice channel" recipient pool = voice-connected members only', async () => {
     // Pins the new invariant after the recipient-scope fix:
-    // /qurl send target=channel invoked from a voice channel resolves to
-    // VOICE-CONNECTED members only (channel.members on a GuildVoice /
-    // GuildStageVoice in discord.js v14). NOT the guild member list and
-    // NOT the ViewChannel-permission set — those expand to @everyone on
-    // default servers and were the source of the prior "sends to entire
-    // guild" bug.
+    // /qurl file or /qurl map invoked from a voice channel (with no
+    // recipients pre-filled) resolves to VOICE-CONNECTED members only
+    // (channel.members on a GuildVoice / GuildStageVoice in discord.js
+    // v14). NOT the guild member list and NOT the ViewChannel-permission
+    // set — those expand to @everyone on default servers and were the
+    // source of the prior "sends to entire guild" bug.
     //
     // The Discord REST API's `voice_states` field on GET /guilds/:id is
     // the canonical source of "currently connected to voice" — same

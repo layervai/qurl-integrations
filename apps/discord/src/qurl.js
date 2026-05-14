@@ -31,7 +31,7 @@ async function qurlFetch(method, path, body, apiKey) {
 
   // Up to 3 attempts total (initial + 2 retries) with exponential backoff
   // plus jitter. A single transient 503 or network blip from qURL's infra
-  // no longer fails a whole /qurl send. Non-retryable statuses + non-network
+  // no longer fails a whole send. Non-retryable statuses + non-network
   // errors throw immediately.
   const maxAttempts = 3;
   let lastErr = null;

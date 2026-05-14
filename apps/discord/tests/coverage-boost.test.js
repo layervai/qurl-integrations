@@ -6,8 +6,8 @@
  * - buildConfirmMsg truncation with > 5 recipients + expand toggle
  * - collector button handlers (revoke, expand, add recipients)
  * - collector end timeout
- * - handleSend: fewer mintLinks than recipients, no attachment guard,
- *   location modal timeout, resource selection timeout, all links fail
+ * - executeSendPipeline: fewer mintLinks than recipients, no attachment
+ *   guard, all links fail
  * - handleCommand: double error (reply + followUp fail)
  * - bulklink: already-linked and forceLink throw paths
  * - Google Maps URL edge cases

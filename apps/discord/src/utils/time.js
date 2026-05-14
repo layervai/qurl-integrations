@@ -29,10 +29,11 @@ function expiryToMs(expiresIn) {
   return ms === null ? DEFAULT_EXPIRY_MS : ms;
 }
 
-// Self-destruct timer presets — the 7 durations exposed in the /qurl send
-// dropdown. Curated narrow set so creators don't ship a 0.7s viewer that
-// hits the 500ms-floor edge case in the connector by accident; every
-// preset is a value we'd recommend out loud.
+// Self-destruct timer presets — the 7 durations exposed in the
+// /qurl file + /qurl map confirm-card dropdown. Curated narrow set so
+// creators don't ship a 0.7s viewer that hits the 500ms-floor edge
+// case in the connector by accident; every preset is a value we'd
+// recommend out loud.
 //
 // The wire field forwarded to the connector is `viewer_ttl_seconds`
 // (qurl-s3-connector PR #477). Connector contract is 0.5–3600 inclusive,
@@ -64,7 +65,8 @@ function findPresetBySeconds(n) {
 }
 
 // selfDestructSelectValueToSeconds — converts a StringSelectMenu value
-// from the /qurl send form into the seconds the bot persists and forwards.
+// from the /qurl file + /qurl map confirm card into the seconds the
+// bot persists and forwards.
 // The select's option set is fixed: the no-timer sentinel, or
 // `String(preset.seconds)` for each preset. Strict string equality (not
 // Number() coercion) so a forged `'0x1'` can't slip past as `1` — same

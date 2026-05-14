@@ -51,14 +51,14 @@ if (rawGuildId) {
 //       ManageRoles + ManageChannels perms in the guild.
 //
 //   (!isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
-//       Single-guild plain /qurl send tool. Only /qurl registers
+//       Single-guild plain qURL sharing tool. Only /qurl registers
 //       (scoped to the guild for instant propagation); no role or
 //       channel creation; /auth and /webhook routes dormant. Needs
 //       only the 4 runtime perms (ViewChannel, SendMessages,
 //       EmbedLinks, UseApplicationCommands).
 //
 //   (isMultiTenant, ENABLE_OPENNHP_FEATURES=false)
-//       Multi-tenant plain /qurl send tool. Commands register
+//       Multi-tenant plain qURL sharing tool. Commands register
 //       globally (up to 1 hr Discord cache propagation); per-guild
 //       config via /qurl setup; every OpenNHP code path is gated off.
 //       Default for the public-bot install.
@@ -76,7 +76,7 @@ const isMultiTenant = !normalizedGuildId;
 // multi-tenant — only exercises the 4 runtime permissions it was
 // invited with (View Channels, Send Messages, Embed Links, Use
 // Application Commands). Only the OpenNHP community server sets this
-// true; everywhere else the bot is a plain /qurl send tool with no
+// true; everywhere else the bot is a plain qURL sharing tool with no
 // elevated expectations. Must be the literal string "true" — any other
 // value (including unset, empty, "TRUE", "1", "yes") keeps it disabled,
 // so an env-var typo can't silently re-enable role/channel creation
@@ -274,8 +274,9 @@ module.exports = {
   // Google Maps (location autocomplete)
   GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY,
 
-  // /qurl send limits — both must be > 0. A cooldown of 0 would silently
-  // disable the rate limit; a recipients cap of 0 would reject every send.
+  // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
+  // cooldown of 0 would silently disable the rate limit; a recipients
+  // cap of 0 would reject every send.
   QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 

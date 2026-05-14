@@ -15,18 +15,11 @@ const intents = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildVoiceStates,
-  // Needed for the /qurl send file path's DM-pivot: when the user
-  // clicks Send File from a guild channel, the bot DMs them and
-  // awaitMessages on that DM channel for the file drop. Without
-  // this intent the bot never sees DM messages and the awaitMessages
-  // call times out at 60s — even though the user dropped the file.
-  // Attachment metadata does NOT require MessageContent intent.
-  GatewayIntentBits.DirectMessages,
 ];
 
 // Per-feature intent canaries. Each line pins one intent to one feature
 // and fails loud if the intent has been removed from `intents` above —
-// converting silent-feature-break (e.g., voice-channel /qurl send
+// converting silent-feature-break (e.g., voice-channel /qurl file/map
 // returning empty) into a startup error with a clear cause.
 //
 // `assertIntent` takes the intents list as its first argument (rather
@@ -43,9 +36,8 @@ function assertIntent(intentsList, bit, requiredFor) {
   }
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(intents, GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
-assertIntent(intents, GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
-assertIntent(intents, GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (channel.members for view-perm holders)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl map voice-channel recipient resolution (channel.members for voice-connected)');
 
 const client = new Client({ intents });
 
@@ -315,7 +307,7 @@ client.once('ready', async () => {
   await verifyBotPermissions();
   // Weekly digest is OpenNHP-specific (star milestones, contributor
   // stats, announcements to #general). No value in a guild running the
-  // bot purely for /qurl send.
+  // bot purely for qURL sharing.
   if (config.isOpenNHPActive) {
     setupWeeklyDigest();
   }
@@ -387,7 +379,7 @@ client.on('guildMemberAdd', async (member) => {
   // OpenNHP-only behavior. Two short-circuits before any work:
   //   1. Flag off → no welcome DM / "Welcome Back, Contributor!" embed
   //      anywhere, regardless of whether the bot is single-guild or
-  //      multi-tenant. A vanilla /qurl send install shouldn't introduce
+  //      multi-tenant. A vanilla qURL install shouldn't introduce
   //      itself as the OpenNHP community bot.
   //   2. In multi-tenant mode (no single GUILD_ID to scope to) there is
   //      no cached `guild`/`channels` state to post into anyway. The
@@ -882,9 +874,10 @@ async function sendDM(discordId, message) {
 // the right "Everyone in this channel" set under discord.js v14
 // (viewer set for text; voice-connected for voice/stage-voice). The
 // helper REJECTS other types via SUPPORTED_CHANNEL_TYPES rather than
-// trusting a documented contract, because /qurl send's slash-command
-// registration does not currently restrict invocation context — a user
-// COULD trigger this helper from a thread / forum / DM today, where
+// trusting a documented contract, because /qurl file + /qurl map's
+// slash-command registration does not currently restrict invocation
+// context — a user COULD trigger this helper from a thread / forum /
+// DM today, where
 // `channel.members` either has the wrong shape (thread:
 // ThreadMemberManager of ThreadMember; user lazily populated) or
 // doesn't exist at all (forum / media / DM). Returning [] (with a

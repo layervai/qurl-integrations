@@ -1,7 +1,8 @@
 /**
- * Comprehensive tests for src/commands.js — covers buildDeliveryEmbed, handleSend,
- * monitorLinkStatus, buildConfirmMsg, handleRevoke, revokeAllLinks, handleCommand,
- * and all slash command execute() functions.
+ * Comprehensive tests for src/commands.js — covers buildDeliveryEmbed,
+ * the send-pipeline back-half, monitorLinkStatus, buildConfirmMsg,
+ * handleRevoke, revokeAllLinks, handleCommand, and all slash command
+ * execute() functions.
  */
 
 // ---------------------------------------------------------------------------
@@ -1184,9 +1185,8 @@ describe('/qurl help subcommand', () => {
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
     // (4) Help text doesn't leak internal jargon. The "Large servers"
-    // section explains the /qurl send fanout caveat to end-users
-    // without naming the underlying GUILD_PRESENCES intent. That
-    // section goes away when 7b.3 deletes /qurl send.
+    // section explains the role-fanout caveat to end-users without
+    // naming the underlying GUILD_PRESENCES intent.
     expect(content).not.toContain('GUILD_PRESENCES');
   });
 });

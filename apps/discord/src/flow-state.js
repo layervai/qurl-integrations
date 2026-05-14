@@ -221,9 +221,9 @@ function decryptPayload(ciphertext) {
 //
 // Why caller-supplied `expires_at` rather than computing it here:
 // different flow types have different lifecycle bounds (a
-// `/qurl setup` modal has a 15-minute window; a `/qurl send`
-// confirmation can sit for hours). The caller knows; this module
-// just persists.
+// `/qurl setup` modal has a 15-minute window; a `/qurl file` or
+// `/qurl map` confirm card has a 3-minute window). The caller knows;
+// this module just persists.
 //
 // Payload semantics: `null` and `undefined` both persist as a null
 // DDB attribute. This is symmetric with createFlow but ASYMMETRIC
@@ -839,8 +839,8 @@ async function deleteFlow(flow_id, { stage, reason, expectedVersion } = {}) {
 
 // Open a fresh flow row, superseding a same-flow_id predecessor at
 // the SAME stage if one exists. The supersede-and-retry pattern was
-// duplicated across /qurl revoke and /qurl setup (and would have
-// re-emerged in /qurl send); extracting it here closes #272 (OCC on
+// duplicated across /qurl revoke and /qurl setup (and recurs in
+// /qurl file + /qurl map); extracting it here closes #272 (OCC on
 // deleteFlow against the prior version), #273 (include_expired so
 // a stuck-orphan past its logical TTL is still observable), and
 // #274 (the duplication itself).

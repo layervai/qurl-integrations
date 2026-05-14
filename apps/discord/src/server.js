@@ -189,7 +189,7 @@ app.get('/metrics', metricsRateLimit, async (req, res) => {
 //
 // Symmetry with commands.js — the full OpenNHP surface (commands +
 // routes) turns on together when config.isOpenNHPActive is true;
-// everything else gets the plain /qurl send tool.
+// everything else gets the plain qURL sharing tool.
 if (config.isOpenNHPActive) {
   app.use('/auth', oauthRouter);
   app.use('/webhook', webhooksRouter);

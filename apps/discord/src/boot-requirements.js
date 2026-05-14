@@ -29,9 +29,9 @@ function bootRequired(isOpenNHPActive) {
 }
 
 // Additionally required when NODE_ENV=production. QURL_API_KEY is the
-// global-fallback for /qurl send; single-guild-plain and multi-tenant
-// deployments both rely on per-guild /qurl setup, so it's optional
-// outside the OpenNHP community server.
+// global-fallback for /qurl file + /qurl map; single-guild-plain and
+// multi-tenant deployments both rely on per-guild /qurl setup, so it's
+// optional outside the OpenNHP community server.
 //
 // KEY_ENCRYPTION_KEY appears here AND in missingKekRequiredKeys.
 // The two checks overlap on prod-with-OAuth (both fail closed there);
