@@ -110,10 +110,24 @@ function formatSelfDestructLabel(seconds) {
   return `${seconds}s`;
 }
 
+// formatSelfDestructSegment — renders the self-destruct status as a
+// stand-alone segment for the post-send confirm header
+// (`Sent to N | Expires: 24h | Self-destruct: ...`). A null/undefined/
+// non-finite/non-positive value renders as "off" — the "no timer
+// selected" sentinel — so the segment is always present and aligned
+// with the rest of the header.
+function formatSelfDestructSegment(seconds) {
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return `Self-destruct: ${formatSelfDestructLabel(seconds)}`;
+  }
+  return 'Self-destruct: off';
+}
+
 module.exports = {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
+  formatSelfDestructSegment,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
