@@ -17,7 +17,13 @@ function encodePlaceIdSentinel(placeId) {
 
 function decodePlaceIdSentinel(value) {
   if (typeof value !== 'string' || !value.startsWith(PLACE_ID_SENTINEL_PREFIX)) return null;
-  return value.slice(PLACE_ID_SENTINEL_PREFIX.length);
+  const placeId = value.slice(PLACE_ID_SENTINEL_PREFIX.length);
+  // Reject an empty payload: `qurl_place:` with no id behind it would
+  // round-trip as a falsy string, and `parseLocationInput`'s
+  // `if (decodedPlaceId)` check would silently fall through to the
+  // URL/text branches — a sentinel that decoded to "nothing" should
+  // surface as "no match" instead.
+  return placeId.length > 0 ? placeId : null;
 }
 
 // Single timeout for every Places call. Both autocomplete (per
@@ -56,14 +62,27 @@ async function placesFetch(url, params) {
 }
 
 // Bounded TTL cache for autocomplete results. Discord fires
-// `searchPlaces` per keystroke, so a user typing "white house" issues
-// ~9 paid Places Autocomplete calls. A 60 s TTL collapses that to one
-// call per distinct prefix plus a few cache hits as they type. Cap
-// keeps memory bounded across many concurrent senders — when full,
-// drop the oldest entry (FIFO; Map preserves insertion order).
+// `searchPlaces` per keystroke; a 60 s TTL collapses a typing session
+// to one Places call per distinct prefix. Cap keeps memory bounded —
+// when full, drop the oldest entry (FIFO; Map preserves insertion
+// order).
 const AUTOCOMPLETE_CACHE_TTL_MS = 60_000;
 const AUTOCOMPLETE_CACHE_MAX = 500;
 const autocompleteCache = new Map();
+
+// In-flight request dedup. Fast typists can fire multiple keystrokes
+// for the same prefix before the first Places response settles; this
+// returns the same in-flight promise for duplicate concurrent calls
+// (single-flight) rather than paying twice.
+const autocompleteInflight = new Map();
+
+// Cache + single-flight key. Normalize to lowercase + collapsed
+// whitespace so "Whitehouse", "whitehouse", and " White House "
+// share the same entry — Places Autocomplete is case-insensitive,
+// so the cache should be too.
+function cacheKey(query) {
+  return query.toLowerCase().replace(/\s+/g, ' ').trim();
+}
 
 function cacheGet(key) {
   const entry = autocompleteCache.get(key);
@@ -89,22 +108,29 @@ async function searchPlaces(query) {
     return [];
   }
   const safeQuery = sanitizeQueryParam(query);
-  const cached = cacheGet(safeQuery);
+  const key = cacheKey(safeQuery);
+  const cached = cacheGet(key);
   if (cached) return cached;
-  const data = await placesFetch(PLACES_AUTOCOMPLETE_URL, {
-    input: safeQuery,
-    types: 'establishment|geocode',
-  });
-  if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
-    throw new Error(`Places API status: ${data.status}`);
-  }
-  const results = (data.predictions || []).map(p => ({
-    placeId: p.place_id,
-    name: p.structured_formatting?.main_text || p.description,
-    address: p.structured_formatting?.secondary_text || '',
-  }));
-  cacheSet(safeQuery, results);
-  return results;
+  const inflight = autocompleteInflight.get(key);
+  if (inflight) return inflight;
+  const promise = (async () => {
+    const data = await placesFetch(PLACES_AUTOCOMPLETE_URL, {
+      input: safeQuery,
+      types: 'establishment|geocode',
+    });
+    if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
+      throw new Error(`Places API status: ${data.status}`);
+    }
+    const results = (data.predictions || []).map(p => ({
+      placeId: p.place_id,
+      name: p.structured_formatting?.main_text || p.description,
+      address: p.structured_formatting?.secondary_text || '',
+    }));
+    cacheSet(key, results);
+    return results;
+  })().finally(() => autocompleteInflight.delete(key));
+  autocompleteInflight.set(key, promise);
+  return promise;
 }
 
 // Returns null when Find Place returns zero candidates; the caller
@@ -171,9 +197,12 @@ module.exports = {
   PLACE_ID_SENTINEL_PREFIX,
   encodePlaceIdSentinel,
   decodePlaceIdSentinel,
-  // Test-only: clear the cache between tests so a leftover entry from
-  // one test can't satisfy a fetch expectation in the next.
+  // Test-only: clear the cache + in-flight map between tests so leftover
+  // state from one test can't satisfy a fetch expectation in the next.
   ...(process.env.NODE_ENV !== 'production' && {
-    _resetAutocompleteCache: () => autocompleteCache.clear(),
+    _resetAutocompleteCache: () => {
+      autocompleteCache.clear();
+      autocompleteInflight.clear();
+    },
   }),
 };

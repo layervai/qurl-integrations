@@ -92,6 +92,14 @@ describe('encodePlaceIdSentinel / decodePlaceIdSentinel', () => {
     expect(decodePlaceIdSentinel(undefined)).toBeNull();
     expect(decodePlaceIdSentinel(42)).toBeNull();
   });
+
+  test('decode rejects an empty payload ("qurl_place:" with no id)', () => {
+    // Defensive: an empty-payload sentinel decodes to '' (falsy), which
+    // would let parseLocationInput's `if (decodedPlaceId)` silently fall
+    // through to the URL/text branches. Reject explicitly so the
+    // failure surfaces as "no match" instead.
+    expect(decodePlaceIdSentinel('qurl_place:')).toBeNull();
+  });
 });
 
 describe('buildPlaceUrl', () => {
@@ -201,6 +209,44 @@ describe('searchPlaces', () => {
     const a = await searchPlaces('white');
     const b = await searchPlaces('white');
     expect(a).toEqual(b);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('cache key is case-insensitive + whitespace-normalized', async () => {
+    // Case-only variants of the same query (and surrounding/extra
+    // whitespace) hit the same cache entry because Places Autocomplete
+    // itself is case-insensitive — without the normalization the
+    // autocomplete cache misses for what's effectively one user query.
+    // (Note: "White House" with a space and "Whitehouse" compound are
+    // genuinely different queries to Places and stay distinct.)
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: 'OK',
+      predictions: [{ place_id: 'ChIJ1', description: 'White House' }],
+    }));
+    await searchPlaces('White House');
+    await searchPlaces('white house');
+    await searchPlaces('  WHITE HOUSE  ');
+    await searchPlaces('white  house'); // extra interior whitespace collapses
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('in-flight requests for the same key are deduped (single-flight)', async () => {
+    // Fast typists can fire multiple keystrokes for the same prefix
+    // before the first response settles — without dedup we'd pay
+    // Places per concurrent call. The second concurrent call must
+    // return the same promise as the first.
+    let resolveBody;
+    fetchMock.mockReturnValueOnce(new Promise((resolve) => {
+      resolveBody = () => resolve(jsonResponse({
+        status: 'OK',
+        predictions: [{ place_id: 'ChIJ1', description: 'White House' }],
+      }));
+    }));
+    const a = searchPlaces('white');
+    const b = searchPlaces('white');
+    resolveBody();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra).toEqual(rb);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
