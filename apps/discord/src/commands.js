@@ -144,6 +144,31 @@ function safeUrlHost(url) {
   try { return new URL(url).host; } catch { return 'invalid-url'; }
 }
 
+/**
+ * Codepoint-aware truncation with an odd-backslash backoff. Two
+ * concerns this guards against:
+ *  1. Surrogate split — bare String.prototype.slice operates on UTF-16
+ *     code units, so cutting at a boundary that lands inside a
+ *     surrogate pair (e.g. \u{1F600}) emits a lone high surrogate
+ *     that Discord renders as tofu.
+ *  2. Dangling escape backslash — a markdown-escaped input may have
+ *     `\X` sequences. A slice that lands ON the `\` separates the
+ *     escape from its target. Count trailing `\` chars; odd count →
+ *     back off by 1 so the escape stays intact.
+ *
+ * Returns the truncated string (no ellipsis appended — callers add
+ * their own truncation indicator if desired).
+ */
+function safeCodepointSlice(s, maxCodepoints) {
+  const codepoints = Array.from(s);
+  if (codepoints.length <= maxCodepoints) return s;
+  let cut = maxCodepoints;
+  let bs = 0;
+  for (let i = cut - 1; i >= 0 && codepoints[i] === '\\'; i--) bs++;
+  if (bs % 2 === 1) cut -= 1;
+  return codepoints.slice(0, cut).join('');
+}
+
 function sanitizeMessage(msg) {
   // Order matters:
   //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
@@ -167,9 +192,14 @@ function sanitizeMessage(msg) {
   const stripped = stripBidiAndControls(msg)
     .replace(/@(everyone|here)/gi, '@\u200b$1')
     .replace(/<@[!&]?\d+>/g, MENTION_SENTINEL);
-  return escapeDiscordMarkdown(stripped)
-    .replaceAll(MENTION_SENTINEL, '[mention]')
-    .slice(0, 500);
+  const escaped = escapeDiscordMarkdown(stripped)
+    .replaceAll(MENTION_SENTINEL, '[mention]');
+  // safeCodepointSlice: codepoint-aware + odd-backslash backoff. Bare
+  // String.prototype.slice could split a surrogate pair (emoji) at the
+  // 500 boundary or leave a dangling `\` from a mid-cut markdown
+  // escape. The slash option's setMaxLength(280) usually keeps us
+  // well under 500, but this is defense-in-depth.
+  return safeCodepointSlice(escaped, 500);
 }
 
 const ALLOWED_FILE_TYPES = [
@@ -3758,10 +3788,9 @@ const NEWLINE_COLLAPSE_RE = new RegExp('[\\r\\n\\u2028\\u2029]+', 'g');
 
 function formatPersonalMessagePreview(message) {
   const oneLine = message.replace(NEWLINE_COLLAPSE_RE, ' ');
-  // Codepoint-aware view of the string — bare String.prototype.slice
-  // operates on UTF-16 code units, so a slice that lands mid-surrogate
-  // emits a lone surrogate that Discord renders as tofu. Same defense
-  // sanitize.js applies for display-name caps.
+  // safeCodepointSlice handles surrogate-safe truncation + odd-trailing-
+  // backslash backoff. The early-return at 80 codepoints avoids the
+  // `…` ellipsis when there's nothing to truncate.
   //
   // Caveat: codepoint-aware ≠ grapheme-aware. ZWJ-joined emoji
   // sequences (e.g. 👨‍👩‍👧 = man + ZWJ + woman + ZWJ + girl, three
@@ -3771,19 +3800,8 @@ function formatPersonalMessagePreview(message) {
   // partial emoji renders as exactly that — a partial display, not
   // garbled text. Full grapheme-segmentation would need Intl.Segmenter
   // which isn't justified for a preview cap.
-  const codepoints = Array.from(oneLine);
-  if (codepoints.length <= 80) return `> ${oneLine}`;
-  let cut = 80;
-  // Count trailing backslashes just before `cut`. An ODD count means
-  // the last `\` is starting a markdown-escape sequence (`\X`) whose
-  // target lands at `cut` and would be sliced off — back off by 1.
-  // EVEN counts represent complete `\\` literal-backslash pairs and
-  // can be kept. Handles single (`\*`), triple (`\\\*`), etc. A `\` is
-  // one codepoint, so the count is the same in either view.
-  let bs = 0;
-  for (let i = cut - 1; i >= 0 && codepoints[i] === '\\'; i--) bs++;
-  if (bs % 2 === 1) cut -= 1;
-  return `> ${codepoints.slice(0, cut).join('')}…`;
+  if (Array.from(oneLine).length <= 80) return `> ${oneLine}`;
+  return `> ${safeCodepointSlice(oneLine, 80)}…`;
 }
 
 // Build the ActionRow set for the confirm card. When `attachPicker`,
@@ -3937,6 +3955,16 @@ async function handleQurlSlashSend(interaction, params) {
       const detail = breakdownEmpty
         ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
         : '';
+      // Metric signal for the v1 cap-skew tracked in #304: a
+      // mention-list that resolved to NOTHING (parser-stripped bots
+      // before partition saw them) is exactly the failure mode the v2
+      // resolve-then-cap refactor would fix. Log at INFO so #304's
+      // prioritization has data without dialing verbosity up.
+      if (breakdownEmpty && !recipientsOmitted) {
+        logger.info('handleQurlSlashSend: bot-only-or-self mention list', {
+          user_id: interaction.user.id, resource_type: params.resourceType,
+        });
+      }
       return interaction.editReply({
         content: warningsBlock + '❌ **No valid recipients to send to.** Re-run with at least one valid user mention.' + detail,
       });
@@ -4284,8 +4312,8 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     });
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
-    if (droppedSelf > 0) reasons.push('cannot send to yourself');
-    return rejectPick(`⚠\u{FE0F} ${reasons.join('; ')}. Re-pick recipients below.\n\n`);
+    if (droppedSelf > 0) reasons.push('Cannot send to yourself');
+    return rejectPick(`⚠\u{FE0F} ${reasons.join('. ')}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
   // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
