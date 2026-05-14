@@ -3611,10 +3611,27 @@ describe('largeSendThreshold', () => {
 
   test('degenerate override (cap=1): floors at 1 (NOT 0 — would fire every send)', () => {
     // Bug-guard: Math.floor(1/2) = 0 would make `>= threshold` true
-    // for every send, including 0-recipient ones. Math.max(1, …)
-    // floors at 1 so the threshold is always a positive integer.
+    // for every send, including 0-recipient ones. The `|| 1`
+    // substitution floors at 1 so the threshold is always a positive
+    // integer.
     const orig = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      expect(largeSendThreshold()).toBe(1);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('boundary (cap=2): floor(2/2)=1 wins WITHOUT the substitution — pins discontinuity', () => {
+    // Round-15 cr: a 2-recipient send on cap=2 warns; a 1-recipient
+    // send on cap=2 does not (threshold=1). The substitution-vs-
+    // half-cap boundary is at cap=2 — pin the intentional shape so
+    // a future refactor (e.g., switching from `half || 1` to
+    // `Math.max(2, half)`) breaks this test instead of silently
+    // moving the boundary.
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 2;
     try {
       expect(largeSendThreshold()).toBe(1);
     } finally {
