@@ -227,14 +227,16 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // A future refactor that goes back to baking a static label into the
   // embed ("Door closes in **24 hours**" forever) would silently
   // regress this UX — the assertion below catches it.
-  it('renders Discord native relative-time <t:N:R> for the Door-closes line', () => {
+  it('renders Discord native relative-time <t:N:R> in the description (Closes line)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
-    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const doorField = fields.find(f => typeof f.value === 'string' && f.value.includes('Door closes'));
-    expect(doorField).toBeDefined();
-    expect(doorField.value).toBe('\ud83d\udd50 Door closes <t:1735689600:R>');
+    // Closes line is folded into the embed description alongside the
+    // sender line (tightened layout \u2014 was a separate addFields() row,
+    // which Discord padded with extra vertical whitespace and pushed
+    // the button further away).
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toMatch(/\ud83d\udd50 Closes <t:1735689600:R>/);
     // Locks against accidental reversion to a static label
-    expect(doorField.value).not.toMatch(/Door closes in \*\*\d/);
+    expect(desc).not.toMatch(/Closes in \*\*\d/);
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes
@@ -253,15 +255,16 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave
   // recipients with a button that doesn't navigate anywhere. This test
   // asserts the button is built as Link-style with the supplied qURL,
-  // and that the 🔗 emoji prefix survives — Link buttons render gray
-  // and the emoji is what carries the "this is a button" affordance.
+  // and that the 🚪 emoji survives — Link buttons render gray, and the
+  // door emoji ties the "opened a door for you" copy to the action so
+  // the button reads as intentional rather than generic-CTA-grey.
   it('builds the Step Through button as a Link-style button with the qURL as its URL', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink: 'https://qurl.link/#at_unique_token' });
     // Last button constructed in the buildDeliveryPayload call is the Step Through.
     const stepThrough = capturedButtons[capturedButtons.length - 1];
     expect(stepThrough).toBeDefined();
     expect(stepThrough._label).toBe('Step Through');
-    expect(stepThrough._emoji).toBe('🔗');
+    expect(stepThrough._emoji).toBe('🚪');
     expect(stepThrough._style).toBe(5); // ButtonStyle.Link
     expect(stepThrough._url).toBe('https://qurl.link/#at_unique_token');
     expect(stepThrough.setURL).toHaveBeenCalledWith('https://qurl.link/#at_unique_token');
