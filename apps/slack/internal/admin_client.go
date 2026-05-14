@@ -33,15 +33,9 @@ const defaultAdminClientVersion = "dev"
 // admin endpoint from eating that whole budget.
 const adminDefaultTimeout = 10 * time.Second
 
-// Query-string field names shared across multiple GET requests.
-// Lifted to constants so a server-side rename only edits one site,
-// and goconst's repeated-string lint stays satisfied. JSON body
-// fields are fixed in their struct tags rather than via these
-// constants because the compiler will catch a rename in a tag.
-const (
-	fieldTeamID = "team_id"
-	fieldUserID = "user_id"
-)
+// fieldTeamID and fieldUserID are declared in process.go (same
+// package); admin_client reuses those so a server-side rename only
+// edits one site.
 
 // AdminClient is a thin wrapper over qurl-service's `/internal/v1/...`
 // admin/policy/redeem/rate-limit endpoints used exclusively by the
