@@ -7,7 +7,7 @@
  * (resolveRecipientUsers, partitionRecipients, selfDestructOptionToSeconds,
  * renderRecipientWarnings, renderConfirmCardContent).
  *
- * Mocks mirror tests/qurl-send-back-half.test.js so both files share
+ * Mocks mirror tests/send-pipeline-back-half.test.js so both files share
  * a coherent module surface. The new commands are accessed via the
  * `_test` export. Real flow-state is stubbed — handlers are tested
  * against the harness contract, not against DDB itself (flow-state.js

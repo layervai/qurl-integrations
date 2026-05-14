@@ -1,7 +1,7 @@
 /**
  * Residual coverage tests for commands.js — narrow branches that aren't
- * covered by the focused specs (qurl-file-map, qurl-send-back-half,
- * commands-comprehensive, qurl-send).
+ * covered by the focused specs (qurl-file-map, send-pipeline-back-half,
+ * commands-comprehensive, send-pipeline-helpers).
  *
  * Covers:
  * - handleCommand: double error path (reply + followUp both fail)
