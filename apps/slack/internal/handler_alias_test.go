@@ -20,6 +20,7 @@ const (
 	testAliasURL       = "https://example.com"
 	testAliasName      = "staging"
 	testSlashCmd       = "/qurl"
+	testOtherAlias     = "other"
 )
 
 // fakeAliasStore is an in-memory AliasStore for handler tests. One
@@ -159,6 +160,15 @@ func TestParseAliasArgs_SetAlias(t *testing.T) {
 		{name: "non-http target rejected", input: "$staging ftp://example.com", wantErr: true},
 		{name: "garbage target rejected", input: "$staging not-a-url", wantErr: true},
 		{name: "alias over cap rejected", input: "$" + strings.Repeat("a", 65) + " https://x.example", wantErr: true},
+		{name: "bare r_ sigil rejected", input: "$staging r_", wantErr: true},
+
+		// Fence: http://localhost is currently ACCEPTED. The parser
+		// stays scheme-permissive because qurl-service is the
+		// authoritative validator on target reachability. If/when
+		// the parser grows a public-host gate (claude-bot review #3
+		// SSRF-adjacent follow-up), flip this row to wantErr and
+		// the test starts enforcing the new contract.
+		{name: "localhost target ACCEPTED (TODO: SSRF gate)", input: "$staging http://localhost:3000", wantAlias: "staging", wantTgt: "http://localhost:3000"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,7 +308,7 @@ func TestSetAlias_DifferentExistingAliasBlocks(t *testing.T) {
 	// /qurl unsetalias first. The test row pins the refusal copy so
 	// a future regression that silently overwrites lights this up.
 	h, store := newAliasTestHandler(t)
-	_ = store.SetChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, "other", "r_existing")
+	_ = store.SetChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testOtherAlias, "r_existing")
 
 	body, sign := aliasSlashRequest(t, "setalias $staging https://example.com", testAliasTeamID, testAliasChannelID)
 	w := httptest.NewRecorder()
@@ -308,9 +318,14 @@ func TestSetAlias_DifferentExistingAliasBlocks(t *testing.T) {
 	if !strings.Contains(got, "$other") || !strings.Contains(got, "unsetalias") {
 		t.Errorf("response = %q, want refusal copy referencing $other and unsetalias", got)
 	}
+	// Refusal copy must NOT leak the bound target (claude-bot review #5
+	// — info-disclosure narrowing). The test row pins this.
+	if strings.Contains(got, "r_existing") {
+		t.Errorf("refusal leaked bound target: %q", got)
+	}
 	a, _, _ := store.LookupChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID)
-	if a != "other" {
-		t.Errorf("alias was overwritten: stored = %q, want %q", a, "other")
+	if a != testOtherAlias {
+		t.Errorf("alias was overwritten: stored = %q, want %q", a, testOtherAlias)
 	}
 }
 
@@ -376,7 +391,7 @@ func TestUnsetAlias_MismatchRefuses(t *testing.T) {
 	// least-surprise posture is "refuse and surface the mismatch"
 	// rather than silently nuke the wrong alias.
 	h, store := newAliasTestHandler(t)
-	_ = store.SetChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, "other", "r_existing")
+	_ = store.SetChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID, testOtherAlias, "r_existing")
 
 	body, sign := aliasSlashRequest(t, "unsetalias $foo", testAliasTeamID, testAliasChannelID)
 	w := httptest.NewRecorder()
@@ -387,8 +402,8 @@ func TestUnsetAlias_MismatchRefuses(t *testing.T) {
 		t.Errorf("response = %q, want mismatch refusal copy", got)
 	}
 	a, _, _ := store.LookupChannelAlias(context.Background(), testAliasTeamID, testAliasChannelID)
-	if a != "other" {
-		t.Errorf("alias was cleared on mismatch: stored = %q, want %q", a, "other")
+	if a != testOtherAlias {
+		t.Errorf("alias was cleared on mismatch: stored = %q, want %q", a, testOtherAlias)
 	}
 }
 
@@ -441,6 +456,40 @@ func TestHelpListsNewVerbs(t *testing.T) {
 	}
 	if !strings.Contains(got, "unsetalias") {
 		t.Errorf("/qurl help = %q, missing unsetalias", got)
+	}
+}
+
+// TestSetAlias_CrossTenancyIsolation fences that an alias bound in
+// (T1, C1) is invisible to (T2, C1) and vice versa. The
+// channel_policies PK is `slack_team_id` so a T2 admin's setalias on
+// the same channel-ID must observe "no alias" — not T1's binding.
+// fakeAliasStore keys on `team|channel` so this is structurally
+// covered, but a regression that switched key construction (e.g. PK
+// = channel only) would break tenancy hard, so pin the fence here.
+func TestSetAlias_CrossTenancyIsolation(t *testing.T) {
+	h, store := newAliasTestHandler(t)
+	_ = store.SetChannelAlias(context.Background(), "T1", "C_shared", testAliasName, testAliasURL)
+
+	// T2 admin in the same channel ID — should see "no alias" and
+	// be allowed to set their own.
+	body, sign := aliasSlashRequest(t, "setalias $other https://t2.example", "T2", "C_shared")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newSignedRequest(t, "/slack/commands", body, sign))
+
+	got := decodeSlackText(t, w.Body.Bytes())
+	if !strings.Contains(got, "now points to") {
+		t.Errorf("T2 setalias should succeed; response = %q", got)
+	}
+
+	// T1's binding should be intact.
+	t1Alias, t1RID, _ := store.LookupChannelAlias(context.Background(), "T1", "C_shared")
+	if t1Alias != testAliasName || t1RID != testAliasURL {
+		t.Errorf("T1 binding was disturbed: got (%q, %q), want (%q, %q)", t1Alias, t1RID, testAliasName, testAliasURL)
+	}
+	// T2 wrote its own row.
+	t2Alias, _, _ := store.LookupChannelAlias(context.Background(), "T2", "C_shared")
+	if t2Alias != testOtherAlias {
+		t.Errorf("T2 binding missing: got %q, want %q", t2Alias, testOtherAlias)
 	}
 }
 

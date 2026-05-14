@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // AliasStore is the persistence surface the alias verbs depend on.
@@ -145,8 +146,11 @@ func parseAliasArgs(text string, wantTarget bool) (parsed *aliasArgs, userMsg st
 	if strings.HasPrefix(tgt, resourceIDPrefix) {
 		// `r_…` short-circuit. We don't enforce a deeper character set
 		// here — qurl-service's resource-id validator is the
-		// authoritative gate. Empty body (`r_`) falls through as a
-		// recognizable error at the persistence layer.
+		// authoritative gate — but we DO reject the bare `r_` sigil
+		// before writing it, so a junk DDB row never lands.
+		if len(tgt) == len(resourceIDPrefix) {
+			return nil, msgAliasTargetInvalid
+		}
 		out.Target = tgt
 		return out, ""
 	}
@@ -185,6 +189,15 @@ func requireAlias(tok string) (alias, userMsg string) {
 	return alias, ""
 }
 
+// aliasSyncTimeout caps the sync alias-verb deadline tight enough to
+// fail inside Slack's 3-second slash-command ack window. Two DDB
+// calls (lookup + write) typically resolve in <100ms, so 2.5s leaves
+// headroom while keeping the bot's failure mode "we surfaced an
+// error" rather than "Slack reported timeout while we kept working
+// and the user retried." Re-evaluate (move to runAsync + response_url)
+// only if DDB tail latency starts exceeding this budget in practice.
+const aliasSyncTimeout = 2500 * time.Millisecond
+
 // aliasPreamble is the shared prelude for both alias verbs after
 // argument parsing: pull team_id + channel_id off the form, verify
 // the AliasStore is wired, and set up the worker context. Returns
@@ -214,7 +227,7 @@ func (h *Handler) aliasPreamble(w http.ResponseWriter, values url.Values, verb s
 		respondSlack(w, "Alias storage is not configured on this Slack bot deployment. Contact the operator.")
 		return
 	}
-	ctx, cancel = context.WithTimeout(h.baseCtx, asyncWorkTimeout)
+	ctx, cancel = context.WithTimeout(h.baseCtx, aliasSyncTimeout)
 	ok = true
 	return
 }
@@ -256,7 +269,7 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 
 	existingAlias, existingRID, err := h.aliasStore.LookupChannelAlias(ctx, teamID, channelID)
 	if err != nil && !errors.Is(err, ErrAliasNotFound) {
-		slog.Error("setalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		slog.Error("setalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel IDs are Slack-controlled but log-injection-safe.
 		respondSlack(w, "Failed to look up the current alias for this channel. Please try again.")
 		return
 	}
@@ -272,14 +285,18 @@ func (h *Handler) handleSetAlias(w http.ResponseWriter, values url.Values) {
 	// Different-existing-alias path: per the schema gap, we can't
 	// hold multiple aliases per channel. Surface this to the admin
 	// rather than silently overwriting — overwriting a teammate's
-	// alias is a footgun.
+	// alias is a footgun. The refusal names the bound alias only
+	// (not its target) — narrows the info-disclosure surface if
+	// the Slack-manifest admin gate slips. The admin can run
+	// `/qurl unsetalias` to inspect the target if they actually
+	// need it.
 	if existingAlias != "" && existingAlias != args.Alias {
-		respondSlack(w, fmt.Sprintf("This channel already has alias `$%s` bound to `%s`. Run `/qurl unsetalias $%s` first, or pick a different channel.", existingAlias, existingRID, existingAlias))
+		respondSlack(w, fmt.Sprintf("This channel already has alias `$%s` bound. Run `/qurl unsetalias $%s` first, or pick a different channel.", existingAlias, existingAlias))
 		return
 	}
 
 	if err := h.aliasStore.SetChannelAlias(ctx, teamID, channelID, args.Alias, args.Target); err != nil {
-		slog.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
+		slog.Error("setalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
 		respondSlack(w, "Failed to update alias. Please try again.")
 		return
 	}
@@ -322,7 +339,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 		respondSlack(w, "No alias is set on this channel. Nothing to clear.")
 		return
 	case err != nil:
-		slog.Error("unsetalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID)
+		slog.Error("unsetalias lookup failed", "error", err, "team_id", teamID, "channel_id", channelID) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel IDs are Slack-controlled but log-injection-safe.
 		respondSlack(w, "Failed to look up the current alias for this channel. Please try again.")
 		return
 	case existingAlias != args.Alias:
@@ -339,7 +356,7 @@ func (h *Handler) handleUnsetAlias(w http.ResponseWriter, values url.Values) {
 			respondSlack(w, fmt.Sprintf("Alias `$%s` is no longer bound to this channel.", args.Alias))
 			return
 		}
-		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias)
+		slog.Error("unsetalias write failed", "error", err, "team_id", teamID, "channel_id", channelID, "alias", args.Alias) //nolint:gosec // G706: slog escapes control bytes in attribute values; team/channel/alias are validated upstream.
 		respondSlack(w, "Failed to clear alias. Please try again.")
 		return
 	}
