@@ -2536,6 +2536,32 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.components).toEqual([]);
   });
 
+  test('partial-cache row (member missing .user) emits a debug log per send (silent-shrinkage telemetry)', async () => {
+    // Pins the round-9 telemetry contract: silent shrinkage of the
+    // recipient set due to partial-cache rows is hard to diagnose
+    // post-hoc without a log. The debug-level emission is per-send
+    // (not per-member) so volume tracks frequency of the degraded
+    // state, not the count of dropped members. A future refactor
+    // that drops the log fails this spec.
+    const logger = require('../src/logger');
+    logger.debug.mockClear();
+    const int = makeVoiceInteraction({ members: [u1] });
+    // Inject a partial-cache row: member entry exists but has no .user.
+    const channel = int.guild.channels.cache.get(VOICE_CH);
+    channel.members.set('partial-cache-id', {});  // no .user → drop
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/partial-cache/i),
+      expect.objectContaining({
+        flow_id: 'fid',
+        voice_channel_id: VOICE_CH,
+        dropped: 1,
+      })
+    );
+    // Send still proceeds with the .user-populated member.
+    expect(mockTransitionFlow).toHaveBeenCalled();
+  });
+
   test('voice-everyone button succeeds when sender lacks MENTION_EVERYONE (no asymmetric gate)', async () => {
     // Pins the intentional asymmetry documented at the button block:
     // ViewChannel-only gating (not MENTION_EVERYONE) is the right
@@ -3461,6 +3487,50 @@ describe('renderConfirmCardRows', () => {
     await handleQurlFile(int);
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
+  });
+
+  test('voice button label stays under Discord\'s 80 UTF-16 cap with an ALL-EMOJI channel name (worst case)', async () => {
+    // Round-14 cr bug-guard: a 46-codepoint all-emoji channel name
+    // (which Discord allows up to its 100-char limit) occupies 92
+    // UTF-16 units. The prior codepoint-based budget would slice at
+    // 46 codepoints (=92 UTF-16 units) + prefix + suffix → ~116-unit
+    // label, busting Discord's 80-UTF-16 hard cap and getting
+    // rejected at API send. The UTF-16-unit budget caps this.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    // 46 🎉 emoji — each is a surrogate pair (U+1F389, 2 UTF-16 units)
+    // so the channel name occupies 92 UTF-16 units. Discord caps
+    // channel names at 100 chars, so this is realistic. The prior
+    // codepoint-based budget would slice at 46 codepoints (92
+    // UTF-16 units) + prefix + suffix → ~116-unit label, busting
+    // Discord's 80-UTF-16 hard cap.
+    const allEmojiName = '🎉'.repeat(46);
+    expect(allEmojiName.length).toBe(92); // confirm worst-case UTF-16
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+    int.channel = { id: 'voice-emoji', type: 2 };
+    int.guild.channels.cache.set('voice-emoji', {
+      id: 'voice-emoji', name: allEmojiName, type: 2,
+      members: new Map([['111', { user: { id: '111', bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    const voiceBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
+    );
+    expect(voiceBtn).toBeDefined();
+    const label = voiceBtn.value.setLabel.mock.calls[0][0];
+    // The hard contract: under 80 UTF-16 units regardless of input.
+    expect(label.length).toBeLessThanOrEqual(80);
+    expect(label).toMatch(/…/);
+    // Surrogate-pair safety still holds for the all-emoji case.
+    for (let i = 0; i < label.length; i++) {
+      const code = label.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = label.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xDC00);
+        expect(next).toBeLessThanOrEqual(0xDFFF);
+        i++;
+      }
+    }
   });
 
   test('voice button label stays under Discord\'s 80 UTF-16 cap even with a 100-char emoji-containing channel name', async () => {

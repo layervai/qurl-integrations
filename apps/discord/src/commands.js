@@ -3139,15 +3139,19 @@ function renderConfirmCardRows({
     // Name the target channel in the label so a user who invoked
     // from #voice-A and drifted to #voice-B mid-flow can tell the
     // button still targets the original channel. Discord button-label
-    // hard cap is 80 UTF-16 code units; the fixed prefix + suffix
-    // measures ~26-28 UTF-16 units depending on count width:
+    // hard cap is 80 UTF-16 code units (NOT codepoints — Discord
+    // measures UTF-16 surrogate-pair-aware, so an emoji-heavy 46-
+    // codepoint name occupies up to 92 UTF-16 units). Budget the
+    // name in UTF-16 units (channelName.length, which IS UTF-16 unit
+    // count in JS strings) so the upper bound is hard-guaranteed
+    // regardless of emoji density.
+    //
+    // Fixed prefix + suffix:
     //   `🔊 ` (3) + `Everyone in #` (13) + ` (NNNNN)` (max 8) = 24
-    //   (🔊 is a surrogate pair = 2 UTF-16 units + a VS16/space).
-    // 46 leaves ~10 units of headroom for label evolution / emoji
-    // additions. Discord channel names cap at 100 chars so truncation
-    // is possible; on cache miss (channel was deleted between render
-    // and re-render) the legacy "this voice channel" copy is correct,
-    // since we can't name a channel we can't read.
+    //   (🔊 is a surrogate pair = 2 UTF-16 units + a space).
+    // 50 leaves 6 units of headroom for label evolution. The `…`
+    // ellipsis adds 1 UTF-16 unit, so the budget includes its slot:
+    // a max-truncation label measures 24 + 49 + 1 = 74 UTF-16 units.
     //
     // SAFETY: channel.name is interpolated raw into the button label
     // — Discord BUTTON labels do not render markdown / mentions /
@@ -3155,18 +3159,19 @@ function renderConfirmCardRows({
     // `<@123>` is displayed verbatim. A future refactor that moves
     // this label into an embed description / message content would
     // need to escape `channel.name` against markdown/mention parsing.
-    const VOICE_LABEL_NAME_BUDGET = 46;
-    // safeCodepointSlice (defined above) is codepoint-aware so a
-    // surrogate-pair emoji at index 45 doesn't get sliced mid-
-    // codepoint and render as `�` on the button. Channel names with
-    // emoji (Discord allows them in names) are the realistic case
-    // this guards against. The `…` ellipsis fits inside the budget
-    // since safeCodepointSlice caps at N codepoints, not N + 1.
-    const safeName = channelName
-      ? (Array.from(channelName).length > VOICE_LABEL_NAME_BUDGET
-          ? `${safeCodepointSlice(channelName, VOICE_LABEL_NAME_BUDGET - 1)}…`
-          : channelName)
-      : null;
+    const VOICE_LABEL_NAME_UTF16_BUDGET = 50;
+    // Back off if the cut would split a surrogate pair (a high
+    // surrogate at the last position with no paired low surrogate
+    // would render as `�`). Reserve 1 UTF-16 unit for the ellipsis.
+    const safeName = (() => {
+      if (!channelName) return null;
+      if (channelName.length <= VOICE_LABEL_NAME_UTF16_BUDGET) return channelName;
+      let cut = VOICE_LABEL_NAME_UTF16_BUDGET - 1;
+      // High surrogate at cut-1 → cut would split it; back off 1 unit.
+      const code = channelName.charCodeAt(cut - 1);
+      if (code >= 0xD800 && code <= 0xDBFF) cut -= 1;
+      return `${channelName.slice(0, cut)}…`;
+    })();
     const labelTarget = safeName ? `#${safeName}` : 'this voice channel';
     bottomRow.addComponents(
       new ButtonBuilder()
@@ -4094,7 +4099,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // connected members for voice/stage-voice channels. A cache miss
   // (channel was deleted between render and click, voice intent was
   // recently dropped, etc.) lands in the warning branch.
-  const channel = interaction.guild?.channels?.cache?.get(voiceChannelId);
+  const channel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
   if (!channel || !channel.members) {
     return rejectVoice(VOICE_REJECT_CHANNEL_UNREADABLE);
   }
