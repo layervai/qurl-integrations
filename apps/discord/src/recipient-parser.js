@@ -144,8 +144,8 @@ const CHANNEL_MENTION_RE = /<#(\d+)>/g;
 // `discord.js` for one constant pair, and so unit tests can build a
 // `channel` mock without instantiating discord.js's ChannelType. A
 // discord.js bump that renumbers these would break voice expansion
-// silently; the `recipient-parser.test.js` "GuildVoice + GuildStageVoice
-// numeric values" spec pins the contract.
+// silently; the `voice-channel type constants` describe block in
+// `recipient-parser.test.js` pins the contract.
 const VOICE_CHANNEL_TYPE = 2;
 const STAGE_VOICE_CHANNEL_TYPE = 13;
 
@@ -451,7 +451,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // reject the mention. The button-driven voice-everyone path
     // doesn't need this gate — invoking the slash command from
     // inside a voice channel intrinsically proves visibility.
-    const viewerPerms = channel.permissionsFor?.(interaction.member ?? interaction.user?.id);
+    const viewerPerms = channel.permissionsFor?.(interaction.member);
     if (!viewerPerms || !viewerPerms.has(VIEW_CHANNEL_PERMISSION)) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
@@ -467,6 +467,11 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
+    // Walks every member regardless of cap — `consider()` caps `ids`
+    // but `seen` grows unbounded. Symmetric with the @everyone loop
+    // below: in both cases, iteration is bounded by Discord's channel
+    // capacity (99 for voice, ~10k for stage), and the cost is
+    // dominated by `partitionRecipients` + transitionFlow downstream.
     let usable = 0;
     for (const [memberId, channelMember] of members) {
       if (isBotMember(channelMember)) continue;

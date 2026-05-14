@@ -3035,6 +3035,13 @@ function renderConfirmCardRows({
     // fall back to `?` so the button still renders without crashing.
     // The button itself is disabled in either degraded case (no count
     // = nothing to send to anyway from this affordance).
+    //
+    // Count is render-time, not click-time — members can join/leave
+    // voice between renders. Click-time resolution in
+    // handleConfirmVoiceEveryone is the authoritative recipient set;
+    // the label is a freshness hint that re-derives on every other
+    // confirm-card interaction (picker / expiry / note edits all flow
+    // through renderConfirmCardRows again).
     const channel = interaction?.guild?.channels?.cache?.get?.(voiceChannelId);
     let connectedCount = null;
     if (channel?.members) {
@@ -3894,7 +3901,9 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     // (schema drift). Re-render the card without the button rather
     // than deleting the row — the user can still pick recipients
     // through the UserSelectMenu.
-    logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', { flow_id });
+    logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', {
+      flow_id, interaction_id: interaction.id,
+    });
     return undefined;
   }
 
@@ -3902,6 +3911,14 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // rejectPick path so the user sees why the button didn't take.
   // Pass the local `voiceChannelId` (already proven truthy above) for
   // consistency with the other handler reads below.
+  //
+  // The payload keeps `voiceChannelId` set even on the reject path —
+  // intentionally. A transient cache miss (voice intent dropped,
+  // members momentarily evicted) will re-disable the button via the
+  // count=null branch on this re-render, but a subsequent picker /
+  // expiry / note interaction will run renderConfirmCardRows again
+  // with the now-repopulated cache and re-enable the button. Recovery
+  // is automatic; persisting the field is the load-bearing piece.
   const rejectVoice = (warning) => interaction.editReply({
     content: renderConfirmCardContent({
       resourceType: payload.resourceType,
