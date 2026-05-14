@@ -386,6 +386,15 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       // see a different subset across invocations as the cache
       // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
       // selection burden onto the user and removes this ambiguity.
+      //
+      // ITERATION ASSUMES NO CONCURRENT MUTATION: discord.js itself
+      // doesn't guarantee iteration safety for Collections under
+      // gateway-driven mutation (member join/leave events). This
+      // parser runs synchronously inside the slash-command handler
+      // — no awaits between the start of this loop and its `break`
+      // — so the cache snapshot is effectively frozen for the loop
+      // body. A future refactor that introduced an `await` here
+      // would break that assumption.
       for (const [memberId, member] of everyoneMembers) {
         // Short-circuit once we've filled the cap. We accept the
         // tradeoff of inaccurate cappedCount (no past-cap members
