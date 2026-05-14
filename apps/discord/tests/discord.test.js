@@ -663,10 +663,21 @@ describe('discord module', () => {
     });
 
     it('does not throw when the bit is undefined (partially-mocked GatewayIntentBits)', () => {
-      // Mirrors the assertIntent undefined-bit behavior: an unknown
-      // intent name in a future Discord.js bump shouldn't crash at
-      // boot just because the bit isn't in our mock.
+      // Unknown intent name in a future Discord.js bump shouldn't crash
+      // at boot just because the bit isn't in our mock.
       expect(() => discord.assertNoIntent([1, 2], undefined, 'FutureIntent'))
+        .not.toThrow();
+    });
+
+    // Pin the documented asymmetry: assertIntent fails CLOSED on
+    // undefined (silent missing intent is a silent feature break);
+    // assertNoIntent fails OPEN on undefined (a bit that doesn't exist
+    // in GatewayIntentBits can't have been re-added). Putting both
+    // halves in one spec makes the contract grep-discoverable.
+    it('assertIntent and assertNoIntent disagree on undefined-bit handling (documented asymmetry)', () => {
+      expect(() => discord.assertIntent([1 /* Guilds */, 2 /* GuildMembers */], undefined, 'feature requiring missing intent'))
+        .toThrow(/Missing required Discord intent/);
+      expect(() => discord.assertNoIntent([1 /* Guilds */, 2 /* GuildMembers */], undefined, 'FutureIntent'))
         .not.toThrow();
     });
   });
