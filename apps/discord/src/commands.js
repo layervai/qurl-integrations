@@ -958,9 +958,10 @@ async function executeSendPipeline(interaction, {
   locationName,
   // MUTATES: the Add Recipients post-send branch dedupe-pushes into
   // this array (see docstring's "transferred ownership" note). The
-  // initial `recipients` is already deduped + bot/sender-filtered by
+  // initial `recipients` is already deduped + bot-filtered by
   // partitionRecipients (see contract pin at commands.js:~3552):
   // upstream owns dedup, this function does NOT re-dedup the initial set.
+  // Sender CAN appear in `recipients` — self-send is supported.
   recipients,
   expiresIn,
   selfDestructSeconds,
@@ -2679,10 +2680,11 @@ async function resolveRecipientUsers(interaction, ids) {
   return { users, unresolvedIds, transientFailureIds };
 }
 
-// Filter resolved Users: drop bots, drop the sender. Returns
-// `{ valid, droppedBots, droppedSelf }` so the caller can surface
-// "X bots / your-own-id were dropped" as a distinct error from
-// "no recipients at all".
+// Filter resolved Users: drop bots, detect whether the sender is
+// included. Returns `{ valid, droppedBots, selfIncluded }` so the
+// caller can surface "X bots were dropped" as a warning and "send
+// includes yourself" as a neutral notice. Sender is NOT filtered —
+// self-send is supported.
 //
 // Known v1 cap-skew: parseRecipientMentions caps to QURL_SEND_MAX_RECIPIENTS
 // BEFORE knowing which IDs are bots. A mention list of
@@ -2696,6 +2698,12 @@ async function resolveRecipientUsers(interaction, ids) {
 // drops them all — small absolute cost but burns per-guild rate-limit
 // budget that legitimate ops elsewhere could use. The durable fix is
 // the v2 resolve-then-cap refactor tracked in #304.
+//
+// Self-mention cap behavior: since self-send is supported, `<@me>` now
+// CONSUMES a cap slot like any other mention. So `<@me> <@u1>..<@u25>`
+// yields self + 24 others (was: 25 others, pre self-send). This is
+// symmetric with the bot cap-skew above and aligns with the supported-
+// recipient model — sender is just another recipient.
 function partitionRecipients(users, senderId) {
   // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
   // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
@@ -2705,13 +2713,13 @@ function partitionRecipients(users, senderId) {
   // loudly via the recipient-count divergence test instead.
   const valid = [];
   let droppedBots = 0;
-  let droppedSelf = 0;
+  let selfIncluded = false;
   for (const u of users) {
     if (u.bot) { droppedBots++; continue; }
-    if (u.id === senderId) { droppedSelf++; continue; }
+    if (u.id === senderId) selfIncluded = true;
     valid.push(u);
   }
-  return { valid, droppedBots, droppedSelf };
+  return { valid, droppedBots, selfIncluded };
 }
 
 /**
@@ -2726,7 +2734,6 @@ function partitionRecipients(users, senderId) {
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
- *   droppedSelf?: number,
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -2735,7 +2742,6 @@ function renderRecipientWarnings({
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
-  droppedSelf = 0,
 } = {}) {
   const lines = [];
   if (cappedCount > 0) {
@@ -2775,9 +2781,6 @@ function renderRecipientWarnings({
   if (droppedBots > 0) {
     lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
   }
-  if (droppedSelf > 0) {
-    lines.push('• You cannot send a qURL to yourself — skipped.');
-  }
   if (lines.length === 0) return '';
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
 }
@@ -2789,7 +2792,7 @@ function renderRecipientWarnings({
 function renderConfirmCardContent({
   resourceType, resourceLabel, validRecipients,
   expiresIn, selfDestructSeconds, personalMessage,
-  warningsBlock, needsPicker, interaction,
+  warningsBlock, needsPicker, interaction, selfIncluded = false,
 }) {
   let content = warningsBlock || '';
   // Explicit branch per RESOURCE_TYPES value — a future resource
@@ -2803,6 +2806,13 @@ function renderConfirmCardContent({
     content += `🗺\u{FE0F} **Sending location:** ${resourceLabel}\n`;
   } else {
     throw new TypeError(`renderConfirmCardContent: unknown resourceType ${JSON.stringify(resourceType)}`);
+  }
+  // Neutral notice (NOT a warning) when the sender is in the recipient
+  // list. Self-send is supported as a first-class flow; surface it on
+  // the confirm card so the user can verify they meant to include
+  // themselves before clicking Send.
+  if (selfIncluded) {
+    content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
   if (needsPicker) {
     content += '\n**Pick recipients below** (1–'
@@ -3088,7 +3098,7 @@ async function handleQurlSlashSend(interaction, params) {
       }
     }
 
-    const { valid, droppedBots, droppedSelf } = partitionRecipients(resolved.users, interaction.user.id);
+    const { valid, droppedBots, selfIncluded } = partitionRecipients(resolved.users, interaction.user.id);
 
     // `needsPicker` is true when the user supplied no `recipients:`
     // value at all. When they DID supply one but it post-filtered to
@@ -3102,7 +3112,6 @@ async function handleQurlSlashSend(interaction, params) {
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
-      droppedSelf,
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
@@ -3113,7 +3122,6 @@ async function handleQurlSlashSend(interaction, params) {
       const transientOnly = resolved.transientFailureIds.length > 0
         && resolved.unresolvedIds.length === 0
         && droppedBots === 0
-        && droppedSelf === 0
         && parsed.invalidTokens.length === 0
         && parsed.cappedCount === 0;
       if (transientOnly) {
@@ -3121,19 +3129,19 @@ async function handleQurlSlashSend(interaction, params) {
           content: warningsBlock + '❌ **Could not look up recipients right now.** Try again in a moment.',
         });
       }
-      // Parser silently strips bots + the sender from `<@id>` mentions
-      // when the cache reports them (recipient-parser.js:205, 214) —
-      // those IDs never reach `partitionRecipients`. If post-parse `ids`
-      // is empty AND the user supplied non-empty `recipients`, surface
-      // a "nothing usable" message even when partition's breakdown is
-      // zero. This is what bot-only / self-only mention lists hit.
-      const breakdownEmpty = droppedBots === 0 && droppedSelf === 0
+      // Parser silently strips bots from `<@id>` mentions when the
+      // cache reports them (recipient-parser.js:~219) — those IDs
+      // never reach `partitionRecipients`. If post-parse `ids` is
+      // empty AND the user supplied non-empty `recipients`, surface
+      // a "nothing usable" message even when partition's breakdown
+      // is zero. This is what bot-only mention lists hit.
+      const breakdownEmpty = droppedBots === 0
         && resolved.unresolvedIds.length === 0
         && resolved.transientFailureIds.length === 0
         && parsed.invalidTokens.length === 0
         && parsed.cappedCount === 0;
       const detail = breakdownEmpty
-        ? '\n\nMake sure you @-mention real users (bots and your own user are skipped automatically).'
+        ? '\n\nMake sure you @-mention real users (bots are skipped automatically).'
         : '';
       // Metric signal for the v1 cap-skew tracked in #304: a
       // mention-list that resolved to NOTHING (parser-stripped bots
@@ -3190,11 +3198,20 @@ async function handleQurlSlashSend(interaction, params) {
       // a contract test pins that invariant.
       personalMessageRaw: personalMessageRawTrimmed,
       // One-time information surface — slash-entry warnings about
-      // bot/self/unresolved mentions persist into the payload so
-      // menu interactions (which don't recompute) still render them.
+      // bot/unresolved mentions persist into the payload so menu
+      // interactions (which don't recompute) still render them.
       // Picker re-pick OVERWRITES with a fresh warningsBlock from the
       // new partition.
       warningsBlock,
+      // Neutral notice signal — surfaced on the confirm card as
+      // "Send includes you." when the sender is in the recipient
+      // list. Persisted (rather than derived from
+      // `recipientIds.includes(senderId)` at re-render) for the
+      // same reason `warningsBlock` is persisted: keeps the menu
+      // re-render path stateless about who computed what. Derivation
+      // would also work — both shapes are defensible, but mirroring
+      // warningsBlock keeps the payload contract uniform.
+      selfIncluded,
       sendNonce,
     };
     let supersede;
@@ -3236,6 +3253,7 @@ async function handleQurlSlashSend(interaction, params) {
       warningsBlock,
       needsPicker,
       interaction,
+      selfIncluded,
     });
     const rows = renderConfirmCardRows({
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
@@ -3565,9 +3583,9 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // enforces "only the user who triggered an ephemeral interaction
   // can click its components" at the gateway level, so the clicker
   // === the sender. This invariant is LOAD-BEARING: partitioning
-  // by clicker also drops the SENDER from the pick (droppedSelf),
-  // and a future refactor that flips the confirm card to
-  // non-ephemeral would need to thread the original sender ID
+  // by clicker is how we detect `selfIncluded` (sender appears in
+  // the pick), and a future refactor that flips the confirm card
+  // to non-ephemeral would need to thread the original sender ID
   // through the flow payload + read it here instead.
   //
   // No `resolveRecipientUsers` re-fetch here — Discord's
@@ -3578,7 +3596,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // defense; adding it here would burn 10 members.fetch calls per
   // picker tick without catching anything the Send-time check misses.
   const payload = row.payload || {};
-  const { valid, droppedBots, droppedSelf } = partitionRecipients(selected, interaction.user.id);
+  const { valid, droppedBots, selfIncluded } = partitionRecipients(selected, interaction.user.id);
   // Both invalid-pick branches re-render the full confirm card with a
   // warning banner prepended. Replacing card content with just the
   // warning string strips the resource header ("Sending file:
@@ -3611,12 +3629,18 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // in invalid-pick churn surfaces in metrics without lowering log
     // verbosity.
     logger.debug('handleConfirmUserSelect: all-invalid pick', {
-      flow_id, dropped_bots: droppedBots, dropped_self: droppedSelf,
+      flow_id, dropped_bots: droppedBots,
     });
+    // Only the bot-only case is reachable here today — self-send is
+    // supported, so a pick of just the sender does NOT empty `valid`.
+    // Kept as a list-builder for future filters; the
+    // `|| 'No usable recipients in pick'` fallback prevents a
+    // degraded `⚠ . Re-pick...` message if a future filter is
+    // removed and `valid.length === 0` is hit with droppedBots === 0.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
-    if (droppedSelf > 0) reasons.push('Cannot send to yourself');
-    return rejectPick(`⚠\u{FE0F} ${reasons.join('. ')}. Re-pick recipients below.\n\n`);
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
+    return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
   // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
@@ -3628,27 +3652,29 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   }
 
   // Recompute warnings + aliases for the new pick. droppedBots and
-  // droppedSelf can flip here (UserSelectMenu doesn't pre-exclude
-  // the invoker or bots), so warnings change with the recipient set.
+  // selfIncluded can flip here (UserSelectMenu doesn't pre-exclude
+  // the invoker or bots), so warnings + the self-notice change with
+  // the recipient set.
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
-    droppedSelf,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
   // Asymmetry vs. the menu/modal handlers' no-op short-circuits:
   // the picker DOES NOT skip transitionFlow on a same-recipient-set
-  // re-pick. Re-running here recomputes warningsBlock (droppedBots /
-  // droppedSelf can flip if the picker selection now includes the
-  // sender or a bot) and refreshes recipientAliases (display names
-  // may have changed since the prior pick). Both are user-visible
-  // and worth the version bump.
+  // re-pick. Re-running here recomputes warningsBlock (droppedBots
+  // can flip if the picker selection now includes a bot) plus
+  // selfIncluded (flips if sender enters or leaves the pick), and
+  // refreshes recipientAliases (display names may have changed
+  // since the prior pick). All three are user-visible and worth
+  // the version bump.
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),
     recipientAliases: newRecipientAliases,
     warningsBlock: newWarningsBlock,
+    selfIncluded,
   };
   // Targeted catch around transitionFlow mirrors the same shape
   // handleConfirmSendClick / handleConfirmCancelClick use around their
@@ -3700,6 +3726,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     warningsBlock: newWarningsBlock,
     needsPicker: false,
     interaction,
+    selfIncluded,
   });
   return interaction.editReply({
     content,
@@ -3774,6 +3801,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
     warningsBlock: newPayload.warningsBlock || '',
     needsPicker,
     interaction,
+    selfIncluded: newPayload.selfIncluded === true,
   });
   return interaction.editReply({
     content,
@@ -4169,17 +4197,18 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
       flow_id, left: partialLeftCount, transient: partialTransientCount,
     });
   }
-  const { valid, droppedBots, droppedSelf } = partitionRecipients(users, interaction.user.id);
+  const { valid, droppedBots } = partitionRecipients(users, interaction.user.id);
   if (valid.length === 0) {
     // Distinguish the failure mode by what was dropped. The general
     // case is "everyone left the guild between confirm and Send"
     // (10007 / transient) — but a forged Send click with payload
-    // recipientIds containing only the sender or only bots would
-    // resolve fine and then partition would drop everything, hitting
-    // this branch with the WRONG copy ("they left the server"
-    // misdirects when nobody left — the recipient list was invalid).
-    // Terminal for THIS attempt either way: delete the flow so a
-    // rerun claims a fresh slot.
+    // recipientIds containing only bots would resolve fine and then
+    // partition would drop everything, hitting this branch with the
+    // WRONG copy ("they left the server" misdirects when nobody left
+    // — the recipient list was invalid). Self-send is supported so
+    // a self-only recipientIds is a legitimate Send and never reaches
+    // this branch. Terminal for THIS attempt either way: delete the
+    // flow so a rerun claims a fresh slot.
     //
     // Version-gate the delete (same shape as the happy-path Send and
     // the empty-recipientIds branch): a concurrent UserSelect could
@@ -4202,9 +4231,8 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
         ephemeral: true,
       }).catch(logIgnoredDiscordErr);
     }
-    const wasInvalidList = droppedBots > 0 || droppedSelf > 0;
     return interaction.editReply({
-      content: wasInvalidList
+      content: droppedBots > 0
         ? '❌ Invalid recipient list — re-run the command with at least one real user.'
         : '❌ Recipients are no longer reachable (all left the server). Re-run the command.',
       components: [],

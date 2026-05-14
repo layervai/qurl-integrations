@@ -117,13 +117,25 @@ describe('parseRecipientMentions — basic shape', () => {
 });
 
 describe('parseRecipientMentions — filtering', () => {
-  test('excludes the sender (no self-sends)', () => {
+  test('keeps the sender (self-send is supported)', () => {
+    // Self-send: the sender deliberately included themselves via
+    // `@me`. Parser does NOT filter — the confirm card surfaces a
+    // neutral "Send includes you." notice instead.
     const int = makeInteraction({
       senderId: '900000000000000001',
       users: { '900000000000000001': {}, '222222222222222222': {} },
     });
-    expect(parseRecipientMentions('<@900000000000000001> <@222222222222222222>', int))
-      .toEqual({ ids: ['222222222222222222'], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('<@900000000000000001> <@222222222222222222>', int).ids.sort())
+      .toEqual(['222222222222222222', '900000000000000001']);
+  });
+
+  test('sender alone is a legitimate single-recipient self-send', () => {
+    const int = makeInteraction({
+      senderId: '900000000000000001',
+      users: { '900000000000000001': {} },
+    });
+    expect(parseRecipientMentions('<@900000000000000001>', int))
+      .toEqual({ ids: ['900000000000000001'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('excludes bots flagged in the member cache', () => {
@@ -137,24 +149,11 @@ describe('parseRecipientMentions — filtering', () => {
   test('completely empty interaction ({}) does not throw, returns empty result', () => {
     // The `interaction == null` early-return handles null/undefined,
     // but a truthy empty object still has to walk the optional chains
-    // (`interaction.user?.id`, `interaction.guild?.roles?.cache`)
-    // without crashing. Pin that an `interaction = {}` is tolerated
-    // — a future refactor that switched `.guild?.x` to `.guild.x?` on
-    // the assumption "we've already null-checked" would surface here.
+    // (`interaction.guild?.roles?.cache`) without crashing. Pin that
+    // `interaction = {}` is tolerated — a future refactor that
+    // switched `.guild?.x` to `.guild.x?` on the assumption "we've
+    // already null-checked" would surface here.
     expect(parseRecipientMentions('<@111>', {}))
-      .toEqual({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
-  });
-
-  test('missing interaction.user falls through (sender-exclusion no-ops, no throw)', () => {
-    // Defensive precondition: `interaction.user?.id` is the sender
-    // exclusion anchor. If a caller passes `interaction = { guild }`
-    // (no user — bot misuse, not user input), the optional chain
-    // makes `senderId === undefined` so sender exclusion silently
-    // no-ops. Pin that the parser doesn't throw — the caller bug
-    // surfaces downstream via the back-half's interaction.user.id
-    // read, which is a clearer crash site than a parse-time TypeError.
-    const interaction = { guild: { members: { cache: new Map([['111', { user: { id: '111', bot: false } }]]) }, roles: { cache: new Map() } } };
-    expect(parseRecipientMentions('<@111>', interaction))
       .toEqual({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
   });
 
@@ -188,14 +187,16 @@ describe('parseRecipientMentions — role mentions', () => {
       .toEqual(['101', '102', '103']);
   });
 
-  test('role expansion excludes sender and bots', () => {
+  test('role expansion includes sender but excludes bots', () => {
+    // Self-send: sender expanded out of a role mention stays in the
+    // recipient set. Bots in the role are still filtered.
     const int = makeInteraction({
       senderId: '900',
       users: { '900': {}, '801': { bot: true }, '101': {} },
       roles: { '7000': ['900', '801', '101'] },
     });
-    expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('<@&7000>', int).ids.sort())
+      .toEqual(['101', '900']);
   });
 
   test('role unknown to the guild lands in invalidTokens', () => {
@@ -204,15 +205,25 @@ describe('parseRecipientMentions — role mentions', () => {
       .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
-  test('role with no usable members (all sender/bots) lands in invalidTokens', () => {
+  test('role with no usable members (all bots) lands in invalidTokens', () => {
     const int = makeInteraction({
       senderId: '900',
-      users: { '900': {}, '801': { bot: true } },
-      roles: { '7000': ['900', '801'] },
+      users: { '801': { bot: true } },
+      roles: { '7000': ['801'] },
     });
     const res = parseRecipientMentions('<@&7000>', int);
     expect(res.ids).toEqual([]);
     expect(res.invalidTokens).toEqual(['<@&7000>']);
+  });
+
+  test('role with only the sender expands to the sender (self-only role is valid)', () => {
+    const int = makeInteraction({
+      senderId: '900',
+      users: { '900': {} },
+      roles: { '7000': ['900'] },
+    });
+    expect(parseRecipientMentions('<@&7000>', int))
+      .toEqual({ ids: ['900'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('DM context (guild=undefined) treats role mentions as invalid', () => {
