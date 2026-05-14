@@ -496,6 +496,13 @@ const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ n
 // — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
 
+// Discord's hard cap on select-menu max_values. The initial confirm-card
+// renderer widens max_values to fit text-resolved recipientIds (so
+// addDefaultUsers can pre-check them — default_values.length ≤
+// max_values is a Discord-side invariant), and that widen is bounded
+// by this cap so we never construct a menu Discord rejects at validation.
+const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
+
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
 // `location:` consumes these — extracted to a single source so a
 // future "new URL shape" tweak only happens here.
@@ -3264,23 +3271,38 @@ function formatPersonalMessagePreview(message) {
 // hint so the label isn't blank.
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
-  voiceChannelId, interaction,
+  voiceChannelId, interaction, recipientIds,
 }) {
   const rows = [];
-  const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  const baseCap = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  // When text-resolved recipients are already present, widen max_values
+  // so we can pre-check them via addDefaultUsers (Discord requires
+  // default_values.length ≤ max_values). Widen clamps at the hard cap;
+  // recipientIds past the hard cap are still in payload.recipientIds and
+  // get the send — only the visual pre-check truncates.
+  const defaults = Array.isArray(recipientIds) ? recipientIds : [];
+  const maxValues = defaults.length > 0
+    ? Math.min(DISCORD_SELECT_MAX_VALUES_HARD_CAP, config.QURL_SEND_MAX_RECIPIENTS, Math.max(baseCap, defaults.length))
+    : baseCap;
   // Placeholder surfaces both ceilings: pick-slot count (Discord's
   // setMaxValues) AND the post-expansion recipient cap. With roles in
   // the picker, a single slot can expand to many members — saying
   // only "1–10" would mislead users who pick 10 roles expecting 10
   // recipients.
   const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
-  rows.push(new ActionRowBuilder().addComponents(
-    new MentionableSelectMenuBuilder()
-      .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
-      .setMinValues(1)
-      .setMaxValues(maxValues)
-  ));
+  const picker = new MentionableSelectMenuBuilder()
+    .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
+    .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
+    .setMinValues(1)
+    .setMaxValues(maxValues);
+  if (defaults.length > 0) {
+    // Text-path recipientIds are user IDs only — parseRecipientMentions
+    // expands roles to members before partition. addDefaultUsers is the
+    // matching API on MentionableSelectMenuBuilder (addDefaultRoles
+    // would be wrong here — we never persist role IDs).
+    picker.addDefaultUsers(...defaults.slice(0, maxValues));
+  }
+  rows.push(new ActionRowBuilder().addComponents(picker));
   // Self-destruct StringSelectMenu: "No self-destruct timer" + 7
   // curated presets sourced from SELF_DESTRUCT_PRESETS in utils/time.
   // The `default: true` flag on the matching option keeps the
@@ -3756,6 +3778,7 @@ async function handleQurlSlashSend(interaction, params) {
       personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds,
     });
     // `return await` (not bare `return`) is load-bearing: without it
     // a Discord-side rejection on the confirm-card delivery would
@@ -4180,6 +4203,10 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch — no
+      // transitionFlow fires here) so the user can recover their prior
+      // valid selection on re-open instead of starting from empty.
+      recipientIds: payload.recipientIds || [],
     }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
@@ -4322,6 +4349,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -4435,6 +4463,10 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch —
+      // no transitionFlow fires) so the user can recover their prior
+      // valid selection on re-open of the picker.
+      recipientIds: payload.recipientIds || [],
     }),
   }).catch(logIgnoredDiscordErr);
 
@@ -4578,6 +4610,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -4655,6 +4688,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
       personalMessage: newPayload.personalMessage,
       voiceChannelId: newPayload.voiceChannelId,
       interaction,
+      recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
