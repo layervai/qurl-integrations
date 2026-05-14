@@ -715,10 +715,75 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(1);
   });
 
-  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles }', () => {
+  test('everyoneCacheCold: @everyone WITH perm but missing guild.members.cache → flag set, no expansion', () => {
+    // Surfaces the "cold cache, try again" UX signal so the caller
+    // can render a "Member cache not yet ready" reason instead of a
+    // silent deferUpdate-only no-op.
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      // guildMemberCache omitted → guild.members.cache is undefined
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+    expect(r.users).toEqual([]);
+    expect(r.everyoneCacheCold).toBe(true);
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('everyoneCacheCold: @everyone WITH perm but EMPTY guild.members.cache → flag set (cache defined but no entries)', () => {
+    // The "cache exists but is empty" case looks identical to "cache
+    // missing" from the user's perspective — both yield zero expansion.
+    // The helper treats them the same.
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      guildMemberCache: new Map(), // defined but size === 0
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+    expect(r.users).toEqual([]);
+    expect(r.everyoneCacheCold).toBe(true);
+  });
+
+  test('everyoneCacheCold stays false when @everyone is DENIED (cache state irrelevant)', () => {
+    // When MENTION_EVERYONE is denied, the cache state is irrelevant
+    // because we never look at it. massMentionDenied is the relevant
+    // signal; everyoneCacheCold should NOT also fire and clutter the
+    // warnings.
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      // No guildMemberCache (would be cold if perm were granted)
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.massMentionDenied).toBe(true);
+    expect(r.everyoneCacheCold).toBe(false);
+  });
+
+  test('defense: role member with undefined .user is skipped (partial GuildMember from sparse fetch)', () => {
+    // In standard discord.js, `member.user` is always populated. A
+    // partial GuildMember from a sparse `members.fetch({ withPresences:
+    // false, time: 100 })` can carry an undefined `.user`. Without the
+    // defense, downstream partitionRecipients would deref `u.bot` /
+    // `u.id` on undefined and throw. Pin the skip.
+    const u1 = makeUser('100000000000000001');
+    // Build members map directly (makeRole helper requires m.user.id).
+    const role = ['role-eng', {
+      id: 'role-eng',
+      members: new Map([
+        ['100000000000000091', { user: undefined }],
+        [u1.id, { user: u1 }],
+        ['100000000000000092', { /* no .user property at all */ }],
+      ]),
+    }];
+    const int = makeMentionableInteraction({
+      pickedRoles: [role],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+    expect(r.droppedFromRoles).toBe(0);
+  });
+
+  test('returns the documented shape: { users, massMentionDenied, droppedFromRoles, everyoneCacheCold }', () => {
     const int = makeMentionableInteraction({});
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
-    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'massMentionDenied', 'users']);
+    expect(Object.keys(r).sort()).toEqual(['droppedFromRoles', 'everyoneCacheCold', 'massMentionDenied', 'users']);
   });
 });
 
@@ -2803,11 +2868,12 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Mention Everyone/);
   });
 
-  test('mentionable picker: guild without members.cache (cold cache after restart) → @everyone-allowed no-ops cleanly', async () => {
+  test('mentionable picker: guild without members.cache (cold cache after restart) → surfaces "Member cache not yet ready" reason', async () => {
     // Right after a bot restart, guild.members.cache may not yet be
-    // populated. The duck-type guard `if (!source || typeof
-    // source.entries !== 'function') continue;` skips the expansion
-    // cleanly rather than throwing. Pin the defense.
+    // populated. Without a user-visible signal, the user picks
+    // @everyone and sees nothing happen — reads as "the bot is
+    // broken." The helper sets everyoneCacheCold, and the all-invalid
+    // branch surfaces a "try again" reason so the user has recourse.
     const int = makeSelectInteraction({
       users: [],
       roles: [],
@@ -2819,11 +2885,11 @@ describe('handleConfirmUserSelect', () => {
     const everyoneId = int.guild.id;
     int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    // No expansion happened → selected is empty, massMentionDenied is
-    // false (perm was granted), droppedFromRoles is 0 → early-return.
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    expect(int.deferUpdate).toHaveBeenCalled();
-    expect(int.editReply).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Member cache not yet ready/);
+    // Resource header survives — preserved-context contract.
+    expect(updated.content).toMatch(/Sending file/);
   });
 
   test('mentionable picker: partial-valid role (humans + bots) → flow advances AND droppedFromRoles warning surfaces', async () => {

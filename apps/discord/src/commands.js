@@ -2749,7 +2749,7 @@ function partitionRecipients(users, senderId) {
 // in prod and plain Maps in tests. Both implement `.values()`,
 // `.entries()`, and `Symbol.iterator` — the duck-type guards below
 // gate on the methods we actually call.
-function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdForLog }) {
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id }) {
   const guild = interaction.guild;
   const userMap = new Map();
   if (interaction.users && typeof interaction.users.values === 'function') {
@@ -2758,6 +2758,13 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
     }
   }
   let massMentionDenied = false;
+  // Set when the user picked @everyone WITH MENTION_EVERYONE but the
+  // guild.members cache is missing or empty — e.g. immediately after
+  // a bot restart, before the lazy-load fills it. Lets the caller
+  // surface a "try again in a few seconds" reason instead of the
+  // silent deferUpdate-only no-op the user-visible path would
+  // otherwise hit.
+  let everyoneCacheCold = false;
   // Distinct bot IDs filtered across all picked roles — caller renders
   // .size as "N bot(s) filtered." Tracking as a Set (not a counter)
   // so overlap (bot in two roles, or directly-picked bot also in a
@@ -2789,7 +2796,16 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
       const source = isEveryoneRole
         ? guild.members?.cache
         : role?.members;
-      if (!source || typeof source.entries !== 'function') continue;
+      if (!source || typeof source.entries !== 'function') {
+        if (isEveryoneRole) everyoneCacheCold = true;
+        continue;
+      }
+      if (isEveryoneRole && source.size === 0) {
+        // Cache exists but is empty — same UX problem as missing
+        // cache. Don't iterate (no-op anyway), surface the signal.
+        everyoneCacheCold = true;
+        continue;
+      }
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
       //    downstream partition cap would be hit anyway.
@@ -2801,7 +2817,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
         if (inspectedFromRoles >= ITER_BOUND) {
           logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
-            flow_id: flowIdForLog,
+            flow_id,
             role_id: roleId,
             inspected_from_roles: inspectedFromRoles,
             user_map_size: userMap.size,
@@ -2810,6 +2826,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
           break;
         }
         inspectedFromRoles += 1;
+        // Defense: partial GuildMember objects from sparse fetches
+        // could carry an undefined `.user`. Downstream partitionRecipients
+        // would deref `.bot` / `.id` on undefined; skip such entries
+        // up front. Symmetric with the picked-users seed guard above.
+        if (!member?.user?.id) continue;
         // Dedupe BEFORE the bot check: a directly-picked bot is
         // already in userMap (seeded above), and partitionRecipients
         // will report it via droppedBots. Skipping here means it
@@ -2832,6 +2853,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
     users: [...userMap.values()],
     massMentionDenied,
     droppedFromRoles: droppedFromRolesSet.size,
+    everyoneCacheCold,
   };
 }
 
@@ -3734,16 +3756,26 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
-  const { users: selected, massMentionDenied, droppedFromRoles } = resolveMentionableSelection({
+  const {
+    users: selected,
+    massMentionDenied,
+    droppedFromRoles,
+    everyoneCacheCold,
+  } = resolveMentionableSelection({
     interaction,
     canMentionEveryone,
-    flowIdForLog: flow_id,
+    flow_id,
   });
-  if (selected.length === 0 && !massMentionDenied && droppedFromRoles === 0) {
+  if (
+    selected.length === 0
+    && !massMentionDenied
+    && droppedFromRoles === 0
+    && !everyoneCacheCold
+  ) {
     // Truly empty pick (no users, no roles, no @everyone, no
-    // bot-only roles) → already acked via deferUpdate above. Other
-    // empty-selected cases fall through to the all-invalid branch
-    // below so the user sees a reason banner.
+    // bot-only roles, cache not cold) → already acked via deferUpdate
+    // above. Other empty-selected cases fall through to the
+    // all-invalid branch below so the user sees a reason banner.
     return undefined;
   }
   // `interaction.user.id` IS the original sender's ID — Discord
@@ -3803,6 +3835,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       dropped_bots: droppedBots,
       mass_mention_denied: massMentionDenied,
       dropped_from_roles: droppedFromRoles,
+      everyone_cache_cold: everyoneCacheCold,
     });
     // Reachable cases:
     //   - bot-only individual pick (droppedBots > 0)
@@ -3810,15 +3843,19 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     //     (massMentionDenied === true)
     //   - picked a role whose only members are bots
     //     (droppedFromRoles > 0, selected.length === 0)
+    //   - picked @everyone WITH perm but guild.members.cache is
+    //     missing / empty (everyoneCacheCold === true) — typically
+    //     right after a bot restart, before chunk-on-startup lands
     // List-builder pattern; the fallback prevents a degraded
     // `⚠ . Re-pick...` message if all conditions are false.
-    // Both bot-related reasons can fire together: a pick combining a
-    // directly-picked bot and a bot-only role surfaces both signals
-    // since they describe independent picker actions.
+    // Multiple reasons can fire together: e.g. directly-picked bot
+    // and a bot-only role both surface since they describe
+    // independent picker actions.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
