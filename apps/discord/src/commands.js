@@ -158,6 +158,12 @@ function safeUrlHost(url) {
  *
  * Returns the truncated string (no ellipsis appended — callers add
  * their own truncation indicator if desired).
+ *
+ * Edge case: if `cut === 1` and the only char before it is `\`, the
+ * backoff sets `cut = 0` and the slice returns `''`. Safe failure
+ * mode for the 500-codepoint cap (callers don't depend on the result
+ * being non-empty), but worth knowing if you wire this into a smaller
+ * cap or a UI surface that distinguishes empty from truncated.
  */
 function safeCodepointSlice(s, maxCodepoints) {
   const codepoints = Array.from(s);
@@ -4194,6 +4200,15 @@ async function handleQurlMap(interaction) {
     // legitimate clients can't exceed it — the slice is forged-interaction
     // defense (a fabricated interaction could pass an unbounded payload),
     // matching the modal entry point one-for-one.
+    //
+    // Order matters: trim() FIRST, then slice. Trimming after slicing
+    // could let a forged 500+ chars-of-whitespace payload pass the
+    // length check below if trimming peeled fewer chars than the slice
+    // truncated (e.g. 510 spaces → slice(500) keeps 500 spaces → trim
+    // produces ''; the empty-location branch catches it). Reversing
+    // the order would NOT preserve the empty-after-trim semantics on
+    // a payload whose first 500 chars are non-whitespace + trailing
+    // whitespace.
     locationValue = interaction.options.getString('location', true).trim().slice(0, 500);
   } catch (err) {
     logger.warn('handleQurlMap: required location option missing', {
@@ -4472,23 +4487,24 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  // Re-fetch users at click time — defensive against members leaving
-  // the guild between confirm and Send. Both unresolved buckets
-  // (10007 + transient fetch failure) reduce the delivered count,
-  // so both are surfaced to the sender via followUp below — without
-  // the split, a 429 / gateway blip would silently shrink the
-  // delivered set with no signal.
+  // Re-fetch users + resolve apiKey IN PARALLEL at click time. Both
+  // are idempotent reads (rule from handleRevokeSelect: parallelize
+  // ONLY with idempotent reads), so the cold-cache happy path saves
+  // a DDB round-trip vs. running them sequentially. allSettled keeps
+  // each failure routable to its own user-actionable copy below; a
+  // rejection in one doesn't short-circuit the other.
   //
-  // resolveRecipientUsers is wrapped in try/catch because the dispatcher's
-  // outer catch only logs + replies generic-superseded; a click-time
-  // lookup throw should give the user a directly actionable message
-  // without committing the dedup deleteFlow.
-  let resolved;
-  try {
-    resolved = await resolveRecipientUsers(interaction, payload.recipientIds);
-  } catch (err) {
+  // Both unresolved buckets (10007 + transient fetch failure) reduce
+  // the delivered count, so both are surfaced to the sender via
+  // followUp below — without the split, a 429 / gateway blip would
+  // silently shrink the delivered set with no signal.
+  const [resolveResult, apiKeyResult] = await Promise.allSettled([
+    resolveRecipientUsers(interaction, payload.recipientIds),
+    db.getGuildApiKey(interaction.guildId),
+  ]);
+  if (resolveResult.status === 'rejected') {
     logger.error('handleSendConfirmClick: resolveRecipientUsers threw', {
-      flow_id, error: err && err.message,
+      flow_id, error: resolveResult.reason && resolveResult.reason.message,
     });
     // Zero side effects — unlock retry so the user can re-click Send
     // immediately after the transient blip clears.
@@ -4498,7 +4514,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  const { users, unresolvedIds, transientFailureIds } = resolved;
+  const { users, unresolvedIds, transientFailureIds } = resolveResult.value;
   const partialLeftCount = unresolvedIds.length;
   const partialTransientCount = transientFailureIds.length;
   if (partialLeftCount > 0 || partialTransientCount > 0) {
@@ -4532,38 +4548,32 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Resolve apiKey before dedup — getGuildApiKey is idempotent + free,
-  // so a duplicate dispatch's redundant call is harmless. Same
-  // safety rule handleRevokeSelect documents (parallelize ONLY with
-  // idempotent reads).
+  // apiKey was resolved in parallel with resolveRecipientUsers above.
+  // Check the rejection branch before consuming the value.
   //
-  // `expectedVersion: row.version` fences the picker-then-Send race:
-  // if a UserSelectMenu interaction landed and transitioned the flow
-  // between the dispatcher's loadFlow (which fed `row` here) and our
-  // deleteFlow, the version would have advanced. Without the version
-  // gate, we'd deleteFlow successfully and call executeSendPipeline
-  // with the STALE recipientIds captured in `payload` above — exactly
-  // the silent-divergence shape handleSetupButton uses expectedVersion
-  // to fence (commands.js:~3196). `deleted: false` here now collapses
-  // duplicate dispatch AND mid-flight picker mutation; both map to the
-  // same user recovery ("the card moved under you, re-click Send").
+  // `expectedVersion: row.version` (used below on deleteFlow) fences
+  // the picker-then-Send race: if a UserSelectMenu interaction landed
+  // and transitioned the flow between the dispatcher's loadFlow (which
+  // fed `row` here) and our deleteFlow, the version would have
+  // advanced. Without the version gate, we'd deleteFlow successfully
+  // and call executeSendPipeline with the STALE recipientIds captured
+  // in `payload` above. `deleted: false` collapses duplicate dispatch
+  // AND mid-flight picker mutation; both map to the same user
+  // recovery ("the card moved under you, re-click Send").
   // `interaction.guildId` is guaranteed non-null at this point —
   // handleQurlSlashSend rejects DM invocations BEFORE the flow row
   // is created, so a row at SEND_STAGE_AWAITING_CONFIRM only ever
-  // belongs to a guild interaction. No conditional fallback.
+  // belongs to a guild interaction.
   //
-  // Sequence: getGuildApiKey BEFORE deleteFlow. If the DDB read
-  // throws (rare — region outage, IAM revocation), the row stays
-  // alive and the user can re-click Send within the TTL once the
-  // blip clears. Burning the flow row first would strand the user
-  // on a dead card with the dispatcher's generic-superseded message
-  // and force a full /qurl file rerun.
-  let guildApiKey;
-  try {
-    guildApiKey = await db.getGuildApiKey(interaction.guildId);
-  } catch (err) {
+  // apiKey gate runs BEFORE deleteFlow: if both guildApiKey AND
+  // config.QURL_API_KEY are null (rare — key rotation removed the
+  // key), the flow row stays alive and the user can re-click Send
+  // within the TTL after the admin reruns `/qurl setup`. Burning the
+  // row before discovering there's no key to send with would strand
+  // the user on a dead card.
+  if (apiKeyResult.status === 'rejected') {
     logger.error('handleSendConfirmClick: getGuildApiKey threw', {
-      flow_id, error: err && err.message,
+      flow_id, error: apiKeyResult.reason && apiKeyResult.reason.message,
     });
     // Flow row stays alive; unlock retry so the user isn't stranded
     // for 30s waiting for a DDB blip to clear.
@@ -4573,6 +4583,7 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
+  const guildApiKey = apiKeyResult.value;
   // Check the resolved key BEFORE deleteFlow. If both guildApiKey and
   // config.QURL_API_KEY are null (rare: key rotation removed the key
   // between dispatcher pre-check and Send click), there's nothing to
