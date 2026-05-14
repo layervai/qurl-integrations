@@ -3445,6 +3445,52 @@ describe('renderConfirmCardRows', () => {
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
   });
+
+  test('voice button label stays under Discord\'s 80 UTF-16 cap even with a 100-char emoji-containing channel name', async () => {
+    // Pins the codepoint-aware truncation: a channel name with an
+    // emoji at position 45 must NOT split a UTF-16 surrogate pair
+    // (would render `�` on the button) AND the full label must stay
+    // under Discord's 80 UTF-16 unit hard cap. Without the
+    // safeCodepointSlice / Array.from length check, a long emoji-
+    // containing name would either overflow or render mangled.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    // 100-char name with emoji (🎉 = surrogate pair) at index 44,
+    // 45, 46 to land near the slice boundary.
+    const longName = 'a'.repeat(44) + '🎉🎉🎉' + 'b'.repeat(47);
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },
+      // Inject the channel into the interaction so renderConfirmCardRows'
+      // live read finds it.
+    });
+    int.channel = { id: 'voice-long', type: 2 };
+    int.guild.channels.cache.set('voice-long', {
+      id: 'voice-long', name: longName, type: 2,
+      members: new Map([['111', { user: { id: '111', bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    const voiceBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
+    );
+    expect(voiceBtn).toBeDefined();
+    const labelCall = voiceBtn.value.setLabel.mock.calls[0];
+    const label = labelCall[0];
+    // UTF-16 unit length (string.length) must stay under 80.
+    expect(label.length).toBeLessThanOrEqual(80);
+    // Truncation indicator present when the name was longer than the budget.
+    expect(label).toMatch(/…/);
+    // Surrogate pair safety: no orphan lead-surrogate (0xD800-0xDBFF
+    // without a paired trail surrogate). Quick scan.
+    for (let i = 0; i < label.length; i++) {
+      const code = label.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = label.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xDC00);
+        expect(next).toBeLessThanOrEqual(0xDFFF);
+        i++; // skip the trail surrogate
+      }
+    }
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

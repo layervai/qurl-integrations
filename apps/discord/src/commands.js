@@ -3077,10 +3077,15 @@ function renderConfirmCardRows({
   const bottomRow = new ActionRowBuilder();
   if (voiceChannelId) {
     // Live count via interaction.guild for the label. interaction may
-    // be absent on the (rare) test path that builds rows without it;
-    // fall back to `?` so the button still renders without crashing.
-    // The button itself is disabled in either degraded case (no count
-    // = nothing to send to anyway from this affordance).
+    // be absent on the rare test path that calls renderConfirmCardRows
+    // directly without constructing an interaction stub (e.g., the
+    // qurl-file-map.test.js renderer-shape tests that exercise row
+    // count + layout without exercising guild-cache resolution); fall
+    // back to `?` so the button still renders without crashing. Every
+    // production caller (handleQurlSlashSend, handleConfirmUserSelect,
+    // handleConfirmVoiceEveryone, rerenderConfirmCard) passes
+    // interaction. The button itself is disabled in either degraded
+    // case (no count = nothing to send to anyway from this affordance).
     //
     // Count is render-time, not click-time — members can join/leave
     // voice between renders. Click-time resolution in
@@ -4059,9 +4064,23 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // shape the picker hands it. Skip entries with no .user (defensive
   // against partial-cache rows); partitionRecipients handles the
   // bot filter + droppedBots accounting.
+  //
+  // Partial-cache drops are logged at debug level — silent shrinkage
+  // of the recipient set is hard to diagnose post-hoc without
+  // telemetry. The log fires per shrunk send (not per dropped
+  // member) so volume tracks frequency of the degraded state, not
+  // member count.
   const selectedUsers = [];
+  let partialCacheDrops = 0;
   for (const [, m] of channel.members) {
     if (m?.user) selectedUsers.push(m.user);
+    else partialCacheDrops++;
+  }
+  if (partialCacheDrops > 0) {
+    logger.debug('handleConfirmVoiceEveryone: partial-cache rows dropped from voice resolution', {
+      flow_id, voice_channel_id: voiceChannelId, dropped: partialCacheDrops,
+      channel_size: channel.members.size,
+    });
   }
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
   if (valid.length === 0) {
