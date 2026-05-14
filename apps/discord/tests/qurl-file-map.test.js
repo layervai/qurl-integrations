@@ -1227,6 +1227,54 @@ describe('handleQurlFile — slash entry', () => {
     }
   });
 
+  test('guild context + no MENTION_EVERYONE → @everyone warning renders + Alice still parses', async () => {
+    // Positive-case companion to the DM-suppression test above. In
+    // guild context, when the sender lacks MENTION_EVERYONE and types
+    // `@everyone <@alice>`, the parser surfaces massMentionDenied and
+    // the handler renders the permission-specific warning. Alice
+    // expands normally. Pin the visible UX so a future refactor that
+    // accidentally collapses the warning surfaces here.
+    const aliceId = '400000000000000001';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    // Default memberPermissions is undefined (no Mention Everyone) —
+    // matches the existing "no permission" assumption across this
+    // test suite.
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastEdit.content).toMatch(/Mention Everyone\b/);
+    // Alice still made it into the recipient list.
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds).toEqual([aliceId]);
+  });
+
+  test('guild context + MENTION_EVERYONE permission → @everyone expands, no warning', async () => {
+    // Channel-overwrite pinning: the handler reads
+    // `interaction.memberPermissions.has(MentionEveryone)` (channel-
+    // effective perms). A future refactor that switched to
+    // `interaction.member.permissions.has(...)` (guild-wide only)
+    // would silently lose channel-overwrite respect. Pin the
+    // property contract by mocking `memberPermissions.has`.
+    const aliceId = '400000000000000002';
+    const bobId = '400000000000000003';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {}, [bobId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Permission warning must NOT fire.
+    expect(lastEdit.content).not.toMatch(/Mention Everyone permission/);
+    // Both Alice + Bob expanded from @everyone are in the payload.
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.recipientIds.sort()).toEqual([aliceId, bobId].sort());
+  });
+
   test('all mentioned recipients hit transient lookup failure → retry copy, not "no valid recipients"', async () => {
     // transient-only path: the user's mentions were VALID but every
     // members.fetch hit a 429 or gateway blip. Generic "no valid
