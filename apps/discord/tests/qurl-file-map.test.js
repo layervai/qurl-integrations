@@ -2416,17 +2416,27 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(ids).not.toContain(bot1);
   });
 
-  test('missing voiceChannelId in payload: early-return without throwing or calling transitionFlow', async () => {
+  test('missing voiceChannelId in payload: re-renders card WITHOUT the voice button (visible feedback)', async () => {
     // The button should not have rendered without voiceChannelId; a
     // click here means a forged interaction or schema drift. Handler
-    // logs and returns undefined rather than deleting the row.
+    // must give the user VISIBLE feedback that something changed —
+    // a silent ack after deferUpdate would leave the user staring at
+    // an unchanged card wondering if their click registered. The
+    // re-render strips the broken affordance (renderConfirmCardRows
+    // conditions on voiceChannelId being set); the user can pick
+    // recipients through the still-visible UserSelectMenu.
     const int = makeVoiceInteraction({ members: [u1] });
     const payloadWithoutVoice = { ...basePayload, voiceChannelId: null };
-    await expect(
-      handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } })
-    ).resolves.toBeUndefined();
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Card content re-rendered (not just components: []) so the
+    // user sees the resource header still — they didn't lose context.
+    expect(lastCall.content).toBeTruthy();
+    expect(Array.isArray(lastCall.components)).toBe(true);
+    expect(lastCall.components.length).toBeGreaterThan(0);
   });
 
   test('channel deleted between render and click: rejectVoice path runs (warning re-render, no transition)', async () => {

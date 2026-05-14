@@ -279,8 +279,18 @@ module.exports = {
   // cap of 0 would reject every send.
   //
   // 20,000 default chosen to accommodate the voice-everyone path against
-  // stage channels (Discord's largest gathering surface). Operational
-  // implications a max-size send carries:
+  // stage channels (Discord's largest gathering surface). Heads-up for
+  // operators reading the release notes: the same cap bounds EVERY
+  // recipient-resolution path — `<@user>` list expansion, `<@&role>`
+  // expansion, `<#voice>` expansion, the UserSelectMenu picker, AND
+  // `@everyone` (gated on MENTION_EVERYONE). The 50 → 20,000 jump
+  // therefore re-shapes the `@everyone` blast radius by 400× for any
+  // member granted MENTION_EVERYONE in a guild that takes the new
+  // default. Guilds that intentionally constrained the prior 50-recipient
+  // ceiling for non-voice surfaces should set `QURL_SEND_MAX_RECIPIENTS`
+  // to the desired bound in their env; the voice-everyone path will then
+  // partial-resolve up to that bound rather than refusing.
+  // Operational implications a max-size send carries:
   //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
   //     qurl-service per send (`mintLinksInBatches`).
   //   - DM delivery is bounded by Discord's per-bot DM rate limit

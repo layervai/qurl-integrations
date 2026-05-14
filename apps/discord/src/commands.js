@@ -3052,10 +3052,27 @@ function renderConfirmCardRows({
       connectedCount = n;
     }
     const labelCount = connectedCount == null ? '?' : String(connectedCount);
+    // Name the target channel in the label so a user who invoked
+    // from #voice-A and drifted to #voice-B mid-flow can tell the
+    // button still targets the original channel. Discord button-label
+    // hard cap is 80 chars; budget enforced by truncating the channel
+    // name (the prefix + suffix is ~32 chars, leaving ~46 for the
+    // name — Discord channel names cap at 100 chars so truncation is
+    // possible). On cache miss (channel was deleted between render
+    // and re-render) the legacy "this voice channel" copy is correct,
+    // since we can't name a channel we can't read.
+    const channelName = channel?.name;
+    const VOICE_LABEL_NAME_BUDGET = 46;
+    const safeName = channelName
+      ? (channelName.length > VOICE_LABEL_NAME_BUDGET
+          ? `${channelName.slice(0, VOICE_LABEL_NAME_BUDGET - 1)}…`
+          : channelName)
+      : null;
+    const labelTarget = safeName ? `#${safeName}` : 'this voice channel';
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID)
-        .setLabel(`\u{1F50A} Everyone in this voice channel (${labelCount})`)
+        .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(connectedCount === null || connectedCount === 0),
     );
@@ -3898,13 +3915,36 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   if (!voiceChannelId) {
     // Button shouldn't have rendered without this field. A click here
     // is either a forged interaction or a payload that lost the field
-    // (schema drift). Re-render the card without the button rather
-    // than deleting the row — the user can still pick recipients
-    // through the UserSelectMenu.
+    // (schema drift). Re-render the card WITHOUT the voice button
+    // (renderConfirmCardRows conditions on voiceChannelId being set)
+    // so the broken affordance is removed AND the user gets visible
+    // feedback that something changed — silently absorbing the click
+    // post-deferUpdate would leave the user staring at an unchanged
+    // card with no indication their click registered.
     logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', {
       flow_id, interaction_id: interaction.id,
     });
-    return undefined;
+    return interaction.editReply({
+      content: renderConfirmCardContent({
+        resourceType: payload.resourceType,
+        resourceLabel: payload.resourceLabel,
+        validRecipients: [],
+        expiresIn: payload.expiresIn,
+        selfDestructSeconds: payload.selfDestructSeconds,
+        personalMessage: payload.personalMessage,
+        warningsBlock: '',
+        needsPicker: true,
+        interaction,
+      }),
+      components: renderConfirmCardRows({
+        sendDisabled: true,
+        expiresIn: payload.expiresIn,
+        selfDestructSeconds: payload.selfDestructSeconds,
+        personalMessage: payload.personalMessage,
+        voiceChannelId: null,
+        interaction,
+      }),
+    }).catch(logIgnoredDiscordErr);
   }
 
   // Re-render with a warning banner. Same shape as the picker's
