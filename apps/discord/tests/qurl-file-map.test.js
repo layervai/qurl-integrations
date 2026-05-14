@@ -588,13 +588,15 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
-  test('pathological all-bot role iteration bounded by 4× cap (belt-and-suspenders against userMap.size never growing)', () => {
+  test('pathological all-bot role iteration bounded at exactly 4× cap (=100, pins the multiplier)', () => {
     // The userMap.size cap-break never fires for an all-bot role
-    // because bots only increment droppedFromRoles. Without the
+    // because bots only increment droppedFromRolesSet. Without the
     // iteration-count guard, a pathological 10k-bot role would
     // iterate all 10k entries. Bound at 4× QURL_SEND_MAX_RECIPIENTS
-    // (=100) keeps it cheap while still surfacing humans behind
-    // bot-prefixes in non-pathological roles.
+    // (=100); pin the multiplier exactly so a future halving back
+    // to 2× would fail this test (≤100 would silently still pass).
+    const config = require('../src/config');
+    const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
     const bots = Array.from({ length: 300 }, (_, i) => ({
       user: makeUser(`100000000000000${String(i).padStart(3, '0')}`, { bot: true }),
     }));
@@ -603,9 +605,55 @@ describe('resolveMentionableSelection', () => {
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
-    // Iterated at most 4× cap (=100) before bailing.
-    expect(r.droppedFromRoles).toBeLessThanOrEqual(100);
-    expect(r.droppedFromRoles).toBeGreaterThan(0);
+    // Exactly ITER_BOUND distinct bot IDs landed in the Set before
+    // the iteration counter tripped the break. With unique bot IDs
+    // (the fixture), set.size === inspectedFromRoles.
+    expect(r.droppedFromRoles).toBe(ITER_BOUND);
+  });
+
+  test('overlap dedup: same bot in two picked roles counted once in droppedFromRoles', () => {
+    // Set-backed droppedFromRoles means the same bot ID across two
+    // picked roles contributes 1 to the user-visible count, not 2.
+    // Pin against a future revert to counter semantics that would
+    // surface "2 bot(s)" when only 1 distinct bot existed.
+    const bot1 = makeUser('100000000000000099', { bot: true });
+    const u1 = makeUser('100000000000000001');
+    const roleA = makeRole({
+      id: 'role-a',
+      members: [{ user: bot1 }, { user: u1 }],
+    });
+    const roleB = makeRole({
+      id: 'role-b',
+      members: [{ user: bot1 }],
+    });
+    const int = makeMentionableInteraction({
+      pickedRoles: [roleA, roleB],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+    expect(r.droppedFromRoles).toBe(1);
+  });
+
+  test('directly-picked bot + same bot in role → droppedFromRoles 0 (partition reports it via droppedBots)', () => {
+    // The role-side dedupe-before-bot-check skip means a bot that's
+    // already in userMap (from interaction.users) doesn't ALSO tick
+    // the role counter. Downstream partitionRecipients reports it via
+    // droppedBots; surfacing two warnings for the same bot would be
+    // a UX nit.
+    const bot1 = makeUser('100000000000000099', { bot: true });
+    const role = makeRole({
+      id: 'role-with-bot',
+      members: [{ user: bot1 }],
+    });
+    const int = makeMentionableInteraction({
+      pickedUsers: [bot1],
+      pickedRoles: [role],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    // Bot lands in users array (caller's partitionRecipients drops it).
+    expect(r.users.map((u) => u.id)).toEqual([bot1.id]);
+    // Role-side did NOT also tick the role-bot counter.
+    expect(r.droppedFromRoles).toBe(0);
   });
 
   test('bot-only role pick → droppedFromRoles counts the filtered bots', () => {
@@ -2683,6 +2731,73 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/no non-bot members/i);
     // Resource header survives — same preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: sender via role pick → flow advances, selfIncluded flips on (#322 parity)', async () => {
+    // Defense against a future refactor that adds a sender-filter
+    // inside resolveMentionableSelection — partitionRecipients OWNS
+    // the selfIncluded detection (commands.js contract). A
+    // sender-only role pick lands the sender in `selected`, partition
+    // sees them, valid.length === 1, selfIncluded === true.
+    const senderUser = makeUser(SENDER_ID);
+    const senderRole = ['role-sender', {
+      id: 'role-sender',
+      members: new Map([[SENDER_ID, { user: senderUser }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [senderRole],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.selfIncluded).toBe(true);
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Send includes you/);
+  });
+
+  test('mentionable picker: missing interaction.memberPermissions → canMentionEveryone defaults false, @everyone denied', async () => {
+    // Discord normally populates `memberPermissions` on guild
+    // interactions, but the `?.has(...) === true` chain handles
+    // undefined defensively. Pin that defense against a future
+    // simplification that drops the optional chain.
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [],
+      canMentionEveryone: false,
+    });
+    int.memberPermissions = undefined;
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/@everyone/);
+    expect(updated.content).toMatch(/Mention Everyone/);
+  });
+
+  test('mentionable picker: guild without members.cache (cold cache after restart) → @everyone-allowed no-ops cleanly', async () => {
+    // Right after a bot restart, guild.members.cache may not yet be
+    // populated. The duck-type guard `if (!source || typeof
+    // source.entries !== 'function') continue;` skips the expansion
+    // cleanly rather than throwing. Pin the defense.
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [],
+      canMentionEveryone: true,
+    });
+    // Strip the cache entirely — guild remains, but `.members.cache`
+    // is undefined.
+    int.guild.members = {};
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    // No expansion happened → selected is empty, massMentionDenied is
+    // false (perm was granted), droppedFromRoles is 0 → early-return.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(int.editReply).not.toHaveBeenCalled();
   });
 
   test('mentionable picker: partial-valid role (humans + bots) → flow advances AND droppedFromRoles warning surfaces', async () => {

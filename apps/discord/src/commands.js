@@ -2738,13 +2738,11 @@ function partitionRecipients(users, senderId) {
 // instead of `role.members` — discord.js doesn't reliably surface
 // all members through @everyone's role.members.
 //
-// `droppedFromRoles` counts picker-action bot filtering (bot members
-// the helper skipped during role expansion). It is a count of
-// *iterations*, not unique bot IDs — if the same bot is also picked
-// individually OR appears in two picked roles, it can be counted
-// more than once. The caller treats it as a boolean signal for the
-// "bot(s) filtered from picked role(s)" warning line, so the count
-// is only used as `> 0` / "N" in user-visible copy.
+// `droppedFromRoles` is the count of DISTINCT bot-user IDs filtered
+// during role expansion (Set-backed) — matches what the user sees
+// rendered as "N bot(s) filtered from picked role(s)." A bot that
+// appears in two picked roles, or is directly picked AND also in a
+// picked role, is counted at most once.
 //
 // Map/Collection compatibility: `interaction.users` and
 // `interaction.roles` are discord.js Collections (which extend Map)
@@ -2760,16 +2758,21 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
     }
   }
   let massMentionDenied = false;
-  // Accumulates across all picked roles intentionally — the bound is
-  // an iteration-cost cap, not per-role correctness, so a pathological
-  // first role legitimately pre-truncates expansion of later roles.
-  let droppedFromRoles = 0;
+  // Distinct bot IDs filtered across all picked roles — caller renders
+  // .size as "N bot(s) filtered." Tracking as a Set (not a counter)
+  // so overlap (bot in two roles, or directly-picked bot also in a
+  // role) doesn't inflate the user-visible number.
+  const droppedFromRolesSet = new Set();
+  // Raw inner-loop iterations across all picked roles. Bounds the
+  // iteration COST independent of unique-bot semantics, so a
+  // pathological 10k-entry role can't grind for free.
+  let inspectedFromRoles = 0;
   // 4× cap (=100) balances pathological-role protection against the
   // UX edge where a real role iterates bots first and humans behind:
   // 2× was tight enough that a "bots-up-front" role could leave the
-  // user under-expanded with no visible signal beyond a high
-  // droppedFromRoles count. 4× pushes the rate-of-occurrence well
-  // below any plausible non-pathological role layout.
+  // user under-expanded with no visible signal beyond a high count.
+  // 4× pushes the rate-of-occurrence well below any plausible
+  // non-pathological role layout.
   const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
   if (interaction.roles && typeof interaction.roles.entries === 'function') {
     for (const [roleId, role] of interaction.roles.entries()) {
@@ -2781,46 +2784,55 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdFo
         massMentionDenied = true;
         continue;
       }
+      // `guild` is provably truthy in the @everyone branch (gated by
+      // `guild && roleId === guild.id` above).
       const source = isEveryoneRole
-        ? guild?.members?.cache
+        ? guild.members?.cache
         : role?.members;
       if (!source || typeof source.entries !== 'function') continue;
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
       //    downstream partition cap would be hit anyway.
-      //  - droppedFromRoles + size past 4× cap: bounds iteration
+      //  - inspectedFromRoles past 4× cap: bounds iteration cost
       //    against a pathological all-bot role where the size guard
-      //    can never fire (bots only increment droppedFromRoles).
-      //    Logs at debug so a user-reported "I picked a role and got
-      //    fewer than expected" has a forensic hook.
+      //    can never fire. Logs at debug so a user-reported "I picked
+      //    a role and got fewer than expected" has a forensic hook.
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
-        if (droppedFromRoles + userMap.size >= ITER_BOUND) {
+        if (inspectedFromRoles >= ITER_BOUND) {
           logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
             flow_id: flowIdForLog,
             role_id: roleId,
-            dropped_from_roles: droppedFromRoles,
+            inspected_from_roles: inspectedFromRoles,
             user_map_size: userMap.size,
             iter_bound: ITER_BOUND,
           });
           break;
         }
+        inspectedFromRoles += 1;
+        // Dedupe BEFORE the bot check: a directly-picked bot is
+        // already in userMap (seeded above), and partitionRecipients
+        // will report it via droppedBots. Skipping here means it
+        // doesn't ALSO tick the role-side bot signal — avoids
+        // surfacing two warnings for the same underlying bot.
+        if (userMap.has(memberId)) continue;
+        if (droppedFromRolesSet.has(memberId)) continue;
         if (isBotMember(member)) {
-          droppedFromRoles += 1;
+          droppedFromRolesSet.add(memberId);
           continue;
         }
-        // `has` check preserves field fidelity, not cap-priority
-        // (which is enforced by the user-pick seeding above happening
-        // before role expansion). It keeps the original User object
-        // from interaction.users instead of overwriting with
-        // member.user, which can differ in optional fields like
-        // `globalName` that downstream alias rendering reads.
-        if (userMap.has(memberId)) continue;
+        // member.user is kept here (not the picker's User object)
+        // because picked-user seeding already happened; field fidelity
+        // for picked users is preserved by the userMap.has skip above.
         userMap.set(memberId, member.user);
       }
     }
   }
-  return { users: [...userMap.values()], massMentionDenied, droppedFromRoles };
+  return {
+    users: [...userMap.values()],
+    massMentionDenied,
+    droppedFromRoles: droppedFromRolesSet.size,
+  };
 }
 
 /**
