@@ -138,6 +138,13 @@ type Handler struct {
 	// missing env vars) — /qurl setup returns a "not configured"
 	// ephemeral in that case rather than minting a useless link.
 	oauthSetup *oauth.SetupConfig
+	// aliasStore persists per-channel alias bindings for the
+	// `/qurl setalias` / `/qurl unsetalias` verbs. nil when not
+	// configured (sandbox / pre-#231/#233 deploys) — handlers fail
+	// fast with an operator-visible ephemeral rather than silently
+	// dropping the write. See handler_alias.go for the interface
+	// shape and the schema-gap rationale.
+	aliasStore AliasStore
 	// baseCtx is captured at NewHandler time from cfg.BaseContext (or
 	// context.Background()). Each async goroutine derives a
 	// context.WithTimeout(baseCtx, asyncWorkTimeout) — canceling baseCtx
@@ -168,6 +175,21 @@ type Handler struct {
 	// returned value, which is the SSRF-sanitization pattern CodeQL's
 	// taint analysis recognizes.
 	validateResponseURLFn func(string) (*url.URL, error)
+}
+
+// SetAliasStore wires the per-channel alias persistence surface into
+// the /qurl setalias / /qurl unsetalias verbs. Must be called exactly
+// once, before srv.Serve. nil is a no-op (the verbs will reply with
+// a "not configured" ephemeral) so cmd/main.go can omit the call on
+// sandbox deploys that haven't onboarded the slackdata package yet.
+// A second non-nil call panics — the field is read on the request
+// hot path without synchronization, and the only safe write window
+// is before any goroutine can observe it.
+func (h *Handler) SetAliasStore(store AliasStore) {
+	if h.aliasStore != nil {
+		panic("SetAliasStore called twice — must be called once before Serve")
+	}
+	h.aliasStore = store
 }
 
 // SetOAuthSetup wires the per-workspace OAuth configuration into the
@@ -472,6 +494,13 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// falls through to the unknown-subcommand branch and gets a
 		// help nudge.
 		h.handleList(w, values)
+	case text == "setalias" || strings.HasPrefix(text, "setalias "):
+		// Bare `setalias` falls through too — parseAliasArgs renders
+		// the usage hint, so the user gets the right grammar without
+		// a separate "missing args" branch here.
+		h.handleSetAlias(w, values)
+	case text == "unsetalias" || strings.HasPrefix(text, "unsetalias "):
+		h.handleUnsetAlias(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -580,6 +609,8 @@ func helpMessage() string {
 • ` + "`/qurl setup`" + ` — Connect qURL to your Slack workspace (workspace admin only)
 • ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
 • ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
+• ` + "`/qurl setalias $<alias> <url-or-resource-id>`" + ` — Bind an alias to this channel (admin only)
+• ` + "`/qurl unsetalias $<alias>`" + ` — Clear this channel's alias (admin only)
 • ` + "`/qurl help`" + ` — Show this help message`
 }
 
