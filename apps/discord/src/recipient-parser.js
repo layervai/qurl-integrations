@@ -243,7 +243,11 @@ function isBotMember(member) {
 //     `guild.roles.cache`.
 // The `<@&{guildId}>` wire form (Discord's @everyone-role mention) is
 // routed through the `@everyone` channel above (massMentionDenied /
-// guild.members.cache expansion) rather than `role.members`.
+// guild.members.cache expansion) rather than `role.members`. The
+// wire-form check (`guild && roleId === guild.id`) fires BEFORE the
+// `roles.cache.get(roleId)` lookup, so a cold cache that doesn't yet
+// hold the @everyone role still routes correctly (pinned by the
+// `<@&{guildId}> wire form routes to massMentionDenied` test).
 //
 // `interaction` is the slash-command interaction; we need it for:
 //   - interaction.guild               → role-mention expansion via

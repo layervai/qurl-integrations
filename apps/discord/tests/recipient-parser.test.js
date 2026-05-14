@@ -492,6 +492,39 @@ describe('parseRecipientMentions — role-mention permission gate (#326)', () =>
     expect(res.invalidTokens).toEqual([]);
   });
 
+  test('`@everyone` text token + <@&{guildId}> wire form together → idempotent (single semantic action, no double-count)', () => {
+    // Both forms map to the same @everyone semantic. Pin that they
+    // converge on a single state — `everyonePresent: true` (allowed
+    // path) and `massMentionDenied: true` (denied path) — without
+    // double-counting or splitting copy across surfaces. A regression
+    // that routed one form through a different channel would surface
+    // here. Allowed-path: @everyone expansion fires ONCE (members
+    // appear once in ids); denied-path: massMentionDenied is just a
+    // boolean so set-once is the natural shape, but the per-occurrence
+    // member expansion still must not happen.
+    const allowedInt = makeInteraction({
+      guildId: '999',
+      users: { '101': {}, '102': {} },
+    });
+    const allowedRes = parseRecipientMentions('@everyone <@&999>', allowedInt, { allowMassMention: true });
+    expect(allowedRes.ids.sort()).toEqual(['101', '102']);
+    expect(allowedRes.massMentionDenied).toBe(false);
+    expect(allowedRes.roleMentionsDenied).toEqual([]);
+
+    const deniedInt = makeInteraction({
+      guildId: '999',
+      users: { '101': {}, '102': {} },
+    });
+    const deniedRes = parseRecipientMentions('@everyone <@&999>', deniedInt, { allowMassMention: false });
+    expect(deniedRes.ids).toEqual([]);
+    expect(deniedRes.massMentionDenied).toBe(true);
+    expect(deniedRes.roleMentionsDenied).toEqual([]);
+    // Neither form should land in invalidTokens — the dedicated
+    // @everyone channel handles both, and neither leaks to the
+    // "couldn't parse" residue path.
+    expect(deniedRes.invalidTokens).toEqual([]);
+  });
+
   test('<@&{guildId}> with allowMassMention → triggers @everyone expansion via guild.members.cache', () => {
     // Parity with the picker path: when allowed, the @everyone-role
     // wire form expands through guild.members.cache (NOT role.members)

@@ -430,6 +430,13 @@ function resolveRecipientAlias(r, interaction) {
 // sourced so a future change to the fallback string or cache shape
 // only touches one place (vs. the text-path and picker-path call
 // sites drifting).
+//
+// Uses `||` (not `??`) intentionally so empty-string names also fall
+// through to `unknown-role`. Discord enforces 1–100 char role names
+// server-side, so empty names shouldn't surface in legitimate flows,
+// but a forged interaction or future API shape could carry one. The
+// alternative under `??` would render `@` (the empty backtick block
+// is visually broken). Rendering `unknown-role` is strictly safer.
 function resolveRoleNames(guild, ids) {
   if (!ids || ids.length === 0) return [];
   return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
@@ -3040,6 +3047,18 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   roleMentionsDeniedNames?: string[],
  * }} [opts]
  */
+// Shared render-bound caps for warnings-block bullets that surface
+// user-controlled (or attacker-influenced) strings. The 80-codepoint
+// cap is shared between invalidTokens and role-name bullets — the
+// two values coincidentally matched when added in #326's review,
+// hoisted here to make the shared intent explicit (one place to
+// bump if Discord's embed budget changes). The display-cap (10
+// entries) bounds the bullet count for both surfaces; the tail count
+// discloses the rest so a forged-interaction enumeration attempt
+// gets surfaced without dwarfing the ephemeral.
+const WARNING_LIST_DISPLAY_MAX = 10;
+const WARNING_NAME_CODEPOINT_CAP = 80;
+
 function renderRecipientWarnings({
   invalidTokens = [],
   cappedCount = 0,
@@ -3064,17 +3083,20 @@ function renderRecipientWarnings({
     // also cap the listed count at 10 so a pathological list can't
     // blow the Discord content budget.
     //
-    // Per-token codepoint cap (80) keeps the worst case bounded:
-    // recipient-parser.js caps each token at 256 chars, so 10 × 256
-    // = 2.5KB of code-fenced text would dwarf the rest of the card
-    // and risk crowding out the action prompt. 80 codepoints is
-    // enough to spot the typo / paste error without rendering the
-    // attacker's entire payload.
-    const TOKEN_DISPLAY_MAX = 80;
-    const shown = invalidTokens.slice(0, 10).map(
-      (t) => sliceWithEllipsis(t.replace(/`/g, ''), TOKEN_DISPLAY_MAX, '…'),
+    // Per-token codepoint cap (WARNING_NAME_CODEPOINT_CAP, 80) keeps
+    // the worst case bounded: recipient-parser.js caps each token at
+    // 256 chars, so 10 × 256 = 2.5KB of code-fenced text would dwarf
+    // the rest of the card and risk crowding out the action prompt.
+    // 80 codepoints is enough to spot the typo / paste error without
+    // rendering the attacker's entire payload. List cap
+    // (WARNING_LIST_DISPLAY_MAX, 10) bounds the bullet count; both
+    // constants are shared with the role-mentions-denied path below.
+    const shown = invalidTokens.slice(0, WARNING_LIST_DISPLAY_MAX).map(
+      (t) => sliceWithEllipsis(t.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…'),
     );
-    const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
+    const more = invalidTokens.length > WARNING_LIST_DISPLAY_MAX
+      ? ` (+${invalidTokens.length - WARNING_LIST_DISPLAY_MAX} more)`
+      : '';
     lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
   }
   if (unresolvedIds.length > 0) {
@@ -3115,30 +3137,28 @@ function renderRecipientWarnings({
   if (roleMentionsDeniedNames.length > 0) {
     // One bullet per denied role so the user can tell which mention
     // tripped the gate (the @everyone bullet above doesn't enumerate
-    // because it's always a single semantic action). Cap the list at
-    // 10 to bound the embed footprint under a forged-interaction
-    // attempt to enumerate every guild role; tail-count discloses
-    // the rest.
+    // because it's always a single semantic action).
+    // WARNING_LIST_DISPLAY_MAX (10) bounds the embed footprint under
+    // a forged-interaction attempt to enumerate every guild role;
+    // tail-count discloses the rest.
     //
     // Sanitization mirrors the invalidTokens path above:
     //   - inline code fence (single backtick) so a role name
     //     containing Discord markdown renders literally;
     //   - backticks inside the name stripped to prevent fence
     //     breakout;
-    //   - codepoint-aware slice via sliceWithEllipsis (80 codepoints)
-    //     so a 100-codepoint role name can't dwarf the rest of the
-    //     card. Role names are admin-controlled but Discord doesn't
-    //     restrict the character set, so treat the input as untrusted
-    //     for rendering purposes.
-    const ROLE_DISPLAY_MAX = 10;
-    const ROLE_NAME_CODEPOINT_CAP = 80;
-    const shown = roleMentionsDeniedNames.slice(0, ROLE_DISPLAY_MAX);
+    //   - codepoint-aware slice via sliceWithEllipsis
+    //     (WARNING_NAME_CODEPOINT_CAP, 80) so a 100-codepoint role
+    //     name can't dwarf the rest of the card. Role names are
+    //     admin-controlled but Discord doesn't restrict the character
+    //     set, so treat the input as untrusted for rendering.
+    const shown = roleMentionsDeniedNames.slice(0, WARNING_LIST_DISPLAY_MAX);
     for (const name of shown) {
-      const safe = sliceWithEllipsis(name.replace(/`/g, ''), ROLE_NAME_CODEPOINT_CAP, '…');
+      const safe = sliceWithEllipsis(name.replace(/`/g, ''), WARNING_NAME_CODEPOINT_CAP, '…');
       lines.push(`• \`@${safe}\` requires the **Mention Everyone** permission or \`role.mentionable: true\` — skipped.`);
     }
-    if (roleMentionsDeniedNames.length > ROLE_DISPLAY_MAX) {
-      lines.push(`• (+${roleMentionsDeniedNames.length - ROLE_DISPLAY_MAX} more role mention(s) skipped.)`);
+    if (roleMentionsDeniedNames.length > WARNING_LIST_DISPLAY_MAX) {
+      lines.push(`• (+${roleMentionsDeniedNames.length - WARNING_LIST_DISPLAY_MAX} more role mention(s) skipped.)`);
     }
   }
   if (lines.length === 0) return '';
@@ -4208,8 +4228,16 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // for the same set of signals but with longer bulleted copy
     // (warnings block vs. rejection banner — different UI contexts).
     // When adding a new reason, update BOTH surfaces.
+    // Reason ordering mirrors renderRecipientWarnings's bullet
+    // ordering (droppedBots → droppedFromRoles → everyoneCacheCold →
+    // massMentionDenied → roleMentionsDenied) so the two surfaces
+    // present multi-signal picks in the same sequence. Most picks
+    // hit at most one signal so ordering is rarely user-visible,
+    // but pin the parity here against future drift.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
+    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     if (roleMentionsDenied.length > 0) {
       // Condensed copy (count, not per-role) for the rejection banner —
@@ -4222,8 +4250,6 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       const noun = roleMentionsDenied.length === 1 ? 'role' : 'roles';
       reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission (or mark the role as mentionable)`);
     }
-    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
-    if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
