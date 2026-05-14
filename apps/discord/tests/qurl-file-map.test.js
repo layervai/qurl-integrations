@@ -774,7 +774,7 @@ describe('handleAutocomplete', () => {
     expect(choices[0].name).not.toBe(choices[1].name);
   });
 
-  test('truncates a label exceeding the 100-char Discord cap', async () => {
+  test('truncates a label exceeding the 100-char Discord cap (UTF-16 units)', async () => {
     const longAddress = '1234 Very Long Street Name, Somewhere Far Away, In A Large City With A Long Name, Region, Country 99999';
     mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJlong', name: 'Place', address: longAddress }]);
     const int = makeAutocompleteInteraction();
@@ -785,6 +785,25 @@ describe('handleAutocomplete', () => {
     // (qurl_place: + 27-char place_id ≈ 38). Pin this — if a future
     // change starts packing more into the value we want a test to fail.
     expect(choice.value.length).toBeLessThanOrEqual(100);
+  });
+
+  test('truncation does not split a surrogate pair (emoji-heavy label stays valid UTF-16)', async () => {
+    // Discord measures name length in UTF-16 code units; a naïve
+    // codepoint slice could ship a string whose .length > 100 if the
+    // first 100 codepoints contain many surrogate pairs, OR could
+    // leave a lone high surrogate at the boundary. The UTF-16 slice
+    // + surrogate-backoff must produce a string that's <= 100 units
+    // AND has no orphan surrogate.
+    const emoji = '🏛️'; // 🏛 + variation selector — 3 UTF-16 units
+    const name = (emoji + 'X').repeat(40); // 160 UTF-16 units of mixed surrogate + ASCII
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: 'ChIJemoji', name, address: '' }]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choice = int.respond.mock.calls[0][0][0];
+    expect(choice.name.length).toBeLessThanOrEqual(100);
+    // No lone high surrogate at the boundary.
+    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    expect(choice.name).not.toMatch(loneHigh);
   });
 
   test('drops a choice whose value would exceed the 100-char Discord cap', async () => {

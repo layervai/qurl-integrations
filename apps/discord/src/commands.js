@@ -5857,12 +5857,17 @@ async function handleAutocomplete(interaction) {
       const value = encodePlaceIdSentinel(p.placeId);
       if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;
-      // Fast path the common ASCII case — codepoint-aware truncation
-      // matters only when label.length > NAME_MAX, since UTF-16 vs
-      // codepoint counts diverge only past the boundary.
-      const name = label.length <= AUTOCOMPLETE_CHOICE_NAME_MAX
-        ? label
-        : Array.from(label).slice(0, AUTOCOMPLETE_CHOICE_NAME_MAX).join('');
+      // Discord validates name length in UTF-16 code units, not code
+      // points, so we cap by `.length`. Back off by 1 if the cap would
+      // land on a lone high surrogate so we don't ship a half-emoji
+      // (which Discord renders as tofu).
+      let name = label;
+      if (label.length > AUTOCOMPLETE_CHOICE_NAME_MAX) {
+        let end = AUTOCOMPLETE_CHOICE_NAME_MAX;
+        const lastUnit = label.charCodeAt(end - 1);
+        if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) end -= 1;
+        name = label.slice(0, end);
+      }
       choices.push({ name, value });
     }
     return interaction.respond(choices);
