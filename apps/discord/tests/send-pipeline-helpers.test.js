@@ -94,6 +94,12 @@ jest.mock('discord.js', () => ({
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
   })),
+  MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => ({
+    setCustomId: jest.fn().mockReturnThis(),
+    setPlaceholder: jest.fn().mockReturnThis(),
+    setMinValues: jest.fn().mockReturnThis(),
+    setMaxValues: jest.fn().mockReturnThis(),
+  })),
 }));
 
 // We do NOT want database.js to open a real file or start intervals
@@ -1377,6 +1383,12 @@ describe('handleAddRecipients', () => {
         addOptions: jest.fn().mockReturnThis(),
       })),
       UserSelectMenuBuilder: jest.fn().mockImplementation(() => ({
+        setCustomId: jest.fn().mockReturnThis(),
+        setPlaceholder: jest.fn().mockReturnThis(),
+        setMinValues: jest.fn().mockReturnThis(),
+        setMaxValues: jest.fn().mockReturnThis(),
+      })),
+      MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => ({
         setCustomId: jest.fn().mockReturnThis(),
         setPlaceholder: jest.fn().mockReturnThis(),
         setMinValues: jest.fn().mockReturnThis(),

@@ -8,6 +8,7 @@ const {
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
+  MentionableSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -2807,11 +2808,177 @@ function partitionRecipients(users, senderId) {
   return { valid, droppedBots, selfIncluded };
 }
 
+// Merge a MentionableSelectMenu pick (users + roles) into a deduped
+// User[] for partitionRecipients. The `@everyone` role
+// (role.id === guild.id) is gated on `canMentionEveryone` — same
+// gate as the text-path #323. Non-@everyone role gating is tracked
+// in #326.
+//
+// Picked users seed `userMap` BEFORE role expansion so they get cap
+// priority over role-expanded members (mirrors the text-path #323
+// round-4 fix).
+//
+// For the @everyone role specifically, iterate `guild.members.cache`
+// instead of `role.members` — discord.js doesn't reliably surface
+// all members through @everyone's role.members.
+//
+// `droppedFromRoles` is the count of DISTINCT bot-user IDs filtered
+// during role expansion (Set-backed) — matches what the user sees
+// rendered as "N bot(s) filtered from picked role(s)." A bot that
+// appears in two picked roles, or is directly picked AND also in a
+// picked role, is counted at most once.
+//
+// Map/Collection compatibility: `interaction.users` and
+// `interaction.roles` are discord.js Collections (which extend Map)
+// in prod and plain Maps in tests. Both implement `.values()`,
+// `.entries()`, and `Symbol.iterator` — the duck-type guards below
+// gate on the methods we actually call.
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null }) {
+  const guild = interaction.guild;
+  const userMap = new Map();
+  if (interaction.users && typeof interaction.users.values === 'function') {
+    for (const u of interaction.users.values()) {
+      if (u && u.id) userMap.set(u.id, u);
+    }
+  }
+  let massMentionDenied = false;
+  // Set when the user picked @everyone WITH MENTION_EVERYONE but the
+  // guild.members cache is missing or empty — e.g. immediately after
+  // a bot restart, before the lazy-load fills it. Lets the caller
+  // surface a "try again in a few seconds" reason instead of the
+  // silent deferUpdate-only no-op the user-visible path would
+  // otherwise hit.
+  let everyoneCacheCold = false;
+  // Distinct bot IDs filtered across all picked roles — caller renders
+  // .size as "N bot(s) filtered." Tracking as a Set (not a counter)
+  // so overlap (bot in two roles, or directly-picked bot also in a
+  // role) doesn't inflate the user-visible number.
+  const droppedFromRolesSet = new Set();
+  // Raw inner-loop iterations across all picked roles. Bounds the
+  // iteration COST independent of unique-bot semantics, so a
+  // pathological 10k-entry role can't grind for free.
+  let inspectedFromRoles = 0;
+  // Gate the ITER_BOUND debug log so it fires AT MOST ONCE per call.
+  // The counter is function-scoped, so without this gate role B's
+  // inner loop would log a redundant line on every iteration past
+  // role A's budget exhaustion. Forensic value is one line per call,
+  // not N.
+  let boundLogged = false;
+  // 4× cap (=100) balances pathological-role protection against the
+  // UX edge where a real role iterates bots first and humans behind:
+  // 2× was tight enough that a "bots-up-front" role could leave the
+  // user under-expanded with no visible signal beyond a high count.
+  // 4× pushes the rate-of-occurrence well below any plausible
+  // non-pathological role layout.
+  const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
+  if (interaction.roles && typeof interaction.roles.entries === 'function') {
+    for (const [roleId, role] of interaction.roles.entries()) {
+      const isEveryoneRole = guild && roleId === guild.id;
+      if (isEveryoneRole && !canMentionEveryone) {
+        // Surfaced even if userMap is already at cap — the gate firing
+        // is a user-visible signal worth showing regardless of whether
+        // expansion would have added anyone.
+        massMentionDenied = true;
+        continue;
+      }
+      // `guild` is provably truthy in the @everyone branch (gated by
+      // `guild && roleId === guild.id` above).
+      const source = isEveryoneRole
+        ? guild.members?.cache
+        : role?.members;
+      // Two distinct cold-cache shapes both surface the same UX
+      // signal (everyoneCacheCold):
+      //   - `source` undefined / non-iterable: discord.js hasn't
+      //     created the cache slot yet (e.g., `guild.members = {}`
+      //     immediately post-restart).
+      //   - `source.size === 0`: cache slot exists but no members
+      //     populated yet (e.g., between bot ready and
+      //     chunk-on-startup completion).
+      if (!source || typeof source.entries !== 'function') {
+        if (isEveryoneRole) everyoneCacheCold = true;
+        continue;
+      }
+      if (isEveryoneRole && source.size === 0) {
+        everyoneCacheCold = true;
+        continue;
+      }
+      // Two break conditions, both belt-and-suspenders:
+      //  - userMap.size at cap: stops adding new entries once the
+      //    downstream partition cap would be hit anyway.
+      //  - inspectedFromRoles past 4× cap: bounds iteration cost
+      //    against a pathological all-bot role where the size guard
+      //    can never fire. Logs at debug so a user-reported "I picked
+      //    a role and got fewer than expected" has a forensic hook.
+      //
+      // The counter is incremented BEFORE the dedupe checks below, so
+      // a bot in two picked roles costs 2 iteration slots even though
+      // it lands in droppedFromRolesSet once. That's intentional —
+      // the bound governs CPU cost (entries inspected), not the
+      // user-visible count semantic. Hoisting the dedupe above the
+      // counter would let a contrived "same 100 members across N
+      // roles" pick grind for free.
+      for (const [memberId, member] of source.entries()) {
+        if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
+        if (inspectedFromRoles >= ITER_BOUND) {
+          if (!boundLogged) {
+            logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
+              flow_id,
+              role_id: roleId,
+              inspected_from_roles: inspectedFromRoles,
+              user_map_size: userMap.size,
+              iter_bound: ITER_BOUND,
+            });
+            boundLogged = true;
+          }
+          break;
+        }
+        inspectedFromRoles += 1;
+        // Defense: partial GuildMember objects from sparse fetches
+        // could carry an undefined `.user`. Downstream partitionRecipients
+        // would deref `.bot` / `.id` on undefined; skip such entries
+        // up front. Symmetric with the picked-users seed guard above.
+        if (!member?.user?.id) continue;
+        // Dedupe BEFORE the bot check: a directly-picked bot is
+        // already in userMap (seeded above), and partitionRecipients
+        // will report it via droppedBots. Skipping here means it
+        // doesn't ALSO tick the role-side bot signal — avoids
+        // surfacing two warnings for the same underlying bot.
+        if (userMap.has(memberId)) continue;
+        if (droppedFromRolesSet.has(memberId)) continue;
+        if (isBotMember(member)) {
+          droppedFromRolesSet.add(memberId);
+          continue;
+        }
+        // member.user is kept here (not the picker's User object)
+        // because picked-user seeding already happened; field fidelity
+        // for picked users is preserved by the userMap.has skip above.
+        userMap.set(memberId, member.user);
+      }
+    }
+  }
+  return {
+    users: [...userMap.values()],
+    massMentionDenied,
+    droppedFromRoles: droppedFromRolesSet.size,
+    everyoneCacheCold,
+  };
+}
+
 /**
  * Render a warnings block for the confirm card. Returns the empty
  * string when nothing is worth surfacing — keeps callers simple
  * (`warningsBlock + content`) without a separate "do I have any
  * warnings" check.
+ *
+ * COPY PARITY: the partial-valid pick path renders bulleted lines
+ * from here; the all-invalid pick path in handleConfirmUserSelect
+ * builds its own joined-sentence reasons list with shorter copy
+ * (rejection banner vs. warnings block — different UI contexts).
+ * Both surface the SAME set of signals (droppedBots,
+ * droppedFromRoles, massMentionDenied, everyoneCacheCold). When
+ * adding or renaming a signal, update BOTH surfaces in lockstep —
+ * the helpers don't share a copy table, so a future contributor
+ * could easily land one half and not the other.
  *
  * @param {{
  *   invalidTokens?: string[],
@@ -2819,7 +2986,9 @@ function partitionRecipients(users, senderId) {
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
+ *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
+ *   everyoneCacheCold?: boolean,
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -2828,7 +2997,9 @@ function renderRecipientWarnings({
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
+  droppedFromRoles = 0,
   massMentionDenied = false,
+  everyoneCacheCold = false,
 } = {}) {
   const lines = [];
   if (cappedCount > 0) {
@@ -2867,6 +3038,21 @@ function renderRecipientWarnings({
   }
   if (droppedBots > 0) {
     lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
+  }
+  if (droppedFromRoles > 0) {
+    // Surfaced symmetrically with droppedBots so the user knows the
+    // role pick was partially filtered (vs. silently shrinking the
+    // recipient count). Distinct copy from droppedBots since the
+    // user took a different picker action (selecting a role rather
+    // than an individual bot).
+    lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+  }
+  if (everyoneCacheCold) {
+    // Symmetric with droppedFromRoles: surfaced even on partial-valid
+    // picks (named user + @everyone with cold cache → user lands but
+    // @everyone silently expanded to zero, which the user would
+    // otherwise have no way to know).
+    lines.push('• Member cache not yet ready — `@everyone` expanded to 0 members. Try again in a few seconds.');
   }
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
@@ -2995,16 +3181,19 @@ function formatPersonalMessagePreview(message) {
   return `> ${safeCodepointSlice(oneLine, 80)}…`;
 }
 
-// Build the ActionRow set for the confirm card. Always 4 rows:
-// UserSelectMenu (always attached so re-picks stay available and
-// the layout is stable from frame 0), Self-destruct StringSelectMenu,
-// Expiry StringSelectMenu (each select needs its own row — Discord
-// forbids combining selects with buttons in the same ActionRow),
-// and the bottom row packing the optional voice-everyone button +
-// Note button + Send + Cancel.
+// Build the ActionRow set for the confirm card. Always 4 rows so the
+// layout is stable from frame 0 — each select needs its own row
+// (Discord forbids selects + buttons in the same ActionRow).
+//
+// MentionableSelect (per #328) surfaces users AND roles in one menu;
+// role picks expand in handleConfirmUserSelect via
+// resolveMentionableSelection with @everyone-role MENTION_EVERYONE
+// gating (same gate as the text-path #323).
+// CONFIRM_USER_SELECT_CUSTOM_ID wire literal kept — renaming would
+// need the 180s flow_state drain coordination from #316.
 //
 // Row math (Discord 5-row max, 5-buttons-per-row max):
-//   UserSelect + SelfDestruct + Expiry +
+//   Mentionable + SelfDestruct + Expiry +
 //   [(optional 🔊 Voice), Note, Send, Cancel] = 4 rows, ≤ 4 buttons
 //
 // The voice button is rendered only when `voiceChannelId` is non-null
@@ -3021,10 +3210,16 @@ function renderConfirmCardRows({
 }) {
   const rows = [];
   const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  // Placeholder surfaces both ceilings: pick-slot count (Discord's
+  // setMaxValues) AND the post-expansion recipient cap. With roles in
+  // the picker, a single slot can expand to many members — saying
+  // only "1–10" would mislead users who pick 10 roles expecting 10
+  // recipients.
+  const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
   rows.push(new ActionRowBuilder().addComponents(
-    new UserSelectMenuBuilder()
+    new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick recipients (1–${maxValues})`)
+      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
       .setMinValues(1)
       .setMaxValues(maxValues)
   ));
@@ -3806,15 +4001,33 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // `interaction.users` is a discord.js Collection in production,
-  // duck-typed as a Map in tests — both support `.values()` so the
-  // iteration here is interchangeable. A future test refactor that
-  // switches to Collection-only methods (`.first()`, `.filter()`)
-  // would break the test harness without breaking prod; keep the
-  // Map-compatible API surface.
-  const selected = [...interaction.users.values()];
-  if (selected.length === 0) {
-    // Empty pick → already acked via deferUpdate above. Nothing to edit.
+  // Resolve the MentionableSelectMenu pick: merges picked users +
+  // role-expanded members into one User[] with @everyone-role
+  // gating. Returns `massMentionDenied: true` when the user picked
+  // the `@everyone` role but lacks MENTION_EVERYONE — parallel to
+  // the text-path gate in #323.
+  const canMentionEveryone = !!interaction.guild
+    && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+  const {
+    users: selected,
+    massMentionDenied,
+    droppedFromRoles,
+    everyoneCacheCold,
+  } = resolveMentionableSelection({
+    interaction,
+    canMentionEveryone,
+    flow_id,
+  });
+  if (
+    selected.length === 0
+    && !massMentionDenied
+    && droppedFromRoles === 0
+    && !everyoneCacheCold
+  ) {
+    // Truly empty pick (no users, no roles, no @everyone, no
+    // bot-only roles, cache not cold) → already acked via deferUpdate
+    // above. Other empty-selected cases fall through to the
+    // all-invalid branch below so the user sees a reason banner.
     return undefined;
   }
   // `interaction.user.id` IS the original sender's ID — Discord
@@ -3827,12 +4040,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // through the flow payload + read it here instead.
   //
   // No `resolveRecipientUsers` re-fetch here — Discord's
-  // UserSelectMenu only surfaces users visible to the bot in this
-  // guild, so picked User IDs are guild-bounded at the gateway-event
-  // level. handleConfirmSendClick re-fetches at click time
-  // (partial-drop test pins this) as the actual guild-membership
-  // defense; adding it here would burn 10 members.fetch calls per
-  // picker tick without catching anything the Send-time check misses.
+  // MentionableSelectMenu only surfaces users + roles visible to
+  // the bot in this guild, so picked IDs are guild-bounded at the
+  // gateway-event level. Role expansion happens inline against
+  // `role.members` / `guild.members.cache` (already populated for
+  // any user the bot can see). handleConfirmSendClick re-fetches at
+  // click time (partial-drop test pins this) as the actual guild-
+  // membership defense; adding it here would burn members.fetch
+  // calls per picker tick without catching anything the Send-time
+  // check misses.
   const payload = row.payload || {};
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selected, interaction.user.id);
   // Both invalid-pick branches re-render the full confirm card with a
@@ -3869,16 +4085,36 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // in invalid-pick churn surfaces in metrics without lowering log
     // verbosity.
     logger.debug('handleConfirmUserSelect: all-invalid pick', {
-      flow_id, dropped_bots: droppedBots,
+      flow_id,
+      dropped_bots: droppedBots,
+      mass_mention_denied: massMentionDenied,
+      dropped_from_roles: droppedFromRoles,
+      everyone_cache_cold: everyoneCacheCold,
     });
-    // Only the bot-only case is reachable here today — self-send is
-    // supported, so a pick of just the sender does NOT empty `valid`.
-    // Kept as a list-builder for future filters; the
-    // `|| 'No usable recipients in pick'` fallback prevents a
-    // degraded `⚠ . Re-pick...` message if a future filter is
-    // removed and `valid.length === 0` is hit with droppedBots === 0.
+    // Reachable cases:
+    //   - bot-only individual pick (droppedBots > 0)
+    //   - picked the @everyone role without MENTION_EVERYONE perm
+    //     (massMentionDenied === true)
+    //   - picked a role whose only members are bots
+    //     (droppedFromRoles > 0, selected.length === 0)
+    //   - picked @everyone WITH perm but guild.members.cache is
+    //     missing / empty (everyoneCacheCold === true) — typically
+    //     right after a bot restart, before chunk-on-startup lands
+    // List-builder pattern; the fallback prevents a degraded
+    // `⚠ . Re-pick...` message if all conditions are false.
+    // Multiple reasons can fire together: e.g. directly-picked bot
+    // and a bot-only role both surface since they describe
+    // independent picker actions.
+    //
+    // COPY PARITY: the partial-valid path uses renderRecipientWarnings
+    // for the same set of signals but with longer bulleted copy
+    // (warnings block vs. rejection banner — different UI contexts).
+    // When adding a new reason, update BOTH surfaces.
     const reasons = [];
     if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
+    if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
+    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
+    if (everyoneCacheCold) reasons.push('Member cache not yet ready — try again in a few seconds');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
@@ -3891,12 +4127,18 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
 
-  // Recompute warnings + aliases for the new pick. droppedBots and
-  // selfIncluded can flip here (UserSelectMenu doesn't pre-exclude
-  // the invoker or bots), so warnings + the self-notice change with
-  // the recipient set.
+  // Recompute warnings + aliases for the new pick. droppedBots,
+  // selfIncluded, and massMentionDenied can all flip here (the
+  // picker doesn't pre-exclude the invoker, bots, or the @everyone
+  // role), so warnings + the self-notice change with the recipient
+  // set. DM suppression isn't needed — `canMentionEveryone` already
+  // requires `interaction.guild` (above), so a DM interaction never
+  // reaches a state where `massMentionDenied` could be true.
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
+    droppedFromRoles,
+    massMentionDenied,
+    everyoneCacheCold,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
@@ -6488,6 +6730,7 @@ module.exports = {
       handleQurlMap,
       resolveRecipientUsers,
       partitionRecipients,
+      resolveMentionableSelection,
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,

@@ -118,6 +118,7 @@ jest.mock('discord.js', () => {
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
     StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
     UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
+    MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeChainable()),
     ModalBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputBuilder: jest.fn().mockImplementation(() => makeChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
