@@ -595,19 +595,20 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     // caller bypasses that contract — belt-and-braces vs rendering
     // a visible-but-empty `> *""*` row between sender and expiry.
     //
-    // Order is intentional: substring → replace → trim. The 280 cap
-    // applies to RAW input (bounds the work done by replace/trim
+    // Order is intentional: cap → replace → trim. The 280-codepoint
+    // cap applies to RAW input (bounds the work done by replace/trim
     // against a 10KB single-line pathological input) rather than to
-    // the rendered output. A future "fix" to `replace().trim().
-    // substring(0, 280)` would be a subtly different contract — the
-    // visible output would be capped at 280 chars but unbounded work
-    // would happen before the cap.
+    // the rendered output. A future "fix" to `replace().trim()` then
+    // cap would be a subtly different contract — the visible output
+    // would be capped at 280 but unbounded work would happen before.
     //
-    // NOTE: `substring(0, 280)` is UTF-16-unit-aware, not grapheme-
-    // aware — a surrogate pair (4-byte emoji) straddling unit 280 can
-    // be split, leaving a lone high surrogate. Tracked as #345; not
-    // a security issue, just a visual gotcha.
-    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
+    // `Array.from(s).slice(0, 280).join('')` is codepoint-aware: a
+    // 4-byte emoji (surrogate pair) is one element in the resulting
+    // array, so the cap can't split it into a lone high surrogate.
+    // 280 codepoints = at most 560 UTF-16 units = still well under
+    // Discord's 4096-char description cap. Mirrors the cap pattern
+    // sanitizeDisplayName uses for senderAlias.
+    const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
   descLines.push(`🕐 Closes <t:${expiresAt}:R>`);

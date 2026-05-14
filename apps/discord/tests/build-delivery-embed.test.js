@@ -343,6 +343,28 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).not.toContain('\\*\\*bold');
   });
 
+  // Regression net for the codepoint-aware cap (closes #345): a 281-
+  // codepoint string ending in a 4-byte emoji at the boundary must
+  // NOT split the emoji into a lone high surrogate. Array.from + slice
+  // is the codepoint-aware pattern (one array element per codepoint,
+  // including surrogate pairs), mirroring sanitizeDisplayName's cap.
+  //
+  // 🎉 (U+1F389) is a high+low surrogate pair: 2 UTF-16 units, 1
+  // codepoint. The string below has 279 ASCII chars + 🎉 = 280
+  // codepoints exactly, then an extra ASCII tail at codepoint 281
+  // that must NOT make it through the cap.
+  it('does not split surrogate pairs at the 280-codepoint personalMessage boundary (#345)', () => {
+    const message = 'A'.repeat(279) + '🎉' + 'X';  // 281 codepoints; codepoint 280 = 🎉
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: message });
+    const desc = capturedEmbeds[0]._description;
+    // The full 🎉 survives at the boundary (intact codepoint, not split).
+    expect(desc).toContain('🎉');
+    // No lone high surrogate (\uD83C is the high half of 🎉).
+    expect(desc).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
+    // The trailing 'X' beyond codepoint 280 is dropped.
+    expect(desc).not.toMatch(/🎉X/);
+  });
+
   // `> ` line-prefix is the most natural blockquote-injection attempt
   // at this surface — a personalMessage that looks like it embeds its
   // own blockquote should still be wrapped in the outer `> *"..."*`,
