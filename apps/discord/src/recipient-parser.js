@@ -55,8 +55,10 @@
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
-// same per-send cap the in-channel form enforces), and excludes the
-// invoking user + bots (matches the form's self-send + bot rejection).
+// same per-send cap the in-channel form enforces), and excludes bots
+// (matches the form's bot rejection). The invoking user IS allowed as
+// a recipient — self-send is a supported use case (test the link
+// before forwarding, cross-device handoff, etc.).
 //
 // Role expansion uses interaction.guild.members.cache via discord.js's
 // `Role.members` getter, which filters the guild's member cache for
@@ -133,13 +135,14 @@ const MAX_INVALID_TOKEN_LENGTH = 256;
 const MASSIVE_OVERSHOOT_MULTIPLIER = 2;
 
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / etc.) to
-// a flat user-ID list with the cap + self/bot filters applied. Returns
+// a flat user-ID list with the cap + bot filter applied. Returns
 // `{ ids, invalidTokens, cappedCount }`; never throws on parse errors —
 // invalid tokens always land in `invalidTokens` for caller-side
-// surfacing.
+// surfacing. Sender is NOT filtered — self-send is supported; the
+// confirm-card renderer surfaces a neutral notice when sender appears
+// in `ids`.
 //
 // `interaction` is the slash-command interaction; we need it for:
-//   - interaction.user.id  → exclude the sender from recipients
 //   - interaction.guild    → role-mention expansion via members.cache
 //   - interaction.guild.members.cache.get(id).user.bot → bot filter
 function parseRecipientMentions(raw, interaction) {
@@ -197,7 +200,6 @@ function parseRecipientMentions(raw, interaction) {
   const seen = new Set();
   const ids = new Set();
   const invalidTokens = [];
-  const senderId = interaction.user?.id;
   const guild = interaction.guild;
   // `cap > 0` is guaranteed by the `intEnv(..., { minPositive: true })`
   // validator on QURL_SEND_MAX_RECIPIENTS in config.js — if the env
@@ -216,7 +218,6 @@ function parseRecipientMentions(raw, interaction) {
 
   for (const m of input.matchAll(USER_MENTION_RE)) {
     const id = m[1];
-    if (id === senderId) continue;
     // Bot filter — best-effort via cache. A cache miss (cold cache,
     // partial cache without GUILD_MEMBERS intent, or DM-context with
     // `guild === undefined`) leaves the bot in the result; downstream
@@ -269,25 +270,24 @@ function parseRecipientMentions(raw, interaction) {
       pushRoleErrorIfNew(roleId, m[0]);
       continue;
     }
-    // `usable` counts members that passed the sender/bot filter,
-    // INCLUDING ones already in `seen` (i.e. a role whose every
-    // member was already direct-mentioned still contributes — dedupe
-    // counts). Drives ONLY the "no usable members" → invalidTokens
-    // branch below: empty role / sender-only role / bots-only role.
-    // Critically, `usable++` runs BEFORE the seen-check inside
-    // `consider`, so the "fully-duplicate role isn't useless" test
-    // catches a future refactor reversing that order.
+    // `usable` counts members that passed the bot filter, INCLUDING
+    // ones already in `seen` (i.e. a role whose every member was
+    // already direct-mentioned still contributes — dedupe counts).
+    // Drives ONLY the "no usable members" → invalidTokens branch
+    // below: empty role / bots-only role. Critically, `usable++` runs
+    // BEFORE the seen-check inside `consider`, so the "fully-duplicate
+    // role isn't useless" test catches a future refactor reversing
+    // that order.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
-      if (memberId === senderId) continue;
       if (roleMember?.user?.bot) continue;
       usable++;
       consider(memberId);
     }
     if (usable === 0) {
-      // Role had members but they were all filtered (sender + bots).
+      // Role had members but they were all filtered out as bots.
       // Surface as "no usable members" rather than silently no-op so
-      // the caller can tell the user "the role only contains you / bots."
+      // the caller can tell the user "the role only contains bots."
       pushRoleErrorIfNew(roleId, m[0]);
     }
   }

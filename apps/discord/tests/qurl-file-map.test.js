@@ -351,7 +351,7 @@ describe('selfDestructOptionToSeconds', () => {
 });
 
 describe('partitionRecipients', () => {
-  test('drops bots and sender', () => {
+  test('drops bots, keeps sender, flags selfIncluded=true', () => {
     const users = [
       makeUser('100000000000000001'),
       makeUser('100000000000000002', { bot: true }),
@@ -359,9 +359,10 @@ describe('partitionRecipients', () => {
       makeUser('100000000000000003'),
     ];
     const r = partitionRecipients(users, SENDER_ID);
-    expect(r.valid.map((u) => u.id)).toEqual(['100000000000000001', '100000000000000003']);
+    expect(r.valid.map((u) => u.id))
+      .toEqual(['100000000000000001', SENDER_ID, '100000000000000003']);
     expect(r.droppedBots).toBe(1);
-    expect(r.droppedSelf).toBe(1);
+    expect(r.selfIncluded).toBe(true);
   });
 
   test('all bots returns valid=[]', () => {
@@ -369,17 +370,30 @@ describe('partitionRecipients', () => {
     const r = partitionRecipients(users, SENDER_ID);
     expect(r.valid).toEqual([]);
     expect(r.droppedBots).toBe(2);
-    expect(r.droppedSelf).toBe(0);
+    expect(r.selfIncluded).toBe(false);
   });
 
-  test('only sender returns valid=[]', () => {
+  test('only sender is a legitimate single-recipient self-send', () => {
+    // Self-send: sender alone is a valid recipient list.
+    // valid=[sender], selfIncluded=true, no drops.
     const r = partitionRecipients([makeUser(SENDER_ID)], SENDER_ID);
-    expect(r.valid).toEqual([]);
-    expect(r.droppedSelf).toBe(1);
+    expect(r.valid.map((u) => u.id)).toEqual([SENDER_ID]);
+    expect(r.droppedBots).toBe(0);
+    expect(r.selfIncluded).toBe(true);
   });
 
   test('empty input', () => {
-    expect(partitionRecipients([], SENDER_ID)).toEqual({ valid: [], droppedBots: 0, droppedSelf: 0 });
+    expect(partitionRecipients([], SENDER_ID))
+      .toEqual({ valid: [], droppedBots: 0, selfIncluded: false });
+  });
+
+  test('sender NOT in input → selfIncluded=false', () => {
+    const r = partitionRecipients(
+      [makeUser('100000000000000001'), makeUser('100000000000000002')],
+      SENDER_ID,
+    );
+    expect(r.selfIncluded).toBe(false);
+    expect(r.valid.length).toBe(2);
   });
 
   test('contract: does NOT re-dedup — dedup is upstream (parseRecipientMentions Set + Discord picker gateway-event)', () => {
@@ -644,14 +658,14 @@ describe('renderRecipientWarnings', () => {
   test('returns empty when nothing to surface', () => {
     expect(renderRecipientWarnings({
       invalidTokens: [], cappedCount: 0, unresolvedIds: [],
-      droppedBots: 0, droppedSelf: 0,
+      droppedBots: 0,
     })).toBe('');
   });
 
   test('cappedCount line', () => {
     const out = renderRecipientWarnings({
       invalidTokens: [], cappedCount: 3, unresolvedIds: [],
-      droppedBots: 0, droppedSelf: 0,
+      droppedBots: 0,
     });
     expect(out).toMatch(/Capped at 25/);
     expect(out).toMatch(/3 recipient/);
@@ -661,7 +675,7 @@ describe('renderRecipientWarnings', () => {
     const tokens = Array.from({ length: 15 }, (_, i) => `bogus${i}`);
     const out = renderRecipientWarnings({
       invalidTokens: tokens, cappedCount: 0, unresolvedIds: [],
-      droppedBots: 0, droppedSelf: 0,
+      droppedBots: 0,
     });
     expect(out).toMatch(/```/);
     expect(out).toMatch(/bogus0/);
@@ -678,7 +692,7 @@ describe('renderRecipientWarnings', () => {
     const tokens = ['```\n[evil](https://phish.example)\n```', '`code`', 'plain'];
     const out = renderRecipientWarnings({
       invalidTokens: tokens, cappedCount: 0, unresolvedIds: [],
-      droppedBots: 0, droppedSelf: 0,
+      droppedBots: 0,
     });
     // Backticks must not appear in the rendered tokens themselves —
     // they'd terminate the surrounding fence.
@@ -693,13 +707,17 @@ describe('renderRecipientWarnings', () => {
     const out = renderRecipientWarnings({
       invalidTokens: ['<#999>'], cappedCount: 2,
       unresolvedIds: ['100000000000000001'],
-      droppedBots: 1, droppedSelf: 1,
+      droppedBots: 1,
     });
     expect(out).toMatch(/Capped/);
     expect(out).toMatch(/Could not parse/);
     expect(out).toMatch(/no longer in this server/);
     expect(out).toMatch(/bot/);
-    expect(out).toMatch(/yourself/);
+    // "yourself" was the dropped-self warning before #316-followup —
+    // self-send is now supported, so the warning is gone; the confirm
+    // card renderer surfaces a neutral "Send includes you." notice
+    // (asserted in the renderConfirmCardContent suite below).
+    expect(out).not.toMatch(/yourself/);
   });
 
   test('transientFailureIds rendered with neutral copy (not "left the server")', () => {
@@ -803,6 +821,22 @@ describe('renderConfirmCardContent', () => {
   test('self-destruct line shown when set', () => {
     const out = renderConfirmCardContent({ ...baseProps, selfDestructSeconds: 300 });
     expect(out).toMatch(/Self-destruct/);
+  });
+
+  test('selfIncluded=true surfaces "Send includes you." neutral notice', () => {
+    // Self-send is supported — the renderer surfaces a NEUTRAL notice
+    // (not a warning) so the user sees confirmation that the sender
+    // made it into the recipient list.
+    const out = renderConfirmCardContent({ ...baseProps, selfIncluded: true });
+    expect(out).toMatch(/Send includes you/);
+    // Not in the warning block (the leading ⚠ "Some recipients were
+    // dropped" header).
+    expect(out).not.toMatch(/Some recipients were dropped/);
+  });
+
+  test('selfIncluded omitted (default false) → no notice', () => {
+    const out = renderConfirmCardContent(baseProps);
+    expect(out).not.toMatch(/Send includes/);
   });
 
   test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
@@ -1148,20 +1182,26 @@ describe('handleQurlFile — slash entry', () => {
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
-    expect(reply.content).toMatch(/bots and your own user are skipped/);
+    expect(reply.content).toMatch(/bots are skipped/);
   });
 
-  test('only sender mentioned → ephemeral error', async () => {
-    // Same parser-side filter applies to the sender (src/recipient-parser.js:205).
+  test('only sender mentioned → confirm card with self-included notice', async () => {
+    // Self-send: a single `@me` mention is a legitimate recipient list.
+    // No "no valid recipients" error; flow advances to confirm card and
+    // the renderer surfaces the "Send includes you." neutral notice.
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${SENDER_ID}>` },
       guildMembers: { [SENDER_ID]: {} },
     });
     await handleQurlFile(int);
-    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(reply.content).toMatch(/No valid recipients/);
-    expect(reply.content).toMatch(/bots and your own user are skipped/);
+    expect(reply.content).toMatch(/Send includes you/);
+    expect(reply.content).not.toMatch(/No valid recipients/);
+    // Payload persists selfIncluded so menu re-renders keep the notice.
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.selfIncluded).toBe(true);
+    expect(payload.recipientIds).toEqual([SENDER_ID]);
   });
 
   test('all mentioned recipients hit transient lookup failure → retry copy, not "no valid recipients"', async () => {
@@ -1799,28 +1839,23 @@ describe('handleConfirmSendClick', () => {
     expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
-  test('forged Send click with sender-only recipientIds → "Invalid recipient list" copy, NOT "all left"', async () => {
-    // Forged payload edge: recipientIds=[SENDER_ID] passes the empty-
-    // array guard, resolves fine (sender is in guild cache), then
-    // partitionRecipients drops the sender (droppedSelf=1) and
-    // valid.length === 0. Pre-fix this hit the all-unresolved branch
-    // and surfaced "Recipients are no longer reachable (all left the
-    // server)" — misleading. Distinguish by droppedSelf/droppedBots > 0.
+  test('Send click with sender-only recipientIds → legitimate self-send, proceeds to dispatch', async () => {
+    // Self-send is a supported recipient list. recipientIds=[SENDER_ID]
+    // partitions to valid=[sender] (selfIncluded=true), so the empty-
+    // valid branch is bypassed and the click proceeds to the send
+    // pipeline. We assert that the "Invalid recipient list" / "all left"
+    // copies are NOT surfaced; the actual dispatch happens in the
+    // executeSendPipeline suite and isn't re-tested here.
     const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
     await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 1 },
     });
-    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Invalid recipient list/i),
-      components: [],
     }));
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/all left the server/i),
-    }));
-    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
-      stage: SEND_STAGE_AWAITING_CONFIRM,
-      reason: 'terminal',
     }));
   });
 
@@ -1876,14 +1911,16 @@ describe('handleConfirmSendClick', () => {
 
   test('all-invalid recipients + concurrent picker race (deleteFlow returns deleted:false) → "card moved" followUp', async () => {
     // Same shape as the empty-recipients race, but the dispatcher
-    // loaded a row whose recipientIds resolved to all-bots or all-
-    // sender. Version-gated delete catches the concurrent picker
-    // advance and surfaces the recovery.
+    // loaded a row whose recipientIds resolved to all-bots. Version-
+    // gated delete catches the concurrent picker advance and surfaces
+    // the recovery. Self-only is no longer all-invalid — self-send is
+    // supported — so the bot-only path is the only remaining trigger.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
-    const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
+    const botId = '100000000000000999';
+    const int = makeInteraction({ guildMembers: { [botId]: { bot: true } } });
     await handleConfirmSendClick(int, {
       flow_id: 'fid',
-      row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 5 },
+      row: { payload: { ...validPayload, recipientIds: [botId] }, version: 5 },
     });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/card moved/i),
@@ -2082,20 +2119,23 @@ describe('handleConfirmUserSelect', () => {
     expect(deferAckedBeforeTransition).toBe(true);
   });
 
-  test('all-invalid pick combining bots AND self → message lists BOTH reasons (not just bot-only)', async () => {
-    // Previous wording collapsed to bot-only via a ternary. A pick of
-    // [bot, sender] is BOTH "cannot send to bots" AND "cannot send to
-    // yourself"; the user deserves to see both reasons so they know
-    // why removing only the bot wouldn't be enough.
+  test('pick combining a bot AND sender → sender survives, bot is dropped, flow advances', async () => {
+    // Self-send: a pick of [bot, sender] partitions to valid=[sender]
+    // (selfIncluded=true). Bot is the only drop. valid.length > 0 so
+    // the flow advances to the confirm card with the self-included
+    // notice; the bot-drop warning still appears.
     const bot1 = '100000000000000099';
     const int = makeSelectInteraction({
       users: [makeUser(bot1, { bot: true }), makeUser(SENDER_ID)],
     });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
-    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.selfIncluded).toBe(true);
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(updated.content).toMatch(/bots/);
-    expect(updated.content).toMatch(/yourself/i);
+    expect(updated.content).toMatch(/bot/);
+    expect(updated.content).toMatch(/Send includes you/);
     expect(updated.content).toMatch(/Sending file/);
   });
 
