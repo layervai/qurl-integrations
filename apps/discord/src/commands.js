@@ -584,8 +584,15 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // the embed visually compact.
   const descLines = [`**${safeSender}** opened a door for you.`];
   if (personalMessage) {
+    // Skip the styled-blockquote line if the input collapses to an
+    // empty string after newline-flatten + trim (e.g. "  \n \n  ").
+    // The call sites already pass `sanitizeMessage(...) || null` so
+    // an empty input arrives as null and short-circuits the outer
+    // `if (personalMessage)`. This guard only matters if a future
+    // caller bypasses that contract — belt-and-braces vs rendering
+    // a visible-but-empty `> *""*` row between sender and expiry.
     const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
-    descLines.push(`> *"${capped}"*`);
+    if (capped) descLines.push(`> *"${capped}"*`);
   }
   descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
 

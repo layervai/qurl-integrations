@@ -320,6 +320,28 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(lines[0]).toContain('**Vik** opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
   });
+
+  // Belt-and-braces: a personalMessage that collapses to "" after
+  // newline-flatten + trim must not render a visible-but-empty
+  // `> *""*` blockquote between sender and expiry. The call sites
+  // pass `sanitizeMessage(...) || null` so an empty input short-
+  // circuits at the outer `if (personalMessage)` today, but a
+  // future caller that bypasses that contract would otherwise hit
+  // the empty-quote regression.
+  it('omits the blockquote line when personalMessage collapses to empty after trim', () => {
+    buildDeliveryPayload({
+      ...baseArgs,
+      senderAlias: 'Vik',
+      personalMessage: '  \n \n  ',
+      expiresAt: 1735689600,
+    });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).not.toContain('> *""*');
+    const lines = desc.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+  });
 });
 
 describe('resolveSenderAlias — fallback chain', () => {
