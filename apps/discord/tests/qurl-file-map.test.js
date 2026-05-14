@@ -2439,6 +2439,33 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.components.length).toBeGreaterThan(0);
   });
 
+  test('missing voiceChannelId WITH previously-picked recipients: re-render preserves recipients (no UI/state drift)', async () => {
+    // Bug-guard: the inline-rebuild alternative would render the
+    // card with validRecipients:[] while the persisted payload still
+    // carried the old recipientIds. The handler routes through
+    // rerenderConfirmCard, which reads recipientIds from the payload
+    // and reconstructs validRecipients — so the UI matches state.
+    const int = makeVoiceInteraction({ members: [u1] });
+    // Seed cache so rerenderConfirmCard can resolve the recipient.
+    int.guild.members.cache.set(u1, { user: makeUser(u1) });
+    const payloadWithoutVoice = {
+      ...basePayload,
+      voiceChannelId: null,
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'alice' },
+    };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Resource header still rendered — user retains context.
+    expect(lastCall.content).toMatch(/Sending file/);
+    // Previously-picked recipient surfaces in the content summary
+    // ("**To:** 1 user (…)"), not just the persisted-but-invisible
+    // state. The inline-rebuild alternative would have rendered
+    // validRecipients:[] here, masking the persisted state drift.
+    expect(lastCall.content).toMatch(/\*\*To:\*\* 1 user/);
+  });
+
   test('channel deleted between render and click: rejectVoice path runs (warning re-render, no transition)', async () => {
     // Cache miss simulates the channel being deleted (or the voice
     // intent dropping mid-flow). The handler should NOT call

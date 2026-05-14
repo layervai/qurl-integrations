@@ -39,6 +39,17 @@ const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } 
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
+// Threshold above which a single send earns a `WARN`-level audit log
+// at executeSendPipeline entry. Operator visibility into "this send
+// is going to take a while" without waiting for a Discord rate-limit
+// dashboard to surface it. 1000 chosen as the cliff where DM fan-out
+// at Discord's ~5/sec per-bot limit starts taking minutes (1000 / 5
+// = ~3 min) and qurl-service re-uploads start being non-trivial
+// (1000 / TOKENS_PER_RESOURCE = 100 re-uploads). Sub-threshold sends
+// stay quiet at the default `INFO` level so log volume tracks
+// operational importance.
+const LARGE_SEND_RECIPIENT_THRESHOLD = 1000;
+
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
 // degraded, we log a warning and continue rather than fail the whole flow.
@@ -1056,6 +1067,21 @@ async function executeSendPipeline(interaction, {
   }
   if (recipients.length > config.QURL_SEND_MAX_RECIPIENTS) {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
+  }
+  // Operator-visibility hook for big sends. Fires when a single send
+  // crosses LARGE_SEND_RECIPIENT_THRESHOLD so the operational cost
+  // (qurl-service re-uploads + DM fan-out duration at Discord's
+  // per-bot rate limit) surfaces in logs before it shows up on a
+  // rate-limit dashboard. Sender + guild ids are the natural pivots
+  // for "which guild kicked off this 5k-recipient send."
+  if (recipients.length >= LARGE_SEND_RECIPIENT_THRESHOLD) {
+    logger.warn('Large recipient send initiated', {
+      recipient_count: recipients.length,
+      threshold: LARGE_SEND_RECIPIENT_THRESHOLD,
+      cap: config.QURL_SEND_MAX_RECIPIENTS,
+      sender_id: interaction.user.id,
+      guild_id: interaction.guildId,
+    });
   }
 
   await interaction.editReply({ content: `Preparing links for ${recipients.length} recipient(s)...`, components: [] }).catch(logIgnoredDiscordErr);
@@ -2563,6 +2589,17 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // left. PR #174's "voice-connected only" semantics are restored here
 // (replacing the legacy `/qurl send`'s wizard option deleted in
 // PR #313 alongside `getChannelMembers`).
+//
+// STAGE-CHANNEL SEMANTICS: discord.js's `channel.members` for stage
+// channels includes BOTH speakers and audience (everyone currently
+// connected to the voice gateway in that stage). This is the
+// "voice-connected" contract carried over from PR #174 and matches
+// the legacy `/qurl send` behavior. A future stage-specific UX
+// might want speakers-only (filter by `member.voice.suppress ===
+// false`) — that's a separate affordance, not a regression in this
+// path. Today the live `(N)` count on the button label is the user's
+// best signal that a click against a 500-person stage will fan out
+// to 500 DMs.
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 
 // Recipient-rejection reason strings shared by every handler that
@@ -3924,35 +3961,23 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     // Button shouldn't have rendered without this field. A click here
     // is either a forged interaction or a payload that lost the field
     // (schema drift). Re-render the card WITHOUT the voice button
-    // (renderConfirmCardRows conditions on voiceChannelId being set)
-    // so the broken affordance is removed AND the user gets visible
-    // feedback that something changed — silently absorbing the click
-    // post-deferUpdate would leave the user staring at an unchanged
-    // card with no indication their click registered.
+    // (rerenderConfirmCard's renderConfirmCardRows conditions on
+    // voiceChannelId being set) so the broken affordance is removed
+    // AND the user gets visible feedback that something changed —
+    // silently absorbing the click post-deferUpdate would leave the
+    // user staring at an unchanged card with no indication their
+    // click registered.
+    //
+    // Reuses `rerenderConfirmCard` (instead of an inline rebuild) so
+    // any previously-picked recipients in the payload still show in
+    // the re-rendered card — the inline-rebuild alternative would
+    // surface validRecipients:[] in the UI while the persisted
+    // payload still carried the old recipientIds, masking real
+    // bugs as a UI/state inconsistency.
     logger.warn('handleConfirmVoiceEveryone: voice button click against payload with no voiceChannelId', {
       flow_id, interaction_id: interaction.id,
     });
-    return interaction.editReply({
-      content: renderConfirmCardContent({
-        resourceType: payload.resourceType,
-        resourceLabel: payload.resourceLabel,
-        validRecipients: [],
-        expiresIn: payload.expiresIn,
-        selfDestructSeconds: payload.selfDestructSeconds,
-        personalMessage: payload.personalMessage,
-        warningsBlock: '',
-        needsPicker: true,
-        interaction,
-      }),
-      components: renderConfirmCardRows({
-        sendDisabled: true,
-        expiresIn: payload.expiresIn,
-        selfDestructSeconds: payload.selfDestructSeconds,
-        personalMessage: payload.personalMessage,
-        voiceChannelId: null,
-        interaction,
-      }),
-    }).catch(logIgnoredDiscordErr);
+    return rerenderConfirmCard(interaction, { ...payload, voiceChannelId: null });
   }
 
   // Re-render with a warning banner. Same shape as the picker's
