@@ -54,13 +54,13 @@ const TOKENS_PER_RESOURCE = 10;
 // so log volume tracks operational importance.
 const LARGE_SEND_RECIPIENT_FLOOR = 1000;
 function largeSendThreshold() {
-  // `Math.max(1, …)` on the inner half: a pathologically-low cap
-  // override (e.g., 1) would otherwise yield `Math.floor(1/2) = 0`,
-  // making `>= 0` always true and firing the WARN on every send.
-  // Floor at 1 so the threshold is always a positive integer; the
-  // `>= threshold` comparison at the call site still works correctly
-  // for any cap ≥ 1 (the config validator rejects cap ≤ 0).
-  return Math.min(LARGE_SEND_RECIPIENT_FLOOR, Math.max(1, Math.floor(config.QURL_SEND_MAX_RECIPIENTS / 2)));
+  // `half || 1` floors the threshold at 1 so a pathologically-low cap
+  // override (e.g., cap=1 → floor(0.5)=0) doesn't make `>= 0` always
+  // true and fire the WARN on every send. Threshold is always a
+  // positive integer; the config validator rejects cap ≤ 0 so the
+  // 0→1 substitution only fires for cap=1.
+  const half = Math.floor(config.QURL_SEND_MAX_RECIPIENTS / 2);
+  return Math.min(LARGE_SEND_RECIPIENT_FLOOR, half || 1);
 }
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
@@ -3082,16 +3082,14 @@ function renderConfirmCardRows({
   // so the user can tell at a glance whether a note is attached.
   const bottomRow = new ActionRowBuilder();
   if (voiceChannelId) {
-    // Live count via interaction.guild for the label. interaction may
-    // be absent on the rare test path that calls renderConfirmCardRows
-    // directly without constructing an interaction stub (e.g., the
-    // qurl-file-map.test.js renderer-shape tests that exercise row
-    // count + layout without exercising guild-cache resolution); fall
-    // back to `?` so the button still renders without crashing. Every
-    // production caller (handleQurlSlashSend, handleConfirmUserSelect,
+    // Live count via interaction.guild for the label. Every production
+    // caller (handleQurlSlashSend, handleConfirmUserSelect,
     // handleConfirmVoiceEveryone, rerenderConfirmCard) passes
-    // interaction. The button itself is disabled in either degraded
-    // case (no count = nothing to send to anyway from this affordance).
+    // interaction; renderer-shape unit tests that drive layout-only
+    // assertions may omit it. Either degraded case (no interaction,
+    // missing channel, no members collection) lands the button in
+    // the disabled-with-count=null branch — `connectedCount === null`
+    // is the single sentinel for "render the disabled button shell".
     //
     // Count is render-time, not click-time — members can join/leave
     // voice between renders. Click-time resolution in
@@ -3099,14 +3097,18 @@ function renderConfirmCardRows({
     // the label is a freshness hint that re-derives on every other
     // confirm-card interaction (picker / expiry / note edits all flow
     // through renderConfirmCardRows again).
-    const channel = interaction?.guild?.channels?.cache?.get?.(voiceChannelId);
     let connectedCount = null;
-    if (channel?.members) {
-      let n = 0;
-      for (const [, m] of channel.members) {
-        if (!isBotMember(m)) n++;
+    let channelName = null;
+    if (interaction) {
+      const channel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
+      if (channel?.members) {
+        let n = 0;
+        for (const [, m] of channel.members) {
+          if (!isBotMember(m)) n++;
+        }
+        connectedCount = n;
+        channelName = channel.name || null;
       }
-      connectedCount = n;
     }
     const labelCount = connectedCount == null ? '?' : String(connectedCount);
     // Name the target channel in the label so a user who invoked
@@ -3121,7 +3123,6 @@ function renderConfirmCardRows({
     // is possible; on cache miss (channel was deleted between render
     // and re-render) the legacy "this voice channel" copy is correct,
     // since we can't name a channel we can't read.
-    const channelName = channel?.name;
     const VOICE_LABEL_NAME_BUDGET = 46;
     // safeCodepointSlice (defined above) is codepoint-aware so a
     // surrogate-pair emoji at index 45 doesn't get sliced mid-

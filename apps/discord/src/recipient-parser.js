@@ -458,11 +458,18 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // mod-tool exports, leaked URLs) could DM-blast its connected
     // members via `/qurl file recipients:<#hidden-voice-id>` even
     // when they themselves can't see the channel in the client.
-    // Fail-closed: if `permissionsFor` is missing (degraded test
-    // mock, future discord.js shape change) or returns falsy, we
-    // reject the mention. The button-driven voice-everyone path
-    // doesn't need this gate — invoking the slash command from
-    // inside a voice channel intrinsically proves visibility.
+    // Fail-closed: a missing `interaction.member` (DM context the
+    // outer guild check already eliminated; defense-in-depth here
+    // against a degraded-shape regression), a missing
+    // `permissionsFor` (degraded test mock, future discord.js shape
+    // change), or a falsy permission check all reject the mention.
+    // The button-driven voice-everyone path doesn't need this gate —
+    // invoking the slash command from inside a voice channel
+    // intrinsically proves visibility.
+    if (!interaction.member) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
     const viewerPerms = channel.permissionsFor?.(interaction.member);
     if (!viewerPerms || !viewerPerms.has(VIEW_CHANNEL_PERMISSION)) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
