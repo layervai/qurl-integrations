@@ -3639,7 +3639,9 @@ async function handleQurlMap(interaction) {
   }
   let { locationUrl, locationName } = resolved;
 
-  // Explicit location-name override wins over the URL-derived name.
+  // Explicit location-name override wins over the resolved name
+  // (whether that came from a URL, a place_id lookup, or a free-text
+  // resolve).
   if (locationNameRaw && locationNameRaw.trim().length > 0) {
     locationName = locationNameRaw.trim();
   }
