@@ -2913,6 +2913,16 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
         massMentionDenied = true;
         continue;
       }
+      // Skip undefined-role entries (theoretical — Discord's picker
+      // surfaces roles via `interaction.roles.entries()`, which should
+      // always carry the Role object alongside the ID; but a partial
+      // fetch shape could deliver a bare ID). Symmetric with the
+      // text-path parser's `if (!role) { pushInvalidIfNew(...) }`
+      // branch — without this short-circuit, the `role?.mentionable
+      // !== true` gate below would route a cache-miss role through
+      // the deny path and surface "Non-mentionable role" copy for
+      // what's actually a missing object.
+      if (!isEveryoneRole && !role) continue;
       // Per-role MENTION_EVERYONE gate (issue #326), parallel to the
       // text-path gate in recipient-parser.js. Discord's picker filters
       // non-mentionable roles client-side for users without the perm —
@@ -2921,7 +2931,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       // branch above already handled (isEveryoneRole), so this gate
       // only fires for non-@everyone roles. `role.mentionable === true`
       // is the per-role bypass (set explicitly by a role owner).
-      if (!isEveryoneRole && role?.mentionable !== true && !canMentionEveryone) {
+      if (!isEveryoneRole && role.mentionable !== true && !canMentionEveryone) {
         if (!roleMentionsDeniedIds.has(roleId)) {
           roleMentionsDeniedIds.add(roleId);
           roleMentionsDenied.push(roleId);
@@ -4247,8 +4257,13 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       // `role.mentionable: true` bypass inline so a user who hits
       // this banner knows the workaround without having to find the
       // per-role copy (which only the partial-valid surface renders).
+      // Phrase the bypass as "have the role marked" rather than
+      // "mark the role" — by definition the user hitting this banner
+      // lacks MENTION_EVERYONE and likely lacks Manage Roles too, so
+      // imperative phrasing reads as misleading agency. The workaround
+      // ("ask an admin") is real but indirect; reflect that in the copy.
       const noun = roleMentionsDenied.length === 1 ? 'role' : 'roles';
-      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission (or mark the role as mentionable)`);
+      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission (or have the role marked as mentionable)`);
     }
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);

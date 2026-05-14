@@ -972,6 +972,25 @@ describe('resolveMentionableSelection', () => {
       expect(r.roleMentionsDenied).toEqual(['role-denied-bot']);
     });
 
+    test('undefined role object (partial-fetch edge) → skipped, NOT routed through deny path', () => {
+      // Theoretical edge: `interaction.roles.entries()` carries `[id,
+      // roleObject]` pairs in production, but a partial-fetch shape
+      // could deliver `[id, undefined]`. Without the
+      // `if (!isEveryoneRole && !role) continue;` short-circuit, the
+      // per-role gate (`role?.mentionable !== true`) would route the
+      // cache-miss through the deny path and surface
+      // "Non-mentionable role" copy for what's actually a missing
+      // object. Symmetric with the text-path parser's
+      // `if (!role) { pushInvalidIfNew(...) }` invalid-role branch.
+      const int = makeMentionableInteraction({
+        pickedRoles: [['orphan-id', undefined]],
+      });
+      const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+      expect(r.users).toEqual([]);
+      expect(r.roleMentionsDenied).toEqual([]);
+      expect(r.massMentionDenied).toBe(false);
+    });
+
     test('@everyone-role (role.id === guild.id) NOT routed to roleMentionsDenied — uses massMentionDenied', () => {
       // The @everyone branch above (isEveryoneRole) catches role.id ===
       // guild.id BEFORE the per-role gate fires, so massMentionDenied
@@ -3448,7 +3467,11 @@ describe('handleConfirmUserSelect', () => {
     // Per-role-bypass mention surfaces inline on the banner so the
     // user doesn't have to find the per-role bullet copy (which only
     // the partial-valid surface renders) to learn the workaround.
-    expect(updated.content).toMatch(/mark the role as mentionable/i);
+    // Phrasing reflects indirect agency — the user lacks MENTION_EVERYONE
+    // (by definition reaching this banner) and likely lacks Manage Roles,
+    // so "have the role marked" is more accurate than the imperative
+    // "mark the role" would be.
+    expect(updated.content).toMatch(/have the role marked as mentionable/i);
     // Resource header survives — preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
   });
