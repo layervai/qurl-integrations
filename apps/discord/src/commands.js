@@ -3506,11 +3506,11 @@ async function handleQurlMap(interaction) {
 }
 
 // --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
-// Wire literals (`qurl_confirm_*`) and handler names were dropped from
-// the legacy `qurl_send_*` / `handleSend*` prefix in #316, post-7b.3
-// drain. Any future rename here needs the same SEND_FLOW_TTL_SECONDS
-// (180s) drain on the prior deploy so in-flight `flow_state` rows
-// don't orphan across the boundary.
+// Wire literals (`qurl_confirm_*`) and handler names were renamed away
+// from the legacy `qurl_send_*` / `handleSend*` prefix in #316, after
+// the 7b.3 drain. Any future rename here needs the same
+// SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so in-flight
+// `flow_state` rows don't orphan across the boundary.
 //
 // Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
 // `stage_to` === current stage advances the version (OCC guard) and
