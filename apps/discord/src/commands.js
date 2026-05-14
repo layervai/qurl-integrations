@@ -540,14 +540,18 @@ function parseLocationInput(rawInput) {
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
   // Fail-loud on a missing/invalid expiresAt rather than rendering
-  // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
-  // the contract-violation throw in handleAddRecipients. Validate
+  // literal "<t:undefined:R>" or "<t:1735689600.5:R>" to a recipient.
+  // Matches the contract-violation throw in handleAddRecipients.
+  // Discord's `<t:N:R>` markdown wants integer Unix seconds; the lone
+  // call site already wraps in `Math.floor`, so `Number.isInteger`
+  // tightens the contract from "any finite number" to "exactly what
+  // the markdown accepts" without changing legitimate inputs. Validate
   // FIRST so the description below can interpolate directly. Safe to
   // run before `sanitizeDisplayName` because that helper is total
   // (NFKC + bidi/zero-width strip + markdown escape + 64-char cap +
   // 'Someone' fallback — never throws on any input shape).
-  if (!Number.isFinite(expiresAt)) {
-    throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
+  if (!Number.isInteger(expiresAt)) {
+    throw new Error(`buildDeliveryPayload: expiresAt must be an integer Unix-seconds number (got ${expiresAt})`);
   }
 
   // sanitizeDisplayName centralizes spoof defense so a future caller

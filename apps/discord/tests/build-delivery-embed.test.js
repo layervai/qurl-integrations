@@ -240,13 +240,17 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes
-  // null/undefined/NaN) would otherwise render literal "<t:undefined:R>"
-  // or "<t:NaN:R>" to recipients. The fail-loud throw matches the
-  // contract guard in handleAddRecipients.
-  it('throws if expiresAt is missing or non-finite (fail-loud)', () => {
-    for (const bad of [undefined, null, NaN, Infinity, 'soon', {}]) {
+  // null/undefined/NaN/a float) would otherwise render a malformed
+  // "<t:undefined:R>" / "<t:NaN:R>" / "<t:1735689600.5:R>" to recipients.
+  // Discord's <t:N:R> markdown accepts only integer Unix seconds, which
+  // is what the lone call site produces via `Math.floor`; the
+  // `Number.isInteger` guard tightens the contract from any-finite-number
+  // to exactly-what-the-markdown-accepts. Matches the contract guard in
+  // handleAddRecipients.
+  it('throws if expiresAt is missing, non-finite, or a float (fail-loud)', () => {
+    for (const bad of [undefined, null, NaN, Infinity, 'soon', {}, 1735689600.5, 0.1]) {
       expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
-        .toThrow(/expiresAt must be a finite Unix-seconds number/);
+        .toThrow(/expiresAt must be an integer Unix-seconds number/);
     }
   });
 
@@ -277,12 +281,12 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     // alongside sender + expiry so all three render in design order —
     // sender → message → expiry).
     expect(desc).toContain('> *"line one line two line three"*');
-    // Newlines inside the message itself are flattened to spaces; the
-    // only newlines in the description are the block separators between
-    // sender / message / expiry lines.
+    // Both \n and \r inside the message itself are flattened to spaces;
+    // any newline remaining on the message line would mean the
+    // [\r\n]+ → ' ' collapse regressed.
     const messageLine = desc.split('\n').find(l => l.includes('line one'));
     expect(messageLine).toBeDefined();
-    expect(messageLine).not.toMatch(/\r/);
+    expect(messageLine).not.toMatch(/[\n\r]/);
   });
 
   // Ordering depends on which Embed slot each piece lands in: Discord
