@@ -1081,11 +1081,45 @@ describe('handleQurlFile — slash entry', () => {
     expect(payload.expiresIn).toBe('24h');
     expect(payload.selfDestructSeconds).toBeNull();
     expect(payload.personalMessage).toBeNull();
+    // Resolved aliases persist into payload so menu-handler reruns
+    // (rerenderConfirmCard) can render names even if the member-cache
+    // entry is evicted before the user picks expiry/self-destruct.
+    expect(payload.recipientAliases).toEqual(
+      expect.objectContaining({ [u1]: expect.any(String), [u2]: expect.any(String) })
+    );
+    // warningsBlock present (empty here — no dropped tokens) so menu
+    // interactions can re-render with the same surface as slash entry.
+    expect(payload).toHaveProperty('warningsBlock');
     expect(int.editReply).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Sending file/);
     expect(reply.content).toMatch(/x\.png/);
     expect(reply.components.length).toBeGreaterThan(0);
+  });
+
+  test('/qurl map slash entry persists recipientAliases (parity with /qurl file)', async () => {
+    // Both entry points share handleQurlSlashSend's payload-construction
+    // path. This sanity test pins that the alias-persistence guarantee
+    // covers /qurl map as well — without it, a regression that only
+    // skipped aliases on one entry point would leave map-flow Edit
+    // notes / menu interactions falling back to the raw snowflake on
+    // cache miss.
+    const u1 = '100000000000000001';
+    const int = makeInteraction({
+      options: {
+        _sub: 'map',
+        location: 'https://maps.app.goo.gl/abcXYZ',
+        recipients: `<@${u1}>`,
+      },
+      guildMembers: { [u1]: {} },
+    });
+    await handleQurlMap(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.resourceType).toBe('maps');
+    expect(payload.recipientAliases).toEqual(
+      expect.objectContaining({ [u1]: expect.any(String) })
+    );
   });
 
   test('happy path without recipients → confirm card with picker', async () => {
@@ -2483,14 +2517,17 @@ describe('handleSendConfirmNoteModal', () => {
 
   function makeModalInteraction({ inputValue = 'hello', ...rest } = {}) {
     const int = makeInteraction(rest);
-    int.update = jest.fn().mockResolvedValue(undefined);
     int.fields = { getTextInputValue: jest.fn(() => inputValue) };
     return int;
   }
 
-  test('happy path: trims input, sanitizes markdown, persists, updates message', async () => {
+  test('happy path: defers, trims/sanitizes, persists, editReply re-renders', async () => {
     const int = makeModalInteraction({ inputValue: '  **bold** message  ' });
     await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    // deferUpdate guards the 3s ack deadline — without it, a slow
+    // DDB conditional write could push past Discord's hard limit and
+    // both update() and reply() would fail.
+    expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
         // sanitizeMessage runs markdown-escape — the `**` becomes `\\*\\*`
@@ -2502,11 +2539,11 @@ describe('handleSendConfirmNoteModal', () => {
         personalMessageRaw: '**bold** message',
       }),
     }));
-    expect(int.update).toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
     // Pin the user-facing render — note shows up in the rerendered
     // confirm card content, not just DDB.
-    const lastUpdate = int.update.mock.calls.slice(-1)[0][0];
-    expect(lastUpdate.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
   });
 
   test('round-trip: re-submit unchanged raw input does NOT double-escape', async () => {
@@ -2548,33 +2585,103 @@ describe('handleSendConfirmNoteModal', () => {
     }));
   });
 
-  test('conflict → superseded copy via update (not editReply — modal-submit context)', async () => {
+  test('conflict → superseded copy via editReply (post-deferUpdate)', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeModalInteraction({ inputValue: 'hi' });
     await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
       components: [],
     }));
   });
 
-  test('not_found → expired copy via update', async () => {
+  test('not_found → expired copy via editReply', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeModalInteraction({ inputValue: 'hi' });
     await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
-    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
     }));
   });
 
-  test('transitionFlow throw → ephemeral reply (modal-submit has no defer to follow up from)', async () => {
+  test('transitionFlow throw → ephemeral followUp (NOT update/reply post-defer)', async () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
     const int = makeModalInteraction({ inputValue: 'hi' });
     await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
-    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your note/i),
       ephemeral: true,
     }));
+    // Negative assertion — once deferUpdate has fired, reply() and
+    // update() would 409 (interaction already acked). The throw path
+    // MUST surface the error via followUp, not either of those.
+    expect(int.reply).not.toHaveBeenCalled();
+    expect(int.update).not.toHaveBeenCalled();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// rerenderConfirmCard cache-miss fallback (verified end-to-end via
+// the expiry handler — rerenderConfirmCard isn't exported)
+// ──────────────────────────────────────────────────────────────
+
+describe('rerenderConfirmCard cache-miss recipient fallback', () => {
+  const u1 = '100000000000000001';
+  const persistedAlias = 'Alice (display)';
+
+  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('renders persisted alias when member-cache is empty', async () => {
+    // The bug this guards: a member-cache miss between pick and menu
+    // change would render the raw 18-digit snowflake. Persisting
+    // resolvedAliases at pick-time + reading them in rerenderConfirmCard
+    // means the user always sees a name (cached when available, the
+    // persisted alias otherwise).
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: persistedAlias },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    // No guildMembers — cache miss. The fallback chain should hit
+    // payload.recipientAliases.
+    const int = makeSelectInteraction({ value: '7d', guildMembers: {} });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalled();
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    // Alias renders (markdown chars not present in this alias, so the
+    // escape pass is a no-op). The raw snowflake MUST NOT appear in the
+    // recipient preview line.
+    expect(lastEdit.content).toMatch(/Alice/);
+    expect(lastEdit.content).not.toMatch(new RegExp(u1));
+  });
+
+  test('warningsBlock from payload carries across menu interactions', async () => {
+    // The other half of the cr finding: when slash entry records
+    // "Skipped bots: 1" warnings, changing expiry shouldn't drop
+    // them. Verifies the payload-persisted warningsBlock flows
+    // through rerenderConfirmCard.
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      warningsBlock: '⚠️ Skipped bots: 1\n\n',
+    };
+    const int = makeSelectInteraction({ value: '7d', guildMembers: { [u1]: {} } });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/Skipped bots/);
   });
 });
 

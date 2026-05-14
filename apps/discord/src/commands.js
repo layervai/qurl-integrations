@@ -4114,6 +4114,15 @@ async function handleQurlSlashSend(interaction, params) {
     // revoke's pattern.
     flow_id = flowIdForInteraction(interaction);
     const sendNonce = crypto.randomBytes(8).toString('hex');
+    // Persist resolved aliases keyed by id. `rerenderConfirmCard`
+    // falls back to these when the menu/note interaction fires after
+    // the member-cache entry has been evicted (rare given the 3-min
+    // flow TTL, but the alternative is showing the raw snowflake).
+    // resolveRecipientAlias returns the PLAIN form — markdown escape
+    // happens at render time.
+    const recipientAliases = Object.fromEntries(
+      valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+    );
     const payload = {
       resourceType: params.resourceType,
       attachment: params.attachment,
@@ -4121,10 +4130,17 @@ async function handleQurlSlashSend(interaction, params) {
       locationName: params.locationName,
       resourceLabel: params.resourceLabel,
       recipientIds,
+      recipientAliases,
       expiresIn,
       selfDestructSeconds,
       personalMessage,
       personalMessageRaw: personalMessageRawTrimmed,
+      // One-time information surface — slash-entry warnings about
+      // bot/self/unresolved mentions persist into the payload so
+      // menu interactions (which don't recompute) still render them.
+      // Picker re-pick OVERWRITES with a fresh warningsBlock from the
+      // new partition.
+      warningsBlock,
       sendNonce,
     };
     let supersede;
@@ -4555,7 +4571,22 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
 
-  const newPayload = { ...payload, recipientIds: valid.map((u) => u.id) };
+  // Recompute warnings + aliases for the new pick. droppedBots and
+  // droppedSelf can flip here (UserSelectMenu doesn't pre-exclude
+  // the invoker or bots), so warnings change with the recipient set.
+  const newWarningsBlock = renderRecipientWarnings({
+    droppedBots,
+    droppedSelf,
+  });
+  const newRecipientAliases = Object.fromEntries(
+    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+  );
+  const newPayload = {
+    ...payload,
+    recipientIds: valid.map((u) => u.id),
+    recipientAliases: newRecipientAliases,
+    warningsBlock: newWarningsBlock,
+  };
   // Targeted catch around transitionFlow mirrors the same shape
   // handleSendConfirmClick / handleSendCancelClick use around their
   // DDB calls. A throw here would otherwise bubble to the dispatcher's
@@ -4591,20 +4622,6 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Recompute warnings against the new pick. `droppedBots` AND
-  // `droppedSelf` can flip here — Discord's UserSelectMenu doesn't
-  // exclude the invoker, so a user picking themselves bumps
-  // droppedSelf; bots present in the picker bump droppedBots.
-  // `cappedCount` / `invalidTokens` / unresolved / transient buckets
-  // are string-path-only (parser never ran on the picker selection),
-  // so they stay empty here. The earlier zero-valid short-circuit
-  // already handled the empty case; what's left below is the
-  // partial-pick UX where SOME picked users are valid but the
-  // warning still surfaces the dropped ones.
-  const warningsBlock = renderRecipientWarnings({
-    droppedBots,
-    droppedSelf,
-  });
   // Intentional flag divergence: the CONTENT renders the resolved
   // recipient summary ("**To:** N user(s)") — needsPicker:false —
   // while the ROWS keep the UserSelectMenu attached so the user can
@@ -4619,7 +4636,7 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     expiresIn: payload.expiresIn,
     selfDestructSeconds: payload.selfDestructSeconds,
     personalMessage: payload.personalMessage,
-    warningsBlock,
+    warningsBlock: newWarningsBlock,
     needsPicker: false,
     interaction,
   });
@@ -4651,17 +4668,21 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 // deferred-ACK menu handlers use the editReply default.
 async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => interaction.editReply(msg)) {
   const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
-  // Re-resolve the User objects from cache for the preview. Cache-only
-  // (no members.fetch) — handleSendConfirmClick re-fetches at Send
-  // time; the preview here just needs the username/nickname for
-  // display. A picked user that left the guild between pick and
-  // menu-click renders as their ID via resolveRecipientAlias's
-  // fallback, which is correct (the actual partial-drop handling
-  // lives at Send-click time).
+  // Resolve each id through three layers, in priority order:
+  //   1. members.cache — freshest data when populated
+  //   2. payload.recipientAliases — persisted at pick time, survives
+  //      cache eviction between pick and menu-click
+  //   3. fabricated `user-${id}` fallback — last resort if both miss
+  // resolveRecipientAlias does its own NFKC + bidi/zero-width strip
+  // on whichever wins, so the rendered text is always sanitized.
   const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
+  const persistedAliases = newPayload.recipientAliases || {};
   const validRecipients = recipientIds.map((id) => {
     const cached = memberCache && memberCache.get && memberCache.get(id);
-    return cached && cached.user ? cached.user : { id, username: id, bot: false };
+    if (cached && cached.user) return cached.user;
+    const alias = persistedAliases[id];
+    if (alias) return { id, displayName: alias, bot: false };
+    return { id, username: `user-${id}`, bot: false };
   });
   const needsPicker = recipientIds.length === 0;
   const content = renderConfirmCardContent({
@@ -4671,7 +4692,7 @@ async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => inter
     expiresIn: newPayload.expiresIn,
     selfDestructSeconds: newPayload.selfDestructSeconds,
     personalMessage: newPayload.personalMessage,
-    warningsBlock: '',
+    warningsBlock: newPayload.warningsBlock || '',
     needsPicker,
     interaction,
   });
@@ -4826,6 +4847,12 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
 // because flow-dispatch wires modal submits to the same message-bound
 // interaction context.
 async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
+  // Defer the modal-submit ack BEFORE the DDB write — without this,
+  // a slow conditional write (throttled partition) can push past
+  // Discord's 3-second hard deadline, after which `update()` /
+  // `reply()` both fail and the user gets an "interaction failed"
+  // toast. Mirrors the menu handlers' shape.
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const raw = interaction.fields.getTextInputValue(SEND_NOTE_MODAL_INPUT_ID).trim();
   // Cap matches the slash-entry path; both forms derive from the same
   // trimmed-and-capped raw so an Edit round-trip is idempotent.
@@ -4845,28 +4872,27 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
     logger.error('handleSendConfirmNoteModal: transitionFlow threw', {
       flow_id, error: err && err.message,
     });
-    return interaction.reply({
+    // Post-deferUpdate the only safe surface for an error toast is
+    // followUp (ephemeral). reply() would 409 — the interaction is
+    // already acked.
+    return interaction.followUp({
       content: '❌ Could not save your note right now. Try again in a moment.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
-  // Modal-submit ACK goes through `update()` against the parent
-  // confirm-card message, not editReply. Both branches and the
-  // happy-path rerender share the same ack target via `update`.
-  const ack = (msg) => interaction.update(msg);
   if (result.result === 'conflict') {
-    return ack({
+    return interaction.editReply({
       content: 'Send was superseded — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'not_found') {
-    return ack({
+    return interaction.editReply({
       content: 'This send expired — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  return rerenderConfirmCard(interaction, newPayload, ack);
+  return rerenderConfirmCard(interaction, newPayload);
 }
 
 // Send button → fire executeSendPipeline. deleteFlow first as the
@@ -6023,7 +6049,7 @@ const commands = [
             opt.setName('personal-message')
               .setDescription('Optional note included in each recipient\'s DM')
               .setRequired(false)
-              .setMaxLength(280)
+              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
           )
       )
       .addSubcommand(sub =>
@@ -6067,7 +6093,7 @@ const commands = [
             opt.setName('personal-message')
               .setDescription('Optional note included in each recipient\'s DM')
               .setRequired(false)
-              .setMaxLength(280)
+              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
           )
       )
       .addSubcommand(sub =>
