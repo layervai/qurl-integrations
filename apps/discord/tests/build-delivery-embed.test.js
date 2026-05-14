@@ -247,10 +247,22 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // `Number.isInteger` guard tightens the contract from any-finite-number
   // to exactly-what-the-markdown-accepts. Matches the contract guard in
   // handleAddRecipients.
-  it('throws if expiresAt is missing, non-finite, or a float (fail-loud)', () => {
-    for (const bad of [undefined, null, NaN, Infinity, 'soon', {}, 1735689600.5, 0.1]) {
+  it('throws if expiresAt is missing, non-finite, a float, or non-positive (fail-loud)', () => {
+    // Note on the "beyond MAX_SAFE_INTEGER" boundary: doubles can
+    // exactly represent every integer up to 2^53, so 2^53 itself is
+    // still `Number.isInteger == true`. Above 2^53, additions of 1
+    // round to the nearest representable double (which is also an
+    // integer at that magnitude), so `Number.isInteger` keeps
+    // returning true. There is no clean "finite integer that
+    // Number.isInteger rejects" boundary — the rejection set is
+    // exactly: non-finite + non-integer-floats + non-positive.
+    for (const bad of [
+      undefined, null, NaN, Infinity, -Infinity, 'soon', {},
+      1735689600.5, 0.1,            // floats
+      0, -1, -1735689600,           // non-positive (negative timestamp would render as "55 years ago" in Discord)
+    ]) {
       expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
-        .toThrow(/expiresAt must be an integer Unix-seconds number/);
+        .toThrow(/expiresAt must be a positive integer Unix-seconds number/);
     }
   });
 
@@ -267,6 +279,8 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
       .toThrow(/got soon, typeof=string/);
     expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600.5 }))
       .toThrow(/got 1735689600\.5, typeof=number/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: -1 }))
+      .toThrow(/got -1, typeof=number/);
   });
 
 
@@ -338,6 +352,11 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('**Vik** opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    // Mirror the all-three-pieces ordering test: also assert addFields
+    // is never called on the no-personalMessage path. Belt-and-braces
+    // against a future regression that adds a field only when one of
+    // the slots is empty (e.g. a "no message attached" placeholder).
+    expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
   });
 
   // Belt-and-braces: a personalMessage that collapses to "" after

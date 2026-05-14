@@ -550,12 +550,15 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // run before `sanitizeDisplayName` because that helper is total
   // (NFKC + bidi/zero-width strip + markdown escape + 64-char cap +
   // 'Someone' fallback — never throws on any input shape).
-  if (!Number.isInteger(expiresAt)) {
+  if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
     // String() over template interpolation so {} renders as "[object
     // Object]" instead of being coerced via valueOf; typeof gives the
     // operator the shape at a glance for non-primitive contract
-    // violations (object, function, symbol).
-    throw new Error(`buildDeliveryPayload: expiresAt must be an integer Unix-seconds number (got ${String(expiresAt)}, typeof=${typeof expiresAt})`);
+    // violations (object, function, symbol). The `> 0` clause closes
+    // the negative-timestamp gap: `<t:-1:R>` renders as "55 years ago"
+    // in Discord rather than failing visibly, so reject before the
+    // interpolation can produce a misleading recipient surface.
+    throw new Error(`buildDeliveryPayload: expiresAt must be a positive integer Unix-seconds number (got ${String(expiresAt)}, typeof=${typeof expiresAt})`);
   }
 
   // sanitizeDisplayName centralizes spoof defense so a future caller
