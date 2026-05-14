@@ -1906,6 +1906,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   let delivered = 0;
   let failed = 0;
 
+  // Hoist payload-shared inputs outside batchSettled so the entire
+  // batch shares one expiry timestamp and one resolved sender alias.
+  // Mirrors executeSendPipeline's structure — both pipelines now
+  // compute expiresAt once per call rather than once per recipient,
+  // eliminating Date.now() drift between recipients in the same
+  // batch (negligible at the 30m–7d horizon, but it's the unifying
+  // shape). resolveSenderAlias is a pure function of
+  // originalInteraction so hoisting is safe and avoids re-resolving
+  // the nickname/globalName/username chain per dispatch.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+  const senderAlias = resolveSenderAlias(originalInteraction);
+
   const dmResults = await batchSettled(newRecipients, async (recipient) => {
     const links = recipientLinks[recipient.id];
     // Defensive guard: recipientLinks is populated above for every newRecipient,
@@ -1932,18 +1944,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;
     try {
-      // Same Unix-seconds expiry computation as executeSendPipeline —
-      // see comment there. Computed once per handleAddRecipients call
-      // (outside the .map below), so a single batch's recipients all
-      // share the same expiry. Cheap to recompute on each call; the
-      // alternative would be threading a single timestamp through
-      // sendConfig at save time.
-      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-        // Same alias resolution as executeSendPipeline — see comment
-        // there for the nickname > globalName > username fallback
-        // rationale.
-        senderAlias: resolveSenderAlias(originalInteraction),
+        senderAlias,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage: sendConfig.personal_message,
