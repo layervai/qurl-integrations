@@ -2755,6 +2755,51 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/Skipped bots/);
   });
+
+  test('off-EXPIRY_LABELS expiresIn in payload → renderer defaults the 24h option (no first-option misrepresentation)', async () => {
+    // Defense-in-depth: a corrupted DDB row carrying expiresIn outside
+    // EXPIRY_LABELS (e.g. left over from a deprecated value, or written
+    // by a misbehaving migration) would leave every option un-defaulted
+    // in the StringSelectMenu — Discord then renders the first option's
+    // label in the collapsed header, MISREPRESENTING the actual stored
+    // value to the user. The renderer falls back to defaulting '24h'
+    // in that case so the card still shows SOMETHING meaningful AND
+    // matches the codebase default.
+    const { StringSelectMenuBuilder } = require('discord.js');
+    StringSelectMenuBuilder.mockClear();
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: ['100000000000000001'],
+      recipientAliases: { '100000000000000001': 'Alice' },
+      expiresIn: '999d',  // corrupted: not in EXPIRY_LABELS
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    // Use the self-destruct handler to trigger a rerender WITHOUT
+    // overwriting the corrupted expiresIn (the expiry handler would
+    // replace it with the user's pick, masking the bug). Self-destruct
+    // touches only selfDestructSeconds, so the rerender carries the
+    // corrupted expiresIn unchanged through to the renderer.
+    const int = makeInteraction({ guildMembers: { '100000000000000001': {} } });
+    int.values = ['30'];  // legit self-destruct preset
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    // The rerender pass calls StringSelectMenuBuilder twice (self-
+    // destruct row + expiry row). Inspect the addOptions calls and
+    // verify the EXPIRY select has exactly one default-true option,
+    // and that option's value is '24h'.
+    const expirySelectCalls = StringSelectMenuBuilder.mock.results
+      .filter((r) => {
+        const calls = r.value.setCustomId.mock.calls;
+        return calls.length && calls[0][0] === 'qurl_send_confirm_expiry';
+      });
+    expect(expirySelectCalls.length).toBeGreaterThan(0);
+    const expiryAddOptionsArgs = expirySelectCalls[expirySelectCalls.length - 1]
+      .value.addOptions.mock.calls[0];
+    const defaultedExpiryOptions = expiryAddOptionsArgs.filter((o) => o.default);
+    expect(defaultedExpiryOptions).toHaveLength(1);
+    expect(defaultedExpiryOptions[0].value).toBe('24h');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -2938,6 +2983,11 @@ describe('constants + exports', () => {
     expect(startIdx).toBeGreaterThanOrEqual(0);
     // Walk forward tracking brace depth; first time depth returns to
     // 0 after entering the body marks the end of the function.
+    // LIMITATION: braces inside string literals / template literals /
+    // regex literals would mis-balance the count. The current
+    // executeSendPipeline body is free of those constructs — if a
+    // future change adds one (e.g. `const re = /\{[^}]*\}/;`), this
+    // walker needs upgrading to a real tokenizer.
     let i = src.indexOf('{', startIdx);
     expect(i).toBeGreaterThanOrEqual(0);
     let depth = 0;

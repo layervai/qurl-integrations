@@ -3534,7 +3534,7 @@ const SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_send_confirm_note_modal';
 // Local to the note modal — kept off the prefix-only customId
 // allowlist because flow-dispatch never routes modal-input fields,
 // only the parent modal customId.
-const SEND_NOTE_MODAL_INPUT_ID = 'message_value';
+const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 
 // 3-minute confirm-card window. Matches /qurl send's Step-3 form
 // timeout at line ~2293 so users have the same time-to-finish budget
@@ -3929,14 +3929,24 @@ function renderConfirmCardRows({
   // Expiry StringSelectMenu. Default-true on the matching option same
   // as self-destruct above. EXPIRY_CHOICES is shared with the slash-
   // option choice list so users see identical labels in autocomplete
-  // and in the form.
+  // and in the form. `hasExpiryMatch` defends against a corrupted DDB
+  // row carrying an off-`EXPIRY_LABELS` value — without it every
+  // option would be un-defaulted and Discord renders the first
+  // option's label, misrepresenting the actual stored value. Falls
+  // back to defaulting the codebase-default '24h' option so the card
+  // still shows SOMETHING meaningful.
+  const hasExpiryMatch = EXPIRY_CHOICES.some((c) => c.value === expiresIn);
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
       .setMinValues(1)
       .setMaxValues(1)
       .addOptions(
-        ...EXPIRY_CHOICES.map((c) => ({ label: c.name, value: c.value, default: c.value === expiresIn }))
+        ...EXPIRY_CHOICES.map((c) => ({
+          label: c.name,
+          value: c.value,
+          default: hasExpiryMatch ? c.value === expiresIn : c.value === '24h',
+        }))
       )
   ));
   // Bottom row: Note button + Send + Cancel. Label flips between
@@ -4691,6 +4701,11 @@ async function rerenderConfirmCard(interaction, newPayload) {
   //   3. fabricated `user-${id}` fallback — last resort if both miss
   // resolveRecipientAlias does its own NFKC + bidi/zero-width strip
   // on whichever wins, so the rendered text is always sanitized.
+  // The aliases in persistedAliases were ALREADY produced by
+  // resolveRecipientAlias at pick time — re-running it here is a
+  // no-op because NFKC + bidi/zero-width strip have fixed points
+  // after one pass. If sanitize semantics ever stop being idempotent,
+  // this becomes a double-sanitize bug.
   const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
   const persistedAliases = newPayload.recipientAliases || {};
   const validRecipients = recipientIds.map((id) => {
@@ -4855,7 +4870,7 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
     .setTitle('Personal message');
   modal.addComponents(new ActionRowBuilder().addComponents(
     new TextInputBuilder()
-      .setCustomId(SEND_NOTE_MODAL_INPUT_ID)
+      .setCustomId(SEND_NOTE_MODAL_FIELD_ID)
       .setLabel('Optional note (leave blank to clear)')
       .setStyle(TextInputStyle.Paragraph)
       .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
@@ -4892,7 +4907,20 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // `reply()` both fail and the user gets an "interaction failed"
   // toast. Mirrors the menu handlers' shape.
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
-  const raw = interaction.fields.getTextInputValue(SEND_NOTE_MODAL_INPUT_ID).trim();
+  // Defensive read: `getTextInputValue` throws if the customId
+  // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. The
+  // try/catch + empty-string fallback keeps the handler resilient
+  // — an unrecognized field reads as empty input, which routes to
+  // the clear-note branch instead of leaving the modal-submit
+  // interaction unresolved past deferUpdate.
+  let raw = '';
+  try {
+    raw = (interaction.fields.getTextInputValue(SEND_NOTE_MODAL_FIELD_ID) || '').trim();
+  } catch (err) {
+    logger.warn('handleSendConfirmNoteModal: getTextInputValue threw', {
+      flow_id, error: err && err.message,
+    });
+  }
   // Cap matches the slash-entry path; both forms derive from the same
   // trimmed-and-capped raw so an Edit round-trip is idempotent.
   const personalMessageRaw = raw ? safeCodepointSlice(raw, PERSONAL_MESSAGE_INPUT_MAX) : null;
