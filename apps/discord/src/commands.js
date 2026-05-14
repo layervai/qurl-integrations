@@ -454,9 +454,6 @@ function resolveRecipientAlias(r, interaction) {
 //     │  🕐 Door closes in 1 day                                    │  (Discord <t:N:R> — auto-updates client-side
 //     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
-//     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
-//     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
-//     │                                                             │
 //     │  ┌──────────────────────────┐                               │
 //     │  │   🔗 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
@@ -590,14 +587,6 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
         }
         return `\ud83d\udd50 Door closes <t:${expiresAt}:R>`;
       })(),
-    },
-    {
-      // Brand line lives in a regular embed field (NOT setFooter) because
-      // Discord embed footers are plain-text only and we need the markdown
-      // hyperlink on `qURL` to point at https://layerv.ai. The brand line
-      // anchors the recipient back to the qURL product page.
-      name: '\u200B',
-      value: 'Quantum URL ([qURL](https://layerv.ai)) · The internet has a hidden layer. This is how you enter.',
     },
   );
 
