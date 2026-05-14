@@ -22,7 +22,15 @@ jest.mock('../src/config', () => ({
   QURL_SEND_MAX_RECIPIENTS: 25,
 }));
 
-const { parseRecipientMentions, MAX_INPUT_LENGTH, MAX_INVALID_TOKEN_LENGTH } = require('../src/recipient-parser');
+const {
+  parseRecipientMentions,
+  isVoiceChannelType,
+  MAX_INPUT_LENGTH,
+  MAX_INVALID_TOKEN_LENGTH,
+  VOICE_CHANNEL_TYPE,
+  STAGE_VOICE_CHANNEL_TYPE,
+  VIEW_CHANNEL_PERMISSION,
+} = require('../src/recipient-parser');
 const logger = require('../src/logger');
 
 // Build a synthetic interaction with the cache shape the parser reads.
@@ -31,7 +39,7 @@ const logger = require('../src/logger');
 // IDs are all-numeric to match real Discord snowflakes — the parser's
 // regex is `/<@!?(\d+)>/` so letter-prefixed test fixtures would silently
 // drop every mention, masking real coverage.
-function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {} } = {}) {
+function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {}, channels = {} } = {}) {
   const memberCache = new Map();
   for (const [id, attrs] of Object.entries(users)) {
     memberCache.set(id, { user: { id, bot: !!attrs.bot } });
@@ -50,11 +58,47 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
     }
     roleCache.set(roleId, { members: roleMembers });
   }
+  // Channel shape: { id → { type, members: [id, ...], viewable? } }
+  //   type     numeric ChannelType (2 = GuildVoice, 13 = GuildStageVoice;
+  //            any other value tests the non-voice rejection path).
+  //   members  voice-connected member IDs (added to guild member cache so
+  //            the bot filter + post-filter dedupe semantics match
+  //            production).
+  //   viewable defaults to true; set false to test the ViewChannel-gate
+  //            rejection path (private voice channels the bot has cached
+  //            but the sender can't see in their client).
+  const channelCache = new Map();
+  for (const [channelId, attrs] of Object.entries(channels)) {
+    const memberIds = attrs.members || [];
+    const chMembers = new Map();
+    for (const mid of memberIds) {
+      const existing = memberCache.get(mid) ?? { user: { id: mid, bot: false } };
+      memberCache.set(mid, existing);
+      chMembers.set(mid, existing);
+    }
+    const viewable = attrs.viewable !== false;
+    // permissionsFor is the read-of-record for the ViewChannel gate.
+    // Real discord.js returns a Readonly<PermissionsBitField>; the
+    // mock returns the minimum shape the parser exercises (`.has`).
+    // Argument is ignored — viewability is per-channel-fixture, not
+    // per-caller, which is sufficient because the parser only ever
+    // asks about the invoking user.
+    channelCache.set(channelId, {
+      id: channelId,
+      type: attrs.type,
+      members: chMembers,
+      permissionsFor: () => ({
+        has: (bit) => bit !== VIEW_CHANNEL_PERMISSION || viewable,
+      }),
+    });
+  }
   return {
     user: { id: senderId },
+    member: { id: senderId },
     guild: {
       members: { cache: memberCache },
       roles: { cache: roleCache },
+      channels: { cache: channelCache },
     },
   };
 }
@@ -326,6 +370,332 @@ describe('parseRecipientMentions — role mentions', () => {
     const res = parseRecipientMentions('<@&7000> <@&7000> <@&7000>', int);
     expect(res.ids.sort()).toEqual(['101', '102']);
     expect(res.invalidTokens).toEqual([]);
+  });
+});
+
+describe('voice-channel type constants (discord.js ChannelType pin)', () => {
+  // Pins the numeric values the parser hard-codes (`channel.type ===
+  // 2 || channel.type === 13`). A discord.js bump that renumbers
+  // GuildVoice / GuildStageVoice would break the voice-everyone path
+  // silently without these assertions — the parser would treat real
+  // voice channels as non-voice and reject the mention.
+  test('VOICE_CHANNEL_TYPE is 2 (GuildVoice)', () => {
+    expect(VOICE_CHANNEL_TYPE).toBe(2);
+  });
+  test('STAGE_VOICE_CHANNEL_TYPE is 13 (GuildStageVoice)', () => {
+    expect(STAGE_VOICE_CHANNEL_TYPE).toBe(13);
+  });
+  test('isVoiceChannelType matches both voice + stage-voice', () => {
+    expect(isVoiceChannelType(2)).toBe(true);
+    expect(isVoiceChannelType(13)).toBe(true);
+  });
+  test('isVoiceChannelType rejects every other channel type (text, category, forum, etc.)', () => {
+    expect(isVoiceChannelType(0)).toBe(false);   // GuildText
+    expect(isVoiceChannelType(4)).toBe(false);   // GuildCategory
+    expect(isVoiceChannelType(5)).toBe(false);   // GuildAnnouncement
+    expect(isVoiceChannelType(10)).toBe(false);  // AnnouncementThread
+    expect(isVoiceChannelType(15)).toBe(false);  // GuildForum
+    expect(isVoiceChannelType(undefined)).toBe(false);
+    expect(isVoiceChannelType(null)).toBe(false);
+  });
+
+  // ViewChannel permission bit pinned at 1 << 10 (1024). A discord.js
+  // bump that renumbers the bit would silently break the private-
+  // voice-channel-leak defense — this spec keeps the contract honest.
+  test('VIEW_CHANNEL_PERMISSION is 1 << 10', () => {
+    expect(VIEW_CHANNEL_PERMISSION).toBe(1024n);
+  });
+});
+
+describe('parseRecipientMentions — channel mentions (voice / stage-voice)', () => {
+  // ChannelType numeric values mirrored from discord.js:
+  //   GuildVoice = 2
+  //   GuildStageVoice = 13
+  //   GuildText = 0 (rejected — non-voice)
+  const GUILD_VOICE = 2;
+  const GUILD_STAGE_VOICE = 13;
+  const GUILD_TEXT = 0;
+
+  test('voice channel expands to currently-connected non-bot members', () => {
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222', '333'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222', '333']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('stage-voice channel expands the same way as voice', () => {
+    const int = makeInteraction({
+      channels: {
+        '501': { type: GUILD_STAGE_VOICE, members: ['111', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#501>', int);
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('voice channel filters bots from the connected set', () => {
+    const int = makeInteraction({
+      users: { '801': { bot: true } },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '801', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('empty voice channel lands in invalidTokens (no silent empty expansion)', () => {
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: [] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('voice channel with only bots lands in invalidTokens', () => {
+    const int = makeInteraction({
+      users: { '801': { bot: true }, '802': { bot: true } },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['801', '802'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('voice channel the sender CANNOT see (ViewChannel denied) lands in invalidTokens — no private-channel-leak', () => {
+    // The bot's channels.cache holds every channel it can see, so
+    // without the ViewChannel gate a user could DM-blast members of
+    // a private voice channel just by knowing its snowflake. Pin
+    // that channels with viewable:false fall through to
+    // invalidTokens despite type=GuildVoice + non-empty members.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222'], viewable: false },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('missing permissionsFor on the channel cache (degraded shape) fails closed', () => {
+    // Defense-in-depth: real discord.js always supplies permissionsFor
+    // on GuildChannel, but a future shape change or partially-mocked
+    // test fixture would otherwise silently bypass the gate. Pin
+    // the fail-closed behavior so the bypass surfaces as "couldn't
+    // expand" rather than a silent leak.
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map([[
+      '500',
+      // intentionally NO permissionsFor — the parser must treat
+      // this as denied, not as "assume allowed".
+      { id: '500', type: GUILD_VOICE, members: new Map([['111', { user: { id: '111', bot: false } }]]) },
+    ]]);
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('text channel mention is rejected into invalidTokens (no @everyone-in-text-channel regression)', () => {
+    // Pins PR #174's fix: text-channel "everyone" used to expand to
+    // every ViewChannel-permission holder, which on default Discord
+    // is the entire guild. We REJECT non-voice channel mentions
+    // outright so a user typing `<#text-channel>` doesn't accidentally
+    // blast the whole server.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_TEXT, members: ['111', '222'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('unknown channel (cache miss) lands in invalidTokens', () => {
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+  });
+
+  test('dedupes repeated channel mentions into one invalidTokens entry', () => {
+    // Symmetric with the role-error dedup path (`<@&999> <@&999>`
+    // produces one entry, not two). A caller's "couldn't parse: X, X"
+    // embed is hostile.
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999> <#999>', int);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+  });
+
+  test('voice expansion combines with explicit user mentions (dedupe across paths)', () => {
+    const int = makeInteraction({
+      users: { '111': {}, '222': {}, '333': {} },
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222'] },
+      },
+    });
+    // '111' appears in both the explicit mention AND the voice
+    // channel; should dedupe to one entry. '333' is mention-only.
+    const res = parseRecipientMentions('<@111> <@333> <#500>', int);
+    expect(res.ids.sort()).toEqual(['111', '222', '333']);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('channel mention does not show up in invalidTokens twice (channel-expansion + residue-strip)', () => {
+    // The residue-strip pass also strips <#id>; without that, a
+    // resolved voice channel would surface as both an expansion AND
+    // a leftover invalid token. Test pins the strip.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111'] },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('DM-context (no guild) lands channel mention in invalidTokens', () => {
+    // Same cold-cache / DM degradation path as user mentions.
+    const res = parseRecipientMentions('<#500>', { user: { id: '900000000000000001' } });
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('rejected channel mention is NOT double-reported by the residue-strip pass', () => {
+    // Pins the load-bearing CHANNEL_MENTION_RE strip in the residue
+    // pass. Without it, a rejected channel mention would surface
+    // TWICE in invalidTokens: once from the channel-expansion loop
+    // (cache miss / non-voice / view-denied → pushInvalidIfNew) and
+    // once from the residue-strip pass (split on whitespace would
+    // tokenize the surviving `<#999>` as a leftover invalid token).
+    // The .toEqual length-1 assertion is what guards the strip; if
+    // the strip were ever removed, this fails loudly rather than
+    // surfacing as a "couldn't parse: <#999>, <#999>" user-visible
+    // hostile embed.
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999>', int);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+    expect(res.invalidTokens.length).toBe(1);
+  });
+
+  test('<#voice> succeeds independently when sender lacks MENTION_EVERYONE (massMentionDenied stays orthogonal)', () => {
+    // Cross-feature interaction: a sender who can see the voice
+    // channel but lacks MENTION_EVERYONE should still get the
+    // voice expansion; @everyone should land in massMentionDenied
+    // independently. The two paths must not block each other —
+    // pinning the orthogonality so a future refactor doesn't
+    // entangle them (e.g., short-circuiting all expansions when
+    // any one is denied).
+    const int = makeInteraction({
+      users: { '111': {}, '222': {} },
+      channels: { '500': { type: 2, members: ['111', '222'] } },
+    });
+    const res = parseRecipientMentions('@everyone <#500>', int, { allowMassMention: false });
+    expect(res.ids.sort()).toEqual(['111', '222']);
+    expect(res.massMentionDenied).toBe(true);
+    // @everyone was stripped from invalidTokens (per the
+    // allowMassMention contract) AND the voice channel expanded
+    // cleanly — neither path interferes with the other.
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('interaction.member undefined with present guild fails closed (no silent view bypass)', () => {
+    // Defense-in-depth: real discord.js always populates member for
+    // guild slash commands. A degraded interaction shape (test mock
+    // bug, future discord.js refactor) where member is undefined
+    // must NOT silently bypass the ViewChannel gate — passing
+    // undefined to channel.permissionsFor returns null in real
+    // discord.js, which fails closed via the `!viewerPerms` branch.
+    // This test pins that contract against a mock that returns null
+    // from permissionsFor when called with undefined.
+    const channelCache = new Map([[
+      '500',
+      {
+        id: '500',
+        type: 2, // GuildVoice
+        members: new Map([['111', { user: { id: '111', bot: false } }]]),
+        // Returns null when called with undefined member, matching
+        // real discord.js behavior.
+        permissionsFor: (memberOrId) => memberOrId == null ? null : ({ has: () => true }),
+      },
+    ]]);
+    const int = {
+      user: { id: '900000000000000001' },
+      // member intentionally absent
+      guild: {
+        members: { cache: new Map([['111', { user: { id: '111', bot: false } }]]) },
+        roles: { cache: new Map() },
+        channels: { cache: channelCache },
+      },
+    };
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('explicit channel mentions claim cap slots BEFORE @everyone (priority ordering)', () => {
+    // The parser's channel-expansion pass runs BEFORE @everyone so
+    // direct mentions (user / role / channel) claim cap slots first
+    // and @everyone fills the remainder. Reversing the order would
+    // silently drop explicit mentions when the cache is partial or
+    // the cap is tight — pin the contract here.
+    //
+    // Setup: cap = 25 (test default), 100 unrelated guild members,
+    // 3-member voice channel. With voice running BEFORE @everyone,
+    // the 3 voice members win cap slots first and @everyone fills
+    // the remaining 22.
+    const users = {};
+    for (let i = 1; i <= 100; i++) {
+      users[`9${String(i).padStart(17, '0')}`] = {};
+    }
+    const voiceMembers = ['111', '222', '333'];
+    for (const id of voiceMembers) users[id] = {};
+    const int = makeInteraction({
+      users,
+      channels: { '500': { type: GUILD_VOICE, members: voiceMembers } },
+    });
+    const res = parseRecipientMentions('@everyone <#500>', int, { allowMassMention: true });
+    // All three voice members must appear (proof: they claimed cap
+    // slots before the larger @everyone pool overflowed the cap).
+    for (const id of voiceMembers) expect(res.ids).toContain(id);
+    expect(res.ids).toHaveLength(25);
+  });
+
+  test('voice channel after cap-filling user mentions: silently no-ops (NOT marked invalid)', () => {
+    // Bug-guard: early break on `ids.size >= cap` must NOT mark the
+    // channel invalid when the cap was already filled by upstream
+    // expansions. The channel was perfectly valid; it just had no
+    // room to contribute. Without `capHit` tracking, the channel
+    // would surface as an invalidTokens entry, misleading the user.
+    const users = { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} };
+    const int = makeInteraction({
+      users,
+      channels: { '500': { type: GUILD_VOICE, members: ['aaa', 'bbb'] } },
+    });
+    // Override cap to a small value so the user mentions alone fill it.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 3;
+    try {
+      const res = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
+      expect(res.ids.sort()).toEqual(['111', '222', '333']);
+      // Channel was valid; it just contributed nothing because the cap was full.
+      expect(res.invalidTokens).toEqual([]);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
   });
 });
 

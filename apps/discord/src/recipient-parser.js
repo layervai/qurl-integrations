@@ -10,9 +10,27 @@
 // hands us the raw "<@123> <@456> <@&789>" text).
 //
 // What we accept:
-//   - User mentions:  <@123456> or <@!123456>   → user ID 123456
-//   - Role mentions:  <@&987654>                → expand to current
-//                                                 guild members of that role
+//   - User mentions:    <@123456> or <@!123456>   → user ID 123456
+//   - Role mentions:    <@&987654>                → expand to current
+//                                                   guild members of that role
+//   - Channel mentions: <#456789>                 → only voice / stage-voice
+//                                                   channels the sender can
+//                                                   see (ViewChannel-gated);
+//                                                   expand to the voice-
+//                                                   connected non-bot member
+//                                                   set via `channel.members`.
+//                                                   Non-voice channels and
+//                                                   non-visible voice
+//                                                   channels both land in
+//                                                   `invalidTokens` so the
+//                                                   caller can surface
+//                                                   "couldn't expand
+//                                                   #channel" rather than
+//                                                   silently dropping
+//                                                   (or, worse, leaking
+//                                                   members of a private
+//                                                   channel whose snowflake
+//                                                   the sender knows).
 // Mention extraction is regex-based — separators don't matter for
 // the mentions themselves (`<@111><@222>` matches both). The
 // separator class only affects the residue/invalid-token strip
@@ -20,7 +38,7 @@
 // — covers free-form paste from contact lists / CSV-ish formats).
 //
 // What we reject (returned in `invalidTokens`):
-//   - Channel mentions <#...>
+//   - Channel mentions <#...> for non-voice channels (see above).
 //   - Custom emoji <:name:id>
 //   - Bare plaintext (no `<@...>` wrapping) — there's no reliable way
 //     to resolve "alice" to a user ID without an autocomplete round-trip,
@@ -115,6 +133,34 @@ const ROLE_MENTION_RE = /<@&(\d+)>/g;
 // as `@everyone` would be deceptive. Falls through to the invalidTokens
 // defuse path as before; revisit if the bot ever adds the intent.
 const EVERYONE_TOKEN_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])/gu;
+
+// Channel mention shape: `<#123>`. Discord also emits `<#!123>` for
+// some legacy contexts, but the slash-input field never produces the
+// `!` form for channels (only for users), so the regex stays strict.
+const CHANNEL_MENTION_RE = /<#(\d+)>/g;
+
+// discord.js GatewayIntentBits.GuildVoice / GuildStageVoice enum
+// values pinned here (2 / 13) so the parser doesn't have to require
+// `discord.js` for one constant pair, and so unit tests can build a
+// `channel` mock without instantiating discord.js's ChannelType. A
+// discord.js bump that renumbers these would break voice expansion
+// silently; the `voice-channel type constants` describe block in
+// `recipient-parser.test.js` pins the contract.
+const VOICE_CHANNEL_TYPE = 2;
+const STAGE_VOICE_CHANNEL_TYPE = 13;
+
+// discord.js PermissionFlagsBits.ViewChannel pinned numerically (bit
+// 10 = 1 << 10) for the same reason as the channel-type constants:
+// no discord.js require in the parser, plus a test spec pins the
+// value against future discord.js renumbers.
+//
+// BigInt (vs the numeric `VOICE_CHANNEL_TYPE = 2` / `STAGE_VOICE_-
+// CHANNEL_TYPE = 13`): discord.js represents PERMISSIONS as BigInt
+// (single bits at positions 0..63), but represents CHANNEL TYPES as
+// small numeric enum values (0..15). PermissionsBitField.has accepts
+// either a BigInt or a Number for forward-compat, but the canonical
+// shape is BigInt — matching that here keeps comparisons type-true.
+const VIEW_CHANNEL_PERMISSION = 1n << 10n;
 
 // Hard cap on input length so an adversarial regex-blowup attack
 // (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
@@ -322,21 +368,23 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // getter filters the full guild member cache per call, so N role
   // mentions = N O(guild_size) scans. Bounded by the 4000-char input
   // cap and Discord's slash-option max.
-  // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
-  // an unknown role yields one invalidTokens entry, not two. The
-  // strip-pass's residue-tokens already dedupe naturally via input
-  // grouping; this set restores the same property for role errors.
+  // Per-kind invalidTokens dedupe sets. Sharing the dedupe helper
+  // across role + channel error paths means `<@&999> <@&999>` and
+  // `<#999> <#999>` each yield one invalidTokens entry, not two —
+  // the strip-pass's residue-tokens already dedupe naturally via
+  // input grouping, and this restores the same property for the
+  // expansion paths.
   const invalidRoleIds = new Set();
-  function pushRoleErrorIfNew(roleId, rawToken) {
-    if (invalidRoleIds.has(roleId)) return;
-    invalidRoleIds.add(roleId);
+  function pushInvalidIfNew(seenIds, id, rawToken) {
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
     invalidTokens.push(rawToken);
   }
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
@@ -345,7 +393,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // "couldn't expand @role").
     const members = role.members;
     if (!members || members.size === 0) {
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
       continue;
     }
     // `usable` counts members that passed the bot filter, INCLUDING
@@ -356,6 +404,14 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // BEFORE the seen-check inside `consider`, so the "fully-duplicate
     // role isn't useless" test catches a future refactor reversing
     // that order.
+    //
+    // Intentionally NO `ids.size >= cap` early-break here (unlike the
+    // channel-expansion and @everyone loops): role expansion walks
+    // every member so `consider()` can grow `seen` past the cap,
+    // giving downstream `cappedCount` an accurate "you typed 55, we
+    // kept 25" signal. Early-breaking would zero out cappedCount
+    // because seen never grows past cap once break fires. Pinned by
+    // the "cappedCount accounts for role-expansion overflow" test.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
       if (isBotMember(roleMember)) continue;
@@ -366,15 +422,128 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       // Role had members but they were all filtered out as bots.
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains bots."
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
     }
   }
 
-  // @everyone expansion runs LAST so explicit mentions get cap
-  // priority. If the user typed `@everyone <@uncachedUser>`, the
-  // direct mention claims a cap slot first, and @everyone fills the
-  // remainder. Reversing this order silently drops explicit mentions
-  // when the cache is partial — caught by cr round 3.
+  // Channel expansion: voice / stage-voice channels expand to their
+  // currently-connected non-bot member set. Runs BEFORE @everyone so
+  // explicit channel mentions claim cap slots first. `channel.members`
+  // reads the voice-state cache, which is only populated when the
+  // `GuildVoiceStates` gateway intent is declared (pinned by the boot
+  // canary in discord.js).
+  //
+  // NOT GATED ON MENTION_EVERYONE (intentional asymmetry with the
+  // @everyone path below): voice channels are scoped co-presence
+  // surfaces — the ViewChannel gate above already proves the sender
+  // can see the channel, and Discord's voice-channel cap of 99
+  // connected (stage channels are higher but require explicit
+  // role-eligibility to join speakers) bounds the fan-out at the
+  // platform level. A user who can see a voice channel can DM each
+  // member individually; bundling the operation doesn't escalate
+  // their privilege. Tracked in #339 if a future product decision
+  // (stage channels with thousands of audience members) needs to
+  // revisit this.
+  const invalidChannelIds = new Set();
+  for (const m of input.matchAll(CHANNEL_MENTION_RE)) {
+    const channelId = m[1];
+    const channel = guild?.channels?.cache?.get(channelId);
+    if (!channel) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    const isVoice = channel.type === VOICE_CHANNEL_TYPE
+      || channel.type === STAGE_VOICE_CHANNEL_TYPE;
+    if (!isVoice) {
+      // Non-voice channel mention — reject. We intentionally do NOT
+      // restore the legacy "Everyone in this text channel" behavior
+      // (PR #174 fixed the @everyone-on-default-server expansion bug
+      // by removing it). Voice membership is unambiguously
+      // "voice-connected"; text-channel membership is permission-
+      // bound and varies across server topologies.
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    // ViewChannel gate — the bot's channels.cache holds every channel
+    // it has visibility into, so without this check a user who
+    // discovers a private voice channel's snowflake (audit logs,
+    // mod-tool exports, leaked URLs) could DM-blast its connected
+    // members via `/qurl file recipients:<#hidden-voice-id>` even
+    // when they themselves can't see the channel in the client.
+    // Fail-closed: a missing `interaction.member` (DM context the
+    // outer guild check already eliminated; defense-in-depth here
+    // against a degraded-shape regression), a missing
+    // `permissionsFor` (degraded test mock, future discord.js shape
+    // change), or a falsy permission check all reject the mention.
+    // The button-driven voice-everyone path doesn't need this gate —
+    // invoking the slash command from inside a voice channel
+    // intrinsically proves visibility.
+    if (!interaction.member) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    const viewerPerms = channel.permissionsFor?.(interaction.member);
+    if (!viewerPerms || !viewerPerms.has(VIEW_CHANNEL_PERMISSION)) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    // channel.members for voice channels is a Collection<Snowflake,
+    // GuildMember> of voice-connected members. Empty when no one is
+    // connected — treat like an unknown channel so the caller can
+    // surface "no one is in #channel" rather than silently produce a
+    // smaller recipient list. Bot filter mirrors the user-mention,
+    // role-expansion, and @everyone passes via isBotMember.
+    const members = channel.members;
+    if (!members || members.size === 0) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    // Early-break on cap, mirroring the @everyone loop's
+    // `if (ids.size >= cap) break;` (see the ordering comment block
+    // there for the full rationale on cache-insertion-order semantics
+    // — voice expansion inherits the same caveat: under-cap overflow
+    // wins remaining slots by Discord Collection insertion order, not
+    // alphabetical / role-ordered / recently-active). Without the
+    // break, a stage channel with thousands of members + a small
+    // env-overridden cap would walk the entire member set after the
+    // cap was hit — bounded but wasted work.
+    //
+    // `capHit` separates "no usable members" (empty / bots-only) from
+    // "cap was already filled by earlier expansions, voice silently
+    // no-ops" — the latter must NOT push to invalidTokens, since the
+    // channel itself was perfectly valid; the cap just had no room.
+    //
+    // Loop ordering: cap check FIRST (avoid wasting cycles after the
+    // cap fills on a bot-heavy channel), then bot filter (a bot at
+    // index N where ids.size === cap-1 correctly skips without
+    // claiming the last slot), then consider. Reversing cap-vs-bot
+    // order would let a bot's `continue` hide the cap fill.
+    //
+    // Intentionally DIVERGES from the role-expansion loop above
+    // (which has no early-break): role expansion preserves the
+    // `cappedCount` overshoot signal by walking every member;
+    // voice/stage expansion can have ~10k-member iteration cost,
+    // and the user's mental model for "everyone in this voice
+    // channel" doesn't need a precise overshoot count the way
+    // `<@&role>` does.
+    let usable = 0;
+    let capHit = false;
+    for (const [memberId, channelMember] of members) {
+      if (ids.size >= cap) { capHit = true; break; }
+      if (isBotMember(channelMember)) continue;
+      usable++;
+      consider(memberId);
+    }
+    if (usable === 0 && !capHit) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+    }
+  }
+
+  // @everyone expansion runs LAST so explicit mentions (user / role /
+  // channel) get cap priority. If the user typed
+  // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
+  // first, and @everyone fills the remainder. Reversing this order
+  // silently drops explicit mentions when the cache is partial.
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -416,18 +585,24 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
 
-  // Detect non-mention residue (channel mentions, custom emoji, bare
-  // names) by stripping valid mentions and surfacing what's left.
-  // Intentionally lossy on subtle parsing — the goal is "tell the user
-  // we didn't understand THIS bit", not a perfect tokenizer.
+  // Detect non-mention residue (custom emoji, bare names, unknown
+  // bracketed tokens) by stripping valid mentions and surfacing what's
+  // left. Intentionally lossy on subtle parsing — the goal is "tell the
+  // user we didn't understand THIS bit", not a perfect tokenizer.
   //
   // Separator class includes `;`, `|`, `/` in addition to whitespace
   // and `,` — these are common when pasting from contact lists or
   // CSV-ish formats. Without them the user gets `;` and `|` echoed
   // back as "invalid tokens."
+  //
+  // CHANNEL_MENTION_RE is stripped here even when the channel resolved
+  // to an invalidTokens entry above — the channel-expansion pass
+  // already surfaced it; the residue pass would otherwise double-
+  // report the same `<#id>` as a leftover token.
   const stripped = input
     .replace(USER_MENTION_RE, ' ')
-    .replace(ROLE_MENTION_RE, ' ');
+    .replace(ROLE_MENTION_RE, ' ')
+    .replace(CHANNEL_MENTION_RE, ' ');
   const leftover = stripped.split(/[\s,;|/]+/).filter(Boolean);
   const residueSeen = new Set();
   for (const tok of leftover) {
@@ -463,8 +638,9 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
     // Dedupe residue tokens by the post-escape rendered form so
     // `<#456> <#456>` or `alice alice` produces ONE entry, not two.
-    // Symmetric with the role-error dedup path (pushRoleErrorIfNew
-    // above) \u2014 a caller's "couldn't parse: X, X" embed is hostile.
+    // Symmetric with the role/channel-error dedup paths
+    // (pushInvalidIfNew above) \u2014 a caller's "couldn't parse: X, X"
+    // embed is hostile.
     if (residueSeen.has(escaped)) continue;
     residueSeen.add(escaped);
     invalidTokens.push(escaped);
@@ -489,10 +665,24 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied };
 }
 
+// `isVoiceChannelType` is the same voice/stage-voice predicate the
+// channel-mention expander uses, exported so the confirm-card renderer
+// can detect "this slash command was invoked from a voice channel"
+// without dragging in the discord.js ChannelType enum. Keeping the
+// predicate parser-owned ensures both the `<#voice>` expansion and
+// the confirm-card button branch on the same set of channel types.
+function isVoiceChannelType(type) {
+  return type === VOICE_CHANNEL_TYPE || type === STAGE_VOICE_CHANNEL_TYPE;
+}
+
 module.exports = {
   parseRecipientMentions,
+  isVoiceChannelType,
   isBotMember,
   MAX_INPUT_LENGTH,
   MAX_INVALID_TOKEN_LENGTH,
   MAX_SLASH_OPTION_LENGTH,
+  VOICE_CHANNEL_TYPE,
+  STAGE_VOICE_CHANNEL_TYPE,
+  VIEW_CHANNEL_PERMISSION,
 };

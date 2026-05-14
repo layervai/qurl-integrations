@@ -277,7 +277,32 @@ module.exports = {
   // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
-  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 50, { minPositive: true }),
+  //
+  // 20,000 default chosen to accommodate the voice-everyone path against
+  // stage channels (Discord's largest gathering surface). Heads-up for
+  // operators reading the release notes: the same cap bounds EVERY
+  // recipient-resolution path — `<@user>` list expansion, `<@&role>`
+  // expansion, `<#voice>` expansion, the UserSelectMenu picker, AND
+  // `@everyone` (gated on MENTION_EVERYONE). The 50 → 20,000 jump
+  // therefore re-shapes the `@everyone` blast radius by 400× for any
+  // member granted MENTION_EVERYONE in a guild that takes the new
+  // default. Guilds that intentionally constrained the prior 50-recipient
+  // ceiling for non-voice surfaces should set `QURL_SEND_MAX_RECIPIENTS`
+  // to the desired bound in their env; the voice-everyone path will then
+  // partial-resolve up to that bound rather than refusing.
+  // Operational implications a max-size send carries:
+  //   - up to ceil(20000/TOKENS_PER_RESOURCE) = 2000 re-uploads to
+  //     qurl-service per send (`mintLinksInBatches`).
+  //   - DM delivery is bounded by Discord's per-bot DM rate limit
+  //     (~5/sec); a 20k send takes >1 hour to finish DM fan-out, and
+  //     `monitorLinkStatus`'s interval-based progress tracking must
+  //     survive that duration. A regression test pinning that
+  //     lifetime is tracked in issue #331 — open against any change
+  //     that touches `monitorLinkStatus`'s interval/cleanup logic
+  //     until it lands.
+  // Per-guild operators can dial this down via the env override if
+  // their qurl-service plan or DM-throughput posture demands it.
+  QURL_SEND_MAX_RECIPIENTS: intEnv('QURL_SEND_MAX_RECIPIENTS', 20000, { minPositive: true }),
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 
   SHARD_ID,

@@ -187,6 +187,7 @@ const {
   CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
   CONFIRM_NOTE_BUTTON_CUSTOM_ID,
   CONFIRM_NOTE_MODAL_CUSTOM_ID,
+  CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -209,6 +210,7 @@ const {
   handleConfirmSelfDestructSelect,
   handleConfirmNoteButton,
   handleConfirmNoteModal,
+  handleConfirmVoiceEveryone,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -3100,6 +3102,284 @@ describe('handleConfirmUserSelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+// handleConfirmVoiceEveryone — "Everyone in this voice channel"
+// button on the confirm card, rendered only when the slash command
+// was invoked from a voice / stage-voice channel. Resolves voice-
+// connected non-bot members AT CLICK TIME from the voice-state
+// cache rather than trusting a render-time snapshot.
+// ──────────────────────────────────────────────────────────────
+
+describe('handleConfirmVoiceEveryone', () => {
+  const VOICE_CH = 'voice-ch-1';
+  const u1 = '100000000000000001';
+  const u2 = '100000000000000002';
+  const bot1 = '100000000000000099';
+
+  // Build a guild whose channels.cache contains a voice channel with
+  // the supplied member list. Bots in `members` get bot:true on the
+  // member-cache user so partitionRecipients drops them.
+  function makeVoiceInteraction({ members = [], channelType = 2, botIds = [] } = {}) {
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map();
+    const chanMembers = new Map();
+    for (const mid of members) {
+      const isBot = botIds.includes(mid);
+      const member = { user: { id: mid, bot: isBot } };
+      int.guild.members.cache.set(mid, member);
+      chanMembers.set(mid, member);
+    }
+    int.guild.channels.cache.set(VOICE_CH, {
+      id: VOICE_CH, type: channelType, members: chanMembers,
+    });
+    return int;
+  }
+
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+    voiceChannelId: VOICE_CH,
+  };
+
+  test('happy path: voice-connected non-bot members populate recipientIds and advance the flow', async () => {
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({
+        recipientIds: expect.arrayContaining([u1, u2]),
+        voiceChannelId: VOICE_CH,
+      }),
+      terminal: false,
+    }));
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    expect(ids).toHaveLength(2);
+  });
+
+  test('happy path: bots are filtered out of the connected set', async () => {
+    const int = makeVoiceInteraction({ members: [u1, bot1, u2], botIds: [bot1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const ids = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    expect(ids.sort()).toEqual([u1, u2].sort());
+    expect(ids).not.toContain(bot1);
+  });
+
+  test('missing voiceChannelId in payload: re-renders card WITHOUT the voice button (visible feedback)', async () => {
+    // The button should not have rendered without voiceChannelId; a
+    // click here means a forged interaction or schema drift. Handler
+    // must give the user VISIBLE feedback that something changed —
+    // a silent ack after deferUpdate would leave the user staring at
+    // an unchanged card wondering if their click registered. The
+    // re-render strips the broken affordance (renderConfirmCardRows
+    // conditions on voiceChannelId being set); the user can pick
+    // recipients through the still-visible UserSelectMenu.
+    const int = makeVoiceInteraction({ members: [u1] });
+    const payloadWithoutVoice = { ...basePayload, voiceChannelId: null };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Card content re-rendered (not just components: []) so the
+    // user sees the resource header still — they didn't lose context.
+    expect(lastCall.content).toBeTruthy();
+    expect(Array.isArray(lastCall.components)).toBe(true);
+    expect(lastCall.components.length).toBeGreaterThan(0);
+  });
+
+  test('missing voiceChannelId WITH previously-picked recipients: re-render preserves recipients (no UI/state drift)', async () => {
+    // Bug-guard: the inline-rebuild alternative would render the
+    // card with validRecipients:[] while the persisted payload still
+    // carried the old recipientIds. The handler routes through
+    // rerenderConfirmCard, which reads recipientIds from the payload
+    // and reconstructs validRecipients — so the UI matches state.
+    const int = makeVoiceInteraction({ members: [u1] });
+    // Seed cache so rerenderConfirmCard can resolve the recipient.
+    int.guild.members.cache.set(u1, { user: makeUser(u1) });
+    const payloadWithoutVoice = {
+      ...basePayload,
+      voiceChannelId: null,
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'alice' },
+    };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: payloadWithoutVoice, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Resource header still rendered — user retains context.
+    expect(lastCall.content).toMatch(/Sending file/);
+    // Previously-picked recipient surfaces in the content summary
+    // ("**To:** 1 user (…)"), not just the persisted-but-invisible
+    // state. The inline-rebuild alternative would have rendered
+    // validRecipients:[] here, masking the persisted state drift.
+    expect(lastCall.content).toMatch(/\*\*To:\*\* 1 user/);
+  });
+
+  test('channel deleted between render and click: rejectVoice path runs (warning re-render, no transition)', async () => {
+    // Cache miss simulates the channel being deleted (or the voice
+    // intent dropping mid-flow). The handler should NOT call
+    // transitionFlow — it re-renders the card with a warning banner.
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map(); // no entry for VOICE_CH
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Couldn't read the voice channel/i);
+  });
+
+  test('empty voice channel: rejectVoice path runs (no-one-connected copy, no transition)', async () => {
+    const int = makeVoiceInteraction({ members: [] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/No one is connected/i);
+  });
+
+  test('bots-only voice channel: surfaces "Cannot send to bots" (NOT the empty-channel copy)', async () => {
+    // Pre-DE-pass had an inline bot pre-filter here that zeroed out
+    // droppedBots, forcing the bots-only case into the misleading
+    // "No one is connected" branch. Letting partitionRecipients own
+    // the bot accounting end-to-end is what produces the accurate
+    // copy. This test pins that behavioral contract.
+    const int = makeVoiceInteraction({ members: [bot1], botIds: [bot1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Cannot send to bots/i);
+    expect(lastCall.content).not.toMatch(/No one is connected/i);
+  });
+
+  test('sender is voice-connected → selfIncluded:true propagates to the new payload', async () => {
+    // Symmetric with handleConfirmUserSelect's "self-send" coverage —
+    // partitionRecipients flips selfIncluded when the invoking user
+    // appears in the resolved set. The confirm-card renderer reads
+    // this flag to surface the "Send includes you." neutral notice.
+    // Without this test, a future refactor that bypassed
+    // partitionRecipients (e.g., reading recipientIds directly from
+    // channel.members.keys()) would silently drop the notice.
+    const int = makeVoiceInteraction({ members: [SENDER_ID, u1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.selfIncluded).toBe(true);
+  });
+
+  test('sender NOT in voice channel → selfIncluded:false on the new payload', async () => {
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.selfIncluded).toBe(false);
+  });
+
+  test('transitionFlow conflict → superseded message (OCC race with sibling interaction)', async () => {
+    // Mirrors handleConfirmUserSelect's conflict-path test. The
+    // version-checked transitionFlow can lose to a concurrent picker
+    // click / menu change / cancel; the handler must surface
+    // "Send was superseded" rather than the generic editReply.
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/superseded/);
+    expect(lastCall.components).toEqual([]);
+  });
+
+  test('partial-cache row (member missing .user) emits a debug log per send (silent-shrinkage telemetry)', async () => {
+    // Pins the round-9 telemetry contract: silent shrinkage of the
+    // recipient set due to partial-cache rows is hard to diagnose
+    // post-hoc without a log. The debug-level emission is per-send
+    // (not per-member) so volume tracks frequency of the degraded
+    // state, not the count of dropped members. A future refactor
+    // that drops the log fails this spec.
+    const logger = require('../src/logger');
+    logger.debug.mockClear();
+    const int = makeVoiceInteraction({ members: [u1] });
+    // Inject a partial-cache row: member entry exists but has no .user.
+    const channel = int.guild.channels.cache.get(VOICE_CH);
+    channel.members.set('partial-cache-id', {});  // no .user → drop
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(/partial-cache/i),
+      expect.objectContaining({
+        flow_id: 'fid',
+        voice_channel_id: VOICE_CH,
+        dropped: 1,
+      })
+    );
+    // Send still proceeds with the .user-populated member.
+    expect(mockTransitionFlow).toHaveBeenCalled();
+  });
+
+  test('voice-everyone button succeeds when sender lacks MENTION_EVERYONE (no asymmetric gate)', async () => {
+    // Pins the intentional asymmetry documented at the button block:
+    // ViewChannel-only gating (not MENTION_EVERYONE) is the right
+    // posture for a co-presence surface. If a future security pass
+    // adds the MENTION_EVERYONE gate to one path and forgets the
+    // other, this fails loud.
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    // memberPermissions.has(MENTION_EVERYONE) returns false (default
+    // makeInteraction shape — no permissions populated). Voice path
+    // must still succeed.
+    int.memberPermissions = { has: () => false };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
+  });
+
+  test('transitionFlow not_found → expired message (row TTL elapsed between click and write)', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/expired/);
+    expect(lastCall.components).toEqual([]);
+  });
+
+  test('cap overshoot (env-overridden small cap): hard-rejects with subset-prompt copy', async () => {
+    // With the production 20k default, voice-channel capacity (99
+    // for voice, larger for stage) never trips this branch — it's
+    // defense-in-depth against a misconfigured env override (e.g.,
+    // a guild operator dialing the cap down to constrain blast
+    // radius). The reject copy steers the user toward picker /
+    // @-mentions for a subset selection.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      const int = makeVoiceInteraction({ members: [u1, u2] });
+      await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+      expect(lastCall.content).toMatch(/Voice channel has 2 connected \(max 1\)/i);
+      expect(lastCall.content).toMatch(/picker or @mentions/i);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
+  });
+
+  test('corrupt payload (unknown resourceType): deleteFlow + actionable re-run copy', async () => {
+    // Mirrors handleConfirmUserSelect's resourceType guard — a
+    // corrupt/stale row would otherwise crash the renderer with a
+    // generic "superseded" toast.
+    const int = makeVoiceInteraction({ members: [u1] });
+    const corruptPayload = { ...basePayload, resourceType: 'bogus' };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: corruptPayload, version: 1 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Card data is corrupted/);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
 // handleConfirmExpirySelect — inline expiry edit on confirm card
 // ──────────────────────────────────────────────────────────────
 
@@ -3960,6 +4240,166 @@ describe('renderConfirmCardRows', () => {
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
   });
+
+  test('voice button label stays under Discord\'s 80 UTF-16 cap with an ALL-EMOJI channel name (worst case)', async () => {
+    // Round-14 cr bug-guard: a 46-codepoint all-emoji channel name
+    // (which Discord allows up to its 100-char limit) occupies 92
+    // UTF-16 units. The prior codepoint-based budget would slice at
+    // 46 codepoints (=92 UTF-16 units) + prefix + suffix → ~116-unit
+    // label, busting Discord's 80-UTF-16 hard cap and getting
+    // rejected at API send. The UTF-16-unit budget caps this.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    // 46 🎉 emoji — each is a surrogate pair (U+1F389, 2 UTF-16 units)
+    // so the channel name occupies 92 UTF-16 units. Discord caps
+    // channel names at 100 chars, so this is realistic. The prior
+    // codepoint-based budget would slice at 46 codepoints (92
+    // UTF-16 units) + prefix + suffix → ~116-unit label, busting
+    // Discord's 80-UTF-16 hard cap.
+    const allEmojiName = '🎉'.repeat(46);
+    expect(allEmojiName.length).toBe(92); // confirm worst-case UTF-16
+    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+    int.channel = { id: 'voice-emoji', type: 2 };
+    int.guild.channels.cache.set('voice-emoji', {
+      id: 'voice-emoji', name: allEmojiName, type: 2,
+      members: new Map([['111', { user: { id: '111', bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    const voiceBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
+    );
+    expect(voiceBtn).toBeDefined();
+    const label = voiceBtn.value.setLabel.mock.calls[0][0];
+    // The hard contract: under 80 UTF-16 units regardless of input.
+    expect(label.length).toBeLessThanOrEqual(80);
+    expect(label).toMatch(/…/);
+    // Surrogate-pair safety still holds for the all-emoji case.
+    for (let i = 0; i < label.length; i++) {
+      const code = label.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = label.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xDC00);
+        expect(next).toBeLessThanOrEqual(0xDFFF);
+        i++;
+      }
+    }
+  });
+
+  test('voice button label stays under Discord\'s 80 UTF-16 cap even with a 100-char emoji-containing channel name', async () => {
+    // Pins the codepoint-aware truncation: a channel name with an
+    // emoji at position 45 must NOT split a UTF-16 surrogate pair
+    // (would render `�` on the button) AND the full label must stay
+    // under Discord's 80 UTF-16 unit hard cap. Without the
+    // safeCodepointSlice / Array.from length check, a long emoji-
+    // containing name would either overflow or render mangled.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    // 100-char name with emoji (🎉 = surrogate pair) at index 44,
+    // 45, 46 to land near the slice boundary.
+    const longName = 'a'.repeat(44) + '🎉🎉🎉' + 'b'.repeat(47);
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },
+      // Inject the channel into the interaction so renderConfirmCardRows'
+      // live read finds it.
+    });
+    int.channel = { id: 'voice-long', type: 2 };
+    int.guild.channels.cache.set('voice-long', {
+      id: 'voice-long', name: longName, type: 2,
+      members: new Map([['111', { user: { id: '111', bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    const voiceBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
+    );
+    expect(voiceBtn).toBeDefined();
+    const labelCall = voiceBtn.value.setLabel.mock.calls[0];
+    const label = labelCall[0];
+    // UTF-16 unit length (string.length) must stay under 80.
+    expect(label.length).toBeLessThanOrEqual(80);
+    // Truncation indicator present when the name was longer than the budget.
+    expect(label).toMatch(/…/);
+    // Surrogate pair safety: no orphan lead-surrogate (0xD800-0xDBFF
+    // without a paired trail surrogate). Quick scan.
+    for (let i = 0; i < label.length; i++) {
+      const code = label.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = label.charCodeAt(i + 1);
+        expect(next).toBeGreaterThanOrEqual(0xDC00);
+        expect(next).toBeLessThanOrEqual(0xDFFF);
+        i++; // skip the trail surrogate
+      }
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// largeSendThreshold formula — covers the floor / half-cap branches +
+// degenerate cap guard.
+// ──────────────────────────────────────────────────────────────
+
+describe('largeSendThreshold', () => {
+  const { largeSendThreshold, LARGE_SEND_RECIPIENT_FLOOR } = commands._test;
+  const config = require('../src/config');
+
+  test('default cap (20k): floor wins (1000)', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 20000;
+    try {
+      expect(largeSendThreshold()).toBe(LARGE_SEND_RECIPIENT_FLOOR);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('small override (cap=500): half-cap wins (250)', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 500;
+    try {
+      expect(largeSendThreshold()).toBe(250);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('degenerate override (cap=1): floors at 1 (NOT 0 — would fire every send)', () => {
+    // Bug-guard: Math.floor(1/2) = 0 would make `>= threshold` true
+    // for every send, including 0-recipient ones. The `|| 1`
+    // substitution floors at 1 so the threshold is always a positive
+    // integer.
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      expect(largeSendThreshold()).toBe(1);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('boundary (cap=2): floor(2/2)=1 wins WITHOUT the substitution — pins discontinuity', () => {
+    // Round-15 cr: a 2-recipient send on cap=2 warns; a 1-recipient
+    // send on cap=2 does not (threshold=1). The substitution-vs-
+    // half-cap boundary is at cap=2 — pin the intentional shape so
+    // a future refactor (e.g., switching from `half || 1` to
+    // `Math.max(2, half)`) breaks this test instead of silently
+    // moving the boundary.
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 2;
+    try {
+      expect(largeSendThreshold()).toBe(1);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
+
+  test('cap exactly at floor (1000): half-cap (500) wins', () => {
+    const orig = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1000;
+    try {
+      expect(largeSendThreshold()).toBe(500);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = orig;
+    }
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -3991,6 +4431,7 @@ describe('constants + exports', () => {
     expect(CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID).toBe('qurl_confirm_self_destruct');
     expect(CONFIRM_NOTE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_note_btn');
     expect(CONFIRM_NOTE_MODAL_CUSTOM_ID).toBe('qurl_confirm_note_modal');
+    expect(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_voice_everyone');
   });
 
   test('all customIds unique', () => {
@@ -4002,8 +4443,9 @@ describe('constants + exports', () => {
       CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID,
       CONFIRM_NOTE_BUTTON_CUSTOM_ID,
       CONFIRM_NOTE_MODAL_CUSTOM_ID,
+      CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
     ]);
-    expect(ids.size).toBe(7);
+    expect(ids.size).toBe(8);
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {

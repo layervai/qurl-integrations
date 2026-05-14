@@ -14,6 +14,7 @@ const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 const intents = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildVoiceStates,
 ];
 
 // Per-feature intent canaries. Each line pins one intent to one feature
@@ -37,18 +38,27 @@ function assertIntent(intentsList, bit, requiredFor) {
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
 assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)');
 
 // Negative-intent canaries — pin that the bot has NOT silently
 // re-broadened gateway scope. Every intent listed here is either:
-//   - privileged (would re-introduce dev-portal toggle dependency:
-//     MessageContent, GuildPresences); or
-//   - non-privileged but only useful for code paths we deleted (both
-//     symbols were removed by PR #313 and don't exist in the tree —
+//   - privileged (would re-introduce dev-portal toggle dependency):
+//     - MessageContent
+//     - GuildPresences
+//   - non-privileged but only useful for code paths we deleted (the
+//     symbol was removed by PR #313 and doesn't exist in the tree —
 //     `git log --diff-filter=D` if you need the historical context):
 //     - DirectMessages → previously consumed by the deleted handleSend
 //       DM file-pivot via `awaitMessages`
-//     - GuildVoiceStates → previously consumed by the deleted
-//       getChannelMembers helper's voice-channel branch
+//
+// `GuildVoiceStates` was previously listed in this negative-canary
+// block (dropped by PR #313 when its only consumer —
+// `getChannelMembers`'s voice-channel branch — was deleted), and was
+// re-added in the voice-everyone restoration: `channel.members` for
+// voice/stage channels reads the voice-state cache, which is only
+// populated when the intent is declared. The positive assertIntent
+// above pins the load-bearing feature.
+//
 // A future PR that re-adds any of these without a paired assertIntent
 // + use-case write-up will fail at boot rather than silently expanding
 // what crosses the Discord gateway. See PR #313 / issue #317 for
@@ -70,7 +80,6 @@ function assertNoIntent(intentsList, bit, name) {
 assertNoIntent(intents, GatewayIntentBits.MessageContent, 'MessageContent');
 assertNoIntent(intents, GatewayIntentBits.GuildPresences, 'GuildPresences');
 assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
-assertNoIntent(intents, GatewayIntentBits.GuildVoiceStates, 'GuildVoiceStates');
 
 const client = new Client({ intents });
 
