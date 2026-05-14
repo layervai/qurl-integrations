@@ -2291,7 +2291,17 @@ describe('handleSendConfirmExpirySelect', () => {
 
   test('preserves all other payload fields across transition', async () => {
     const int = makeSelectInteraction({ value: '7d' });
-    const payload = { ...basePayload, selfDestructSeconds: 60, personalMessage: 'hi' };
+    const payload = {
+      ...basePayload,
+      selfDestructSeconds: 60,
+      personalMessage: 'hi',
+      // Explicitly include personalMessageRaw to pin the round-trip
+      // invariant: a regression that destructured `personalMessage`
+      // (without `Raw`) into newPayload would silently drop it and
+      // break the next Edit-note pre-fill. The spread covers it
+      // today; this assertion locks the contract.
+      personalMessageRaw: 'hi',
+    };
     await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
@@ -2299,6 +2309,7 @@ describe('handleSendConfirmExpirySelect', () => {
         recipientIds: [u1],
         selfDestructSeconds: 60,
         personalMessage: 'hi',
+        personalMessageRaw: 'hi',
         resourceType: 'file',
       }),
     }));
@@ -2912,6 +2923,13 @@ describe('constants + exports', () => {
     // destructures by explicit field name (not `...payload` spread).
     // This test extracts the function body from source and pins that
     // the substring `personalMessageRaw` does not appear inside it.
+    //
+    // **If this test fails:** the substring scan is intentionally
+    // coarse — even a comment like `// don't read personalMessageRaw
+    // here` inside executeSendPipeline trips it. Document the
+    // invariant at the field declaration in handleQurlSlashSend
+    // (search commands.js for "CONTRACT: `personalMessageRaw` is for
+    // modal-prefill ONLY"), not inside executeSendPipeline's body.
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.resolve(__dirname, '../src/commands.js'), 'utf8');

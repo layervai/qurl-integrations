@@ -4696,9 +4696,13 @@ async function rerenderConfirmCard(interaction, newPayload) {
   const validRecipients = recipientIds.map((id) => {
     const cached = memberCache && memberCache.get && memberCache.get(id);
     if (cached && cached.user) return cached.user;
+    // Both fallback branches set `displayName` (NOT `username`) so
+    // resolveRecipientAlias's precedence (displayName → globalName →
+    // username → user-${id}) hits the first branch consistently.
+    // Asymmetric shape would be a footgun if anyone touches that
+    // precedence later.
     const alias = persistedAliases[id];
-    if (alias) return { id, displayName: alias, bot: false };
-    return { id, username: `user-${id}`, bot: false };
+    return { id, displayName: alias || `user-${id}`, bot: false };
   });
   const needsPicker = recipientIds.length === 0;
   const content = renderConfirmCardContent({
