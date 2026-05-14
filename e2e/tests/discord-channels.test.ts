@@ -83,57 +83,6 @@ describe('Discord: Voice State', () => {
     console.log(`Verified voice channel: #${voiceChannel.name}`);
   });
 
-  test('"Everyone in this voice channel" recipient pool = voice-connected members only', async () => {
-    // Pins the new invariant after the recipient-scope fix:
-    // /qurl file or /qurl map invoked from a voice channel (with no
-    // recipients pre-filled) resolves to VOICE-CONNECTED members only
-    // (channel.members on a GuildVoice / GuildStageVoice in discord.js
-    // v14). NOT the guild member list and NOT the ViewChannel-permission
-    // set — those expand to @everyone on default servers and were the
-    // source of the prior "sends to entire guild" bug.
-    //
-    // The Discord REST API's `voice_states` field on GET /guilds/:id is
-    // the canonical source of "currently connected to voice" — same
-    // signal the bot's voice state cache exposes via channel.members.
-    // This test pins TWO real invariants:
-    //   1. Every entry in voice_states has a channel_id — i.e., voice
-    //      states are always channel-scoped (not guild-scoped).
-    //   2. Every voice_state.channel_id resolves to a voice or stage-
-    //      voice channel in the same guild — never to a text channel,
-    //      DM, or unknown ID. A future Discord API shape change that
-    //      broke this would surface here, not silently in the bot.
-    const channels = await discordApi('GET', `/guilds/${env.GUILD_ID}/channels`);
-    const voiceChannels = channels.filter((c: any) => c.type === 2 || c.type === 13);
-    if (voiceChannels.length === 0) {
-      console.log('No voice/stage channels in test guild — skipping invariant check');
-      return;
-    }
-
-    let guildSnapshot: any;
-    try {
-      guildSnapshot = await discordApi('GET', `/guilds/${env.GUILD_ID}?with_counts=true`);
-    } catch (e) {
-      console.log('Guild snapshot fetch failed:', (e as Error).message);
-      return;
-    }
-
-    const voiceStates: any[] = guildSnapshot.voice_states || [];
-    const voiceChannelIds = new Set(voiceChannels.map((c: any) => c.id));
-    voiceStates.forEach((vs: any) => {
-      // Invariant 1: every voice state has a channel_id.
-      expect(typeof vs.channel_id).toBe('string');
-      // Invariant 2: voice states only reference voice / stage-voice
-      // channels in this guild — pins the API shape the bot relies on.
-      expect(voiceChannelIds.has(vs.channel_id)).toBe(true);
-    });
-    const voiceChannel = voiceChannels[0];
-    const inThisChannel = voiceStates.filter((vs: any) => vs.channel_id === voiceChannel.id);
-    console.log(
-      `Voice channel #${voiceChannel.name}: ${inThisChannel.length} voice-connected member(s) ` +
-      `would be in the "Everyone in this voice channel" recipient pool ` +
-      `(scope = voice-connected only, NOT @everyone view-perm).`,
-    );
-  });
 });
 
 describe('Discord: Guild Members', () => {

@@ -608,9 +608,9 @@ describe('discord module', () => {
     // throw path, a future "let's downgrade to a warn" refactor would
     // silently degrade the assertion. These tests pin the contract.
     it('throws when the required intent is not in the intents list', () => {
-      const intentsWithoutVoice = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
-      expect(() => discord.assertIntent(intentsWithoutVoice, 128, 'voice-channel send'))
-        .toThrow(/Missing required Discord intent for voice-channel send/);
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */];
+      expect(() => discord.assertIntent(intentsList, 128, 'test feature'))
+        .toThrow(/Missing required Discord intent for test feature/);
     });
 
     it('throws when the required intent is undefined (partially-mocked GatewayIntentBits)', () => {
@@ -622,7 +622,7 @@ describe('discord module', () => {
     });
 
     it('does not throw when the required intent is present', () => {
-      expect(() => discord.assertIntent([1, 2, 128, 4096], 128, 'voice-channel send'))
+      expect(() => discord.assertIntent([1, 2, 128], 128, 'test feature'))
         .not.toThrow();
     });
   });
