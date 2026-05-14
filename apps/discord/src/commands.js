@@ -1219,16 +1219,20 @@ async function executeSendPipeline(interaction, {
     await db.recordQURLSendBatch(qurlLinks.map(link => ({
       sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
-      // targetType is preserved on every row for the revoke-list
-      // renderer's branch on `s.target_type` (historical /qurl send rows
-      // can be 'channel'; new /qurl file + /qurl map rows are always
-      // 'user'). #318 drops the formatRevokeLabel non-'user' branch
+      // CONTRACT: targetType is always 'user' for new rows post-PR
+      // #313 (the only caller is executeSendPipeline via the confirm
+      // card on /qurl file + /qurl map, both of which DM individual
+      // recipients). The column is kept because the revoke-list
+      // renderer's branch on `s.target_type` still has to handle
+      // historical /qurl send rows ('channel') during the TTL drain
+      // window. #318 drops the formatRevokeLabel non-'user' branch
       // once no revoke-visible row has `target_type !== 'user'` — the
       // drain happens naturally as the revoke renderer filters on
       // `expires_at`, so the gate is condition-driven (no live legacy
       // rows surface in /qurl revoke) rather than date-driven. The
       // EXPIRY_LABELS max window (7d) bounds when that condition is
-      // safe to assume post-deploy.
+      // safe to assume post-deploy. No entry-gate fires because the
+      // value can't drift — it's a literal, not a forwarded param.
       expiresIn, channelId: interaction.channelId, targetType: 'user',
     })));
   } catch (err) {
@@ -2522,6 +2526,16 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 // would not add safety (the dispatcher's trust model treats customId
 // as a routing key, not an identity signal). Matches the convention
 // REVOKE_SELECT_CUSTOM_ID / SETUP_BUTTON_CUSTOM_ID use.
+//
+// WIRE-PROTOCOL FROZEN until #316. The `qurl_send_*` string literals
+// below are encoded into (a) every in-flight `flow_state` row in DDB
+// for confirm-card sessions (cleared by SEND_FLOW_TTL_SECONDS = 180s
+// drain), AND (b) every active button row on the message that hosted
+// the original confirm card (cleared once monitorLinkStatus stops
+// polling, which can take several minutes on large fan-outs). #316's
+// rename PR must wait for BOTH drains before flipping the literals.
+// See also: SEND_STAGE_AWAITING_CONFIRM above (same wire-protocol
+// constraint for the flow_state.stage column).
 const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
 const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
 const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
