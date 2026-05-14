@@ -20,7 +20,7 @@ module.exports = {
     //   - qurl-file-map.test.js: /qurl file + /qurl map front-half
     //     (slash-option parsing, recipient resolution, confirm-card
     //     render/dispatch, forgery-rejection gates).
-    //   - qurl-send-back-half.test.js: executeSendPipeline + back-half
+    //   - send-pipeline-back-half.test.js: executeSendPipeline + back-half
     //     unit tests (monitorLinkStatus polling/transitions/stop()-race/
     //     LRU eviction, revokeAllLinks per-link failures,
     //     handleAddRecipients pre-flight guards + file/location paths +
@@ -30,7 +30,7 @@ module.exports = {
     //     /unlink, /bulklink, etc.).
     //   - coverage-boost.test.js: residual handleCommand double-error
     //     paths, /bulklink failure modes, isGoogleMapsURL edge cases.
-    //   - qurl-send.test.js: shared helpers + the qURL client + connector
+    //   - send-pipeline-helpers.test.js: shared helpers + the qURL client + connector
     //     client + DB methods used by the send pipeline.
     global: {
       statements: 78,

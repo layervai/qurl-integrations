@@ -177,7 +177,7 @@ function appendViewerTtl(form, viewerTtlSeconds) {
  * @deprecated for NEW code — use `downloadAndUpload` which also returns the
  * buffered file so callers can re-upload without a second round trip. This
  * function is retained because its SSRF-rejection path is directly tested in
- * tests/connector-coverage.test.js and tests/qurl-send.test.js, and those
+ * tests/connector-coverage.test.js and tests/send-pipeline-helpers.test.js, and those
  * cases would lose coverage if it were removed.
  */
 async function uploadToConnector(sourceUrl, filename, contentType, apiKey, viewerTtlSeconds) {

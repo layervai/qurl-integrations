@@ -1,7 +1,8 @@
 /**
- * Tests for the qurl send pipeline (shared back-half of /qurl file +
- * /qurl map) — helper functions, qURL client, connector client, places
- * client, and database methods.
+ * Tests for shared send-pipeline helpers used by /qurl file + /qurl map:
+ * helper functions, the qURL client, connector client, places client, and
+ * database methods. The polling/back-half coverage lives in
+ * send-pipeline-back-half.test.js.
  */
 
 const Database = require('better-sqlite3');

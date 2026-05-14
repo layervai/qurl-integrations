@@ -2220,11 +2220,11 @@ describe('handleCommand — autocomplete', () => {
   // stale registration) is short-circuited without dispatch.
 });
 
-// `revokeAllLinks` coverage lives in qurl-send-back-half.test.js
+// `revokeAllLinks` coverage lives in send-pipeline-back-half.test.js
 // (direct unit tests) and in the `handleRevokeSelect (dispatcher
 // path)` block above (integration through the flow).
 
-// connector and qurl tests that require resetModules are in qurl-send.test.js
+// connector and qurl tests that require resetModules are in send-pipeline-helpers.test.js
 
 describe('autocomplete handling', () => {
   it('returns early for all autocomplete interactions', async () => {
