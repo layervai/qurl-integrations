@@ -46,6 +46,10 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
 		{name: "single-digit alias accepted", text: "get $1", wantSub: SubcmdGet, wantAlias: "1", wantFlags: map[string]string{}},
+		// Internal `--` runs are intentionally accepted — qurl-service
+		// is the authoritative validator and allows them; the parser
+		// only enforces leading/trailing-hyphen rejection.
+		{name: "alias with internal double hyphen accepted", text: "get $foo--bar", wantSub: SubcmdGet, wantAlias: "foo--bar", wantFlags: map[string]string{}},
 	}
 
 	for _, tc := range cases {
@@ -121,6 +125,13 @@ func TestParse_ErrorPaths(t *testing.T) {
 		{name: "alias with trailing hyphen rejected", text: "get $prod-", wantErr: ErrInvalidAlias},
 		{name: "alias single hyphen rejected", text: "get $-", wantErr: ErrInvalidAlias},
 		{name: "alias with double trailing hyphens rejected", text: "get $foo--", wantErr: ErrInvalidAlias},
+		// Strict-posture: once channel + alias slots are both taken,
+		// any further positional is an ErrUnexpectedArgument (matches
+		// the posture parseAdmin takes for verbs like `admin policies`).
+		// Previously this fell into the missing-sigil branch with a
+		// misleading "alias must start with $" message.
+		{name: "admin allow with extra arg after both slots filled", text: "admin allow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
+		{name: "admin disallow with extra arg after both slots filled", text: "admin disallow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
@@ -139,7 +150,9 @@ func TestParse_ErrorPaths(t *testing.T) {
 
 // TestParse_GetFlagErrors covers the `get`-flag mini-grammar on its own.
 // Unknown flags must reject so a typo (e.g. `dn:true`) doesn't silently
-// no-op into ephemeral-channel post.
+// no-op into ephemeral-channel post. Empty values (`key:` or `key:""`)
+// reject so the handler in PR-3c.3+ can rely on absence-in-map to
+// mean "flag unset" (no third "set-to-empty" state to distinguish).
 func TestParse_GetFlagErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -148,6 +161,8 @@ func TestParse_GetFlagErrors(t *testing.T) {
 	}{
 		{name: "unknown flag key", text: "get $prod-db whatever:true"},
 		{name: "malformed flag (no colon)", text: "get $prod-db reasontruly"},
+		{name: "empty bare value", text: "get $prod-db reason:"},
+		{name: "empty quoted value", text: `get $prod-db reason:""`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

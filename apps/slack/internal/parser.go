@@ -162,6 +162,12 @@ var flagPattern = regexp.MustCompile(`^([a-z][a-z0-9_]*):(?:"([^"]*)"|(\S+))$`)
 // `[a-z0-9-]*[a-z0-9]` (middle plus required trailing alnum). A
 // single-character alias (`$a`, `$1`) is allowed by the optional
 // non-capturing group.
+//
+// Internal `--` runs (e.g. `foo--bar`) are intentionally permitted —
+// qurl-service's own alias validator is the authoritative gate and
+// accepts them. The parser only enforces the leading/trailing rule
+// because that's what surfaces with a friendlier error than punting
+// to the service.
 var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 // Parse tokenizes the trimmed `text` field of a Slack slash command into a
@@ -223,6 +229,14 @@ func Parse(text string) (*Command, error) {
 // `Target = "\"https://x\""`. Flag values strip quotes via [flagPattern]
 // already; this normalizes the positional path so both surfaces behave
 // the same way.
+//
+// Unbalanced quotes are tolerated, not rejected: input like
+// `setalias $a "https://x` (no closing quote) yields a final token
+// `"https://x` with the literal opening quote preserved. The caller
+// (the URL/resource validator in PR-3c.3+) will reject the malformed
+// target naturally. We don't error here because Slack's slash-command
+// box collapses runs of whitespace before we see the body, making
+// stray-quote inputs vanishingly rare in practice.
 func tokenize(text string) []string {
 	var out []string
 	var cur strings.Builder
@@ -364,9 +378,19 @@ func parseAdmin(cmd *Command, rest []string) (*Command, error) {
 // (Slack's autocomplete sometimes interleaves them). Both must be
 // present, and each may appear at most once — duplicate channels or
 // aliases are an [ErrUnexpectedArgument] (consistent with the strict
-// posture parseAdmin takes for verbs like `admin policies`).
+// posture parseAdmin takes for verbs like `admin policies`). Once
+// both slots are filled, any further positional surfaces as
+// [ErrUnexpectedArgument] too — `admin allow <#C1|a> $alias junk`
+// is a typo, not a missing-sigil error.
 func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 	for _, tok := range rest {
+		if cmd.ChannelID != "" && cmd.Alias != "" {
+			// Both slots taken — any further token is a typo, surface
+			// the strict-posture sentinel instead of routing through
+			// the channel/alias dispatchers (which would say
+			// "duplicate" or "missing sigil" — neither is right here).
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+		}
 		if id, ok := matchChannel(tok); ok {
 			if cmd.ChannelID != "" {
 				return nil, fmt.Errorf("%w: duplicate #channel %q", ErrUnexpectedArgument, tok)
@@ -442,7 +466,10 @@ func matchChannel(tok string) (string, bool) {
 // error so a typo doesn't silently no-op. The key half is
 // case-folded so `DM:true` and `Reason:foo` work the way users on
 // mobile clients (with auto-capitalize) expect; the value half is
-// preserved verbatim because reasons are user-facing prose.
+// preserved verbatim because reasons are user-facing prose. An
+// empty value (either `key:` or `key:""`) is rejected — the handler
+// in PR-3c.3+ should be able to distinguish "flag unset" from "flag
+// set to empty" by absence in [Command.Flags] alone.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
 	if colonIdx <= 0 {
@@ -459,6 +486,9 @@ func applyFlag(cmd *Command, tok string) error {
 	val := m[2]
 	if val == "" {
 		val = m[3]
+	}
+	if val == "" {
+		return fmt.Errorf("invalid flag: %q (empty value — use a non-empty value or omit the flag)", tok)
 	}
 	switch key {
 	case "dm", "reason":

@@ -59,10 +59,11 @@ const actionIDClaimCode = "claim_code_input"
 // .value`. The mitigation for Blocker #3 ("no plaintext bootstrap
 // codes anywhere user-visible") therefore lives at the bot's
 // logging boundary, not in the modal payload itself: the code
-// transits the wire once (TLS to the bot, bot to qurl-service via
-// [AdminClient.RedeemBootstrap]) and is never written to logs or
-// telemetry. This map is the single source of truth for that
-// guarantee.
+// transits the wire once (TLS to the bot, then DDB UpdateItem on
+// the in-account `bootstrap_codes` table via in-account IAM — see
+// the 2026-05-12 pivot, qurl-integrations-infra #523) and is never
+// written to logs or telemetry. This map is the single source of
+// truth for that guarantee.
 //
 // Unexported because [IsRedactedSubmissionBlock] is the supported
 // query surface — keeping the map private lets a future change to
@@ -105,6 +106,14 @@ func HelpResponse() ([]byte, error) {
 				"`/qurl admin allow #channel $alias` — allow alias in channel",
 				"`/qurl admin disallow #channel $alias` — remove alias from channel",
 				"`/qurl admin policies` — list channel/alias policies",
+				"`/qurl admin status` — workspace bot health and admin info",
+				"`/qurl admin revoke $alias` — revoke a previously minted link",
+			}, "\n")),
+			dividerBlock(),
+			sectionBlock(strings.Join([]string{
+				"*Legacy commands*",
+				"`/qurl create <url>` — mint an access link for a raw URL (pre-alias world)",
+				"`/qurl list` — list recent qURLs",
 			}, "\n")),
 			dividerBlock(),
 			sectionBlock("`/qurl help` — show this message"),
@@ -157,10 +166,11 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 // AdminClaimModal renders the modal shown when a user runs
 // `/qurl admin claim`. The bootstrap code is collected via a regular
 // `plain_text_input` (Slack's Block Kit has no input-masking
-// primitive — see [RedactedSubmissionBlockIDs] for the mitigation
-// strategy). The user-visible `:lock:` context line documents the
-// guarantee: the bot never logs the submitted code; the only place
-// it travels is into [AdminClient.RedeemBootstrap] over TLS.
+// primitive — see the redaction-registry comment above for the
+// mitigation strategy). The user-visible `:lock:` context line
+// documents the guarantee: the bot never logs the submitted code;
+// it transits TLS once and is consumed by the DDB-direct redeem
+// path in PR-3c.3+ (`apps/slack/internal/slackdata`).
 //
 // This satisfies Blocker #3 (no plaintext bootstrap codes anywhere
 // user-visible) at the slash-command grammar layer (the parser

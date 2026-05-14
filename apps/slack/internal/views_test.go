@@ -48,11 +48,11 @@ func TestHelpResponse_ValidJSON(t *testing.T) {
 	}
 }
 
-// TestHelpResponse_MentionsSubcommands fences the help text content.
-// The slash-command grammar declares a fixed set of subcommands; if
-// help silently drops one, users discover it the hard way. This is
-// a substring check on the rendered text — not a full parse — so
-// reformatting the help doesn't churn the test.
+// TestHelpResponse_MentionsSubcommands fences the help text content
+// against the parser grammar. Every verb declared in parser.go must
+// appear in the help body — a regression that drops a verb from
+// help silently degrades discoverability. Substring checks (not
+// full parse) so reformatting the help doesn't churn the test.
 func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 	t.Parallel()
 	raw, err := HelpResponse()
@@ -60,7 +60,22 @@ func TestHelpResponse_MentionsSubcommands(t *testing.T) {
 		t.Fatalf("HelpResponse: %v", err)
 	}
 	body := string(raw)
-	for _, want := range []string{"qurl get", "qurl setalias", "qurl admin", "qurl aliases"} {
+	// Every Subcommand + AdminAction from parser.go must surface.
+	for _, want := range []string{
+		"qurl get",
+		"qurl setalias",
+		"qurl unsetalias",
+		"qurl aliases",
+		"qurl admin claim",
+		"qurl admin allow",
+		"qurl admin disallow",
+		"qurl admin policies",
+		"qurl admin status",
+		"qurl admin revoke",
+		"qurl create",
+		"qurl list",
+		"qurl help",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("help body missing %q", want)
 		}
