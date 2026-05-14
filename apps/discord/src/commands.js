@@ -2698,6 +2698,12 @@ async function resolveRecipientUsers(interaction, ids) {
 // drops them all — small absolute cost but burns per-guild rate-limit
 // budget that legitimate ops elsewhere could use. The durable fix is
 // the v2 resolve-then-cap refactor tracked in #304.
+//
+// Self-mention cap behavior: since self-send is supported, `<@me>` now
+// CONSUMES a cap slot like any other mention. So `<@me> <@u1>..<@u25>`
+// yields self + 24 others (was: 25 others, pre self-send). This is
+// symmetric with the bot cap-skew above and aligns with the supported-
+// recipient model — sender is just another recipient.
 function partitionRecipients(users, senderId) {
   // Dedup contract is OWNED upstream: parseRecipientMentions dedupes
   // via a Set (recipient-parser.js:197-198) and the UserSelectMenu
@@ -3627,10 +3633,14 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     });
     // Only the bot-only case is reachable here today — self-send is
     // supported, so a pick of just the sender does NOT empty `valid`.
-    // Kept as a list-builder for future filters.
+    // Kept as a list-builder for future filters; the
+    // `|| 'No usable recipients in pick'` fallback prevents a
+    // degraded `⚠ . Re-pick...` message if a future filter is
+    // removed and `valid.length === 0` is hit with droppedBots === 0.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
-    return rejectPick(`⚠\u{FE0F} ${reasons.join('. ')}. Re-pick recipients below.\n\n`);
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
+    return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
   // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,

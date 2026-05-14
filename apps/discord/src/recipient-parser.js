@@ -155,7 +155,7 @@ function parseRecipientMentions(raw, interaction) {
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
-  // at the `interaction.user?.id` deref below. The back-half has
+  // at the `interaction.guild` deref below. The back-half has
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
@@ -234,9 +234,14 @@ function parseRecipientMentions(raw, interaction) {
   // / all-members-filtered all land the raw role token in
   // `invalidTokens` so the caller can surface "couldn't resolve
   // @role" rather than silently produce a smaller recipient list.
+  // Self-send via role: if the sender is a member of the mentioned
+  // role, they contribute to the recipient list along with the
+  // role's other (non-bot) members. The confirm card's "Send includes
+  // you." notice surfaces this so users aren't surprised when an
+  // `@team` mention includes themselves.
   // NOTE: these three states are CONFLATED in the current shape —
   // 7b.2 may want to distinguish "role doesn't exist" / "role has
-  // no members" / "all members are you+bots" via separate fields
+  // no members" / "all members are bots" via separate fields
   // (e.g. `emptyRoles`, or check `role.memberCount > 0 && members.size
   // === 0` for the partial-cache case). For now, conflation is
   // acceptable because the user-visible copy ("couldn't expand @role")

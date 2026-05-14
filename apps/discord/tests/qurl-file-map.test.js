@@ -1843,14 +1843,25 @@ describe('handleConfirmSendClick', () => {
     // Self-send is a supported recipient list. recipientIds=[SENDER_ID]
     // partitions to valid=[sender] (selfIncluded=true), so the empty-
     // valid branch is bypassed and the click proceeds to the send
-    // pipeline. We assert that the "Invalid recipient list" / "all left"
-    // copies are NOT surfaced; the actual dispatch happens in the
-    // executeSendPipeline suite and isn't re-tested here.
+    // pipeline. Positive-path assertions pin the dispatch entry (the
+    // "Preparing send" editReply + the terminal deleteFlow that fires
+    // on the happy path) so a future regression that silently no-ops
+    // for self-only sends shows up here, not just as the absence of
+    // the legacy error copies.
     const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 1 },
     });
+    // Positive: dispatch was entered.
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Preparing send/),
+    }));
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      reason: 'terminal',
+    }));
+    // Negative: legacy error copies must NOT surface.
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Invalid recipient list/i),
     }));
@@ -2303,6 +2314,25 @@ describe('handleConfirmExpirySelect', () => {
     // the wire-protocol assertion above.
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/7 days/);
+  });
+
+  test('selfIncluded notice survives an expiry change re-render', async () => {
+    // Non-recipient menu transitions (expiry, self-destruct, note
+    // modal) must keep the "Send includes you." notice when the
+    // payload was minted with selfIncluded=true. `rerenderConfirmCard`
+    // reads `newPayload.selfIncluded === true`, so an expiry change
+    // that drops the field by accident would surface here as the
+    // notice disappearing on a non-recipient menu click.
+    const int = makeSelectInteraction({ value: '7d' });
+    const payloadWithSelf = { ...basePayload, selfIncluded: true };
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: payloadWithSelf, version: 1 } });
+    // Persisted in the new payload (transitionFlow spreads ...payload).
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ selfIncluded: true, expiresIn: '7d' }),
+    }));
+    // Re-rendered content still shows the notice.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/Send includes you/);
   });
 
   test('no-op re-pick (same value as payload) → skip transitionFlow + version bump, still re-render', async () => {
