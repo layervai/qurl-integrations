@@ -197,6 +197,12 @@ function sliceWithEllipsis(s, maxCodepoints, indicator) {
   return sliced === s ? s : sliced + indicator;
 }
 
+// Discord-enforced input bound on every legitimate personalMessage
+// ingress (slash option setMaxLength + modal TextInput setMaxLength).
+// `personalMessageRaw` storage uses this cap so forged interactions
+// can't grow flow rows past the legitimate ceiling.
+const PERSONAL_MESSAGE_INPUT_MAX = 280;
+
 function sanitizeMessage(msg) {
   // Order matters:
   //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
@@ -4012,7 +4018,13 @@ async function handleQurlSlashSend(interaction, params) {
       });
     }
     const selfDestructSeconds = selfDestructOptionToSeconds(selfDestructValue);
-    const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
+    // Trim once and derive both forms — raw for Edit-note pre-fill,
+    // sanitized for render. Without the raw, the modal would pre-fill
+    // the escaped form and a no-op resubmit would double-escape.
+    const personalMessageRawTrimmed = personalMessageRaw
+      ? safeCodepointSlice(personalMessageRaw.trim(), PERSONAL_MESSAGE_INPUT_MAX)
+      : null;
+    const personalMessage = personalMessageRawTrimmed ? sanitizeMessage(personalMessageRawTrimmed) : null;
 
     const parsed = parseRecipientMentions(recipientsRaw, interaction);
 
@@ -4112,6 +4124,7 @@ async function handleQurlSlashSend(interaction, params) {
       expiresIn,
       selfDestructSeconds,
       personalMessage,
+      personalMessageRaw: personalMessageRawTrimmed,
       sendNonce,
     };
     let supersede;
@@ -4634,7 +4647,9 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 // who opened /qurl file without `recipients:` could change expiry
 // before picking and see an enabled Send button against an empty
 // recipient set.
-async function rerenderConfirmCard(interaction, newPayload) {
+// `ack` lets modal-submit handlers pass `interaction.update` —
+// deferred-ACK menu handlers use the editReply default.
+async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => interaction.editReply(msg)) {
   const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
   // Re-resolve the User objects from cache for the preview. Cache-only
   // (no members.fetch) — handleSendConfirmClick re-fetches at Send
@@ -4660,7 +4675,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
     needsPicker,
     interaction,
   });
-  return interaction.editReply({
+  return ack({
     content,
     components: renderConfirmCardRows({
       attachPicker: true,
@@ -4730,9 +4745,16 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
 // unexpected value (forged interaction), which is the safe default.
 async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
-  const selfDestructSeconds = selfDestructSelectValueToSeconds(
-    interaction.values && interaction.values[0]
-  );
+  const pickedValue = interaction.values && interaction.values[0];
+  const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
+  // Helper silently falls back to null for unknown values to avoid
+  // punishing a legitimate UI bug, but flag forgeries for forensics.
+  if (pickedValue !== undefined && pickedValue !== SELF_DESTRUCT_NO_TIMER_VALUE
+      && !SELF_DESTRUCT_PRESETS.some((p) => String(p.seconds) === pickedValue)) {
+    logger.warn('handleSendConfirmSelfDestructSelect: forged off-set self-destruct value', {
+      flow_id, value: pickedValue,
+    });
+  }
   const payload = row.payload || {};
   const newPayload = { ...payload, selfDestructSeconds };
   let result;
@@ -4784,9 +4806,11 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
       .setCustomId(SEND_NOTE_MODAL_INPUT_ID)
       .setLabel('Optional note (leave blank to clear)')
       .setStyle(TextInputStyle.Paragraph)
-      .setMaxLength(280)
+      .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
       .setRequired(false)
-      .setValue(payload.personalMessage || '')
+      // Pre-fill from raw to avoid double-escape on resubmit. Empty
+      // fallback for legacy flow rows missing the field (3-min TTL).
+      .setValue(payload.personalMessageRaw || '')
   ));
   return interaction.showModal(modal).catch((err) => {
     logger.warn('handleSendConfirmNoteButton: showModal failed', {
@@ -4803,9 +4827,12 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
 // interaction context.
 async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   const raw = interaction.fields.getTextInputValue(SEND_NOTE_MODAL_INPUT_ID).trim();
-  const personalMessage = raw ? sanitizeMessage(raw) : null;
+  // Cap matches the slash-entry path; both forms derive from the same
+  // trimmed-and-capped raw so an Edit round-trip is idempotent.
+  const personalMessageRaw = raw ? safeCodepointSlice(raw, PERSONAL_MESSAGE_INPUT_MAX) : null;
+  const personalMessage = personalMessageRaw ? sanitizeMessage(personalMessageRaw) : null;
   const payload = row.payload || {};
-  const newPayload = { ...payload, personalMessage };
+  const newPayload = { ...payload, personalMessage, personalMessageRaw };
   let result;
   try {
     result = await transitionFlow(flow_id, row.version, {
@@ -4823,48 +4850,23 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
+  // Modal-submit ACK goes through `update()` against the parent
+  // confirm-card message, not editReply. Both branches and the
+  // happy-path rerender share the same ack target via `update`.
+  const ack = (msg) => interaction.update(msg);
   if (result.result === 'conflict') {
-    return interaction.update({
+    return ack({
       content: 'Send was superseded — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
   if (result.result === 'not_found') {
-    return interaction.update({
+    return ack({
       content: 'This send expired — re-run the command.',
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
-  // Build the same re-rendered content/rows shape as the menus, but
-  // ACK via `update` (modal-submit) instead of editReply (deferred).
-  const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
-  const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
-  const validRecipients = recipientIds.map((id) => {
-    const cached = memberCache && memberCache.get && memberCache.get(id);
-    return cached && cached.user ? cached.user : { id, username: id, bot: false };
-  });
-  const needsPicker = recipientIds.length === 0;
-  const content = renderConfirmCardContent({
-    resourceType: newPayload.resourceType,
-    resourceLabel: newPayload.resourceLabel,
-    validRecipients,
-    expiresIn: newPayload.expiresIn,
-    selfDestructSeconds: newPayload.selfDestructSeconds,
-    personalMessage: newPayload.personalMessage,
-    warningsBlock: '',
-    needsPicker,
-    interaction,
-  });
-  return interaction.update({
-    content,
-    components: renderConfirmCardRows({
-      attachPicker: true,
-      sendDisabled: needsPicker,
-      expiresIn: newPayload.expiresIn,
-      selfDestructSeconds: newPayload.selfDestructSeconds,
-      personalMessage: newPayload.personalMessage,
-    }),
-  }).catch(logIgnoredDiscordErr);
+  return rerenderConfirmCard(interaction, newPayload, ack);
 }
 
 // Send button → fire executeSendPipeline. deleteFlow first as the

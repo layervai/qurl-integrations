@@ -2321,18 +2321,38 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     }));
   });
 
-  test('unknown forged value → null (safe fallback)', async () => {
+  test('unknown forged value → null (safe fallback) + logs warn for forensic trace', async () => {
     // selfDestructSelectValueToSeconds returns null for any value not
     // in the closed preset set. A forged '999999' here lands as
     // selfDestructSeconds: null — same shape as "no timer." Safe
     // default; the alternative (rejecting like the expiry handler
     // does) would deny the user any save until they re-pick from the
     // legit list, which is needlessly punishing for a defensive case.
+    // BUT — the silent fallback would erase the user's previously-set
+    // timer with zero forensic signal. Logging `warn` keeps the
+    // forgery trace without blocking the UX.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
     const int = makeSelectInteraction({ value: '999999' });
     await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ selfDestructSeconds: null }),
     }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/forged off-set self-destruct/i),
+      expect.objectContaining({ flow_id: 'fid', value: '999999' })
+    );
+  });
+
+  test('legitimate "no-timer" value does NOT trigger forgery warn', async () => {
+    // The forgery-warn must not false-positive on the no-timer
+    // sentinel (which also maps to null via the helper but is the
+    // legitimate way to clear a timer).
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   test('conflict → superseded copy', async () => {
@@ -2382,22 +2402,32 @@ describe('handleSendConfirmNoteButton', () => {
     expect(mockDeleteFlow).not.toHaveBeenCalled();
   });
 
-  test('modal pre-filled with current personalMessage when one exists', async () => {
+  test('modal pre-filled with RAW input (not sanitized) for round-trip safety', async () => {
     // The discord.js component mocks don't preserve state, so we
     // inspect builder method invocations to verify the pre-fill.
     // Each TextInputBuilder instance has its own jest.fn-based
     // setValue; the most-recent call captures what the modal passes
     // to the TextInput.
+    //
+    // CRITICAL: pre-fill uses payload.personalMessageRaw (the raw
+    // user input), NOT payload.personalMessage (the sanitized form).
+    // Without this distinction, pre-filling with `\*\*bold\*\*` and
+    // resubmitting unchanged would re-sanitize → `\\\*\\\*bold\\\*\\\*`
+    // (double-escape), and every Edit cycle would escalate.
     const { TextInputBuilder } = require('discord.js');
     TextInputBuilder.mockClear();
     const int = makeButtonInteraction();
-    const payload = { ...basePayload, personalMessage: 'existing note' };
+    const payload = {
+      ...basePayload,
+      personalMessage: '\\*\\*bold\\*\\*',  // sanitized form (would render literally)
+      personalMessageRaw: '**bold**',         // what the user actually typed
+    };
     await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.showModal).toHaveBeenCalled();
-    // The TextInputBuilder was constructed once; its setValue was
-    // called with the pre-fill string.
+    // setValue receives the RAW form so the user sees `**bold**` in
+    // the input, not the escaped `\*\*bold\*\*`.
     const builder = TextInputBuilder.mock.results[0].value;
-    expect(builder.setValue).toHaveBeenCalledWith('existing note');
+    expect(builder.setValue).toHaveBeenCalledWith('**bold**');
   });
 
   test('modal pre-fills empty string when no personalMessage is set', async () => {
@@ -2405,6 +2435,21 @@ describe('handleSendConfirmNoteButton', () => {
     TextInputBuilder.mockClear();
     const int = makeButtonInteraction();
     await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('');
+  });
+
+  test('modal pre-fills empty for legacy flow rows missing personalMessageRaw', async () => {
+    // Forward-compat: a flow row created before the personalMessageRaw
+    // field was added has personalMessage but no Raw counterpart.
+    // Falling back to empty string is the safe choice (user sees blank,
+    // can re-type) — pre-filling from the sanitized personalMessage
+    // would re-trigger the double-escape bug this field exists to fix.
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    const legacyPayload = { ...basePayload, personalMessage: '\\*\\*bold\\*\\*' };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: legacyPayload, version: 1 } });
     const builder = TextInputBuilder.mock.results[0].value;
     expect(builder.setValue).toHaveBeenCalledWith('');
   });
@@ -2451,6 +2496,10 @@ describe('handleSendConfirmNoteModal', () => {
         // sanitizeMessage runs markdown-escape — the `**` becomes `\\*\\*`
         // so the note renders as literal text in the recipient DM.
         personalMessage: expect.stringMatching(/\\\*\\\*bold\\\*\\\* message/),
+        // Raw form retained for the next Edit cycle's pre-fill —
+        // without this, opening Edit would show the escaped form
+        // and a no-op resubmit would re-sanitize to double-escape.
+        personalMessageRaw: '**bold** message',
       }),
     }));
     expect(int.update).toHaveBeenCalled();
@@ -2458,6 +2507,29 @@ describe('handleSendConfirmNoteModal', () => {
     // confirm card content, not just DDB.
     const lastUpdate = int.update.mock.calls.slice(-1)[0][0];
     expect(lastUpdate.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
+  });
+
+  test('round-trip: re-submit unchanged raw input does NOT double-escape', async () => {
+    // The bug this guards against: pre-fill with sanitized → resubmit
+    // sanitizes again → backslashes escalate. The fix is the raw/
+    // sanitized split; this test pins the round-trip is idempotent.
+    // Simulates: user typed `**bold**`, clicked Edit (pre-fill shows
+    // raw via the button test), submitted unchanged → raw resubmits,
+    // sanitized re-derives identically.
+    const int = makeModalInteraction({ inputValue: '**bold**' });
+    const existingPayload = {
+      ...basePayload,
+      personalMessage: '\\*\\*bold\\*\\*',
+      personalMessageRaw: '**bold**',
+    };
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: existingPayload, version: 1 } });
+    // Sanitized form remains single-escaped, not double.
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: '\\*\\*bold\\*\\*',
+        personalMessageRaw: '**bold**',
+      }),
+    }));
   });
 
   test('empty input → personalMessage: null (clear note)', async () => {
