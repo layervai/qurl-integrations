@@ -48,6 +48,11 @@ function seedSend({ sendId, senderDiscordId, resourceType = 'file', recipients =
       qurlLink: `https://q.test/${sendId}-${i}`,
       expiresIn: '24h',
       channelId: 'channel-1',
+      // Legacy-row shape: post-PR #313, new rows are always
+      // `target_type='user'`. This fixture exercises the
+      // formatRevokeLabel branch that handles pre-7b.3 `'channel'`
+      // rows during the 7-day TTL drain window. The branch (and this
+      // fixture) are scheduled for cleanup in #318.
       targetType: 'channel',
     });
   }

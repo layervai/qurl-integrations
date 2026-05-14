@@ -266,13 +266,16 @@ function isAllowedFileType(contentType) {
   return ALLOWED_FILE_TYPES.some(prefix => ct.startsWith(prefix));
 }
 
-// Global per-sendId mutex for the "Add Recipients" flow. Discord's
-// `createMessageComponentCollector` in executeSendPipeline can fire the
-// "Add Recipients" button callback concurrently for the same sendId
-// (rapid clicks before the prior callback finishes its userSelect prompt
-// or DDB write); this Set is the single source of truth for "an
-// addRecipients pass is in progress." Acquire at handler entry, release
-// in the finally.
+// Global per-sendId mutex for the "Add Recipients" flow. Node is
+// single-threaded, but the handler awaits `userSelect` prompt + DDB
+// writes, so a second "Add Recipients" button click on the same sendId
+// can interleave between await points within the same collector
+// instance (lines 1508–1512 in executeSendPipeline). The sync
+// check-then-add at entry plus release-in-finally is the single source
+// of truth for "an addRecipients pass is in progress." Also intentional
+// belt-and-suspenders against a future refactor that shares a sendId
+// across collector instances (e.g. flow_state RESUME on a bot restart
+// loading unfinished sends).
 const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();
@@ -364,8 +367,8 @@ async function batchSettled(items, fn, batchSize = 5) {
 //   4. 'Someone' — last-resort literal so callers never get null.
 // Optional chains throughout so a malformed interaction (no user, no
 // member) returns 'Someone' instead of throwing inside DM-dispatch.
-// Used by both the DM embed and the channel announcement so a single
-// send always shows the same name in both places.
+// Used by the DM-embed renderer so every recipient sees the same
+// sender name across the dispatch.
 function resolveSenderAlias(interaction) {
   return interaction?.member?.displayName
     ?? interaction?.user?.displayName
@@ -402,8 +405,7 @@ function resolveRecipientAlias(r, interaction) {
 // in their default browser.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
-// > globalName > username) — same source resolveSenderAlias used at the
-// channel-announce site, so the alias shown matches across both surfaces.
+// > globalName > username) sourced from resolveSenderAlias.
 // `personalMessage` is optional caller-provided context; if present, it
 // renders as an italicized blockquote above the body paragraph.
 //
@@ -452,9 +454,9 @@ const EXPIRY_LABELS = {
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
 // Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
-// limit is 25; capping at 10 bounds the UX. Both the initial user-
-// target select AND the channel-target's "Add more recipients" flow
-// use this — keep them in lockstep so a future bump doesn't drift.
+// limit is 25; capping at 10 bounds the UX. The initial confirm-card
+// UserSelectMenu AND the post-send "Add Recipients" flow both use this
+// — keep them in lockstep so a future bump doesn't drift.
 const USER_SELECT_PER_PICK_CAP = 10;
 
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
