@@ -352,18 +352,6 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.ids.sort()).toEqual(['101', '102']);
   });
 
-  test('allowed: caps at QURL_SEND_MAX_RECIPIENTS, surfaces cappedCount', () => {
-    // Synthetic guild larger than the cap. Pin that the cap applies
-    // post-expansion so a future "expand-without-cap" regression
-    // surfaces here.
-    const users = {};
-    for (let i = 0; i < 40; i++) users[`u${String(i).padStart(18, '0')}`] = {};
-    const int = makeInteraction({ users });
-    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
-    expect(res.ids.length).toBe(25);
-    expect(res.cappedCount).toBe(15);
-  });
-
   test('denied (default): surfaces massMentionDenied=true, no expansion, no invalidTokens entry', () => {
     const int = makeInteraction({
       users: { '101': {}, '102': {} },
@@ -406,6 +394,41 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
     expect(res.ids).toEqual([]);
     expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('allowed but every cached member is a bot → empty expansion, massMentionDenied still false', () => {
+    // Distinguish "expanded to nothing" (cache has only bots) from
+    // "denied" (no MENTION_EVERYONE perm). The caller renders these
+    // differently: "no valid recipients" generic copy vs. the
+    // permission-specific @everyone copy. Pin that the allowed-but-
+    // empty path stays on the generic side.
+    const int = makeInteraction({
+      users: { '801': { bot: true }, '802': { bot: true } },
+    });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('allowed: cap short-circuits the cache scan (large guild cap behavior)', () => {
+    // The @everyone expansion iterates guild.members.cache — a large
+    // guild could have 10k+ entries. Once `ids.size === cap`, the
+    // loop breaks rather than scanning the remainder. We can't easily
+    // assert "break ran" directly without instrumentation, but we
+    // can assert the cap-bounded result: 25 (the cap) ids out of 40
+    // synthetic non-bot members, with NO cappedCount surfaced for the
+    // skipped members (the early break is the tradeoff — we don't
+    // count past-cap members in @everyone expansion, unlike the
+    // text-mention path).
+    const users = {};
+    for (let i = 0; i < 40; i++) users[`u${String(i).padStart(18, '0')}`] = {};
+    const int = makeInteraction({ users });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids.length).toBe(25);
+    // cappedCount reflects only the members the loop actually saw
+    // past `ids.size === cap`. Since we break immediately, no members
+    // get added to `seen` beyond the cap, so cappedCount stays at 0.
+    expect(res.cappedCount).toBe(0);
   });
 });
 
@@ -488,18 +511,22 @@ describe('parseRecipientMentions — invalid tokens', () => {
       .toMatchObject({ ids: ['111'], invalidTokens: ['@\u200bhere:'], cappedCount: 0 });
   });
 
-  test('@everyone with trailing punctuation (denied) still surfaces massMentionDenied', () => {
+  test('@everyone with trailing punctuation (denied) still surfaces massMentionDenied + leftover lands in invalidTokens', () => {
     // `@everyone!`, `@everyone.fix`, etc. — the parser's
     // EVERYONE_TOKEN_RE matches `@everyone` with a non-word lookahead,
     // so trailing punctuation isn't consumed but the gate still fires.
     // Any leftover residue (`!`, `.fix`) is a tradeoff worth making —
     // surfacing the @everyone permission notice is the load-bearing
     // signal; the leftover punctuation gets a generic "couldn't
-    // parse" treatment if present.
+    // parse" treatment. Pin the residue shape so a future regression
+    // that double-surfaces (`@everyone!` AS A WHOLE in invalidTokens
+    // alongside the massMentionDenied flag) or silently swallows the
+    // `!` is caught here.
     const int = makeInteraction({ users: { '111': {} } });
     const res = parseRecipientMentions('@everyone! <@111>', int);
     expect(res.ids).toEqual(['111']);
     expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['!']);
   });
 
   test('here@everyone (embedded) stays on the defuse path (not a standalone @everyone)', () => {

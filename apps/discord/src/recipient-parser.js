@@ -146,6 +146,14 @@ const MAX_INVALID_TOKEN_LENGTH = 256;
 // which oncall benefits from seeing as a pattern.
 const MASSIVE_OVERSHOOT_MULTIPLIER = 2;
 
+// Single-source the GuildMember-shape bot check used by every
+// expansion path (direct user mention, role expansion, @everyone
+// expansion). A future discord.js rename of `.user.bot` only needs
+// to touch one line.
+function isBotMember(member) {
+  return member?.user?.bot === true;
+}
+
 // Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
 // to a flat user-ID list with the cap + bot filter applied. Returns
 // `{ ids, invalidTokens, cappedCount, massMentionDenied }`; never
@@ -261,7 +269,17 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         // not the guild's true member count. Acceptable v1; the cap
         // (QURL_SEND_MAX_RECIPIENTS) bounds the worst case anyway.
         for (const [memberId, member] of members) {
-          if (member?.user?.bot) continue;
+          // Short-circuit once we've filled the cap — the cache
+          // can be tens of thousands of entries in a large guild,
+          // and the per-iteration bot check is wasted work after
+          // `ids` is full. `seen` still gets populated for cappedCount
+          // accuracy on the path through `consider`; we trade that
+          // small UX nicety (knowing exactly how many were over the
+          // cap) for not scanning a 10k-member cache. Acceptable for
+          // an @everyone send — the user is already getting "expanded
+          // to N members" and the cap message.
+          if (ids.size >= cap) break;
+          if (isBotMember(member)) continue;
           consider(memberId);
         }
       }
@@ -284,7 +302,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // is acceptable. 7b.2 wiring should NOT assume the parser
     // filtered bots.
     const member = guild?.members?.cache?.get(id);
-    if (member?.user?.bot) continue;
+    if (isBotMember(member)) continue;
     consider(id);
   }
 
@@ -343,7 +361,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // that order.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
-      if (roleMember?.user?.bot) continue;
+      if (isBotMember(roleMember)) continue;
       usable++;
       consider(memberId);
     }
