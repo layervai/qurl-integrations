@@ -244,8 +244,6 @@ function makePipelineParams(overrides = {}) {
     locationUrl: null,
     locationName: null,
     recipients: [{ id: 'u1', username: 'u1' }],
-    target: 'user',
-    isVoiceContext: false,
     expiresIn: '24h',
     selfDestructSeconds: null,
     personalMessage: null,
@@ -1417,162 +1415,6 @@ describe('mintLinksInBatches', () => {
   });
 });
 
-// Strict input gate added in PR #277 (round-4 cr fix). isVoiceContext
-// is the one param whose silent default would mis-render the channel-
-// announce blurb — every other param either lands in DB rows where
-// corruption is grep-discoverable, or fails loudly inside the upload/
-// mint pipeline. Pin the gate here so PR 7b's flow_state-payload
-// schema can't drop the boolean in serialization and silently land
-// a voice-context send on text-channel wording.
-describe('executeSendPipeline — isVoiceContext strict gate', () => {
-  // sendCooldowns is module-private state; the cooldown-cleanup test
-  // sets it for a unique user id and relies on the gate's
-  // clearCooldown call to undo. If a future edit moves the throw
-  // ahead of clearCooldown (the exact regression that test pins),
-  // the unique-id strategy would still let other tests pass — but
-  // the residual entry would leak across describes. Explicit
-  // afterEach reset closes that hatch.
-  afterEach(() => {
-    const { clearCooldown } = _test;
-    if (typeof clearCooldown === 'function') {
-      clearCooldown('cooldown-gate-test-user');
-    }
-  });
-
-  // Gate is at function entry — mocks below don't need to be
-  // configured because the pipeline never reaches a downstream call.
-
-  test('throws TypeError when isVoiceContext is undefined (missing-flag case PR 7b might hit)', async () => {
-    const interaction = makeInteraction();
-    // Single invocation captured into a promise so both the type + the
-    // message assertion observe the SAME rejection. The previous pattern
-    // (two await-expects, two pipeline invocations) is harmless today —
-    // the gate is idempotent — but would surface a double-fire bug if a
-    // future change adds side effects (audit emission, etc.) ahead of
-    // the throw.
-    const rejection = executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: undefined }));
-    await expect(rejection).rejects.toThrow(TypeError);
-    await expect(rejection).rejects.toThrow(/isVoiceContext must be a boolean/);
-    // Gate clears the caller's stale ephemeral with an explicit error
-    // ephemeral BEFORE throwing. Pin the call — without it the user
-    // would see the caller's stale "Preparing send..." alongside the
-    // top-level catch's generic "There was an error" followUp.
-    // The "Preparing links..." editReply that lives later in the
-    // pipeline still never fires (the gate throws before reaching it),
-    // so any failed regression test that DOES see two editReplies is
-    // also caught: the cancellation edit is the only legitimate call.
-    expect(interaction.editReply).toHaveBeenCalledTimes(1);
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringMatching(/Internal error — send cancelled/),
-        components: [],
-      }),
-    );
-  });
-
-  test('throws TypeError when isVoiceContext is a string (most-likely miscoding shape)', async () => {
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: 'true' })))
-      .rejects.toThrow(/isVoiceContext must be a boolean/);
-    // Same user-facing cancellation behavior as the undefined case.
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringMatching(/Internal error — send cancelled/),
-      }),
-    );
-  });
-
-  test('throws TypeError for null isVoiceContext (typeof null === "object" foot-gun)', async () => {
-    // `typeof null === 'object'`, NOT 'boolean' — pin that null is
-    // rejected. A flow_state payload that serialized `false` as
-    // missing-vs-null could hit this without the test.
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: null })))
-      .rejects.toThrow(/isVoiceContext must be a boolean/);
-  });
-
-  test.each([0, 1])('throws TypeError for numeric %s (JS-y caller miscoding)', async (n) => {
-    // A caller writing `isVoiceContext: channel.type === 2 ? 1 : 0`
-    // (treating it as a truthy flag rather than a strict boolean)
-    // hits this branch. Pin both 0 and 1 — `Number(true) === 1`
-    // looks deceptively boolean-compatible but trips the typeof
-    // check.
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: n })))
-      .rejects.toThrow(/isVoiceContext must be a boolean/);
-  });
-
-  // eslint-disable-next-line no-new-wrappers
-  test('throws TypeError for Boolean wrapper object (typeof is "object", not "boolean")', async () => {
-    // `new Boolean(true)` is `typeof === 'object'` per JS spec —
-    // would silently coerce to truthy in a `?:` ternary while
-    // failing the strict gate. Worth pinning so a future reader
-    // debugging the gate doesn't get confused by the wrapper
-    // edge case.
-    const interaction = makeInteraction();
-    // eslint-disable-next-line no-new-wrappers
-    const wrapperTrue = new Boolean(true);
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: wrapperTrue })))
-      .rejects.toThrow(/isVoiceContext must be a boolean/);
-  });
-
-  test('clears cooldown before throwing so caller is not locked out', async () => {
-    // Caller-side convention (see handleQurlFile/handleQurlMap): setCooldown fires
-    // before the pipeline call so a rapid second invocation gets
-    // a "wait" reply. If the pipeline throws BEFORE clearing the
-    // cooldown, the user is locked out for the full window with
-    // no feedback — exactly the silent-failure shape the gate
-    // is meant to avoid amplifying. The post-throw isOnCooldown
-    // assertion below leaves no stray state for adjacent tests:
-    // the gate's clearCooldown call IS the cleanup.
-    const interaction = makeInteraction();
-    const { setCooldown, isOnCooldown } = _test;
-    // Use a unique sender id so a parallel test's cooldown state
-    // can't leak into this assertion. sendCooldowns is a module-
-    // private Map so the read/write surface is exposed only via
-    // the helpers above.
-    interaction.user = { id: 'cooldown-gate-test-user', username: 'test' };
-    setCooldown(interaction.user.id);
-    expect(isOnCooldown(interaction.user.id)).toBe(true);
-
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: undefined })))
-      .rejects.toThrow(TypeError);
-    expect(isOnCooldown(interaction.user.id)).toBe(false);
-  });
-});
-
-// Symmetric to the isVoiceContext gate — pins target and
-// attachment.url at entry so a tampered persisted payload or a
-// future caller mis-coding cannot reach the upload/announce path.
-describe('executeSendPipeline — target allowed-set gate', () => {
-  test.each([
-    ['voice (silent-suppress shape — docstring warns about this)', 'voice'],
-    ['empty string', ''],
-    ['unknown future value', 'group'],
-  ])('throws TypeError for target=%s', async (_label, target) => {
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ target })))
-      .rejects.toThrow(/target must be 'user' or 'channel'/);
-    // Cancel-edit fires before the throw — same shape as the
-    // isVoiceContext gate.
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringMatching(/Internal error — send cancelled/),
-      }),
-    );
-  });
-
-  test('throws TypeError for non-string target (undefined / null)', async () => {
-    const interaction = makeInteraction();
-    await expect(executeSendPipeline(interaction, makePipelineParams({ target: undefined })))
-      .rejects.toThrow(/target must be 'user' or 'channel'/);
-  });
-
-  test.each(['user', 'channel'])('accepts the allowed value: %s', async (target) => {
-    await expectGateAccepts(makePipelineParams({ target }), /target must be/);
-  });
-});
-
 describe('executeSendPipeline — attachment.url SSRF re-validation gate', () => {
   test.each([
     ['null attachment', null],
@@ -1847,26 +1689,11 @@ describe('executeSendPipeline — recipients shape + cap gates', () => {
   });
 });
 
-// Pin that truncForLog applies to ALL value-rendering gates in the
-// entry-gate family, not just the recipients gate that introduces
-// it. A future caller handing a 1MB string as `isVoiceContext`,
-// `target`, or `expiresIn` would otherwise dump the whole blob
-// into the rejection message.
-describe('executeSendPipeline — truncForLog applies to all value-rendering gates', () => {
-  test('isVoiceContext rejection message is bounded with `…` on oversized input', async () => {
-    const interaction = makeInteraction();
-    const huge = 'w'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makePipelineParams({ isVoiceContext: huge })))
-      .rejects.toThrow(/isVoiceContext must be a boolean .* value=w{64}…\)/);
-  });
-
-  test('target rejection message is bounded with `…` on oversized input', async () => {
-    const interaction = makeInteraction();
-    const huge = 'x'.repeat(1024);
-    await expect(executeSendPipeline(interaction, makePipelineParams({ target: huge })))
-      .rejects.toThrow(/target must be 'user' or 'channel' \(got x{64}…\)/);
-  });
-
+// Pin that truncForLog applies to the value-rendering gates in the
+// entry-gate family. A future caller handing a 1MB string as
+// `expiresIn` (or any value-rendering gate added later) would otherwise
+// dump the whole blob into the rejection message.
+describe('executeSendPipeline — truncForLog applies to value-rendering gates', () => {
   test('expiresIn rejection message is bounded with `…` on oversized input', async () => {
     const interaction = makeInteraction();
     const huge = 'y'.repeat(1024);

@@ -38,6 +38,28 @@ function assertIntent(intentsList, bit, requiredFor) {
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
 assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
 
+// Negative-intent canaries — pin that the bot has NOT silently
+// re-broadened gateway scope. Every intent listed here is either:
+//   - privileged (would re-introduce dev-portal toggle dependency:
+//     MessageContent, GuildPresences); or
+//   - non-privileged but only useful for code paths we deleted
+//     (DirectMessages → handleSend DM file-pivot; GuildVoiceStates →
+//     getChannelMembers voice-channel branch).
+// A future PR that re-adds any of these without a paired assertIntent
+// + use-case write-up will fail at boot rather than silently expanding
+// what crosses the Discord gateway. See PR #313 / issue #317 for
+// context on why this matters operationally (event volume + portal-
+// toggle drift).
+function assertNoIntent(intentsList, bit, name) {
+  if (bit !== undefined && intentsList.includes(bit)) {
+    throw new Error(`Intent \`${name}\` was re-added without justification. If the new use case is legitimate, document it via assertIntent at apps/discord/src/discord.js and remove the assertNoIntent below; otherwise drop the intent from the \`intents\` array.`);
+  }
+}
+assertNoIntent(intents, GatewayIntentBits.MessageContent, 'MessageContent');
+assertNoIntent(intents, GatewayIntentBits.GuildPresences, 'GuildPresences');
+assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
+assertNoIntent(intents, GatewayIntentBits.GuildVoiceStates, 'GuildVoiceStates');
+
 const client = new Client({ intents });
 
 // Cache for quick lookups
@@ -878,10 +900,12 @@ module.exports = {
   sendDM,
   refreshCache,
   shutdown,
-  // Exported only for unit tests to verify the boot canary throws on
-  // a missing intent. Production callers don't need it — the module-
+  // Exported only for unit tests to verify the boot canaries throw
+  // on a missing intent (assertIntent) or a re-broadened intents array
+  // (assertNoIntent). Production callers don't need them — the module-
   // level invocations above are the load-bearing assertions.
   assertIntent,
+  assertNoIntent,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,

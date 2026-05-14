@@ -643,4 +643,31 @@ describe('discord module', () => {
         .toThrow(/\/qurl file \+ \/qurl map recipient resolution/);
     });
   });
+
+  describe('assertNoIntent (negative canary)', () => {
+    // Pins the negative-intent guard: if a future PR silently adds back
+    // MessageContent / GuildPresences / DirectMessages / GuildVoiceStates
+    // to the intents array, the assertNoIntent invocations at
+    // discord.js:~45-50 fail loud at boot. This test pins both branches
+    // (re-added intent throws; absent intent doesn't).
+    it('throws when the disallowed intent IS in the intents list', () => {
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
+      expect(() => discord.assertNoIntent(intentsList, 4096, 'DirectMessages'))
+        .toThrow(/Intent `DirectMessages` was re-added without justification/);
+    });
+
+    it('does not throw when the disallowed intent is absent', () => {
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */];
+      expect(() => discord.assertNoIntent(intentsList, 4096, 'DirectMessages'))
+        .not.toThrow();
+    });
+
+    it('does not throw when the bit is undefined (partially-mocked GatewayIntentBits)', () => {
+      // Mirrors the assertIntent undefined-bit behavior: an unknown
+      // intent name in a future Discord.js bump shouldn't crash at
+      // boot just because the bit isn't in our mock.
+      expect(() => discord.assertNoIntent([1, 2], undefined, 'FutureIntent'))
+        .not.toThrow();
+    });
+  });
 });

@@ -874,8 +874,6 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 // alone.
 //
 // Entry gates (fire-and-forget cancel-edit + throw):
-//   - `isVoiceContext` must be a strict boolean.
-//   - `target` must be `'user'` or `'channel'`.
 //   - `attachment.url` re-validated against `isAllowedSourceUrl`
 //     when `resourceType === RESOURCE_TYPES.FILE`.
 //   - `expiresIn` must be a key of `EXPIRY_LABELS`.
@@ -904,43 +902,23 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 //     A caller that reuses the same array across retries will see
 //     silent double-adds.
 //
-//   - `target` is `'user' | 'channel'` ONLY — voice/text channel
-//     discrimination is on `isVoiceContext`, NOT on `target`.
-//     Setting `target: 'voice'` would silently suppress the
-//     channel-announce (the gate at the announce site is strict
-//     equality on `'channel'`).
-//
-//   - `isVoiceContext` is REQUIRED and strictly validated as a
-//     boolean (see entry-point assertion). A silent default would
-//     mis-render the channel-announce blurb for a voice-context
-//     send whose flag got dropped in serialization — exactly the
-//     silent-regression shape every other param avoids by landing
-//     in a grep-discoverable DB column or failing loudly inside
-//     the upload/mint stack.
-//
 // Required `interaction` surface (fail loudly at the corresponding
 // call site if missing):
 //
 //   - `interaction.user.id`            (cooldown key + senderDiscordId
 //                                       on every DB row + audit event)
 //   - `interaction.channelId`          (qurl_sends.channel_id)
-//   - `interaction.channel`            (null-guarded; nullable just
-//                                       drops the channel-announce)
 //   - `interaction.member?.displayName` + `user.username` fallback
-//                                      (resolveSenderAlias → DM embed
-//                                       + channel-announce wording)
+//                                      (resolveSenderAlias → DM embed)
 //   - `interaction.guild?.members?.fetch` (best-effort, recipient-
 //                                       alias resolution for cold cache)
 //   - `interaction.editReply`          (every user-visible status
 //                                       update on the primary message)
-//   - `interaction.channel.send`       (only on `target === 'channel'
-//                                       && delivered > 0`; logged-
-//                                       and-swallowed on failure)
 //
 // Resolved value is unused — both terminal completion and the
 // early-exit `return interaction.editReply(...)` paths discard
 // observable result; the function exists for its user-visible
-// side-effects (editReply + DM fan-out + channel-announce).
+// side-effects (editReply + DM fan-out).
 // Bounded value-renderer for entry-gate throw messages. `String()` is
 // wrapped because a hostile @@toPrimitive / toString would otherwise
 // replace the gate's intended TypeError with the renderer's opaque
@@ -979,11 +957,6 @@ async function executeSendPipeline(interaction, {
   // partitionRecipients (see contract pin at commands.js:~3552):
   // upstream owns dedup, this function does NOT re-dedup the initial set.
   recipients,
-  target,
-  // REQUIRED — validated at entry (see assertion below). NO default
-  // value: an omitted-or-non-boolean caller fails loudly instead of
-  // silently landing on text-channel wording for a voice-context send.
-  isVoiceContext,
   expiresIn,
   selfDestructSeconds,
   personalMessage,
@@ -1012,33 +985,6 @@ async function executeSendPipeline(interaction, {
     clearCooldown(interaction.user.id);
     cancelEdit();
     throw new ErrorCtor(msg);
-  }
-
-  // `isVoiceContext` strict-boolean gate. Unique among the params
-  // because a wrong value surfaces only as a subtle copy mismatch
-  // in the non-ephemeral channel-announce — the silent-regression
-  // shape every other input either lands in a grep-discoverable
-  // DB column or fails loudly inside the upload/mint stack. The
-  // clearCooldown ahead of the throw matches the pipeline's "clear
-  // on every error path" convention so a caller that hit the
-  // gate doesn't strand the user in a cooldown window.
-  if (typeof isVoiceContext !== 'boolean') {
-    // `typeof=` + `value=` rendered separately because
-    // `typeof null === 'object'` is a classic foot-gun in
-    // a single-field "(got object: null)" rendering. truncForLog
-    // keeps the message bounded if a future caller hands a
-    // pathological value (1MB string, etc.) and appends a `…`
-    // marker so a prod-log reader can tell a truncated rendering
-    // from the full payload.
-    failGate(TypeError, `executeSendPipeline: isVoiceContext must be a boolean (got typeof=${typeof isVoiceContext}, value=${truncForLog(isVoiceContext)})`);
-  }
-
-  // `target` allowed-set gate. Same silent-mis-render shape: an
-  // unrecognized value (e.g. `'voice'`) would silently suppress
-  // the channel-announce — the announce site gates on strict
-  // equality with `'channel'`.
-  if (target !== 'user' && target !== 'channel') {
-    failGate(TypeError, `executeSendPipeline: target must be 'user' or 'channel' (got ${truncForLog(target)})`);
   }
 
   // Defense-in-depth SSRF re-check. `/qurl file`'s front-half
@@ -1092,11 +1038,11 @@ async function executeSendPipeline(interaction, {
   // the editReply) — a non-array reaching either site would crash on
   // `.length` lookup against undefined.
   if (!Array.isArray(recipients) || recipients.length === 0) {
-    // Same canonical `typeof=`, `value=` rendering as the
-    // isVoiceContext gate above. Empty-array case renders the literal
-    // `<empty array>` sentinel (truncForLog on `[]` would `String()`
-    // to the empty string, which a prod-log reader couldn't
-    // distinguish from a missing value-field).
+    // Canonical `typeof=`, `value=` rendering matches the other entry
+    // gates so a prod-log reader sees one shape across the file. Empty-
+    // array case renders the literal `<empty array>` sentinel
+    // (truncForLog on `[]` would `String()` to the empty string, which
+    // a prod-log reader couldn't distinguish from a missing value-field).
     const detail = Array.isArray(recipients)
       ? 'typeof=object, value=<empty array>'
       : `typeof=${typeof recipients}, value=${truncForLog(recipients)}`;
@@ -1269,7 +1215,12 @@ async function executeSendPipeline(interaction, {
     await db.recordQURLSendBatch(qurlLinks.map(link => ({
       sendId, senderDiscordId: interaction.user.id, recipientDiscordId: link.recipientId,
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
-      expiresIn, channelId: interaction.channelId, targetType: target,
+      // targetType is preserved on every row for the revoke-list
+      // renderer's branch on `s.target_type` (historical /qurl send rows
+      // can be 'channel'/'voice'; new /qurl file + /qurl map rows are
+      // always 'user'). When all historical rows expire, the
+      // formatRevokeLabel non-'user' branch can be deleted too.
+      expiresIn, channelId: interaction.channelId, targetType: 'user',
     })));
   } catch (err) {
     // Log the orphaned QURL resources at error level so an operator can
@@ -1428,40 +1379,8 @@ async function executeSendPipeline(interaction, {
   }
   const response = await interaction.editReply(initialPayload);
 
-  // Non-ephemeral channel notification when sending to "Everyone" (channel
-  // target) or "Voice users" (voice target). The sender's ephemeral reply
-  // confirms the send to THEM; this message is what recipients see in the
-  // channel so they know to look for the Qurl Bot DM. Without this, a
-  // passive channel member who missed the DM ping has no signal that a
-  // send happened. Logged-and-swallowed on failure — a missing
-  // "Send Messages" permission in a customer server shouldn't fail the
-  // whole send (DMs already went out successfully).
-  //
-  // Guard on `interaction.channel` being present: for a slash command
-  // invoked in a guild channel this is always set, but in edge cases
-  // (partial-cache on a fresh gateway connect, thread that got
-  // archived mid-send, DM-channel dispatch) the channel object can be
-  // null — and `.send()` on null throws synchronously, before the
-  // try/catch can see it.
-  if (interaction.channel && target === 'channel' && delivered > 0) {
-    // Same sanitizer the DM embed uses (sanitizeDisplayName: NFKC + bidi/
-    // zero-width/control strip + markdown escape + 64-char cap + 'Someone'
-    // fallback). Channel-post is a wider blast radius than DM, so applying
-    // the same spoof defense here is critical — without it a display name
-    // with a leading U+202E flips text direction in the public announcement.
-    const safeName = sanitizeDisplayName(resolveSenderAlias(interaction));
-    const notifyMsg = isVoiceContext
-      ? `📩 **${safeName}** has shared something with users currently connected to this voice channel via **qURL Bot** — check your DMs from qURL Bot.`
-      : `📩 **${safeName}** has shared something with all members of this channel via **qURL Bot** — check your DMs from qURL Bot.`;
-    try {
-      await interaction.channel.send({ content: notifyMsg });
-    } catch (err) {
-      logger.warn('Failed to send channel notification', { error: err.message });
-    }
-  }
-
   logger.info('qurl send pipeline completed', {
-    sender: interaction.user.id, sendId, target, resourceType, delivered, failed, expiresIn,
+    sender: interaction.user.id, sendId, resourceType, delivered, failed, expiresIn,
   });
 
   // Collector handles multiple button clicks (Add Recipients can be clicked multiple times)
@@ -4378,8 +4297,6 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     locationUrl: payload.locationUrl,
     locationName: payload.locationName,
     recipients: valid,
-    target: 'user',
-    isVoiceContext: false,
     expiresIn: payload.expiresIn,
     selfDestructSeconds: payload.selfDestructSeconds,
     personalMessage: payload.personalMessage,
@@ -5598,7 +5515,8 @@ const commands = [
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
             'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
             '**Large servers (~1000+ members):** `/qurl file` or `/qurl map` with role @mentions ' +
-            'may skip members who appear offline in Discord. ' +
+            'may skip members the bot has not yet cached locally (the bot fetches members lazily, ' +
+            'and very large servers may not be fully populated). ' +
             'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +
             'Learn more at **https://layerv.ai**.',
           ephemeral: true,
