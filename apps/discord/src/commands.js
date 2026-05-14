@@ -2774,6 +2774,12 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
   // iteration COST independent of unique-bot semantics, so a
   // pathological 10k-entry role can't grind for free.
   let inspectedFromRoles = 0;
+  // Gate the ITER_BOUND debug log so it fires AT MOST ONCE per call.
+  // The counter is function-scoped, so without this gate role B's
+  // inner loop would log a redundant line on every iteration past
+  // role A's budget exhaustion. Forensic value is one line per call,
+  // not N.
+  let boundLogged = false;
   // 4× cap (=100) balances pathological-role protection against the
   // UX edge where a real role iterates bots first and humans behind:
   // 2× was tight enough that a "bots-up-front" role could leave the
@@ -2824,13 +2830,16 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
         if (inspectedFromRoles >= ITER_BOUND) {
-          logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
-            flow_id,
-            role_id: roleId,
-            inspected_from_roles: inspectedFromRoles,
-            user_map_size: userMap.size,
-            iter_bound: ITER_BOUND,
-          });
+          if (!boundLogged) {
+            logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
+              flow_id,
+              role_id: roleId,
+              inspected_from_roles: inspectedFromRoles,
+              user_map_size: userMap.size,
+              iter_bound: ITER_BOUND,
+            });
+            boundLogged = true;
+          }
           break;
         }
         inspectedFromRoles += 1;

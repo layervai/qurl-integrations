@@ -643,6 +643,40 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(ITER_BOUND);
   });
 
+  test('iteration cost vs count semantic: overlap bots consume iter budget twice but Set counts them once', () => {
+    // Pin the documented intent at commands.js: counter increments
+    // BEFORE the dedupe check, so a bot in two picked roles costs 2
+    // iteration slots even though droppedFromRolesSet has 1 entry.
+    // A regression that hoisted the dedupe check above the counter
+    // (in pursuit of "symmetry") would let a contrived "same N
+    // members across M roles" pick grind for free.
+    //
+    // Setup: role A has 1 unique bot (the "overlap" bot) + 49 other
+    // bots (50 total). Role B has the same overlap bot + 49 DIFFERENT
+    // bots. Total unique bots: 1 + 49 + 49 = 99. Total iterations if
+    // unbounded: 50 + 50 = 100 — exactly ITER_BOUND. So role B's last
+    // unique bot is the one that trips the bound.
+    const overlapBot = makeUser('100000000000000099', { bot: true });
+    const roleAOnly = Array.from({ length: 49 }, (_, i) => ({
+      user: makeUser(`200000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    const roleBOnly = Array.from({ length: 49 }, (_, i) => ({
+      user: makeUser(`300000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    const roleA = makeRole({ id: 'role-a', members: [{ user: overlapBot }, ...roleAOnly] });
+    const roleB = makeRole({ id: 'role-b', members: [{ user: overlapBot }, ...roleBOnly] });
+    const int = makeMentionableInteraction({ pickedRoles: [roleA, roleB] });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users).toEqual([]);
+    // 99 unique bots in the Set. If a future refactor moved the
+    // dedupe check above the counter, role B's overlap iteration
+    // would short-circuit (skipped at userMap.has via the Set), and
+    // the bound would only trip after 100 *unique* members =
+    // unreachable with this fixture. Asserting 99 (vs. 100) pins the
+    // counter-before-dedupe ordering.
+    expect(r.droppedFromRoles).toBe(99);
+  });
+
   test('overlap dedup: same bot in two picked roles counted once in droppedFromRoles', () => {
     // Set-backed droppedFromRoles means the same bot ID across two
     // picked roles contributes 1 to the user-visible count, not 2.
