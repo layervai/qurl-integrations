@@ -571,6 +571,25 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
+  test('pathological all-bot role iteration bounded by 2x cap (belt-and-suspenders against userMap.size never growing)', () => {
+    // The userMap.size cap-break never fires for an all-bot role
+    // because bots only increment droppedFromRoles. Without the
+    // iteration-count guard, a pathological 10k-bot role would
+    // iterate all 10k entries. Bound at 2× QURL_SEND_MAX_RECIPIENTS
+    // (50) keeps it cheap even if exposure widens later.
+    const bots = Array.from({ length: 200 }, (_, i) => ({
+      user: makeUser(`100000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: 'role-bots', members: bots })],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users).toEqual([]);
+    // Iterated at most 2× cap (=50) before bailing.
+    expect(r.droppedFromRoles).toBeLessThanOrEqual(50);
+    expect(r.droppedFromRoles).toBeGreaterThan(0);
+  });
+
   test('bot-only role pick → droppedFromRoles counts the filtered bots', () => {
     // Without this signal the call site has no way to differentiate a
     // truly empty pick (silent return) from a role-of-bots pick (where
@@ -2646,6 +2665,27 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/no non-bot members/i);
     // Resource header survives — same preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: bot user + bot-only-role pick → BOTH reasons surface (independent signals)', async () => {
+    // Pin against the earlier gating that hid the role-bots reason
+    // when an individual bot was also picked. Both reasons describe
+    // independent picker actions and should both surface.
+    const directBot = makeUser('100000000000000099', { bot: true });
+    const roleBot = makeUser('100000000000000091', { bot: true });
+    const botRole = ['role-bots', {
+      id: 'role-bots',
+      members: new Map([[roleBot.id, { user: roleBot }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [directBot],
+      roles: [botRole],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Cannot send to bots/);
+    expect(updated.content).toMatch(/no non-bot members/i);
   });
 
   test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {

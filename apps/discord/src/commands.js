@@ -2761,17 +2761,25 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
         ? guild?.members?.cache
         : role?.members;
       if (!source || typeof source.entries !== 'function') continue;
-      // Cap short-circuit avoids building a 10k-entry userMap when a
-      // large role is picked; downstream partition still enforces.
+      // Two break conditions, both belt-and-suspenders:
+      //  - userMap.size at cap: stops adding new entries once the
+      //    downstream partition cap would be hit anyway.
+      //  - droppedFromRoles + size past 2× cap: bounds iteration
+      //    against a pathological all-bot role where the size guard
+      //    can never fire (bots only increment droppedFromRoles).
+      const ITER_BOUND = 2 * config.QURL_SEND_MAX_RECIPIENTS;
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
+        if (droppedFromRoles + userMap.size >= ITER_BOUND) break;
         if (isBotMember(member)) {
           droppedFromRoles += 1;
           continue;
         }
-        // `has` check is load-bearing for cap-priority: keeps the
-        // first-seen User (the one from interaction.users) over the
-        // role-member view, which may differ in optional fields like
+        // `has` check preserves field fidelity, not cap-priority
+        // (which is enforced by the user-pick seeding above happening
+        // before role expansion). It keeps the original User object
+        // from interaction.users instead of overwriting with
+        // member.user, which can differ in optional fields like
         // `globalName` that downstream alias rendering reads.
         if (userMap.has(memberId)) continue;
         userMap.set(memberId, member.user);
@@ -3747,10 +3755,13 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     //     (droppedFromRoles > 0, selected.length === 0)
     // List-builder pattern; the fallback prevents a degraded
     // `⚠ . Re-pick...` message if all conditions are false.
+    // Both bot-related reasons can fire together: a pick combining a
+    // directly-picked bot and a bot-only role surfaces both signals
+    // since they describe independent picker actions.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
-    if (droppedFromRoles > 0 && droppedBots === 0) reasons.push('Picked role(s) have no non-bot members');
+    if (droppedFromRoles > 0) reasons.push('Picked role(s) have no non-bot members');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
