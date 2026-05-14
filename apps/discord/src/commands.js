@@ -2737,7 +2737,21 @@ function partitionRecipients(users, senderId) {
 // For the @everyone role specifically, iterate `guild.members.cache`
 // instead of `role.members` — discord.js doesn't reliably surface
 // all members through @everyone's role.members.
-function resolveMentionableSelection({ interaction, canMentionEveryone }) {
+//
+// `droppedFromRoles` counts picker-action bot filtering (bot members
+// the helper skipped during role expansion). It is a count of
+// *iterations*, not unique bot IDs — if the same bot is also picked
+// individually OR appears in two picked roles, it can be counted
+// more than once. The caller treats it as a boolean signal for the
+// "bot(s) filtered from picked role(s)" warning line, so the count
+// is only used as `> 0` / "N" in user-visible copy.
+//
+// Map/Collection compatibility: `interaction.users` and
+// `interaction.roles` are discord.js Collections (which extend Map)
+// in prod and plain Maps in tests. Both implement `.values()`,
+// `.entries()`, and `Symbol.iterator` — the duck-type guards below
+// gate on the methods we actually call.
+function resolveMentionableSelection({ interaction, canMentionEveryone, flowIdForLog }) {
   const guild = interaction.guild;
   const userMap = new Map();
   if (interaction.users && typeof interaction.users.values === 'function') {
@@ -2750,7 +2764,13 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
   // an iteration-cost cap, not per-role correctness, so a pathological
   // first role legitimately pre-truncates expansion of later roles.
   let droppedFromRoles = 0;
-  const ITER_BOUND = 2 * config.QURL_SEND_MAX_RECIPIENTS;
+  // 4× cap (=100) balances pathological-role protection against the
+  // UX edge where a real role iterates bots first and humans behind:
+  // 2× was tight enough that a "bots-up-front" role could leave the
+  // user under-expanded with no visible signal beyond a high
+  // droppedFromRoles count. 4× pushes the rate-of-occurrence well
+  // below any plausible non-pathological role layout.
+  const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
   if (interaction.roles && typeof interaction.roles.entries === 'function') {
     for (const [roleId, role] of interaction.roles.entries()) {
       const isEveryoneRole = guild && roleId === guild.id;
@@ -2768,12 +2788,23 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
       // Two break conditions, both belt-and-suspenders:
       //  - userMap.size at cap: stops adding new entries once the
       //    downstream partition cap would be hit anyway.
-      //  - droppedFromRoles + size past 2× cap: bounds iteration
+      //  - droppedFromRoles + size past 4× cap: bounds iteration
       //    against a pathological all-bot role where the size guard
       //    can never fire (bots only increment droppedFromRoles).
+      //    Logs at debug so a user-reported "I picked a role and got
+      //    fewer than expected" has a forensic hook.
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
-        if (droppedFromRoles + userMap.size >= ITER_BOUND) break;
+        if (droppedFromRoles + userMap.size >= ITER_BOUND) {
+          logger.debug('resolveMentionableSelection: ITER_BOUND hit during role expansion', {
+            flow_id: flowIdForLog,
+            role_id: roleId,
+            dropped_from_roles: droppedFromRoles,
+            user_map_size: userMap.size,
+            iter_bound: ITER_BOUND,
+          });
+          break;
+        }
         if (isBotMember(member)) {
           droppedFromRoles += 1;
           continue;
@@ -3694,6 +3725,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   const { users: selected, massMentionDenied, droppedFromRoles } = resolveMentionableSelection({
     interaction,
     canMentionEveryone,
+    flowIdForLog: flow_id,
   });
   if (selected.length === 0 && !massMentionDenied && droppedFromRoles === 0) {
     // Truly empty pick (no users, no roles, no @everyone, no

@@ -452,6 +452,18 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
+  test('filters out malformed user entries lacking .id (defense against partial User payload)', () => {
+    // The seed loop guards with `if (u && u.id) userMap.set(u.id, u);`
+    // — discord.js shouldn't ever surface a partial User, but the
+    // Collection→Map duck-typing in the test harness leaves room for
+    // a future regression to drop the guard. Pin the defense.
+    const u1 = makeUser('100000000000000001');
+    const partial = { id: undefined, username: 'partial' };
+    const int = makeMentionableInteraction({ pickedUsers: [u1, partial] });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+  });
+
   test('named role expands its members onto the user list, filters bots', () => {
     const u1 = makeUser('100000000000000001');
     const bot1 = makeUser('100000000000000099', { bot: true });
@@ -576,13 +588,14 @@ describe('resolveMentionableSelection', () => {
     expect(r.massMentionDenied).toBe(false);
   });
 
-  test('pathological all-bot role iteration bounded by 2x cap (belt-and-suspenders against userMap.size never growing)', () => {
+  test('pathological all-bot role iteration bounded by 4× cap (belt-and-suspenders against userMap.size never growing)', () => {
     // The userMap.size cap-break never fires for an all-bot role
     // because bots only increment droppedFromRoles. Without the
     // iteration-count guard, a pathological 10k-bot role would
-    // iterate all 10k entries. Bound at 2× QURL_SEND_MAX_RECIPIENTS
-    // (50) keeps it cheap even if exposure widens later.
-    const bots = Array.from({ length: 200 }, (_, i) => ({
+    // iterate all 10k entries. Bound at 4× QURL_SEND_MAX_RECIPIENTS
+    // (=100) keeps it cheap while still surfacing humans behind
+    // bot-prefixes in non-pathological roles.
+    const bots = Array.from({ length: 300 }, (_, i) => ({
       user: makeUser(`100000000000000${String(i).padStart(3, '0')}`, { bot: true }),
     }));
     const int = makeMentionableInteraction({
@@ -590,8 +603,8 @@ describe('resolveMentionableSelection', () => {
     });
     const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
     expect(r.users).toEqual([]);
-    // Iterated at most 2× cap (=50) before bailing.
-    expect(r.droppedFromRoles).toBeLessThanOrEqual(50);
+    // Iterated at most 4× cap (=100) before bailing.
+    expect(r.droppedFromRoles).toBeLessThanOrEqual(100);
     expect(r.droppedFromRoles).toBeGreaterThan(0);
   });
 
