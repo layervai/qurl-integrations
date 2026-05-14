@@ -4909,6 +4909,11 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
       .setRequired(false)
       // Pre-fill from raw to avoid double-escape on resubmit. Empty
       // fallback for legacy flow rows missing the field (3-min TTL).
+      // Note: raw can contain bidi/zero-width chars (sanitize hasn't
+      // run on raw); pre-filling them into the TextInput is by design
+      // for round-trip correctness, and the surface is ephemeral-to-
+      // self (only the invoking user sees the modal). If this ever
+      // gets piped to a non-ephemeral context, sanitize the prefill.
       .setValue(payload.personalMessageRaw || '')
   ));
   return interaction.showModal(modal).catch((err) => {
@@ -4967,6 +4972,16 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // input). Keeps the button label and the modal pre-fill consistent.
   const personalMessageRaw = personalMessage ? rawCapped : null;
   const payload = row.payload || {};
+  // No-op submit (same content as current state) → skip the DDB
+  // write + version bump (symmetric with expiry / self-destruct
+  // handlers). Compare BOTH forms because a sanitize-semantics
+  // change could leave sanitized identical but raw drifted; matching
+  // both is the correct invariant. Visible feedback (rerender) still
+  // fires so the user knows the submit registered.
+  if (personalMessage === (payload.personalMessage ?? null)
+      && personalMessageRaw === (payload.personalMessageRaw ?? null)) {
+    return rerenderConfirmCard(interaction, payload);
+  }
   const newPayload = { ...payload, personalMessage, personalMessageRaw };
   let result;
   try {

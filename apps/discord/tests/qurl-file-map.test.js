@@ -2649,13 +2649,17 @@ describe('handleSendConfirmNoteModal', () => {
     expect(lastEdit.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
   });
 
-  test('round-trip: re-submit unchanged raw input does NOT double-escape', async () => {
-    // The bug this guards against: pre-fill with sanitized → resubmit
-    // sanitizes again → backslashes escalate. The fix is the raw/
-    // sanitized split; this test pins the round-trip is idempotent.
+  test('round-trip no-op: re-submit unchanged input → skip transitionFlow + version bump, still re-render', async () => {
+    // Two invariants in one test:
+    //  1. Round-trip is idempotent — re-sanitizing the same raw
+    //     produces the same sanitized form (no double-escape).
+    //  2. No-op submit short-circuits the DDB write + version bump
+    //     (symmetric with expiry / self-destruct handlers). The
+    //     idempotence is what MAKES the no-op short-circuit safe:
+    //     sanitize semantics guarantee the derived forms match the
+    //     stored forms, so the equality check fires correctly.
     // Simulates: user typed `**bold**`, clicked Edit (pre-fill shows
-    // raw via the button test), submitted unchanged → raw resubmits,
-    // sanitized re-derives identically.
+    // raw via the button test), submitted unchanged.
     const int = makeModalInteraction({ inputValue: '**bold**' });
     const existingPayload = {
       ...basePayload,
@@ -2663,32 +2667,36 @@ describe('handleSendConfirmNoteModal', () => {
       personalMessageRaw: '**bold**',
     };
     await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: existingPayload, version: 1 } });
-    // Sanitized form remains single-escaped, not double.
-    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({
-        personalMessage: '\\*\\*bold\\*\\*',
-        personalMessageRaw: '**bold**',
-      }),
-    }));
+    expect(int.deferUpdate).toHaveBeenCalled();
+    // No-op skip — no DDB write, no version bump, no sibling fence.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    // Visible feedback fires.
+    expect(int.editReply).toHaveBeenCalled();
   });
 
-  test('empty input → personalMessage: null (clear note)', async () => {
+  // The clear-note tests use a payload with a PREVIOUS note so the
+  // round-17 no-op short-circuit doesn't skip the write (it would
+  // for an already-null personalMessage on an empty submit). Each
+  // test exercises a different "stripped to empty" input shape.
+  const payloadWithNote = { ...basePayload, personalMessage: 'old note', personalMessageRaw: 'old note' };
+
+  test('empty input on a payload with an existing note → personalMessage: null (clear)', async () => {
     const int = makeModalInteraction({ inputValue: '' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ personalMessage: null }),
+      payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
     }));
   });
 
-  test('whitespace-only input → personalMessage: null', async () => {
+  test('whitespace-only input on a payload with an existing note → personalMessage: null', async () => {
     const int = makeModalInteraction({ inputValue: '   \n  \t' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ personalMessage: null }),
+      payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
     }));
   });
 
-  test('ZWSP-only input (survives trim, sanitize strips) → both fields null in lockstep', async () => {
+  test('ZWSP-only input on a payload with an existing note → both fields null in lockstep', async () => {
     // The trim-vs-sanitize gap: zero-width space (U+200B) isn't in
     // ECMAScript's WhiteSpace set, so .trim() leaves it. But
     // sanitizeMessage's bidi/zero-width strip removes it, producing
@@ -2700,13 +2708,24 @@ describe('handleSendConfirmNoteModal', () => {
     // to null in lockstep.
     const zwsp = String.fromCharCode(0x200B);
     const int = makeModalInteraction({ inputValue: zwsp.repeat(3) });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
         personalMessage: null,
         personalMessageRaw: null,
       }),
     }));
+  });
+
+  test('empty submit on a payload with NO existing note → no-op skip (already cleared)', async () => {
+    // Symmetric with the menu no-op tests. basePayload.personalMessage
+    // is null; submitting empty produces null → no actual change →
+    // skip the write + version bump.
+    const int = makeModalInteraction({ inputValue: '' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
   });
 
   test('conflict → superseded copy via editReply (post-deferUpdate)', async () => {
@@ -2918,11 +2937,16 @@ describe('renderConfirmCardRows', () => {
   // or by inspecting what renderConfirmCardRows would attach (via the
   // editReply calls). Simpler: drive via the entry path and inspect.
 
-  test('slash-entry WITHOUT recipients → 4 rows (picker + 2 selects + button row)', async () => {
+  test('slash-entry WITHOUT recipients → 4 rows, Send disabled, expiry/self-destruct/note interactable', async () => {
     // Renderer always produces 4 rows (picker + self-destruct +
-    // expiry + bottom button row). The slash-entry "no recipients"
-    // path is one of two entry shapes; the "with recipients" test
-    // below pins the other half (picker still attached for re-picks).
+    // expiry + bottom button row). On a no-recipients initial render,
+    // Send must be DISABLED (no recipients to send to) while the
+    // expiry/self-destruct/note selects+button stay INTERACTABLE so
+    // the user can pre-configure their send before picking
+    // recipients. Inspect the ButtonBuilder mock for the Send button's
+    // setDisabled call.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },  // no `recipients` → needsPicker
     });
@@ -2930,6 +2954,14 @@ describe('renderConfirmCardRows', () => {
     const editReplyCalls = int.editReply.mock.calls;
     const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
     expect(lastCall.components).toHaveLength(4);
+    // 3 ButtonBuilders: Note, Send, Cancel. The Send button is the
+    // one with custom id 'qurl_send_confirm_send'. Find it and assert
+    // setDisabled(true) was called.
+    const sendBuilder = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_send_confirm_send'
+    );
+    expect(sendBuilder).toBeDefined();
+    expect(sendBuilder.value.setDisabled).toHaveBeenCalledWith(true);
   });
 
   test('slash-entry WITH recipients → 4 rows (picker still attached so layout is stable across menu interactions)', async () => {
