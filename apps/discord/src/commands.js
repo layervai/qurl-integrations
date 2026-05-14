@@ -2746,7 +2746,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
     }
   }
   let massMentionDenied = false;
+  // Accumulates across all picked roles intentionally — the bound is
+  // an iteration-cost cap, not per-role correctness, so a pathological
+  // first role legitimately pre-truncates expansion of later roles.
   let droppedFromRoles = 0;
+  const ITER_BOUND = 2 * config.QURL_SEND_MAX_RECIPIENTS;
   if (interaction.roles && typeof interaction.roles.entries === 'function') {
     for (const [roleId, role] of interaction.roles.entries()) {
       const isEveryoneRole = guild && roleId === guild.id;
@@ -2767,7 +2771,6 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
       //  - droppedFromRoles + size past 2× cap: bounds iteration
       //    against a pathological all-bot role where the size guard
       //    can never fire (bots only increment droppedFromRoles).
-      const ITER_BOUND = 2 * config.QURL_SEND_MAX_RECIPIENTS;
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
         if (droppedFromRoles + userMap.size >= ITER_BOUND) break;
@@ -2801,6 +2804,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone }) {
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
+ *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
  * }} [opts]
  */
@@ -2810,6 +2814,7 @@ function renderRecipientWarnings({
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
+  droppedFromRoles = 0,
   massMentionDenied = false,
 } = {}) {
   const lines = [];
@@ -2849,6 +2854,14 @@ function renderRecipientWarnings({
   }
   if (droppedBots > 0) {
     lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
+  }
+  if (droppedFromRoles > 0) {
+    // Surfaced symmetrically with droppedBots so the user knows the
+    // role pick was partially filtered (vs. silently shrinking the
+    // recipient count). Distinct copy from droppedBots since the
+    // user took a different picker action (selecting a role rather
+    // than an individual bot).
+    lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
   }
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
@@ -3783,6 +3796,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // reaches a state where `massMentionDenied` could be true.
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
+    droppedFromRoles,
     massMentionDenied,
   });
   const newRecipientAliases = Object.fromEntries(

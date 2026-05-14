@@ -556,9 +556,14 @@ describe('resolveMentionableSelection', () => {
     const resultIds = r.users.map((u) => u.id);
     expect(resultIds.length).toBe(25);
     // All 5 explicit picks survived — none were evicted by role
-    // expansion filling the cap.
-    for (const explicitId of explicitIds) {
-      expect(resultIds).toContain(explicitId);
+    // expansion filling the cap. Field-fidelity check: also pin
+    // OBJECT IDENTITY so the picked-user reference (which may carry
+    // optional fields like `globalName` not present on the cache's
+    // `member.user`) is the one that survives, not the cache view.
+    // A regression that dropped the `userMap.has(memberId) continue`
+    // would still pass the .toContain() check above.
+    for (let i = 0; i < explicitUsers.length; i++) {
+      expect(r.users.find((u) => u.id === explicitIds[i])).toBe(explicitUsers[i]);
     }
   });
 
@@ -2664,6 +2669,31 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/no non-bot members/i);
     // Resource header survives — same preserved-context contract.
+    expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: partial-valid role (humans + bots) → flow advances AND droppedFromRoles warning surfaces', async () => {
+    // Symmetric with the per-user droppedBots warning: a role pick
+    // that mixes humans and bots advances the flow with the humans
+    // BUT also surfaces a warning line so the user knows the role
+    // was partially filtered. Without this, the partial case is
+    // silent — the user sees a smaller recipient count than they
+    // expected with no explanation.
+    const u1 = makeUser('100000000000000001');
+    const bot1 = makeUser('100000000000000091', { bot: true });
+    const mixedRole = ['role-mixed', {
+      id: 'role-mixed',
+      members: new Map([[u1.id, { user: u1 }], [bot1.id, { user: bot1 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [mixedRole],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/bot\(s\) filtered from picked role/i);
     expect(updated.content).toMatch(/Sending file/);
   });
 
