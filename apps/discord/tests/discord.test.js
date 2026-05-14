@@ -625,5 +625,22 @@ describe('discord module', () => {
       expect(() => discord.assertIntent([1, 2, 128], 128, 'test feature'))
         .not.toThrow();
     });
+
+    // Pins the actual production canary description strings so a future
+    // refactor of the `assertIntent(..., '<feature>')` arg at discord.js:
+    // 38–39 fails this test instead of silently shipping a stale error
+    // message at boot. The prior version of this spec pinned a `/qurl send`
+    // description; this version tracks the live `/qurl file + /qurl map`
+    // wording.
+    it('production assertIntent invocations surface the live recipient-resolution feature label', () => {
+      // Construct the same intentsList shape src/discord.js declares (the
+      // numeric values are mocked at the top of this file — see the
+      // GatewayIntentBits mock). Drop GuildMembers (=2) to force the
+      // canary; the throw message MUST embed the production label so an
+      // oncall engineer reading boot logs gets the actionable feature.
+      expect(() => discord.assertIntent([1 /* Guilds */], 2 /* GuildMembers */,
+        '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)'))
+        .toThrow(/\/qurl file \+ \/qurl map recipient resolution/);
+    });
   });
 });
