@@ -4134,6 +4134,15 @@ async function handleQurlSlashSend(interaction, params) {
       expiresIn,
       selfDestructSeconds,
       personalMessage,
+      // CONTRACT: `personalMessageRaw` is for modal-prefill ONLY.
+      // It is the trimmed-and-capped user input WITHOUT sanitization
+      // (no NFKC, no bidi/control strip, no @-mention defuse, no
+      // markdown escape). Never read it from any rendering path or
+      // downstream pipeline — only `personalMessage` (the sanitized
+      // derivative) is safe for those. `handleSendConfirmClick`
+      // explicitly picks `personalMessage` (not `...payload`) when
+      // calling `executeSendPipeline`, which keeps this safe today;
+      // a contract test pins that invariant.
       personalMessageRaw: personalMessageRawTrimmed,
       // One-time information surface — slash-entry warnings about
       // bot/self/unresolved mentions persist into the payload so
@@ -4713,17 +4722,20 @@ async function rerenderConfirmCard(interaction, newPayload, ack = (msg) => inter
 // option gate — Discord enforces the choice set server-side, but a
 // forged interaction could land an off-set value here.
 async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const picked = interaction.values && interaction.values[0];
+  // Validate before deferring so the forgery branch can use `reply`
+  // (the cheaper, single-call ack) instead of `followUp` after a
+  // wasted deferUpdate. Symmetric with the self-destruct handler.
   if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
     logger.warn('handleSendConfirmExpirySelect: forged off-set expiry value', {
       flow_id, value: picked,
     });
-    return interaction.followUp({
+    return interaction.reply({
       content: '❌ Unrecognized expiry value. Re-pick from the list.',
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const payload = row.payload || {};
   const newPayload = { ...payload, expiresIn: picked };
   let result;
@@ -4765,17 +4777,25 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
 // selfDestructOptionToSeconds. The helper falls back to null for any
 // unexpected value (forged interaction), which is the safe default.
 async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
-  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   const pickedValue = interaction.values && interaction.values[0];
-  const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
-  // Helper silently falls back to null for unknown values to avoid
-  // punishing a legitimate UI bug, but flag forgeries for forensics.
-  if (pickedValue !== undefined && pickedValue !== SELF_DESTRUCT_NO_TIMER_VALUE
-      && !SELF_DESTRUCT_PRESETS.some((p) => String(p.seconds) === pickedValue)) {
+  // Validate against the closed legitimate set BEFORE acknowledging.
+  // Discord enforces the choice list server-side; an off-set value
+  // here means a forged interaction. Silently mapping forged values
+  // to null would clear a user's previously-set timer on every probe
+  // — symmetric with the expiry handler's reject-and-warn behavior.
+  const isLegitimate = pickedValue === SELF_DESTRUCT_NO_TIMER_VALUE
+    || SELF_DESTRUCT_PRESETS.some((p) => String(p.seconds) === pickedValue);
+  if (!isLegitimate) {
     logger.warn('handleSendConfirmSelfDestructSelect: forged off-set self-destruct value', {
       flow_id, value: pickedValue,
     });
+    return interaction.reply({
+      content: '❌ Unrecognized self-destruct value. Re-pick from the list.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
   }
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  const selfDestructSeconds = selfDestructSelectValueToSeconds(pickedValue);
   const payload = row.payload || {};
   const newPayload = { ...payload, selfDestructSeconds };
   let result;

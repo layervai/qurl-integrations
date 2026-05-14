@@ -2241,13 +2241,16 @@ describe('handleSendConfirmExpirySelect', () => {
     expect(lastEdit.content).toMatch(/7 days/);
   });
 
-  test('forged off-set expiry value → followUp warn, NO transitionFlow', async () => {
+  test('forged off-set expiry value → reply warn BEFORE defer, NO transitionFlow', async () => {
     // Defense-in-depth: Discord enforces the choice set, but a forged
-    // interaction could land an arbitrary string. Reject before persisting.
+    // interaction could land an arbitrary string. Validate BEFORE
+    // deferUpdate so the forgery branch uses the cheaper single-call
+    // `reply` ack instead of `followUp` after a wasted defer.
     const int = makeSelectInteraction({ value: '999d' });
     await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
-    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+    expect(int.deferUpdate).not.toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Unrecognized expiry/i),
       ephemeral: true,
     }));
@@ -2355,22 +2358,23 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     }));
   });
 
-  test('unknown forged value → null (safe fallback) + logs warn for forensic trace', async () => {
-    // selfDestructSelectValueToSeconds returns null for any value not
-    // in the closed preset set. A forged '999999' here lands as
-    // selfDestructSeconds: null — same shape as "no timer." Safe
-    // default; the alternative (rejecting like the expiry handler
-    // does) would deny the user any save until they re-pick from the
-    // legit list, which is needlessly punishing for a defensive case.
-    // BUT — the silent fallback would erase the user's previously-set
-    // timer with zero forensic signal. Logging `warn` keeps the
-    // forgery trace without blocking the UX.
+  test('unknown forged value → reply warn BEFORE defer, NO transitionFlow', async () => {
+    // Symmetric with the expiry handler. The previous round had a
+    // silent-fallback path that mapped forged values to null (no
+    // timer) — that would silently clear a user's previously-set
+    // timer on every forgery probe. Reject + warn + no save matches
+    // the realistic threat model: Discord enforces the option set
+    // server-side, so an off-set value here is forgery, not a
+    // legitimate UI bug.
     const logger = require('../src/logger');
     logger.warn.mockClear();
     const int = makeSelectInteraction({ value: '999999' });
     await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
-    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
-      payload: expect.objectContaining({ selfDestructSeconds: null }),
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.deferUpdate).not.toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Unrecognized self-destruct/i),
+      ephemeral: true,
     }));
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringMatching(/forged off-set self-destruct/i),
@@ -2391,7 +2395,10 @@ describe('handleSendConfirmSelfDestructSelect', () => {
 
   test('conflict → superseded copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
-    const int = makeSelectInteraction({ value: '60' });
+    // '30' is in SELF_DESTRUCT_PRESETS. Forged values now reject
+    // BEFORE deferUpdate, so we need a legitimate preset to reach
+    // the transitionFlow → result-handling branches.
+    const int = makeSelectInteraction({ value: '30' });
     await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
@@ -2400,7 +2407,10 @@ describe('handleSendConfirmSelfDestructSelect', () => {
 
   test('not_found → expired copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
-    const int = makeSelectInteraction({ value: '60' });
+    // '30' is in SELF_DESTRUCT_PRESETS. Forged values now reject
+    // BEFORE deferUpdate, so we need a legitimate preset to reach
+    // the transitionFlow → result-handling branches.
+    const int = makeSelectInteraction({ value: '30' });
     await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
