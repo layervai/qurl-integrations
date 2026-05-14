@@ -15,8 +15,8 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
   coverageDirectory: 'coverage',
   coverageThreshold: {
-    // 78/68/78/78 floors. Coverage on commands.js is held by four
-    // files, each owning a distinct slice:
+    // 78/68/78/78 floors. Current commands.js coverage: 81.23/77.27/
+    // 83.93/81.98 — held by five files, each owning a distinct slice:
     //   - qurl-file-map.test.js: /qurl file + /qurl map front-half
     //     (slash-option parsing, recipient resolution, confirm-card
     //     render/dispatch, forgery-rejection gates).

@@ -18,8 +18,9 @@ const intents = [
 
 // Per-feature intent canaries. Each line pins one intent to one feature
 // and fails loud if the intent has been removed from `intents` above —
-// converting silent-feature-break (e.g., voice-channel /qurl file/map
-// returning empty) into a startup error with a clear cause.
+// converting silent-feature-break (e.g., role-mention expansion in
+// recipient-parser.js silently resolving to an empty member set when
+// `GuildMembers` is dropped) into a startup error with a clear cause.
 //
 // `assertIntent` takes the intents list as its first argument (rather
 // than closing over the module-level `intents`) so it's directly

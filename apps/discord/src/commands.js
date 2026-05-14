@@ -1293,11 +1293,10 @@ async function executeSendPipeline(interaction, {
   // Using send-time + duration rather than reading from the API mint
   // response since `mintLinks` doesn't currently surface `expires_at`.
   // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on
-  // the send-pipeline path; can be a few seconds on
-  // handleAddRecipients which re-downloads + re-uploads + re-mints
-  // first). Negligible at the
-  // 30m–7d horizon — recipients see "in 24 hours" instead of
+  // by the time between this line and the mint call (sub-second on the
+  // send-pipeline path; can be a few seconds on handleAddRecipients
+  // which re-downloads + re-uploads + re-mints first). Negligible at
+  // the 30m–7d horizon — recipients see "in 24 hours" instead of
   // "in 23h 59m 56s" on the worst-case path.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
@@ -1933,9 +1932,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // try/finally + before-DB-write — see executeSendPipeline's
     // batchSettled callback for the full rationale (payload-build,
     // sendDM-throws, AND DB-throw must all still emit the metric).
-    // Wraps the entire
-    // dispatch attempt — payload assembly, button re-packing, network
-    // call — so a malformed sendConfig (e.g. pathological
+    // Wraps the entire dispatch attempt — payload assembly, button re-
+    // packing, network call — so a malformed sendConfig (e.g. pathological
     // personalMessage that throws inside buildDeliveryPayload) still
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;

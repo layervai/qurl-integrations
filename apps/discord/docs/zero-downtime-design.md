@@ -1,13 +1,12 @@
 # Zero-downtime upgrades for the qURL Discord bot
 
-**Status:** design — ratified, implementation in progress
+**Status:** front-half analysis superseded by PR 7b.3 — see banner; full
+rewrite tracked in [#314](https://github.com/layervai/qurl-integrations/issues/314). Gateway-tier RESUME design (PR 10–15) still applies.
 > ⚠️ This doc still references `/qurl send` and the legacy `await*Component` /
 > `awaitMessages` patterns. As of PR 7b.3 those are gone — `/qurl file` and
 > `/qurl map` are the live entry points and the flow is flow_state-backed
 > (no in-process Promise-on-Gateway-event coupling). The MESSAGE_CREATE-on-DM
-> constraint cited below is no longer load-bearing. Targeted rewrite tracked
-> in [#314](https://github.com/layervai/qurl-integrations/issues/314); the
-> gateway-tier RESUME design (PR 10–15) is largely unaffected.
+> constraint cited below is no longer load-bearing.
 
 **Tracking:** `qurl-integrations-infra#122` (deploy outage), `qurl-integrations#TBD` (this PR)
 **Owners:** posey + reviewers
