@@ -893,6 +893,18 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/\balice\b/);
   });
 
+  test('preview falls back to username when interaction is omitted (no guild member lookup)', () => {
+    // resolveRecipientAlias handles `interaction == null` via optional
+    // chaining (commands.js:~310) and falls through to r.username, so
+    // tests / callers without an interaction object still produce a
+    // usable preview rather than throwing.
+    const u = makeUser('100000000000000001', { username: 'alice' });
+    const out = renderConfirmCardContent({ ...baseProps, validRecipients: [u] });
+    // No `interaction` passed → no guild member cache to consult →
+    // falls back to the user's username.
+    expect(out).toMatch(/alice/);
+  });
+
   test('personal-message blockquote collapses embedded newlines + unicode line/paragraph separators to spaces', () => {
     // Discord blockquotes are per-LINE — only the line starting with
     // `> ` gets the left-bar. A multi-line message would render with

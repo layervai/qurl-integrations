@@ -3469,7 +3469,7 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
-const SEND_LIKE_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
+const API_KEY_GATED_SUBCOMMANDS = new Set(['send', 'file', 'map', 'revoke']);
 
 // Slash-option choice arrays. Reuse the existing /qurl send wording
 // so users see the same labels in autocomplete as in the form's
@@ -3833,7 +3833,7 @@ function renderConfirmCardRows({ attachPicker, sendDisabled }) {
 // — the key may rotate during the confirm card's 3-min TTL, and the
 // dispatcher's gate at the slash-command entry point only proves the
 // key was present at that single moment. Re-fetching at click time
-// is the durable check. The dispatcher's gate (SEND_LIKE_SUBCOMMANDS
+// is the durable check. The dispatcher's gate (API_KEY_GATED_SUBCOMMANDS
 // set) still runs to fail fast on the no-key-at-all case.
 async function handleQurlSlashSend(interaction, params) {
   if (!interaction.guildId || !interaction.guild) {
@@ -4532,6 +4532,22 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
       ephemeral: true,
     }).catch(logIgnoredDiscordErr);
   }
+  // Check the resolved key BEFORE deleteFlow. If both guildApiKey and
+  // config.QURL_API_KEY are null (rare: key rotation removed the key
+  // between dispatcher pre-check and Send click), there's nothing to
+  // send with — preserving the flow row lets the user retry after the
+  // admin re-runs `/qurl setup` without re-invoking the slash command.
+  // Cooldown clears so the user isn't stranded for the 30s window
+  // while waiting on the admin.
+  const apiKey = guildApiKey || config.QURL_API_KEY;
+  if (!apiKey) {
+    clearCooldown(interaction.user.id);
+    return interaction.editReply({
+      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
   const deleteResult = await deleteFlow(flow_id, {
     stage: SEND_STAGE_AWAITING_CONFIRM,
     reason: 'terminal',
@@ -4541,24 +4557,6 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     return interaction.followUp({
       content: 'Recipients changed before Send fired — re-check the card and click Send again.',
       ephemeral: true,
-    }).catch(logIgnoredDiscordErr);
-  }
-
-  const apiKey = guildApiKey || config.QURL_API_KEY;
-  if (!apiKey) {
-    // Flow row is INTENTIONALLY already deleted here — by the time the
-    // happy-path deleteFlow above succeeded, the user's send-intent has
-    // committed. If the API key vanished (admin ran `/qurl setup` and
-    // the new key didn't propagate, or the key was actively rotated
-    // between the dispatcher's pre-check and click time), the recovery
-    // path is `/qurl setup` followed by a NEW `/qurl file` / `/qurl
-    // map` invocation — NOT a re-click on the dead card. Cooldown
-    // clears so the user isn't stranded for 30s after the admin
-    // completes setup.
-    clearCooldown(interaction.user.id);
-    return interaction.editReply({
-      content: '❌ qURL is no longer configured for this server. Ask an admin to run `/qurl setup`.',
-      components: [],
     }).catch(logIgnoredDiscordErr);
   }
 
@@ -5764,7 +5762,7 @@ const commands = [
       }
 
       // Gate: require guild API key for send/file/map/revoke.
-      // SEND_LIKE_SUBCOMMANDS hoisted to module scope.
+      // API_KEY_GATED_SUBCOMMANDS hoisted to module scope.
       //
       // For /qurl file + /qurl map this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
@@ -5776,7 +5774,7 @@ const commands = [
       // re-introduce stale-key dispatches. The handleQurlSlashSend
       // docstring documents the contract explicitly.
       let resolvedApiKey = null;
-      if (SEND_LIKE_SUBCOMMANDS.has(sub)) {
+      if (API_KEY_GATED_SUBCOMMANDS.has(sub)) {
         const guildApiKey = interaction.guildId ? await db.getGuildApiKey(interaction.guildId) : null;
         if (!guildApiKey && !config.QURL_API_KEY) {
           return interaction.reply({
@@ -5797,7 +5795,7 @@ const commands = [
       // /qurl file and /qurl map deliberately don't accept the
       // dispatcher-resolved apiKey — handleSendConfirmClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
-      // The dispatcher's SEND_LIKE_SUBCOMMANDS gate above is the
+      // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
       if (sub === 'file') return handleQurlFile(interaction);
       if (sub === 'map') return handleQurlMap(interaction);
