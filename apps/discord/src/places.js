@@ -108,7 +108,10 @@ function cacheGet(key) {
 }
 
 function cacheSet(key, results) {
-  if (autocompleteCache.size >= AUTOCOMPLETE_CACHE_MAX) {
+  // Only evict when actually growing the map. Setting an existing key
+  // updates in place, so evicting first would needlessly drop an
+  // unrelated entry — only matters at saturation but cheap to guard.
+  if (autocompleteCache.size >= AUTOCOMPLETE_CACHE_MAX && !autocompleteCache.has(key)) {
     const oldest = autocompleteCache.keys().next().value;
     if (oldest !== undefined) autocompleteCache.delete(oldest);
   }
@@ -148,7 +151,11 @@ async function searchPlaces(query) {
     // Cache ZERO_RESULTS too — a typo prefix like "asfasdf" otherwise
     // hits Places on every keystroke. The 60 s TTL bounds staleness.
     cacheSet(key, results);
-    return results;
+    // Defensive copy so concurrent single-flight callers each get their
+    // own array (cacheGet already returns a copy on cache-hit; without
+    // this, the in-flight path's callers would share a mutable
+    // reference and one caller's sort/splice would poison the others).
+    return results.slice();
   })().finally(() => autocompleteInflight.delete(key));
   autocompleteInflight.set(key, promise);
   return promise;
@@ -222,6 +229,7 @@ module.exports = {
   getPlaceDetails,
   buildPlaceUrl,
   PLACE_ID_SENTINEL_PREFIX,
+  PLACE_ID_SHAPE_RE,
   encodePlaceIdSentinel,
   decodePlaceIdSentinel,
   // Test-only reset hook. Exported unconditionally — a NODE_ENV gate

@@ -161,6 +161,7 @@ jest.mock('../src/places', () => ({
     return url.toString();
   },
   PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
+  PLACE_ID_SHAPE_RE: /^[A-Za-z0-9_-]{16,}$/,
   encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
   // Mirror the production shape check so a test that smuggles a
   // too-short fake place_id doesn't pass here while failing in prod.

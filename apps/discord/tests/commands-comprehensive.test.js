@@ -228,6 +228,7 @@ jest.mock('../src/places', () => ({
   getPlaceDetails: jest.fn().mockResolvedValue(null),
   buildPlaceUrl: (name, placeId) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name || placeId)}&query_place_id=${encodeURIComponent(placeId)}`,
   PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
+  PLACE_ID_SHAPE_RE: /^[A-Za-z0-9_-]{16,}$/,
   encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
   decodePlaceIdSentinel: (value) => {
     if (typeof value !== 'string' || !value.startsWith('qurl_place:')) return null;

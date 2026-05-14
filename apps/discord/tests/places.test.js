@@ -288,6 +288,35 @@ describe('searchPlaces', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  test('cache hit after TTL expiry re-fetches the API (60 s freshness window)', async () => {
+    // The cache TTL is from initial insert (intentional refresh-after-
+    // 60s for upstream-changed places). Pin the contract: a cache hit
+    // BEFORE expiry skips the API; the same key AFTER expiry refetches.
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({
+        status: 'OK',
+        predictions: [{ place_id: 'ChIJ1', description: 'Place v1' }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        status: 'OK',
+        predictions: [{ place_id: 'ChIJ1', description: 'Place v2 (refreshed)' }],
+      }));
+    const first = await searchPlaces('eiffel');
+    expect(first[0].name).toBe('Place v1');
+    // Still within TTL — second call is a cache hit, no fetch.
+    jest.advanceTimersByTime(59_000);
+    const second = await searchPlaces('eiffel');
+    expect(second[0].name).toBe('Place v1');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Past TTL — entry expired, refetch fires.
+    jest.advanceTimersByTime(2_000);
+    const third = await searchPlaces('eiffel');
+    expect(third[0].name).toBe('Place v2 (refreshed)');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    jest.useRealTimers();
+  });
+
   test('FIFO eviction at AUTOCOMPLETE_CACHE_MAX — oldest entry drops when cap is hit', async () => {
     // Don't pin the constant value here (avoid coupling to the
     // implementation detail), but pin the BEHAVIOR: when the cache is

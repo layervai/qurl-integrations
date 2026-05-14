@@ -41,6 +41,7 @@ const {
   buildPlaceUrl,
   encodePlaceIdSentinel,
   decodePlaceIdSentinel,
+  PLACE_ID_SHAPE_RE,
 } = require('./places');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
@@ -5860,13 +5861,6 @@ const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
 const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 
-// Match the production-side decodePlaceIdSentinel shape gate. Filter
-// here too so a malformed Google response — `place_id` with a char
-// outside `[A-Za-z0-9_-]` or shorter than 16 chars — gets skipped at
-// the dropdown rather than rendered as a choice that's about to fail
-// the submit-time decode.
-const AUTOCOMPLETE_PLACE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{16,}$/;
-
 // Per Discord's contract, MUST respond within 3 s. Two-layer error
 // handling: the inner try catches Places I/O failures (ticks the
 // sampled SRE counter; that's its intent — "Places is degraded"); the
@@ -5934,7 +5928,7 @@ async function handleAutocomplete(interaction) {
       // Skip dud entries early instead of relying on submit-time decode
       // to reject them — saves the user a "place no longer available"
       // error on a malformed Google response.
-      if (!AUTOCOMPLETE_PLACE_ID_SHAPE_RE.test(p.placeId)) continue;
+      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) continue;
       const value = encodePlaceIdSentinel(p.placeId);
       if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;
