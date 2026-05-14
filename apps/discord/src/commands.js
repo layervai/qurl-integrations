@@ -8,6 +8,7 @@ const {
   ComponentType,
   StringSelectMenuBuilder,
   UserSelectMenuBuilder,
+  MentionableSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -2722,6 +2723,75 @@ function partitionRecipients(users, senderId) {
   return { valid, droppedBots, selfIncluded };
 }
 
+// Resolve a MentionableSelectMenu pick to a flat User[] suitable for
+// partitionRecipients. The picker surfaces both users + roles in one
+// menu — this helper merges them into one deduped User list with the
+// same shape partitionRecipients expects.
+//
+// Reads:
+//   - interaction.users  → Collection<id, User>  (picked individual users)
+//   - interaction.roles  → Collection<id, Role>  (picked roles, expanded
+//                                                  to non-bot members)
+//   - interaction.guild  → for the @everyone role detection (its ID
+//                                                  matches guild.id)
+//
+// The `@everyone` role is gated on the caller-supplied
+// `canMentionEveryone` flag — same gate as the text-path #323. When
+// denied, the helper sets `massMentionDenied: true` and skips that
+// role's expansion. Other roles expand unconditionally; this PR is
+// scope-limited (the broader role-mentionable / MENTION_EVERYONE
+// gate parity for non-@everyone roles is tracked in #326).
+//
+// Bot members are filtered during role expansion (mirrors the parser).
+// Sender is NOT filtered — selfIncluded detection happens downstream
+// in partitionRecipients, consistent with the text-path contract.
+function resolveMentionableSelection({ interaction, canMentionEveryone }) {
+  const guild = interaction.guild;
+  const userMap = new Map();
+  // Picked individual users come as User objects with `.bot` directly
+  // accessible — partitionRecipients reads `.bot` so the shape is fine
+  // to pass through.
+  if (interaction.users && typeof interaction.users.values === 'function') {
+    for (const u of interaction.users.values()) {
+      if (u && u.id) userMap.set(u.id, u);
+    }
+  }
+  let massMentionDenied = false;
+  if (interaction.roles && typeof interaction.roles.entries === 'function') {
+    for (const [roleId, role] of interaction.roles) {
+      const isEveryoneRole = guild && roleId === guild.id;
+      if (isEveryoneRole && !canMentionEveryone) {
+        // Gate parallel to the text path: surface a denial signal so
+        // the caller renders the permission-specific warning; skip
+        // this role's expansion.
+        massMentionDenied = true;
+        continue;
+      }
+      // For the @everyone role specifically, iterate guild.members.cache
+      // — `role.members` for @everyone may not reliably surface all
+      // members in discord.js. For named roles, role.members is the
+      // pre-filtered Collection of role-bearers.
+      const source = isEveryoneRole
+        ? guild?.members?.cache
+        : role?.members;
+      if (!source || typeof source.entries !== 'function') continue;
+      // Same cap short-circuit logic as the text-path @everyone
+      // expansion: the picker can carry a role with thousands of
+      // members; we stop adding once we'd exceed the cap. Cap
+      // enforcement happens via the post-resolve partition; here we
+      // just avoid building a 10k-entry userMap.
+      for (const [memberId, member] of source) {
+        if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
+        if (!member?.user) continue;
+        if (member.user.bot) continue;
+        if (userMap.has(memberId)) continue;
+        userMap.set(memberId, member.user);
+      }
+    }
+  }
+  return { users: [...userMap.values()], massMentionDenied };
+}
+
 /**
  * Render a warnings block for the confirm card. Returns the empty
  * string when nothing is worth surfacing — keeps callers simple
@@ -2911,23 +2981,38 @@ function formatPersonalMessagePreview(message) {
 }
 
 // Build the ActionRow set for the confirm card. Always 4 rows:
-// UserSelectMenu (always attached so re-picks stay available and
-// the layout is stable from frame 0), Self-destruct StringSelectMenu,
-// Expiry StringSelectMenu (each select needs its own row — Discord
-// forbids combining selects with buttons in the same ActionRow),
-// and the bottom row packing Note button + Send + Cancel.
+// MentionableSelectMenu (always attached so re-picks stay available
+// and the layout is stable from frame 0), Self-destruct
+// StringSelectMenu, Expiry StringSelectMenu (each select needs its
+// own row — Discord forbids combining selects with buttons in the
+// same ActionRow), and the bottom row packing Note button + Send +
+// Cancel.
+//
+// MentionableSelect (not UserSelect) so the picker surfaces both
+// individual users AND roles (including the `@everyone` role).
+// Role picks expand to members in handleConfirmUserSelect via
+// resolveMentionableSelection; the `@everyone` role is gated on
+// MENTION_EVERYONE at expansion time, same gate the text-path
+// `@everyone` uses (#323).
+//
+// CONFIRM_USER_SELECT_CUSTOM_ID wire literal stays as-is despite the
+// shape change — the customId is just a routing key; renaming it
+// would need the same 180s flow_state drain coordination #316
+// covered, and the literal isn't semantically wrong (a picked role
+// resolves to users at expansion time). Internal JS constant name
+// also kept to avoid churn.
 //
 // Row math (Discord 5-row max):
-//   UserSelect + SelfDestruct + Expiry + [Note, Send, Cancel] = 4 rows
+//   Mentionable + SelfDestruct + Expiry + [Note, Send, Cancel] = 4 rows
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
 }) {
   const rows = [];
   const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
   rows.push(new ActionRowBuilder().addComponents(
-    new UserSelectMenuBuilder()
+    new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick recipients (1–${maxValues})`)
+      .setPlaceholder(`Pick users or roles (1–${maxValues})`)
       .setMinValues(1)
       .setMaxValues(maxValues)
   ));
@@ -3600,15 +3685,21 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // `interaction.users` is a discord.js Collection in production,
-  // duck-typed as a Map in tests — both support `.values()` so the
-  // iteration here is interchangeable. A future test refactor that
-  // switches to Collection-only methods (`.first()`, `.filter()`)
-  // would break the test harness without breaking prod; keep the
-  // Map-compatible API surface.
-  const selected = [...interaction.users.values()];
-  if (selected.length === 0) {
-    // Empty pick → already acked via deferUpdate above. Nothing to edit.
+  // Resolve the MentionableSelectMenu pick: merges picked users +
+  // role-expanded members into one User[] with @everyone-role
+  // gating. Returns `massMentionDenied: true` when the user picked
+  // the `@everyone` role but lacks MENTION_EVERYONE — parallel to
+  // the text-path gate in #323.
+  const canMentionEveryone = !!interaction.guild
+    && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+  const { users: selected, massMentionDenied } = resolveMentionableSelection({
+    interaction,
+    canMentionEveryone,
+  });
+  if (selected.length === 0 && !massMentionDenied) {
+    // Empty pick (no users, no roles, no @everyone) → already acked
+    // via deferUpdate above. Nothing to edit. The massMentionDenied
+    // branch is handled in the rejection path below.
     return undefined;
   }
   // `interaction.user.id` IS the original sender's ID — Discord
@@ -3621,12 +3712,15 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // through the flow payload + read it here instead.
   //
   // No `resolveRecipientUsers` re-fetch here — Discord's
-  // UserSelectMenu only surfaces users visible to the bot in this
-  // guild, so picked User IDs are guild-bounded at the gateway-event
-  // level. handleConfirmSendClick re-fetches at click time
-  // (partial-drop test pins this) as the actual guild-membership
-  // defense; adding it here would burn 10 members.fetch calls per
-  // picker tick without catching anything the Send-time check misses.
+  // MentionableSelectMenu only surfaces users + roles visible to
+  // the bot in this guild, so picked IDs are guild-bounded at the
+  // gateway-event level. Role expansion happens inline against
+  // `role.members` / `guild.members.cache` (already populated for
+  // any user the bot can see). handleConfirmSendClick re-fetches at
+  // click time (partial-drop test pins this) as the actual guild-
+  // membership defense; adding it here would burn members.fetch
+  // calls per picker tick without catching anything the Send-time
+  // check misses.
   const payload = row.payload || {};
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selected, interaction.user.id);
   // Both invalid-pick branches re-render the full confirm card with a
@@ -3661,16 +3755,18 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // in invalid-pick churn surfaces in metrics without lowering log
     // verbosity.
     logger.debug('handleConfirmUserSelect: all-invalid pick', {
-      flow_id, dropped_bots: droppedBots,
+      flow_id, dropped_bots: droppedBots, mass_mention_denied: massMentionDenied,
     });
-    // Only the bot-only case is reachable here today — self-send is
-    // supported, so a pick of just the sender does NOT empty `valid`.
-    // Kept as a list-builder for future filters; the
-    // `|| 'No usable recipients in pick'` fallback prevents a
-    // degraded `⚠ . Re-pick...` message if a future filter is
-    // removed and `valid.length === 0` is hit with droppedBots === 0.
+    // Reachable cases:
+    //   - bot-only pick (droppedBots > 0)
+    //   - picked the @everyone role without MENTION_EVERYONE perm
+    //     (massMentionDenied === true)
+    //   - picked a role with zero non-bot members
+    // List-builder pattern; the fallback prevents a degraded
+    // `⚠ . Re-pick...` message if all conditions are false.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
+    if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
@@ -3683,12 +3779,16 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }
 
-  // Recompute warnings + aliases for the new pick. droppedBots and
-  // selfIncluded can flip here (UserSelectMenu doesn't pre-exclude
-  // the invoker or bots), so warnings + the self-notice change with
-  // the recipient set.
+  // Recompute warnings + aliases for the new pick. droppedBots,
+  // selfIncluded, and massMentionDenied can all flip here (the
+  // picker doesn't pre-exclude the invoker, bots, or the @everyone
+  // role), so warnings + the self-notice change with the recipient
+  // set. DM suppression isn't needed — `canMentionEveryone` already
+  // requires `interaction.guild` (above), so a DM interaction never
+  // reaches a state where `massMentionDenied` could be true.
   const newWarningsBlock = renderRecipientWarnings({
     droppedBots,
+    massMentionDenied,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
@@ -6006,6 +6106,7 @@ module.exports = {
       handleQurlMap,
       resolveRecipientUsers,
       partitionRecipients,
+      resolveMentionableSelection,
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,

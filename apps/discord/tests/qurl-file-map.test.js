@@ -97,6 +97,7 @@ jest.mock('discord.js', () => {
     ComponentType: { Button: 2, StringSelect: 3, UserSelect: 5 },
     StringSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     UserSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
+    MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     ModalBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     TextInputBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
     TextInputStyle: { Short: 1, Paragraph: 2 },
@@ -174,6 +175,7 @@ const {
   selfDestructOptionToSeconds,
   renderRecipientWarnings,
   renderConfirmCardContent,
+  resolveMentionableSelection,
   parseLocationInput,
   safeDecodeURIComponent,
   softenCooldown,
@@ -407,6 +409,172 @@ describe('partitionRecipients', () => {
     const dup = makeUser('100000000000000001');
     const r = partitionRecipients([dup, dup, makeUser('100000000000000002')], SENDER_ID);
     expect(r.valid.length).toBe(3);
+  });
+});
+
+describe('resolveMentionableSelection', () => {
+  // Picker-path helper (Mentionable select returns BOTH users + roles in
+  // one interaction): expands the role members → flat user list, filters
+  // bots, dedupes against directly picked users, caps at
+  // QURL_SEND_MAX_RECIPIENTS, gates the @everyone role on canMentionEveryone.
+  const GUILD_ID = 'guild-1';
+
+  function makeRole({ id, members = [] }) {
+    // role.members is a Discord.js Collection but only `.entries()`
+    // (iterable of [id, member]) is read; a Map is shape-compatible.
+    const memberMap = new Map(members.map((m) => [m.user.id, m]));
+    return [id, { id, members: memberMap }];
+  }
+
+  function makeMentionableInteraction({
+    pickedUsers = [],
+    pickedRoles = [],
+    guildMemberCache = new Map(),
+    inDM = false,
+  } = {}) {
+    const guild = inDM ? null : {
+      id: GUILD_ID,
+      members: { cache: guildMemberCache },
+    };
+    return {
+      guild,
+      users: new Map(pickedUsers.map((u) => [u.id, u])),
+      roles: new Map(pickedRoles),
+    };
+  }
+
+  test('users only (no roles) → returns those users verbatim, no denial', () => {
+    const u1 = makeUser('100000000000000001');
+    const u2 = makeUser('100000000000000002');
+    const int = makeMentionableInteraction({ pickedUsers: [u1, u2] });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id, u2.id]);
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('named role expands its members onto the user list, filters bots', () => {
+    const u1 = makeUser('100000000000000001');
+    const bot1 = makeUser('100000000000000099', { bot: true });
+    const u2 = makeUser('100000000000000002');
+    const int = makeMentionableInteraction({
+      pickedRoles: [
+        makeRole({
+          id: 'role-eng',
+          members: [{ user: u1 }, { user: bot1 }, { user: u2 }],
+        }),
+      ],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id).sort()).toEqual([u1.id, u2.id].sort());
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('user + role overlap dedupes (same id appears once)', () => {
+    const u1 = makeUser('100000000000000001');
+    const int = makeMentionableInteraction({
+      pickedUsers: [u1],
+      pickedRoles: [makeRole({ id: 'role-eng', members: [{ user: u1 }] })],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.map((u) => u.id)).toEqual([u1.id]);
+  });
+
+  test('@everyone role (role.id === guild.id) WITHOUT MENTION_EVERYONE → denied, no expansion', () => {
+    const u1 = makeUser('100000000000000001');
+    const guildMembers = new Map([[u1.id, { user: u1 }]]);
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      guildMemberCache: guildMembers,
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users).toEqual([]);
+    expect(r.massMentionDenied).toBe(true);
+  });
+
+  test('@everyone role WITH MENTION_EVERYONE → expands via guild.members.cache (NOT role.members)', () => {
+    // discord.js may not surface all members through @everyone's
+    // role.members; resolveMentionableSelection has a guard that
+    // routes @everyone-role expansion to guild.members.cache instead.
+    // Pin that branch.
+    const u1 = makeUser('100000000000000001');
+    const u2 = makeUser('100000000000000002');
+    const bot1 = makeUser('100000000000000099', { bot: true });
+    const guildMembers = new Map([
+      [u1.id, { user: u1 }],
+      [u2.id, { user: u2 }],
+      [bot1.id, { user: bot1 }],
+    ]);
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      guildMemberCache: guildMembers,
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+    expect(r.users.map((u) => u.id).sort()).toEqual([u1.id, u2.id].sort());
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('cap short-circuits role expansion at QURL_SEND_MAX_RECIPIENTS (25) — does not over-collect 10k members', () => {
+    // Mirrors the text-path @everyone cap-short-circuit. Defends
+    // against a fleet of 1k+ guilds where role.members iteration would
+    // otherwise build a 10k-entry userMap before the downstream
+    // partition cap kicked in.
+    const members = Array.from({ length: 60 }, (_, i) => ({
+      user: makeUser(`100000000000000${String(i).padStart(3, '0')}`),
+    }));
+    const int = makeMentionableInteraction({
+      pickedRoles: [makeRole({ id: 'role-eng', members })],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users.length).toBe(25);
+  });
+
+  test('cap priority: explicit user picks survive when role expansion would otherwise evict them', () => {
+    // Picker-path analog of the text-path #323 round-4 fix
+    // (recipient-parser.js: explicit `<@id>` mentions get cap priority
+    // over `@everyone` expansion). resolveMentionableSelection seeds
+    // `userMap` with picked users FIRST, then role expansion runs the
+    // `if (userMap.size >= cap) break;` short-circuit — so the 5
+    // explicit picks must occupy 5 of the 25 slots before any role
+    // member can be added. A future refactor that flips the order, or
+    // adds an inline cap inside the user-pick loop, would silently
+    // break the invariant and let cache-iteration order decide which
+    // picks survive — pin the fix here.
+    const explicitIds = Array.from({ length: 5 }, (_, i) => `300000000000000${String(i).padStart(3, '0')}`);
+    const explicitUsers = explicitIds.map((id) => makeUser(id));
+    const cacheMembers = new Map(
+      Array.from({ length: 30 }, (_, i) => {
+        const id = `100000000000000${String(i).padStart(3, '0')}`;
+        return [id, { user: makeUser(id) }];
+      }),
+    );
+    const int = makeMentionableInteraction({
+      pickedUsers: explicitUsers,
+      pickedRoles: [makeRole({ id: GUILD_ID, members: [] })],
+      guildMemberCache: cacheMembers,
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: true });
+    const resultIds = r.users.map((u) => u.id);
+    expect(resultIds.length).toBe(25);
+    // All 5 explicit picks survived — none were evicted by role
+    // expansion filling the cap.
+    for (const explicitId of explicitIds) {
+      expect(resultIds).toContain(explicitId);
+    }
+  });
+
+  test('DM context (no guild) → empty users, no denial flag (no roles surface at all)', () => {
+    // In a DM, interaction.roles never carries the @everyone role; the
+    // helper should return cleanly with no expansion attempted.
+    const int = makeMentionableInteraction({ inDM: true });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(r.users).toEqual([]);
+    expect(r.massMentionDenied).toBe(false);
+  });
+
+  test('returns the documented shape: { users, massMentionDenied }', () => {
+    const int = makeMentionableInteraction({});
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    expect(Object.keys(r).sort()).toEqual(['massMentionDenied', 'users']);
   });
 });
 
@@ -2137,9 +2305,27 @@ describe('handleConfirmCancelClick', () => {
 describe('handleConfirmUserSelect', () => {
   const u1 = '100000000000000001';
 
-  function makeSelectInteraction({ users = [makeUser(u1)], ...rest } = {}) {
+  function makeSelectInteraction({
+    users = [makeUser(u1)],
+    roles = [],
+    canMentionEveryone = false,
+    guildMemberCache = null,
+    ...rest
+  } = {}) {
     const int = makeInteraction(rest);
     int.users = new Map(users.map((u) => [u.id, u]));
+    // Mentionable picker also surfaces roles on interaction.roles.
+    // Default empty so existing user-only tests stay shape-compatible
+    // with resolveMentionableSelection's iteration guard.
+    int.roles = new Map(roles);
+    int.memberPermissions = {
+      has: jest.fn(() => canMentionEveryone),
+    };
+    if (guildMemberCache && int.guild) {
+      // Replace the default empty member cache so @everyone-role
+      // expansion has members to iterate.
+      int.guild.members.cache = guildMemberCache;
+    }
     return int;
   }
 
@@ -2322,6 +2508,85 @@ describe('handleConfirmUserSelect', () => {
       expect.stringMatching(/transitionFlow threw/),
       expect.objectContaining({ flow_id: 'fid' }),
     );
+  });
+
+  test('mentionable picker: role pick → role members expanded, flow advances with merged recipientIds', async () => {
+    // Mentionable picker can surface BOTH users and roles in one
+    // interaction. The role's non-bot members get merged into the
+    // recipient list, deduped against directly picked users.
+    const u2 = '100000000000000002';
+    const u3 = '100000000000000003';
+    const role = ['role-eng', {
+      id: 'role-eng',
+      members: new Map([
+        [u2, { user: makeUser(u2) }],
+        [u3, { user: makeUser(u3) }],
+      ]),
+    }];
+    const int = makeSelectInteraction({
+      users: [makeUser(u1)],
+      roles: [role],
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        recipientIds: expect.arrayContaining([u1, u2, u3]),
+      }),
+    }));
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds.length).toBe(3);
+  });
+
+  test('mentionable picker: @everyone role WITHOUT MENTION_EVERYONE → all-invalid branch surfaces gated warning', async () => {
+    // Parallel to the text-path #323 gate: picking the @everyone role
+    // (role.id === guild.id) when the user lacks MENTION_EVERYONE
+    // surfaces `massMentionDenied: true` from resolveMentionableSelection,
+    // hits the all-invalid branch, and renders the permission-specific
+    // reason on the rejection banner. No transitionFlow fires.
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [],
+      canMentionEveryone: false,
+    });
+    // Derive @everyone role id from int.guild.id rather than a literal —
+    // a future change to the makeInteraction default would otherwise
+    // silently break the role-id === guild-id detection.
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/@everyone/);
+    expect(updated.content).toMatch(/Mention Everyone/);
+    // Resource header survives — same preserved-context contract.
+    expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: @everyone role WITH MENTION_EVERYONE → expands via guild.members.cache, flow advances', async () => {
+    // With the perm, @everyone-role expansion routes through
+    // guild.members.cache (not role.members — discord.js doesn't
+    // reliably surface all members through @everyone's role.members).
+    const u2 = '100000000000000002';
+    const u3 = '100000000000000003';
+    const bot1 = '100000000000000099';
+    const cache = new Map([
+      [u2, { user: makeUser(u2) }],
+      [u3, { user: makeUser(u3) }],
+      [bot1, { user: makeUser(bot1, { bot: true }) }],
+    ]);
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [],
+      canMentionEveryone: true,
+      guildMemberCache: cache,
+    });
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const recipientIds = mockTransitionFlow.mock.calls[0][2].payload.recipientIds;
+    expect(recipientIds.sort()).toEqual([u2, u3].sort());
+    // Bot members filtered out by resolveMentionableSelection.
+    expect(recipientIds).not.toContain(bot1);
   });
 
   test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {
