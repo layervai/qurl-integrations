@@ -424,20 +424,11 @@ function resolveRecipientAlias(r, interaction) {
 }
 
 // Resolve role IDs to display names for the `roleMentionsDeniedNames`
-// warning surface (#326). Single-sourced so the text-path and picker-
-// path call sites can't drift.
-//
-// Empty-array short-circuit is a defensive contract guard — the two
-// real call sites both pass arrays from the parser/picker result
-// shape, so reaching it on the hot path is unreachable. Keep it as
-// a documented contract for future callers.
-//
-// Per-id fallback uses `||` (not `??`) so empty-string names —
+// warning surface (#326). `||` (not `??`) so empty-string names —
 // forged interaction / future API shape — also fall through to
-// `unknown-role` rather than rendering `@` with a broken inline code
-// fence.
+// `unknown-role` rather than rendering `@` with broken backticks.
 function resolveRoleNames(guild, ids) {
-  if (!ids || ids.length === 0) return [];
+  if (!ids?.length) return [];
   return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
 }
 
