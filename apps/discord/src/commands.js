@@ -4735,7 +4735,7 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
   // wasted deferUpdate. Symmetric with the self-destruct handler.
   if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
     logger.warn('handleSendConfirmExpirySelect: forged off-set expiry value', {
-      flow_id, value: picked,
+      flow_id, value: truncForLog(picked),
     });
     return interaction.reply({
       content: '❌ Unrecognized expiry value. Re-pick from the list.',
@@ -4794,7 +4794,7 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
     || SELF_DESTRUCT_PRESETS.some((p) => String(p.seconds) === pickedValue);
   if (!isLegitimate) {
     logger.warn('handleSendConfirmSelfDestructSelect: forged off-set self-destruct value', {
-      flow_id, value: pickedValue,
+      flow_id, value: truncForLog(pickedValue),
     });
     return interaction.reply({
       content: '❌ Unrecognized self-destruct value. Re-pick from the list.',

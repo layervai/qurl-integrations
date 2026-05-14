@@ -2628,6 +2628,39 @@ describe('handleSendConfirmNoteModal', () => {
     expect(int.reply).not.toHaveBeenCalled();
     expect(int.update).not.toHaveBeenCalled();
   });
+
+  test('sibling-mutation merge: row carries an expiry change made during typing → persisted alongside the note', async () => {
+    // Lock in the merge semantics for the "user types in modal while
+    // another desktop window changes expiry" race. The dispatcher
+    // loads the freshest row at submit time, so row.payload carries
+    // the sibling's mutation. `{ ...row.payload, personalMessage }`
+    // must preserve that mutation — without it, the modal submit
+    // would silently undo whatever the sibling set.
+    //
+    // Setup: row.payload has expiresIn: '7d' (the sibling's change)
+    // and the original selfDestructSeconds. Modal submit's note must
+    // land alongside both.
+    const int = makeModalInteraction({ inputValue: 'hello' });
+    const rowAfterSiblingMenu = {
+      ...basePayload,
+      expiresIn: '7d',          // sibling-changed
+      selfDestructSeconds: 30,  // sibling-changed
+      version: 2,                // version bumped by the sibling
+    };
+    await handleSendConfirmNoteModal(int, {
+      flow_id: 'fid',
+      row: { payload: rowAfterSiblingMenu, version: 2 },
+    });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 2, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: expect.stringMatching(/hello/),
+        personalMessageRaw: 'hello',
+        // Sibling's changes must survive the merge.
+        expiresIn: '7d',
+        selfDestructSeconds: 30,
+      }),
+    }));
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
