@@ -269,12 +269,15 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     input = everyoneStripped;
     if (allowMassMention) {
       const members = guild?.members?.cache;
-      if (members && typeof members.entries === 'function') {
+      if (members) {
         // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
         // above — in large guilds without a recent GUILD_MEMBERS
         // chunk, the cache reflects only the currently-loaded subset,
-        // not the guild's true member count. Acceptable v1; the cap
-        // (QURL_SEND_MAX_RECIPIENTS) bounds the worst case anyway.
+        // not the guild's true member count. Acceptable v1; in
+        // realistic guilds (where bots are <1% of members) the cap
+        // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
+        // `break` below. The pathological all-bots case still walks
+        // the entire cache — bounded only by cache size, not the cap.
         //
         // ORDERING is cache-insertion-order (discord.js Collection
         // is a Map): when the cap short-circuits the loop, the first

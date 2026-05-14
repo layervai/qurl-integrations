@@ -1204,6 +1204,29 @@ describe('handleQurlFile — slash entry', () => {
     expect(payload.recipientIds).toEqual([SENDER_ID]);
   });
 
+  test('DM context (no guild) suppresses the @everyone permission warning', async () => {
+    // @everyone has no meaning in a DM (Discord doesn't expand it),
+    // so the permission-warning copy ("requires the Mention Everyone
+    // permission") reads strangely if it fires there. The handler
+    // suppresses massMentionDenied surfacing when interaction.guild
+    // is null/undefined. Pin that this suppression is in place so a
+    // future caller refactor that drops the `!isDmContext` check
+    // surfaces here, not as confusing UX.
+    const int = makeInteraction({
+      guildId: null, // → guild = null in makeInteraction
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${SENDER_ID}>` },
+    });
+    await handleQurlFile(int);
+    // Whatever editReply lands, the @everyone permission warning
+    // must not appear. (The flow itself may hard-fail downstream
+    // because resolveRecipientUsers needs guild context — that's a
+    // separate concern; this test only pins the warning suppression.)
+    const calls = int.editReply.mock.calls;
+    for (const [arg] of calls) {
+      expect(arg.content || '').not.toMatch(/Mention Everyone permission/);
+    }
+  });
+
   test('all mentioned recipients hit transient lookup failure → retry copy, not "no valid recipients"', async () => {
     // transient-only path: the user's mentions were VALID but every
     // members.fetch hit a 429 or gateway blip. Generic "no valid

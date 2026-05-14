@@ -2786,9 +2786,9 @@ function renderRecipientWarnings({
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
     // user knows it's a PERMISSION issue, not a typo. Mirrors
-    // Discord's own MENTION_EVERYONE gate. Copy is context-agnostic
-    // (no "in this channel") so it reads sensibly even in DM context
-    // where channel-overrides don't apply.
+    // Discord's own MENTION_EVERYONE gate. The caller suppresses
+    // this in DM context (where @everyone has no meaning) so the
+    // copy here doesn't need a context qualifier.
     lines.push('• `@everyone` requires the **Mention Everyone** permission — skipped.');
   }
   if (lines.length === 0) return '';
@@ -3126,13 +3126,19 @@ async function handleQurlSlashSend(interaction, params) {
     // (vs. silently dropping into the picker, which would mask the
     // underlying mention-list problem).
     const recipientsOmitted = recipientsRaw == null || recipientsRaw.trim().length === 0;
+    // Suppress the @everyone permission warning in DM context —
+    // @everyone has no meaning in a DM (Discord doesn't expand it
+    // there) and "requires the Mention Everyone permission" reads
+    // strangely when there's no permission to grant. The other
+    // warnings (bot/capped/unresolved) still apply and surface.
+    const isDmContext = !interaction.guild;
     const warningsBlock = renderRecipientWarnings({
       invalidTokens: parsed.invalidTokens,
       cappedCount: parsed.cappedCount,
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
-      massMentionDenied: parsed.massMentionDenied,
+      massMentionDenied: parsed.massMentionDenied && !isDmContext,
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
