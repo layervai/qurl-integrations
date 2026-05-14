@@ -201,6 +201,7 @@ const {
   renderConfirmCardContent,
   parseLocationInput,
   resolveLocation,
+  RESOLVE_REASON,
   handleAutocomplete,
   safeDecodeURIComponent,
   softenCooldown,
@@ -656,21 +657,21 @@ describe('resolveLocation', () => {
     mockFindPlaceFromText.mockResolvedValueOnce(null);
     const r = await resolveLocation({ text: 'asdfasdfasdf' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('not_found');
+    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
   });
 
   test('placeId branch returns not_found when Place Details returns null', async () => {
     mockGetPlaceDetails.mockResolvedValueOnce(null);
     const r = await resolveLocation({ placeId: 'ChIJ-deleted-place' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('not_found');
+    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
   });
 
   test('text branch returns error when the Places call throws', async () => {
     mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
     const r = await resolveLocation({ text: 'somewhere' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('error');
+    expect(r.reason).toBe(RESOLVE_REASON.ERROR);
   });
 
   test('hard-fails with no_api_key when GOOGLE_MAPS_API_KEY is unset', async () => {
@@ -685,7 +686,7 @@ describe('resolveLocation', () => {
     try {
       const r = await resolveLocation({ text: 'eiffel tower' });
       expect(r.ok).toBe(false);
-      expect(r.reason).toBe('no_api_key');
+      expect(r.reason).toBe(RESOLVE_REASON.NO_API_KEY);
     } finally {
       configMock.GOOGLE_MAPS_API_KEY = orig;
     }
