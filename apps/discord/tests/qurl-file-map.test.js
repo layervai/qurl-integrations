@@ -501,9 +501,14 @@ describe('parseLocationInput', () => {
     // host pin; this test pins the current contract.
     const spoofed = 'https://google.com.evil.com/maps/place/Eiffel-Tower';
     const r = parseLocationInput(spoofed);
-    // The synth-search URL's HOST is google.com (the search domain),
-    // not the spoofed host. The spoofed input lands URL-encoded INSIDE
-    // the search query, not as the rendered link's host.
+    // INTENDED UX: the recipient embed renders `locationName` as a
+    // LABEL on a Maps link whose TARGET is google.com. The spoofed
+    // string is visible (so the recipient sees what was searched),
+    // but the click goes to google.com/maps/search/?<encoded-spoof>.
+    // sanitizeContentLabel further strips bidi/control + markdown-
+    // escapes the label before it lands in the embed, so the visible
+    // label text can't render as a clickable masked link or flip
+    // direction via U+202E.
     const parsed = new URL(r.locationUrl);
     expect(parsed.hostname).toBe('www.google.com');
     expect(parsed.pathname.startsWith('/maps/search/')).toBe(true);

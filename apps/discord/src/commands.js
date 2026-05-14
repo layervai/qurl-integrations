@@ -3437,8 +3437,6 @@ async function handleSetupModal(interaction, { flow_id }) {
 // Cancel buttons. The confirm card is flow_state-backed so the Send
 // dedup gate fires on `deleteFlow` (consistent with /qurl revoke,
 // /qurl setup).
-//
-// /qurl send stays in place until PR 7b.3 hard-removes it.
 // ─────────────────────────────────────────────────────────────
 
 const {
@@ -5453,23 +5451,14 @@ const commands = [
       .addSubcommand(sub =>
         sub.setName('send')
           .setDescription('Send a file or location to users via one-time secure link')
-          // No options — the redesigned flow is button-driven. Customer
-          // feedback (April 2026): the prior 4-option shape (target,
-          // expiry_optional, file_optional, message_optional) confused
-          // users at the slash-command-popup stage because they had to
-          // pre-decide file-vs-location AND fill in target before
-          // seeing the actual flow. New flow: `/qurl send` opens a
-          // 2-button reply (Send File / Send Location); each path
-          // collects its specific resource (drop-file in chat for
-          // file via awaitMessages, modal text input for location)
-          // then converges on a shared final step that gathers
-          // recipient(s), optional message, and expiry before
-          // committing the send.
-          //
-          // PR 7b.3 hard-removes /qurl send in favor of /qurl file
-          // and /qurl map. The two new subcommands take all options
-          // up-front so power users can stay on the keyboard, and
-          // the in-channel confirm card is flow_state-backed.
+          // No options — the redesigned flow is button-driven. The prior
+          // 4-option shape (target, expiry_optional, file_optional,
+          // message_optional) confused users at the slash-command-popup
+          // stage because they had to pre-decide file-vs-location AND
+          // fill in target before seeing the actual flow. Current flow:
+          // a 2-button reply opens, each path collects its specific
+          // resource (drop-file via awaitMessages, modal for location),
+          // then converges on the shared final step.
       )
       .addSubcommand(sub =>
         sub.setName('file')
