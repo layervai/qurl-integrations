@@ -17,6 +17,7 @@ const {
   expiryToMs,
   formatSelfDestructLabel,
   selfDestructSelectValueToSeconds,
+  isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('../src/utils/time');
@@ -91,6 +92,37 @@ describe('utils/time', () => {
       // shouldn't accidentally become a half-set timer.
       for (const v of ['', '0', '2', '60', '7200', 'abc', '0x1', null, undefined]) {
         expect(selfDestructSelectValueToSeconds(v)).toBeNull();
+      }
+    });
+  });
+
+  describe('isLegitimateSelfDestructSelectValue', () => {
+    // Predicate used by the form-side reject-vs-apply gate. Differs
+    // from `selfDestructSelectValueToSeconds` (which returns null for
+    // BOTH legitimate "no timer" AND forged values) by returning
+    // `true` only for the closed legitimate set.
+    it('true for the no-timer sentinel', () => {
+      expect(isLegitimateSelfDestructSelectValue(SELF_DESTRUCT_NO_TIMER_VALUE)).toBe(true);
+    });
+
+    it('true for every preset seconds value (stringified)', () => {
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(isLegitimateSelfDestructSelectValue(String(preset.seconds))).toBe(true);
+      }
+    });
+
+    it('false for forged / unexpected values', () => {
+      for (const v of ['', '0', '2', '60', '7200', 'abc', '0x1', null, undefined]) {
+        expect(isLegitimateSelfDestructSelectValue(v)).toBe(false);
+      }
+    });
+
+    it('false for numeric preset (must be the stringified form)', () => {
+      // The select carries values as strings ('0.5', '1', ...). Direct
+      // numeric input would forge past `selfDestructSelectValueToSeconds`
+      // if String equality wasn't strict — this test pins the gate.
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(isLegitimateSelfDestructSelectValue(preset.seconds)).toBe(false);
       }
     });
   });

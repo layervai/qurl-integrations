@@ -79,6 +79,21 @@ function selfDestructSelectValueToSeconds(value) {
   return null;
 }
 
+// True if `value` matches the closed legitimate option set of the
+// form-side self-destruct StringSelectMenu (the no-timer sentinel OR
+// a stringified preset seconds value). Use this to gate forgery-
+// rejection paths — `selfDestructSelectValueToSeconds` returns null
+// for BOTH legitimate "no timer" AND forged values, so callers that
+// need to distinguish (reject + warn-log vs. apply) want this
+// predicate, not the converter's return value.
+function isLegitimateSelfDestructSelectValue(value) {
+  if (value === SELF_DESTRUCT_NO_TIMER_VALUE) return true;
+  for (const preset of SELF_DESTRUCT_PRESETS) {
+    if (value === String(preset.seconds)) return true;
+  }
+  return false;
+}
+
 // formatSelfDestructLabel — renders a stored seconds value as the matching
 // preset's friendly label (e.g., 0.5 → "1/2 second"). Used by the form to
 // echo what the user picked. Falls back to a compact "Ns" rendering for
@@ -98,6 +113,7 @@ module.exports = {
   expiryToMs,
   formatSelfDestructLabel,
   selfDestructSelectValueToSeconds,
+  isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 };

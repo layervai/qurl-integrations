@@ -24,6 +24,7 @@ const {
   expiryToMs,
   formatSelfDestructLabel,
   selfDestructSelectValueToSeconds,
+  isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
   SELF_DESTRUCT_NO_TIMER_VALUE,
 } = require('./utils/time');
@@ -4814,9 +4815,7 @@ async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }
   // here means a forged interaction. Silently mapping forged values
   // to null would clear a user's previously-set timer on every probe
   // — symmetric with the expiry handler's reject-and-warn behavior.
-  const isLegitimate = pickedValue === SELF_DESTRUCT_NO_TIMER_VALUE
-    || SELF_DESTRUCT_PRESETS.some((p) => String(p.seconds) === pickedValue);
-  if (!isLegitimate) {
+  if (!isLegitimateSelfDestructSelectValue(pickedValue)) {
     logger.warn('handleSendConfirmSelfDestructSelect: forged off-set self-destruct value', {
       flow_id, value: truncForLog(pickedValue),
     });
