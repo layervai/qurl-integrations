@@ -3873,36 +3873,27 @@ function formatPersonalMessagePreview(message) {
   return `> ${safeCodepointSlice(oneLine, 80)}…`;
 }
 
-// Build the ActionRow set for the confirm card. When `attachPicker`,
-// row 0 is a UserSelectMenu (recipients absent OR a prior pick is in
-// the payload and the user might want to re-pick); otherwise no
-// picker row. Self-destruct + Expiry StringSelectMenus follow (each
-// requires its own row — Discord forbids combining selects with
-// buttons in the same ActionRow). The last row packs the optional
-// note button + Send + Cancel.
+// Build the ActionRow set for the confirm card. Always 4 rows:
+// UserSelectMenu (always attached so re-picks stay available and
+// the layout is stable from frame 0), Self-destruct StringSelectMenu,
+// Expiry StringSelectMenu (each select needs its own row — Discord
+// forbids combining selects with buttons in the same ActionRow),
+// and the bottom row packing Note button + Send + Cancel.
 //
 // Row math (Discord 5-row max):
-//   attachPicker=true:  UserSelect + SelfDestruct + Expiry + [Note,Send,Cancel] = 4 rows
-//   attachPicker=false: SelfDestruct + Expiry + [Note,Send,Cancel] = 3 rows
-//
-// Renamed from `needsPicker` so the content/rows divergence at the
-// post-pick call site (content rendered WITHOUT picker, rows rendered
-// WITH picker — to let the user re-pick) is impossible to silently
-// merge in a future refactor.
+//   UserSelect + SelfDestruct + Expiry + [Note, Send, Cancel] = 4 rows
 function renderConfirmCardRows({
-  attachPicker, sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
+  sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
 }) {
   const rows = [];
-  if (attachPicker) {
-    const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
-    rows.push(new ActionRowBuilder().addComponents(
-      new UserSelectMenuBuilder()
-        .setCustomId(SEND_USER_SELECT_CUSTOM_ID)
-        .setPlaceholder(`Pick recipients (1–${maxValues})`)
-        .setMinValues(1)
-        .setMaxValues(maxValues)
-    ));
-  }
+  const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  rows.push(new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(SEND_USER_SELECT_CUSTOM_ID)
+      .setPlaceholder(`Pick recipients (1–${maxValues})`)
+      .setMinValues(1)
+      .setMaxValues(maxValues)
+  ));
   // Self-destruct StringSelectMenu. Mirrors the OLD /qurl send form's
   // shape at commands.js:~2334: "No self-destruct timer" + 7 presets.
   // The `default: true` flag on the matching option keeps the
@@ -3913,6 +3904,16 @@ function renderConfirmCardRows({
   // render the first option's label — wrong UX).
   const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
   const hasMatchingPreset = hasTimer && SELF_DESTRUCT_PRESETS.some((p) => p.seconds === selfDestructSeconds);
+  if (hasTimer && !hasMatchingPreset) {
+    // Symmetric with the expiry off-set warn below: a finite positive
+    // selfDestructSeconds that misses every preset means a corrupted
+    // row. The "No timer" fallback keeps the header sensible but the
+    // content line still renders "self-destructs in N seconds" — log
+    // so the asymmetric state surfaces in forensics.
+    logger.warn('renderConfirmCardRows: off-preset selfDestructSeconds in payload — falling back to No timer default', {
+      selfDestructSeconds: truncForLog(selfDestructSeconds),
+    });
+  }
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID)
@@ -4216,14 +4217,6 @@ async function handleQurlSlashSend(interaction, params) {
       interaction,
     });
     const rows = renderConfirmCardRows({
-      // Always attach the picker so the row layout is stable from
-      // frame 0 — without this, a slash entry that supplied
-      // `recipients:` would render 3 rows initially and then jump to
-      // 4 the first time the user touched any menu (rerenderConfirmCard
-      // hard-codes attachPicker: true). Always-attached also matches
-      // handleSendUserSelect's post-pick contract: the picker stays
-      // available for re-picks, even after a successful pick.
-      attachPicker: true,
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
       expiresIn,
       selfDestructSeconds,
@@ -4581,7 +4574,6 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
       interaction,
     }),
     components: renderConfirmCardRows({
-      attachPicker: true,
       sendDisabled: true,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -4661,13 +4653,11 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Intentional flag divergence: the CONTENT renders the resolved
-  // recipient summary ("**To:** N user(s)") — needsPicker:false —
-  // while the ROWS keep the UserSelectMenu attached so the user can
-  // re-pick. Send is enabled because we now have a valid recipient
-  // set. The two flags are deliberately fed opposite values; the
-  // rename from `needsPicker` to `attachPicker` on the rows side
-  // makes this asymmetry impossible to silently consolidate.
+  // The CONTENT renders the resolved recipient summary
+  // ("**To:** N user(s)") with needsPicker:false; the ROWS always
+  // keep the UserSelectMenu attached (renderConfirmCardRows always
+  // produces 4 rows) so the user can re-pick. Send is enabled now
+  // that we have a valid recipient set.
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,
@@ -4682,7 +4672,6 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
-      attachPicker: true,
       sendDisabled: false,
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
@@ -4695,10 +4684,8 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
 // payload (expiry / self-destruct / note). Each menu handler builds
 // `newPayload` and calls this with the post-transition `interaction` +
 // payload. Keeping the re-render shape in one place avoids the three
-// handlers drifting on `attachPicker` / `sendDisabled` / content flags.
+// handlers drifting on `sendDisabled` / content flags.
 //
-// `attachPicker: true` matches `handleSendUserSelect`'s post-pick
-// behavior (the picker stays attached so the user can re-pick).
 // `sendDisabled` is derived from recipientIds — without it, a user
 // who opened /qurl file without `recipients:` could change expiry
 // before picking and see an enabled Send button against an empty
@@ -4747,7 +4734,6 @@ async function rerenderConfirmCard(interaction, newPayload) {
   return interaction.editReply({
     content,
     components: renderConfirmCardRows({
-      attachPicker: true,
       sendDisabled: needsPicker,
       expiresIn: newPayload.expiresIn,
       selfDestructSeconds: newPayload.selfDestructSeconds,
