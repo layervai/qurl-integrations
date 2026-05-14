@@ -430,6 +430,65 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     // get added to `seen` beyond the cap, so cappedCount stays at 0.
     expect(res.cappedCount).toBe(0);
   });
+
+  test('mixed `@everyone @here` in one input: @everyone gated separately, @here defuses', () => {
+    // Both shapes hit different paths simultaneously. With
+    // allowMassMention=false: @everyone surfaces massMentionDenied,
+    // @here surfaces in invalidTokens via the legacy defuse. Pin
+    // the two paths don't interfere.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('@everyone @here <@111>', int);
+    expect(res.ids).toEqual(['111']);
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['@​here']);
+  });
+
+  test('repeated `@everyone @everyone` triggers expansion once (single-shot dedupe via `seen`)', () => {
+    // Even though the parser sees `@everyone` twice, the expansion is
+    // a single pass — consider() dedupes via `seen`. Pin that a
+    // repeated mass-mention doesn't produce duplicate ids.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('@everyone @everyone', int, { allowMassMention: true });
+    expect(res.ids.sort()).toEqual(['101', '102']);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('Unicode word boundary: `@everyoneé` (Unicode letter trailing) does NOT match', () => {
+    // EVERYONE_TOKEN_RE uses `\p{L}\p{N}_` (Unicode-aware) instead of
+    // ASCII-only `[A-Za-z0-9_]` so non-ASCII letters following
+    // `@everyone` don't break the word boundary. Pin that
+    // `@everyoneé` falls through to the residue path (NOT mass-mention
+    // expansion). ASCII-only boundary would have over-matched here.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('@everyoneé', int, { allowMassMention: true });
+    expect(res.ids).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+    expect(res.invalidTokens).toEqual(['@​everyoneé']);
+  });
+});
+
+describe('parseRecipientMentions — result-shape contract', () => {
+  test('result shape pins exactly four keys (ids, invalidTokens, cappedCount, massMentionDenied)', () => {
+    // Empire of `.toMatchObject` in other tests admits new fields by
+    // design (the result shape is allowed to grow), but the closed
+    // set of CURRENT keys is load-bearing — callers destructure these
+    // names. Pin the closed set so a future PR that adds a 5th field
+    // surfaces here intentionally rather than slipping past
+    // partial-match assertions.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('<@111>', int);
+    expect(Object.keys(res).sort()).toEqual([
+      'cappedCount',
+      'ids',
+      'invalidTokens',
+      'massMentionDenied',
+    ]);
+  });
 });
 
 describe('parseRecipientMentions — invalid tokens', () => {
@@ -527,6 +586,18 @@ describe('parseRecipientMentions — invalid tokens', () => {
     expect(res.ids).toEqual(['111']);
     expect(res.massMentionDenied).toBe(true);
     expect(res.invalidTokens).toEqual(['!']);
+  });
+
+  test('@everyone.fix (denied) leaves `.fix` in invalidTokens (parallel to `!` case)', () => {
+    // `.fix` survives the strip-pass split class `[\s,;|/]+` — same
+    // shape as `@everyone!`. Pin the residue so a future split-class
+    // refactor that consumed `.` would surface here, not silently
+    // change UX.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('@everyone.fix <@111>', int);
+    expect(res.ids).toEqual(['111']);
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['.fix']);
   });
 
   test('here@everyone (embedded) stays on the defuse path (not a standalone @everyone)', () => {

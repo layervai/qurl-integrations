@@ -48,10 +48,14 @@
 //
 // Output shape:
 //   {
-//     ids:           [<user_id>, ...],        // deduped, cap-applied
-//     invalidTokens: [<raw_token>, ...],      // pre-escaped (see above)
-//     cappedCount:   <number>,                // 0 if not capped; else
+//     ids:                [<user_id>, ...],   // deduped, cap-applied
+//     invalidTokens:      [<raw_token>, ...], // pre-escaped (see above)
+//     cappedCount:        <number>,           // 0 if not capped; else
 //                                             // `total_pre_cap - cap`
+//     massMentionDenied:  <boolean>,          // true when @everyone
+//                                             // appeared but the caller
+//                                             // denied via the
+//                                             // `allowMassMention` opt
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
@@ -88,18 +92,21 @@ const logger = require('./logger');
 // regex instance.)
 const USER_MENTION_RE = /<@!?(\d+)>/g;
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
-// Matches `@everyone` as a standalone token (word boundaries on both
-// sides). Intentionally narrower than the U+200B defuse regex below —
-// here we're matching for INCLUSION, so we want only real Discord
-// mass-mention tokens, not substrings like `@everyonefoo` that would
-// false-positive. Case-sensitive because Discord's mass-mention parser
-// is itself lowercase-only (`@Everyone` is inert), so widening here
-// would expand for shapes Discord wouldn't have pinged.
+// Matches `@everyone` as a standalone token (Unicode word boundaries
+// on both sides). Intentionally narrower than the U+200B defuse regex
+// below — here we're matching for INCLUSION, so we want only real
+// Discord mass-mention tokens, not substrings like `@everyonefoo`
+// that would false-positive. Case-sensitive because Discord's mass-
+// mention parser is itself lowercase-only (`@Everyone` is inert).
+// `\p{L}\p{N}_` (Unicode letters/numbers + underscore) instead of
+// ASCII-only `[A-Za-z0-9_]` so `@everyoneé` / `@everyonefoö` don't
+// false-match the way an ASCII boundary would. Discord's tokenizer
+// is itself Unicode-aware here; the `/u` flag aligns with that.
 // `@here` is NOT matched — would need GUILD_PRESENCES intent (we
 // only run GuildMembers) to filter online members, and treating it
 // as `@everyone` would be deceptive. Falls through to the invalidTokens
 // defuse path as before; revisit if the bot ever adds the intent.
-const EVERYONE_TOKEN_RE = /(?<![A-Za-z0-9_])@everyone(?![A-Za-z0-9_])/g;
+const EVERYONE_TOKEN_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])/gu;
 
 // Hard cap on input length so an adversarial regex-blowup attack
 // (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
@@ -268,6 +275,14 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         // chunk, the cache reflects only the currently-loaded subset,
         // not the guild's true member count. Acceptable v1; the cap
         // (QURL_SEND_MAX_RECIPIENTS) bounds the worst case anyway.
+        //
+        // ORDERING is cache-insertion-order (discord.js Collection
+        // is a Map): when the cap short-circuits the loop, the first
+        // ~25 members BY CACHE INSERTION ORDER win the slots — not
+        // alphabetical, role-ordered, or recently-active. Users may
+        // see a different subset across invocations as the cache
+        // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
+        // selection burden onto the user and removes this ambiguity.
         for (const [memberId, member] of members) {
           // Short-circuit once we've filled the cap — the cache
           // can be tens of thousands of entries in a large guild,

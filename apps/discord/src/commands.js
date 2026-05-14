@@ -2786,8 +2786,10 @@ function renderRecipientWarnings({
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
     // user knows it's a PERMISSION issue, not a typo. Mirrors
-    // Discord's own MENTION_EVERYONE gate.
-    lines.push('• `@everyone` requires the **Mention Everyone** permission in this channel — skipped.');
+    // Discord's own MENTION_EVERYONE gate. Copy is context-agnostic
+    // (no "in this channel") so it reads sensibly even in DM context
+    // where channel-overrides don't apply.
+    lines.push('• `@everyone` requires the **Mention Everyone** permission — skipped.');
   }
   if (lines.length === 0) return '';
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
