@@ -2734,6 +2734,7 @@ function partitionRecipients(users, senderId) {
  *   unresolvedIds?: string[],
  *   transientFailureIds?: string[],
  *   droppedBots?: number,
+ *   massMentionDenied?: boolean,
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -2742,6 +2743,7 @@ function renderRecipientWarnings({
   unresolvedIds = [],
   transientFailureIds = [],
   droppedBots = 0,
+  massMentionDenied = false,
 } = {}) {
   const lines = [];
   if (cappedCount > 0) {
@@ -2780,6 +2782,12 @@ function renderRecipientWarnings({
   }
   if (droppedBots > 0) {
     lines.push(`• ${droppedBots} bot(s) cannot receive qURL links — skipped.`);
+  }
+  if (massMentionDenied) {
+    // Specific copy beats the generic "couldn't parse" path so the
+    // user knows it's a PERMISSION issue, not a typo. Mirrors
+    // Discord's own MENTION_EVERYONE gate.
+    lines.push('• `@everyone` requires the **Mention Everyone** permission in this channel — skipped.');
   }
   if (lines.length === 0) return '';
   return '⚠\u{FE0F} **Some recipients were dropped:**\n' + lines.join('\n') + '\n\n';
@@ -3081,7 +3089,17 @@ async function handleQurlSlashSend(interaction, params) {
     // (personalMessage is empty/falsy) but pre-fill with invisible chars.
     const personalMessageRawTrimmed = personalMessage ? initialRawTrimmed : null;
 
-    const parsed = parseRecipientMentions(recipientsRaw, interaction);
+    // `@everyone` is gated on the sender's MENTION_EVERYONE permission
+    // in this channel (Discord's own gate for mass-mention). Without
+    // this, any guild member could blast a /qurl send to every member
+    // in the cache, bounded only by the 25-recipient cap. The parser
+    // surfaces `massMentionDenied: true` when the sender tried but
+    // lacks permission — the caller renders a permission-specific
+    // warning instead of the generic "couldn't parse" copy.
+    const canMentionEveryone = interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+    const parsed = parseRecipientMentions(recipientsRaw, interaction, {
+      allowMassMention: canMentionEveryone,
+    });
 
     let resolved = { users: [], unresolvedIds: [], transientFailureIds: [] };
     if (parsed.ids.length > 0) {
@@ -3112,6 +3130,7 @@ async function handleQurlSlashSend(interaction, params) {
       unresolvedIds: resolved.unresolvedIds,
       transientFailureIds: resolved.transientFailureIds,
       droppedBots,
+      massMentionDenied: parsed.massMentionDenied,
     });
     if (!recipientsOmitted && valid.length === 0) {
       clearCooldown(interaction.user.id);
