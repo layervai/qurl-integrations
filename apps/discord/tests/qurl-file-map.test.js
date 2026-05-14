@@ -713,10 +713,10 @@ describe('renderRecipientWarnings', () => {
     expect(out).toMatch(/Could not parse/);
     expect(out).toMatch(/no longer in this server/);
     expect(out).toMatch(/bot/);
-    // "yourself" was the dropped-self warning before #316-followup —
-    // self-send is now supported, so the warning is gone; the confirm
-    // card renderer surfaces a neutral "Send includes you." notice
-    // (asserted in the renderConfirmCardContent suite below).
+    // Self-send is supported, so renderRecipientWarnings emits NO
+    // sender-related text. The confirm-card renderer surfaces a
+    // neutral "Send includes you." notice instead (asserted in the
+    // renderConfirmCardContent suite below).
     expect(out).not.toMatch(/yourself/);
   });
 

@@ -3199,8 +3199,12 @@ async function handleQurlSlashSend(interaction, params) {
       warningsBlock,
       // Neutral notice signal — surfaced on the confirm card as
       // "Send includes you." when the sender is in the recipient
-      // list. Persisted (rather than re-derived) so menu re-renders
-      // don't need to know how to compute it.
+      // list. Persisted (rather than derived from
+      // `recipientIds.includes(senderId)` at re-render) for the
+      // same reason `warningsBlock` is persisted: keeps the menu
+      // re-render path stateless about who computed what. Derivation
+      // would also work — both shapes are defensible, but mirroring
+      // warningsBlock keeps the payload contract uniform.
       selfIncluded,
       sendNonce,
     };
