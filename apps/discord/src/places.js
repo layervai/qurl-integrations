@@ -18,13 +18,19 @@ function encodePlaceIdSentinel(placeId) {
   return `${PLACE_ID_SENTINEL_PREFIX}${placeId}`;
 }
 
+// Documented place_id char class: ASCII alphanumeric + `_-`. Length is
+// not officially capped, but real place_ids are ~27 chars and have
+// never been observed <16. Require >=16 + the char class so a user
+// who types `qurl_place:foo` as free text falls through to the text
+// branch (and gets a "couldn't find X" message echoing their input)
+// rather than the misleading "place no longer available" branch.
+const PLACE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{16,}$/;
+
 function decodePlaceIdSentinel(value) {
   if (typeof value !== 'string' || !value.startsWith(PLACE_ID_SENTINEL_PREFIX)) return null;
   const placeId = value.slice(PLACE_ID_SENTINEL_PREFIX.length);
-  // Reject `qurl_place:` with no id behind it: an empty-payload
-  // sentinel isn't a real selection and shouldn't be treated as one.
-  // Callers should null-check the return.
-  return placeId.length > 0 ? placeId : null;
+  if (!PLACE_ID_SHAPE_RE.test(placeId)) return null;
+  return placeId;
 }
 
 // Single timeout for every Places call. Both autocomplete (per

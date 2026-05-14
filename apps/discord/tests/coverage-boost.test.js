@@ -223,11 +223,11 @@ jest.mock('../src/places', () => ({
   buildPlaceUrl: (name, placeId) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name || placeId)}&query_place_id=${encodeURIComponent(placeId)}`,
   PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
   encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
-  decodePlaceIdSentinel: (value) => (
-    typeof value === 'string' && value.startsWith('qurl_place:')
-      ? value.slice('qurl_place:'.length)
-      : null
-  ),
+  decodePlaceIdSentinel: (value) => {
+    if (typeof value !== 'string' || !value.startsWith('qurl_place:')) return null;
+    const placeId = value.slice('qurl_place:'.length);
+    return /^[A-Za-z0-9_-]{16,}$/.test(placeId) ? placeId : null;
+  },
 }));
 
 // ---------------------------------------------------------------------------

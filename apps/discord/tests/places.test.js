@@ -65,18 +65,21 @@ function jsonResponse(body, { status = 200, ok = true } = {}) {
 
 describe('PLACE_ID_SENTINEL_PREFIX', () => {
   test('is the wire literal "qurl_place:" (DO NOT change without a coordinated deploy)', () => {
-    // Pinned because in-flight confirm-card flow_state rows carry this
-    // prefix in actualUrl. A rename would orphan every open send while
-    // the prior deploy's rows drain.
+    // The vulnerable window is autocomplete-pick → slash-submit
+    // (seconds): a previously-rendered dropdown choice would resolve
+    // to NOT_FOUND if the new deploy renamed the literal. DDB rows
+    // always carry the resolved place_id-pinned URL, not the sentinel,
+    // so they're unaffected.
     expect(PLACE_ID_SENTINEL_PREFIX).toBe('qurl_place:');
   });
 });
 
 describe('encodePlaceIdSentinel / decodePlaceIdSentinel', () => {
   test('encode then decode round-trips the placeId', () => {
-    const encoded = encodePlaceIdSentinel('ChIJabc');
-    expect(encoded).toBe('qurl_place:ChIJabc');
-    expect(decodePlaceIdSentinel(encoded)).toBe('ChIJabc');
+    const realisticId = 'ChIJ37FjGE63t4kRD2_jXSF1F9o';
+    const encoded = encodePlaceIdSentinel(realisticId);
+    expect(encoded).toBe(`qurl_place:${realisticId}`);
+    expect(decodePlaceIdSentinel(encoded)).toBe(realisticId);
   });
 
   test('decode returns null for non-sentinel strings', () => {
@@ -99,6 +102,23 @@ describe('encodePlaceIdSentinel / decodePlaceIdSentinel', () => {
     // through to the URL/text branches. Reject explicitly so the
     // failure surfaces as "no match" instead.
     expect(decodePlaceIdSentinel('qurl_place:')).toBeNull();
+  });
+
+  test('decode rejects a payload that does not match the place_id shape', () => {
+    // Defends against a user typing `qurl_place:something` as free
+    // text — the sentinel branch would otherwise misroute them to
+    // the "place no longer available" message (which presumes they
+    // picked from the dropdown). Place IDs are documented as ASCII
+    // alphanumeric + `_-`, typically 27+ chars; the >=16 floor
+    // excludes typos while still accepting real Google IDs.
+    expect(decodePlaceIdSentinel('qurl_place:foo')).toBeNull();
+    expect(decodePlaceIdSentinel('qurl_place:has space123456')).toBeNull(); // space not allowed
+    expect(decodePlaceIdSentinel('qurl_place:has!bang12345678')).toBeNull(); // `!` not allowed
+    expect(decodePlaceIdSentinel('qurl_place:abcdefghijklmno')).toBeNull(); // 15 chars, one short
+    // 16 chars + char class — passes.
+    expect(decodePlaceIdSentinel('qurl_place:abcdefghijklmnop')).toBe('abcdefghijklmnop');
+    // Realistic place_id — passes.
+    expect(decodePlaceIdSentinel('qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o')).toBe('ChIJ37FjGE63t4kRD2_jXSF1F9o');
   });
 });
 

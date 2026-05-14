@@ -162,11 +162,13 @@ jest.mock('../src/places', () => ({
   },
   PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
   encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
-  decodePlaceIdSentinel: (value) => (
-    typeof value === 'string' && value.startsWith('qurl_place:')
-      ? value.slice('qurl_place:'.length)
-      : null
-  ),
+  // Mirror the production shape check so a test that smuggles a
+  // too-short fake place_id doesn't pass here while failing in prod.
+  decodePlaceIdSentinel: (value) => {
+    if (typeof value !== 'string' || !value.startsWith('qurl_place:')) return null;
+    const placeId = value.slice('qurl_place:'.length);
+    return /^[A-Za-z0-9_-]{16,}$/.test(placeId) ? placeId : null;
+  },
 }));
 
 // Flow-state stubs. Each test overrides per-call to assert on the
@@ -2007,21 +2009,21 @@ describe('handleQurlMap — slash entry', () => {
     // Place Details (cheap, one API call) to hydrate the canonical
     // name + address, then pins the URL to the chosen place_id.
     mockGetPlaceDetails.mockResolvedValueOnce({
-      placeId: 'ChIJabc',
+      placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o',
       name: 'The White House',
       address: '1600 Pennsylvania Ave NW',
     });
     const int = makeInteraction({
       options: {
-        location: 'qurl_place:ChIJabc',
+        location: 'qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o',
         recipients: '<@100000000000000001>',
       },
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJabc');
+    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationUrl).toContain('query_place_id=ChIJabc');
+    expect(payload.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
     expect(payload.locationName).toBe('The White House');
   });
 
@@ -2052,7 +2054,7 @@ describe('handleQurlMap — slash entry', () => {
     // Reviewer-flagged contract: when a sender picks a suggestion from
     // autocomplete and the place is deleted upstream between pick and
     // submit, the error message must not read `Couldn't find a place
-    // matching "qurl_place:ChIJabc..."` — that's user-hostile and leaks
+    // matching "qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o..."` — that's user-hostile and leaks
     // the wire format. Branch on parsedLocation.placeId to a place-
     // specific message instead.
     mockGetPlaceDetails.mockResolvedValueOnce(null);
