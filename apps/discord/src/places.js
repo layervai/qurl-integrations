@@ -18,11 +18,9 @@ function encodePlaceIdSentinel(placeId) {
 function decodePlaceIdSentinel(value) {
   if (typeof value !== 'string' || !value.startsWith(PLACE_ID_SENTINEL_PREFIX)) return null;
   const placeId = value.slice(PLACE_ID_SENTINEL_PREFIX.length);
-  // Reject an empty payload: `qurl_place:` with no id behind it would
-  // round-trip as a falsy string, and `parseLocationInput`'s
-  // `if (decodedPlaceId)` check would silently fall through to the
-  // URL/text branches — a sentinel that decoded to "nothing" should
-  // surface as "no match" instead.
+  // Reject `qurl_place:` with no id behind it: an empty-payload
+  // sentinel isn't a real selection and shouldn't be treated as one.
+  // Callers should null-check the return.
   return placeId.length > 0 ? placeId : null;
 }
 
