@@ -4878,6 +4878,73 @@ describe('renderConfirmCardRows', () => {
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
   });
 
+  test('slash-entry WITH recipients → picker pre-checks the text-resolved ids via addDefaultUsers', async () => {
+    // Power-user bug: typing `recipients:@a @b` then opening the picker
+    // showed an empty dropdown — the originally-selected users were not
+    // pre-checked. Fix routes the resolved recipientIds through
+    // renderConfirmCardRows → MentionableSelectMenuBuilder.addDefaultUsers
+    // so Discord pre-checks them on dropdown open. The send still
+    // proceeds with the same set; this is purely a re-open UX fix.
+    // Roles in text get expanded to users by parseRecipientMentions, so
+    // we never pre-check roles here (addDefaultRoles would be wrong).
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const int = makeInteraction({
+      options: {
+        attachment: VALID_ATTACHMENT,
+        recipients: '<@100000000000000001> <@100000000000000002>',
+      },
+      guildMembers: {
+        '100000000000000001': {},
+        '100000000000000002': {},
+      },
+    });
+    await handleQurlFile(int);
+    expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.addDefaultUsers).toHaveBeenCalledWith(
+      '100000000000000001',
+      '100000000000000002',
+    );
+  });
+
+  test('slash-entry WITHOUT recipients → picker does NOT call addDefaultUsers', async () => {
+    // When there are no resolved recipients (needsPicker:true), the
+    // renderer must skip the addDefaultUsers call entirely — Discord
+    // rejects a select menu where default_values is empty-but-present,
+    // and the picker stays empty by design for first-pick UX.
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },  // no recipients → needsPicker
+    });
+    await handleQurlFile(int);
+    expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.addDefaultUsers).not.toHaveBeenCalled();
+  });
+
+  test('slash-entry with >USER_SELECT_PER_PICK_CAP recipients widens max_values to fit all defaults', async () => {
+    // Discord requires default_values.length ≤ max_values. The picker's
+    // default per-pick cap is 10; if the user text-resolved 12 valid
+    // recipients, the initial render must widen max_values to 12 so
+    // addDefaultUsers(12 ids) is accepted (bounded by Discord's 25 hard
+    // cap on select-menu max_values).
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const ids = Array.from({ length: 12 }, (_, i) => `1000000000000000${String(i + 10)}`);
+    const mentionList = ids.map((id) => `<@${id}>`).join(' ');
+    const guildMembers = Object.fromEntries(ids.map((id) => [id, {}]));
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: mentionList },
+      guildMembers,
+    });
+    await handleQurlFile(int);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.setMaxValues).toHaveBeenCalledWith(12);
+    expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
+  });
+
   test('voice button label stays under Discord\'s 80 UTF-16 cap with an ALL-EMOJI channel name (worst case)', async () => {
     // Round-14 cr bug-guard: a 46-codepoint all-emoji channel name
     // (which Discord allows up to its 100-char limit) occupies 92

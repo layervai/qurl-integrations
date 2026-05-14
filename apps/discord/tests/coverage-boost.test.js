@@ -128,6 +128,8 @@ jest.mock('discord.js', () => {
     setPlaceholder: jest.fn().mockReturnThis(),
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
+    setDefaultValues: jest.fn().mockReturnThis(),
+    addDefaultUsers: jest.fn().mockReturnThis(),
   })),
   MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
