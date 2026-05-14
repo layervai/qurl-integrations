@@ -6867,6 +6867,7 @@ module.exports = {
       resolveRecipientUsers,
       partitionRecipients,
       resolveMentionableSelection,
+      resolveRoleNames,
       selfDestructOptionToSeconds,
       renderRecipientWarnings,
       renderConfirmCardContent,

@@ -197,6 +197,7 @@ const {
   executeSendPipeline,
   getActiveFileSends,
   setActiveFileSends,
+  resolveRoleNames,
 } = _test;
 
 // Flow-dispatch handlers live at module top-level (consumed by
@@ -984,6 +985,70 @@ describe('resolveMentionableSelection', () => {
       expect(r.massMentionDenied).toBe(true);
       expect(r.roleMentionsDenied).toEqual([]);
     });
+  });
+});
+
+describe('resolveRoleNames (#326 helper)', () => {
+  // Closed-contract pin for the cache-lookup-with-fallback helper
+  // used by both the text-path (`handleQurlSlashSend`) and picker-
+  // path (`handleConfirmUserSelect`) `roleMentionsDeniedNames`
+  // resolution. Centralizing tests here means a future refactor of
+  // the helper signature surfaces in one place rather than via
+  // brittle handler-level integration tests.
+
+  function makeGuild(rolesById = {}) {
+    const cache = new Map(Object.entries(rolesById));
+    return { roles: { cache } };
+  }
+
+  test('returns [] for null / undefined / empty ids (defensive contract)', () => {
+    const guild = makeGuild({});
+    expect(resolveRoleNames(guild, null)).toEqual([]);
+    expect(resolveRoleNames(guild, undefined)).toEqual([]);
+    expect(resolveRoleNames(guild, [])).toEqual([]);
+  });
+
+  test('returns [] when guild is null (defensive — DM context shouldn\'t reach here, but parity with optional chains)', () => {
+    expect(resolveRoleNames(null, ['7000'])).toEqual(['unknown-role']);
+    expect(resolveRoleNames(undefined, ['7000'])).toEqual(['unknown-role']);
+  });
+
+  test('resolves cached role IDs to their names', () => {
+    const guild = makeGuild({
+      '7000': { id: '7000', name: 'admin' },
+      '7001': { id: '7001', name: 'mods' },
+    });
+    expect(resolveRoleNames(guild, ['7000', '7001'])).toEqual(['admin', 'mods']);
+  });
+
+  test('cache miss → `unknown-role` fallback (deleted-mid-flow race)', () => {
+    const guild = makeGuild({});  // role 7000 not in cache
+    expect(resolveRoleNames(guild, ['7000'])).toEqual(['unknown-role']);
+  });
+
+  test('empty-string role name → `unknown-role` fallback (pins `||` vs `??` rationale)', () => {
+    // Discord enforces 1–100 char role names server-side, so empty
+    // names shouldn't surface in legitimate flows — but a forged
+    // interaction or future API edge could carry one. The `||` (not
+    // `??`) in `resolveRoleNames` ensures an empty name falls through
+    // to `unknown-role` rather than rendering `@` (the empty backtick
+    // block would be visually broken). Pin the rationale.
+    const guild = makeGuild({
+      '7000': { id: '7000', name: '' },
+    });
+    expect(resolveRoleNames(guild, ['7000'])).toEqual(['unknown-role']);
+  });
+
+  test('mixed cache-hit / cache-miss / empty-name in one batch → fallback applies per-entry', () => {
+    const guild = makeGuild({
+      '7000': { id: '7000', name: 'admin' },
+      '7002': { id: '7002', name: '' },
+    });
+    expect(resolveRoleNames(guild, ['7000', '7001', '7002'])).toEqual([
+      'admin',
+      'unknown-role',  // cache miss
+      'unknown-role',  // empty name
+    ]);
   });
 });
 
