@@ -573,6 +573,57 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     expect(res.invalidTokens).toEqual(['<#500>']);
   });
 
+  test('rejected channel mention is NOT double-reported by the residue-strip pass', () => {
+    // Pins the load-bearing CHANNEL_MENTION_RE strip in the residue
+    // pass. Without it, a rejected channel mention would surface
+    // TWICE in invalidTokens: once from the channel-expansion loop
+    // (cache miss / non-voice / view-denied → pushInvalidIfNew) and
+    // once from the residue-strip pass (split on whitespace would
+    // tokenize the surviving `<#999>` as a leftover invalid token).
+    // The .toEqual length-1 assertion is what guards the strip; if
+    // the strip were ever removed, this fails loudly rather than
+    // surfacing as a "couldn't parse: <#999>, <#999>" user-visible
+    // hostile embed.
+    const int = makeInteraction({ channels: {} });
+    const res = parseRecipientMentions('<#999>', int);
+    expect(res.invalidTokens).toEqual(['<#999>']);
+    expect(res.invalidTokens.length).toBe(1);
+  });
+
+  test('interaction.member undefined with present guild fails closed (no silent view bypass)', () => {
+    // Defense-in-depth: real discord.js always populates member for
+    // guild slash commands. A degraded interaction shape (test mock
+    // bug, future discord.js refactor) where member is undefined
+    // must NOT silently bypass the ViewChannel gate — passing
+    // undefined to channel.permissionsFor returns null in real
+    // discord.js, which fails closed via the `!viewerPerms` branch.
+    // This test pins that contract against a mock that returns null
+    // from permissionsFor when called with undefined.
+    const channelCache = new Map([[
+      '500',
+      {
+        id: '500',
+        type: 2, // GuildVoice
+        members: new Map([['111', { user: { id: '111', bot: false } }]]),
+        // Returns null when called with undefined member, matching
+        // real discord.js behavior.
+        permissionsFor: (memberOrId) => memberOrId == null ? null : ({ has: () => true }),
+      },
+    ]]);
+    const int = {
+      user: { id: '900000000000000001' },
+      // member intentionally absent
+      guild: {
+        members: { cache: new Map([['111', { user: { id: '111', bot: false } }]]) },
+        roles: { cache: new Map() },
+        channels: { cache: channelCache },
+      },
+    };
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
   test('explicit channel mentions claim cap slots BEFORE @everyone (priority ordering)', () => {
     // The parser's channel-expansion pass runs BEFORE @everyone so
     // direct mentions (user / role / channel) claim cap slots first

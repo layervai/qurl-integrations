@@ -39,16 +39,23 @@ const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } 
 // resource must be created (re-upload) to get a fresh token pool.
 const TOKENS_PER_RESOURCE = 10;
 
-// Threshold above which a single send earns a `WARN`-level audit log
-// at executeSendPipeline entry. Operator visibility into "this send
-// is going to take a while" without waiting for a Discord rate-limit
-// dashboard to surface it. 1000 chosen as the cliff where DM fan-out
-// at Discord's ~5/sec per-bot limit starts taking minutes (1000 / 5
-// = ~3 min) and qurl-service re-uploads start being non-trivial
-// (1000 / TOKENS_PER_RESOURCE = 100 re-uploads). Sub-threshold sends
-// stay quiet at the default `INFO` level so log volume tracks
-// operational importance.
-const LARGE_SEND_RECIPIENT_THRESHOLD = 1000;
+// Absolute floor above which a single send earns a `WARN`-level
+// audit log at executeSendPipeline entry. 1000 chosen as the cliff
+// where DM fan-out at Discord's ~5/sec per-bot limit starts taking
+// minutes (1000 / 5 = ~3 min) and qurl-service re-uploads get
+// non-trivial (1000 / TOKENS_PER_RESOURCE = 100 re-uploads).
+//
+// The effective threshold (`largeSendThreshold()` below) takes the
+// MIN of this floor and half the configured cap, so operators who
+// env-override `QURL_SEND_MAX_RECIPIENTS` down (e.g., 500) still see
+// the WARN fire on sends that are "operationally large for them"
+// (250 on a 500 cap) rather than only on sends near the absolute
+// floor. Sub-threshold sends stay quiet at the default `INFO` level
+// so log volume tracks operational importance.
+const LARGE_SEND_RECIPIENT_FLOOR = 1000;
+function largeSendThreshold() {
+  return Math.min(LARGE_SEND_RECIPIENT_FLOOR, Math.floor(config.QURL_SEND_MAX_RECIPIENTS / 2));
+}
 
 // Shared helper: many Discord API calls (edits, updates, follow-ups) are
 // best-effort — if the interaction token expired or Discord is briefly
@@ -1069,16 +1076,18 @@ async function executeSendPipeline(interaction, {
     failGate(RangeError, `executeSendPipeline: recipients.length (${recipients.length}) exceeds QURL_SEND_MAX_RECIPIENTS (${config.QURL_SEND_MAX_RECIPIENTS})`);
   }
   // Operator-visibility hook for big sends. Fires when a single send
-  // crosses LARGE_SEND_RECIPIENT_THRESHOLD so the operational cost
-  // (qurl-service re-uploads + DM fan-out duration at Discord's
-  // per-bot rate limit) surfaces in logs before it shows up on a
-  // rate-limit dashboard. Sender + guild ids are the natural pivots
-  // for "which guild kicked off this 5k-recipient send."
-  if (recipients.length >= LARGE_SEND_RECIPIENT_THRESHOLD) {
+  // crosses `largeSendThreshold()` so the operational cost (qurl-
+  // service re-uploads + DM fan-out duration at Discord's per-bot
+  // rate limit) surfaces in logs before it shows up on a rate-limit
+  // dashboard. Sender + guild ids + resourceType are the natural
+  // pivots for "which guild kicked off this 5k-recipient file send."
+  const sendThreshold = largeSendThreshold();
+  if (recipients.length >= sendThreshold) {
     logger.warn('Large recipient send initiated', {
       recipient_count: recipients.length,
-      threshold: LARGE_SEND_RECIPIENT_THRESHOLD,
+      threshold: sendThreshold,
       cap: config.QURL_SEND_MAX_RECIPIENTS,
+      resource_type: resourceType,
       sender_id: interaction.user.id,
       guild_id: interaction.guildId,
     });
@@ -3103,9 +3112,15 @@ function renderConfirmCardRows({
     // since we can't name a channel we can't read.
     const channelName = channel?.name;
     const VOICE_LABEL_NAME_BUDGET = 46;
+    // safeCodepointSlice (defined above) is codepoint-aware so a
+    // surrogate-pair emoji at index 45 doesn't get sliced mid-
+    // codepoint and render as `�` on the button. Channel names with
+    // emoji (Discord allows them in names) are the realistic case
+    // this guards against. The `…` ellipsis fits inside the budget
+    // since safeCodepointSlice caps at N codepoints, not N + 1.
     const safeName = channelName
-      ? (channelName.length > VOICE_LABEL_NAME_BUDGET
-          ? `${channelName.slice(0, VOICE_LABEL_NAME_BUDGET - 1)}…`
+      ? (Array.from(channelName).length > VOICE_LABEL_NAME_BUDGET
+          ? `${safeCodepointSlice(channelName, VOICE_LABEL_NAME_BUDGET - 1)}…`
           : channelName)
       : null;
     const labelTarget = safeName ? `#${safeName}` : 'this voice channel';
@@ -3992,6 +4007,13 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // expiry / note interaction will run renderConfirmCardRows again
   // with the now-repopulated cache and re-enable the button. Recovery
   // is automatic; persisting the field is the load-bearing piece.
+  //
+  // No `transitionFlow` call here either — the persisted
+  // `recipientIds` from the original slash command (if any) stays on
+  // the row. Send is disabled in this re-render (sendDisabled:true)
+  // so the stale recipientIds can't fan out; the picker re-pick
+  // path is the natural way to refresh them. Matches `rejectPick`'s
+  // pattern in handleConfirmUserSelect.
   const rejectVoice = (warning) => interaction.editReply({
     content: renderConfirmCardContent({
       resourceType: payload.resourceType,
