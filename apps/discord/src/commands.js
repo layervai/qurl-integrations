@@ -1915,6 +1915,18 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // shape). resolveSenderAlias is a pure function of
   // originalInteraction so hoisting is safe and avoids re-resolving
   // the nickname/globalName/username chain per dispatch.
+  //
+  // AUDIT TRADE-OFF: hoisting `expiresAt` outside the per-recipient
+  // try/finally means an `expiryToMs` throw on malformed
+  // `sendConfig.expires_in` bubbles out of handleAddRecipients
+  // entirely — ZERO `DISPATCH_FAILED` audits are emitted for the
+  // batch. The prior code computed expiresAt per-recipient inside the
+  // try, so the same throw would have produced N audits. The hoist is
+  // the correct shape (sendConfig.expires_in is validated upstream
+  // and the per-recipient audits would have been N-failed-for-one-
+  // root-cause noise), but the contract is intentional: an upstream
+  // expires_in regression is invisible at the dispatch-metric layer
+  // and surfaces only via the function-level throw.
   const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
   const senderAlias = resolveSenderAlias(originalInteraction);
 

@@ -234,7 +234,7 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     // which Discord padded with extra vertical whitespace and pushed
     // the button further away).
     const desc = capturedEmbeds[0]._description;
-    expect(desc).toMatch(/\ud83d\udd50 Closes <t:1735689600:R>/);
+    expect(desc).toMatch(/🕐 Closes <t:1735689600:R>/);
     // Locks against accidental reversion to a static label
     expect(desc).not.toMatch(/Closes in \*\*\d/);
   });
@@ -247,16 +247,10 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // `Number.isInteger` guard tightens the contract from any-finite-number
   // to exactly-what-the-markdown-accepts. Matches the contract guard in
   // handleAddRecipients.
-  // Positive test for the upper-bound reasoning documented in the
-  // throw test below: there is no clean "finite integer that
-  // Number.isInteger rejects" boundary because doubles can exactly
-  // represent every integer up to 2^53. Pin that `Number.MAX_SAFE_INTEGER`
-  // itself is accepted (and renders into the description as the literal
-  // integer), so a future reader who tries `MAX_SAFE_INTEGER + 1` and
-  // sees it still pass doesn't have to re-derive the reasoning. Discord's
-  // <t:N:R> parser will overflow well before 2^53 (its accepted range is
-  // ±10000 years from epoch), but that's Discord's responsibility — the
-  // validator's contract is "positive integer", not "renderable timestamp".
+  // Positive counterpart to the "no clean upper bound" reasoning in
+  // the adjacent throw test — MAX_SAFE_INTEGER itself is a valid
+  // integer that Number.isInteger accepts, so the validator passes it
+  // through unchanged.
   it('accepts Number.MAX_SAFE_INTEGER as a positive integer (no synthetic upper bound)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: Number.MAX_SAFE_INTEGER });
     const desc = capturedEmbeds[0]._description;
@@ -347,6 +341,21 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).toContain(`> *"${raw}"*`);
     expect(desc).not.toContain('\\[click');
     expect(desc).not.toContain('\\*\\*bold');
+  });
+
+  // `> ` line-prefix is the most natural blockquote-injection attempt
+  // at this surface — a personalMessage that looks like it embeds its
+  // own blockquote should still be wrapped in the outer `> *"..."*`,
+  // not "fixed up" by the function. Pinned alongside [](), ** to
+  // round out the attack-shape coverage of the no-internal-escape
+  // contract. The `\n` inside the input is flattened to a space by
+  // the newline-flatten pass, so the second `>` lands inline rather
+  // than starting a new blockquote — that's the expected behavior.
+  it('renders personalMessage with `> ` prefixes verbatim (no auto-fix of nested blockquote)', () => {
+    const raw = '> faux quote\n> still faux';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: raw });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toContain('> *"> faux quote > still faux"*');
   });
 
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
