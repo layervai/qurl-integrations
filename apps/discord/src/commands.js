@@ -546,21 +546,24 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // legitimate input is rejected. `typeof` in the throw closes the
   // null-vs-undefined-vs-object triage gap for operators.
   if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
-    throw new Error(`buildDeliveryPayload: expiresAt must be a positive integer Unix-seconds number (got ${String(expiresAt)}, typeof=${typeof expiresAt})`);
+    const got = String(expiresAt);
+    const gotType = typeof expiresAt;
+    throw new Error(
+      `buildDeliveryPayload: expiresAt must be a positive integer `
+      + `Unix-seconds number (got ${got}, typeof=${gotType})`
+    );
   }
 
   // sanitizeDisplayName centralizes spoof defense so a future caller
   // adding another sender-name surface picks up the same protections.
   const safeSender = sanitizeDisplayName(senderAlias);
 
-  // Single description block: sender → optional personal message →
-  // expiry. Folding all three into one setDescription (rather than
-  // splitting personal message into addFields) keeps the rendered
-  // order matching the design — Discord renders fields BELOW the
-  // description, so an addFields personal-message would land after
-  // the expiry line, not between sender and expiry. It also keeps
-  // the embed compact: addFields adds vertical padding that pushes
-  // the Step Through button further from the sender line.
+  // Discord renders fields BELOW the description, so all three lines
+  // (sender / optional personal message / expiry) must live in one
+  // setDescription block — an addFields personal-message would land
+  // after the expiry line, not between sender and expiry. Folding
+  // also strips addFields' vertical padding, keeping the Step Through
+  // button close to the sender line.
   //
   // `<t:N:R>` is Discord's client-side relative-time markdown: the
   // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
@@ -599,6 +602,11 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     // substring(0, 280)` would be a subtly different contract — the
     // visible output would be capped at 280 chars but unbounded work
     // would happen before the cap.
+    //
+    // NOTE: `substring(0, 280)` is UTF-16-unit-aware, not grapheme-
+    // aware — a surrogate pair (4-byte emoji) straddling unit 280 can
+    // be split, leaving a lone high surrogate. Tracked as #345; not
+    // a security issue, just a visual gotcha.
     const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
