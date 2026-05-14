@@ -2199,6 +2199,28 @@ describe('handleSendUserSelect', () => {
       expect.objectContaining({ flow_id: 'fid' }),
     );
   });
+
+  test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {
+    // Picker's newPayload is `{ ...payload, recipientIds, recipientAliases,
+    // warningsBlock }` — the spread carries personalMessage and
+    // personalMessageRaw through. A regression that destructured
+    // `personalMessage` (without `Raw`) into newPayload would silently
+    // drop the Edit-pre-fill on the next click. Symmetric with the
+    // expiry-handler's "preserves all other payload fields" test.
+    const payloadWithNote = {
+      ...initialPayload,
+      personalMessage: '\\*\\*hi\\*\\*',
+      personalMessageRaw: '**hi**',
+    };
+    const int = makeSelectInteraction();
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: '\\*\\*hi\\*\\*',
+        personalMessageRaw: '**hi**',
+      }),
+    }));
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

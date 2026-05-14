@@ -4616,6 +4616,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
+  // Asymmetry vs. the menu/modal handlers' no-op short-circuits:
+  // the picker DOES NOT skip transitionFlow on a same-recipient-set
+  // re-pick. Re-running here recomputes warningsBlock (droppedBots /
+  // droppedSelf can flip if the picker selection now includes the
+  // sender or a bot) and refreshes recipientAliases (display names
+  // may have changed since the prior pick). Both are user-visible
+  // and worth the version bump.
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),
@@ -4763,11 +4770,11 @@ async function rerenderConfirmCard(interaction, newPayload) {
 // option gate — Discord enforces the choice set server-side, but a
 // forged interaction could land an off-set value here.
 async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
-  // `interaction.values && ...` is paranoia, not load-bearing —
-  // Discord guarantees `values` is an array for StringSelectMenu
-  // interactions. The guard catches a forged interaction missing
-  // the field entirely; legitimate UI paths always provide it.
-  const picked = interaction.values && interaction.values[0];
+  // `?.[0]` is paranoia, not load-bearing — Discord guarantees
+  // `values` is an array for StringSelectMenu interactions. The
+  // guard catches a forged interaction missing the field entirely;
+  // legitimate UI paths always provide it.
+  const picked = interaction.values?.[0];
   // Validate before deferring so the forgery branch can use `reply`
   // (the cheaper, single-call ack) instead of `followUp` after a
   // wasted deferUpdate. Symmetric with the self-destruct handler.
@@ -4830,9 +4837,9 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
 // selfDestructOptionToSeconds. The helper falls back to null for any
 // unexpected value (forged interaction), which is the safe default.
 async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
-  // `interaction.values && ...` is paranoia (see expiry handler) —
-  // legitimate StringSelectMenu interactions always carry the array.
-  const pickedValue = interaction.values && interaction.values[0];
+  // `?.[0]` paranoia (see expiry handler) — legitimate
+  // StringSelectMenu interactions always carry the values array.
+  const pickedValue = interaction.values?.[0];
   // Validate against the closed legitimate set BEFORE acknowledging.
   // Discord enforces the choice list server-side; an off-set value
   // here means a forged interaction. Silently mapping forged values
@@ -4932,11 +4939,14 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
 }
 
 // Note modal-submit → sanitize input, update payload.personalMessage.
-// Modal-submit interactions get a fresh 3s ack window; using
-// `editReply` after `update()` mirrors handleSetupModal's shape.
-// `update()` ACKs against the ORIGINAL message (the confirm card)
-// because flow-dispatch wires modal submits to the same message-bound
-// interaction context.
+// Modal-submit interactions get a fresh 3s ack window. We defer
+// FIRST (deferUpdate) for budget headroom under slow DDB writes,
+// then editReply on the deferred interaction. The deferred ack
+// targets the ORIGINAL message (the confirm card) because flow-
+// dispatch wires modal submits to the same message-bound
+// interaction context. Post-defer error paths use followUp
+// (ephemeral) — reply / update would 409 against the acked
+// interaction.
 async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // Defer the modal-submit ack BEFORE the DDB write — without this,
   // a slow conditional write (throttled partition) can push past
