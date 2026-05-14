@@ -2650,6 +2650,27 @@ describe('handleSendConfirmNoteModal', () => {
     }));
   });
 
+  test('ZWSP-only input (survives trim, sanitize strips) → both fields null in lockstep', async () => {
+    // The trim-vs-sanitize gap: zero-width space (U+200B) isn't in
+    // ECMAScript's WhiteSpace set, so .trim() leaves it. But
+    // sanitizeMessage's bidi/zero-width strip removes it, producing
+    // an empty personalMessage. Without the "null out raw if
+    // sanitize stripped to empty" fix, personalMessageRaw would
+    // retain the invisible char — the button would label as "Add a
+    // note" (empty personalMessage is falsy) while the modal pre-
+    // fills invisible chars on the next Edit. Both fields must go
+    // to null in lockstep.
+    const zwsp = String.fromCharCode(0x200B);
+    const int = makeModalInteraction({ inputValue: zwsp.repeat(3) });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: null,
+        personalMessageRaw: null,
+      }),
+    }));
+  });
+
   test('conflict → superseded copy via editReply (post-deferUpdate)', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeModalInteraction({ inputValue: 'hi' });
@@ -3058,6 +3079,14 @@ describe('constants + exports', () => {
     // executeSendPipeline body is free of those constructs — if a
     // future change adds one (e.g. `const re = /\{[^}]*\}/;`), this
     // walker needs upgrading to a real tokenizer.
+    //
+    // ALSO LIMITATION: destructured default params with object
+    // literals (e.g. `personalMessage = { fallback: null }`) trip
+    // the same brace-count failure mode — the first `{` after the
+    // signature would be the default's, not the body's. The runtime
+    // Proxy CONTRACT test below is the load-bearing safety net for
+    // these cases; this static check is belt-and-suspenders against
+    // the common refactor shape.
     let i = src.indexOf('{', startIdx);
     expect(i).toBeGreaterThanOrEqual(0);
     let depth = 0;

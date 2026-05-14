@@ -4043,7 +4043,11 @@ async function handleQurlSlashSend(interaction, params) {
     const initialRawTrimmed = personalMessageRaw
       ? safeCodepointSlice(personalMessageRaw.trim(), PERSONAL_MESSAGE_INPUT_MAX)
       : null;
-    const personalMessage = initialRawTrimmed ? sanitizeMessage(initialRawTrimmed) : null;
+    // `|| null`: sanitizeMessage returns '' (not null) when the input
+    // strips to empty (ZWSP-only / bidi-only). Normalize to null so
+    // downstream falsy checks AND the `personalMessage ? rawCapped : null`
+    // lockstep below behave consistently.
+    const personalMessage = initialRawTrimmed ? (sanitizeMessage(initialRawTrimmed) || null) : null;
     // Null out raw if sanitize stripped to empty (e.g. ZWSP-only input
     // survives `.trim()` but sanitizeMessage's bidi-strip removes it).
     // Without this, the Edit-note button would label as "Add a note"
@@ -4911,26 +4915,17 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // toast. Mirrors the menu handlers' shape.
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
   // Defensive read: `getTextInputValue` throws if the customId
-  // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. The
-  // try/catch + empty-string fallback keeps the handler resilient
-  // — an unrecognized field reads as empty input, which routes to
-  // the clear-note branch instead of leaving the modal-submit
-  // interaction unresolved past deferUpdate.
-  let raw = '';
-  let getValueThrew = false;
+  // allowlist ever drifts from SEND_NOTE_MODAL_FIELD_ID. Don't
+  // silently clear the existing note — surface an ephemeral error
+  // so the user knows their submit failed and their stored note is
+  // unchanged. Early-return preserves the existing payload.
+  let raw;
   try {
     raw = (interaction.fields.getTextInputValue(SEND_NOTE_MODAL_FIELD_ID) || '').trim();
   } catch (err) {
-    getValueThrew = true;
     logger.warn('handleSendConfirmNoteModal: getTextInputValue threw', {
       flow_id, error: err && err.message,
     });
-  }
-  // If the field read threw (customId allowlist drift), don't
-  // silently clear the existing note — surface an ephemeral error
-  // so the user knows their submit failed and their stored note is
-  // unchanged. The early-return preserves the existing payload.
-  if (getValueThrew) {
     return interaction.followUp({
       content: '❌ Could not read your note input — try again. (Your existing note, if any, is unchanged.)',
       ephemeral: true,
@@ -4939,10 +4934,12 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // Cap matches the slash-entry path; both forms derive from the same
   // trimmed-and-capped raw so an Edit round-trip is idempotent.
   const rawCapped = raw ? safeCodepointSlice(raw, PERSONAL_MESSAGE_INPUT_MAX) : null;
-  const personalMessage = rawCapped ? sanitizeMessage(rawCapped) : null;
+  // `|| null`: sanitizeMessage returns '' (not null) when the input
+  // strips to empty. Normalize so the lockstep below treats both
+  // forms consistently. See slash-entry site for the full rationale.
+  const personalMessage = rawCapped ? (sanitizeMessage(rawCapped) || null) : null;
   // Null out raw if sanitize stripped to empty (ZWSP-only / bidi-only
-  // input). Keeps the button label and the modal pre-fill consistent
-  // — see slash-entry site for the rationale.
+  // input). Keeps the button label and the modal pre-fill consistent.
   const personalMessageRaw = personalMessage ? rawCapped : null;
   const payload = row.payload || {};
   const newPayload = { ...payload, personalMessage, personalMessageRaw };
