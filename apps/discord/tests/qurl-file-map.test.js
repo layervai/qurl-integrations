@@ -3462,7 +3462,10 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-    expect(updated.content).toMatch(/Non-mentionable role/i);
+    // Singular noun + singular verb stay in lockstep — most one-role
+    // picks hit this banner, so "role requires" (not "role require")
+    // is the user-visible default.
+    expect(updated.content).toMatch(/Non-mentionable role requires/i);
     expect(updated.content).toMatch(/Mention Everyone/);
     // Per-role-bypass mention surfaces inline on the banner so the
     // user doesn't have to find the per-role bullet copy (which only
@@ -3474,6 +3477,33 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/have the role marked as mentionable/i);
     // Resource header survives — preserved-context contract.
     expect(updated.content).toMatch(/Sending file/);
+  });
+
+  test('mentionable picker: multiple non-mentionable roles → banner uses plural noun + verb ("roles require")', async () => {
+    // Sibling to the singular-form pin above. Two denied roles in
+    // one pick — the banner reason builder must flip both noun
+    // ("role" → "roles") AND verb ("requires" → "require") in
+    // lockstep. A regression that bumped only one would render
+    // either "roles requires" or "role require." Pin both.
+    const u1 = makeUser('100000000000000001');
+    const u2 = makeUser('100000000000000002');
+    const roleA = ['role-a', {
+      id: 'role-a', name: 'admin-a', mentionable: false,
+      members: new Map([[u1.id, { user: u1 }]]),
+    }];
+    const roleB = ['role-b', {
+      id: 'role-b', name: 'admin-b', mentionable: false,
+      members: new Map([[u2.id, { user: u2 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [roleA, roleB],
+      canMentionEveryone: false,
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Non-mentionable roles require/i);
   });
 
   test('mentionable picker: non-mentionable role + valid user pick → partial-valid, warnings block lists role NAME', async () => {

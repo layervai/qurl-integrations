@@ -425,9 +425,17 @@ function resolveRecipientAlias(r, interaction) {
 
 // Resolve role IDs to display names for the `roleMentionsDeniedNames`
 // warning surface (#326). Single-sourced so the text-path and picker-
-// path call sites can't drift. `||` (not `??`) so an empty-string
-// name — forged interaction / future API shape — also falls through
-// to `unknown-role` rather than rendering `@`.
+// path call sites can't drift.
+//
+// Empty-array short-circuit is a defensive contract guard — the two
+// real call sites both pass arrays from the parser/picker result
+// shape, so reaching it on the hot path is unreachable. Keep it as
+// a documented contract for future callers.
+//
+// Per-id fallback uses `||` (not `??`) so empty-string names —
+// forged interaction / future API shape — also fall through to
+// `unknown-role` rather than rendering `@` with a broken inline code
+// fence.
 function resolveRoleNames(guild, ids) {
   if (!ids || ids.length === 0) return [];
   return ids.map((id) => guild?.roles?.cache?.get(id)?.name || 'unknown-role');
@@ -2918,12 +2926,17 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       // Skip undefined-role entries (theoretical — Discord's picker
       // surfaces roles via `interaction.roles.entries()`, which should
       // always carry the Role object alongside the ID; but a partial
-      // fetch shape could deliver a bare ID). Symmetric with the
-      // text-path parser's `if (!role) { pushInvalidIfNew(...) }`
+      // fetch shape could deliver a bare ID). Gate placement parallels
+      // the text-path parser's `if (!role) { pushInvalidIfNew(...) }`
       // branch — without this short-circuit, the `role?.mentionable
       // !== true` gate below would route a cache-miss role through
       // the deny path and surface "Non-mentionable role" copy for
-      // what's actually a missing object.
+      // what's actually a missing object. RESIDUE DIVERGES BY DESIGN:
+      // the parser surfaces invalid-role IDs in `invalidTokens` so
+      // the user sees a "couldn't parse" bullet, but the picker has
+      // no parse-error context to surface (the picker submitted IDs
+      // are by definition Discord-rendered choices), so silent
+      // `continue` is the right residue here.
       if (!isEveryoneRole && !role) continue;
       // Per-role MENTION_EVERYONE gate (issue #326), parallel to the
       // text-path gate in recipient-parser.js. Discord's picker filters
@@ -3045,7 +3058,11 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * (caller maps role IDs through `guild.roles.cache.get(id)?.name`,
  * falling back to a placeholder for cache-miss / deleted roles).
  * Keeping the helper pure of guild lookups mirrors how
- * `invalidTokens` arrives pre-formatted from the parser.
+ * `invalidTokens` arrives pre-formatted from the parser. Names are
+ * truncated AT RENDER time here: each name is capped at
+ * WARNING_NAME_CODEPOINT_CAP (80) codepoints with backticks stripped,
+ * and the listed count is capped at WARNING_LIST_DISPLAY_MAX (10)
+ * with a tail-count line — callers don't need to pre-sanitize.
  *
  * @param {{
  *   invalidTokens?: string[],
@@ -4256,8 +4273,13 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       // lacks MENTION_EVERYONE and likely lacks Manage Roles too, so
       // imperative phrasing reads as misleading agency. The workaround
       // ("ask an admin") is real but indirect; reflect that in the copy.
-      const noun = roleMentionsDenied.length === 1 ? 'role' : 'roles';
-      reasons.push(`Non-mentionable ${noun} require the **Mention Everyone** permission (or have the role marked as mentionable)`);
+      // Singular/plural noun AND verb stay in lockstep so the single-
+      // role case ("Non-mentionable role requires …") doesn't render
+      // as a noun/verb mismatch — most one-role picks hit this banner.
+      const isSingular = roleMentionsDenied.length === 1;
+      const noun = isSingular ? 'role' : 'roles';
+      const verb = isSingular ? 'requires' : 'require';
+      reasons.push(`Non-mentionable ${noun} ${verb} the **Mention Everyone** permission (or have the role marked as mentionable)`);
     }
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
