@@ -28,9 +28,9 @@ import (
 // schema reshape (per-alias SK, or an `aliases` SS attribute) tracked
 // separately — see qurl-integrations #233's comment thread. The
 // verbs here intentionally enforce one-alias-per-channel and surface
-// the existing-different-alias case via the rebind modal so the
-// remediation lands at the schema layer rather than papered over in
-// the handler.
+// the existing-different-alias case with a refusal message asking
+// the operator to `unsetalias` first, so the remediation lands at
+// the schema layer rather than papered over in the handler.
 type AliasStore interface {
 	// LookupChannelAlias returns the (alias, resourceID) pair bound to
 	// (teamID, channelID), or ErrAliasNotFound if no alias is set.
