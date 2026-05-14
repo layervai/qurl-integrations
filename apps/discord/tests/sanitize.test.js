@@ -4,7 +4,7 @@
  * masked-link phishing in embeds, so adversarial coverage matters.
  */
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeContentLabel, stripBidiAndControls } = require('../src/utils/sanitize');
+const { sanitizeFilename, escapeDiscordMarkdown, sanitizeContentLabel, stripBidiAndControls, sanitizeDisplayNamePlain } = require('../src/utils/sanitize');
 
 describe('sanitizeFilename', () => {
   it('strips path traversal', () => {
@@ -156,5 +156,47 @@ describe('stripBidiAndControls', () => {
     // helper must not pre-truncate.
     const big = 'a'.repeat(2000);
     expect(stripBidiAndControls(big)).toBe(big);
+  });
+});
+
+describe('sanitizeDisplayNamePlain — idempotence (load-bearing for rerenderConfirmCard cache-miss path)', () => {
+  // The flow_state payload persists `recipientAliases` produced by
+  // resolveRecipientAlias at pick time. On rerenderConfirmCard's
+  // cache-miss path, the persisted alias is re-passed through
+  // resolveRecipientAlias → sanitizeDisplayNamePlain. The chain is
+  // idempotent today (NFKC + bidi/zero-width strip have fixed points
+  // after one pass + the 64-codepoint cap leaves an already-capped
+  // input unchanged). These tests pin that invariant: a future
+  // sanitize-semantics change that breaks idempotence flips the
+  // cache-miss render into a double-sanitize bug, and these red lights
+  // catch it before that.
+
+  it('idempotent on plain ASCII', () => {
+    const once = sanitizeDisplayNamePlain('Alice');
+    expect(sanitizeDisplayNamePlain(once)).toBe(once);
+  });
+
+  it('idempotent after RLO strip', () => {
+    const rlo = String.fromCharCode(0x202E);
+    const once = sanitizeDisplayNamePlain(`${rlo}Bob`);
+    expect(sanitizeDisplayNamePlain(once)).toBe(once);
+  });
+
+  it('idempotent after NFKC normalization', () => {
+    // U+FF21 (FULLWIDTH LATIN CAPITAL A) normalizes to 'A' under NFKC.
+    const once = sanitizeDisplayNamePlain('Ａlice');
+    expect(sanitizeDisplayNamePlain(once)).toBe(once);
+  });
+
+  it('idempotent on an already-capped 64-codepoint input', () => {
+    const long = 'x'.repeat(64);
+    const once = sanitizeDisplayNamePlain(long);
+    expect(sanitizeDisplayNamePlain(once)).toBe(once);
+    expect(once).toHaveLength(64);
+  });
+
+  it('idempotent on emoji (surrogate-pair safe)', () => {
+    const once = sanitizeDisplayNamePlain('\u{1F600} Alice');
+    expect(sanitizeDisplayNamePlain(once)).toBe(once);
   });
 });

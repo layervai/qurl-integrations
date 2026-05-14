@@ -200,6 +200,10 @@ const {
   handleSendUserSelect,
   handleSendConfirmClick,
   handleSendCancelClick,
+  handleSendConfirmExpirySelect,
+  handleSendConfirmSelfDestructSelect,
+  handleSendConfirmNoteButton,
+  handleSendConfirmNoteModal,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -1077,11 +1081,45 @@ describe('handleQurlFile — slash entry', () => {
     expect(payload.expiresIn).toBe('24h');
     expect(payload.selfDestructSeconds).toBeNull();
     expect(payload.personalMessage).toBeNull();
+    // Resolved aliases persist into payload so menu-handler reruns
+    // (rerenderConfirmCard) can render names even if the member-cache
+    // entry is evicted before the user picks expiry/self-destruct.
+    expect(payload.recipientAliases).toEqual(
+      expect.objectContaining({ [u1]: expect.any(String), [u2]: expect.any(String) })
+    );
+    // warningsBlock present (empty here — no dropped tokens) so menu
+    // interactions can re-render with the same surface as slash entry.
+    expect(payload).toHaveProperty('warningsBlock');
     expect(int.editReply).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Sending file/);
     expect(reply.content).toMatch(/x\.png/);
     expect(reply.components.length).toBeGreaterThan(0);
+  });
+
+  test('/qurl map slash entry persists recipientAliases (parity with /qurl file)', async () => {
+    // Both entry points share handleQurlSlashSend's payload-construction
+    // path. This sanity test pins that the alias-persistence guarantee
+    // covers /qurl map as well — without it, a regression that only
+    // skipped aliases on one entry point would leave map-flow Edit
+    // notes / menu interactions falling back to the raw snowflake on
+    // cache miss.
+    const u1 = '100000000000000001';
+    const int = makeInteraction({
+      options: {
+        _sub: 'map',
+        location: 'https://maps.app.goo.gl/abcXYZ',
+        recipients: `<@${u1}>`,
+      },
+      guildMembers: { [u1]: {} },
+    });
+    await handleQurlMap(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.resourceType).toBe('maps');
+    expect(payload.recipientAliases).toEqual(
+      expect.objectContaining({ [u1]: expect.any(String) })
+    );
   });
 
   test('happy path without recipients → confirm card with picker', async () => {
@@ -2161,6 +2199,872 @@ describe('handleSendUserSelect', () => {
       expect.objectContaining({ flow_id: 'fid' }),
     );
   });
+
+  test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {
+    // Picker's newPayload is `{ ...payload, recipientIds, recipientAliases,
+    // warningsBlock }` — the spread carries personalMessage and
+    // personalMessageRaw through. A regression that destructured
+    // `personalMessage` (without `Raw`) into newPayload would silently
+    // drop the Edit-pre-fill on the next click. Symmetric with the
+    // expiry-handler's "preserves all other payload fields" test.
+    const payloadWithNote = {
+      ...initialPayload,
+      personalMessage: '\\*\\*hi\\*\\*',
+      personalMessageRaw: '**hi**',
+    };
+    const int = makeSelectInteraction();
+    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: '\\*\\*hi\\*\\*',
+        personalMessageRaw: '**hi**',
+      }),
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmExpirySelect — inline expiry edit on confirm card
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmExpirySelect', () => {
+  const u1 = '100000000000000001';
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [u1],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('happy path persists new expiresIn + re-renders', async () => {
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({ expiresIn: '7d', recipientIds: [u1] }),
+      terminal: false,
+      set_expires_at: expect.any(Number),
+    }));
+    expect(int.editReply).toHaveBeenCalled();
+    // Pin the user-facing render — verifies the new value reaches the
+    // confirm-card content, not just DDB. A refactor landing the right
+    // value in flow state but rendering the old label would slip past
+    // the wire-protocol assertion above.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/7 days/);
+  });
+
+  test('no-op re-pick (same value as payload) → skip transitionFlow + version bump, still re-render', async () => {
+    // Pin the no-op optimization: re-picking the current value
+    // doesn't fence concurrent sibling interactions via a needless
+    // version bump. Visible feedback (rerender) still fires so the
+    // user knows their click registered.
+    const int = makeSelectInteraction({ value: '24h' });  // same as basePayload.expiresIn
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
+  test('forged off-set expiry value → reply warn BEFORE defer, NO transitionFlow', async () => {
+    // Defense-in-depth: Discord enforces the choice set, but a forged
+    // interaction could land an arbitrary string. Validate BEFORE
+    // deferUpdate so the forgery branch uses the cheaper single-call
+    // `reply` ack instead of `followUp` after a wasted defer.
+    const int = makeSelectInteraction({ value: '999d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.deferUpdate).not.toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Unrecognized expiry/i),
+      ephemeral: true,
+    }));
+  });
+
+  test('conflict result → superseded copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+      components: [],
+    }));
+  });
+
+  test('not_found result → expired copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+      components: [],
+    }));
+  });
+
+  test('transitionFlow throw → ephemeral retry followUp, no superseded copy', async () => {
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save/i),
+      ephemeral: true,
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+  });
+
+  test('preserves all other payload fields across transition + warns on corrupted selfDestructSeconds', async () => {
+    // `selfDestructSeconds: 60` is OFF-PRESET (presets are
+    // [0.5, 1, 5, 30, 300, 1800, 3600]). The rerender path's
+    // renderConfirmCardRows logs a warn on this case (cr round-13)
+    // — pin that the expiry-handler entry trips the same forensic
+    // surface, not just the rerenderConfirmCard cache-miss tests.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    const int = makeSelectInteraction({ value: '7d' });
+    const payload = {
+      ...basePayload,
+      selfDestructSeconds: 60,
+      personalMessage: 'hi',
+      // Explicitly include personalMessageRaw to pin the round-trip
+      // invariant: a regression that destructured `personalMessage`
+      // (without `Raw`) into newPayload would silently drop it and
+      // break the next Edit-note pre-fill. The spread covers it
+      // today; this assertion locks the contract.
+      personalMessageRaw: 'hi',
+    };
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        expiresIn: '7d',
+        recipientIds: [u1],
+        selfDestructSeconds: 60,
+        personalMessage: 'hi',
+        personalMessageRaw: 'hi',
+        resourceType: 'file',
+      }),
+    }));
+    // Corruption warn fired from the rerender pass.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/off-preset selfDestructSeconds/i),
+      expect.objectContaining({ selfDestructSeconds: '60' })
+    );
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmSelfDestructSelect — inline self-destruct edit
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmSelfDestructSelect', () => {
+  const u1 = '100000000000000001';
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [u1],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeSelectInteraction({ value = '60', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('happy path persists new selfDestructSeconds + re-renders', async () => {
+    // Use 30 — SELF_DESTRUCT_PRESETS only contains [0.5, 1, 5, 30, 300, 1800, 3600].
+    // selfDestructSelectValueToSeconds rejects (returns null) anything off-preset
+    // so the test value must match an existing preset for this assertion.
+    const int = makeSelectInteraction({ value: '30' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({ selfDestructSeconds: 30 }),
+      terminal: false,
+    }));
+    expect(int.editReply).toHaveBeenCalled();
+    // Pin the user-facing render — wire-protocol assertion above proves
+    // we persisted the new value; this proves the rerendered content
+    // shows it back to the user.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/30 seconds/);
+  });
+
+  test('no-op re-pick (same selfDestructSeconds as payload) → skip transitionFlow + version bump, still re-render', async () => {
+    // Symmetric with the expiry handler's no-op test. `no-timer`
+    // sentinel maps to null; basePayload.selfDestructSeconds is null
+    // so this is a no-op.
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
+  test('"no-timer" form-side sentinel → null (when changing FROM a previous timer)', async () => {
+    // Form value-space uses SELF_DESTRUCT_NO_TIMER_VALUE (distinct
+    // from the slash-option side's 'none'). The helper maps it to
+    // null. Pin so a refactor that conflates the two value-spaces
+    // fails this test. Use a non-null current value so the no-op
+    // short-circuit doesn't skip the write (separate test pins the
+    // no-op path).
+    const payloadWithTimer = { ...basePayload, selfDestructSeconds: 30 };
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: payloadWithTimer, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ selfDestructSeconds: null }),
+    }));
+  });
+
+  test('unknown forged value → reply warn BEFORE defer, NO transitionFlow', async () => {
+    // Symmetric with the expiry handler. The previous round had a
+    // silent-fallback path that mapped forged values to null (no
+    // timer) — that would silently clear a user's previously-set
+    // timer on every forgery probe. Reject + warn + no save matches
+    // the realistic threat model: Discord enforces the option set
+    // server-side, so an off-set value here is forgery, not a
+    // legitimate UI bug.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    const int = makeSelectInteraction({ value: '999999' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.deferUpdate).not.toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Unrecognized self-destruct/i),
+      ephemeral: true,
+    }));
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/forged off-set self-destruct/i),
+      expect.objectContaining({ flow_id: 'fid', value: '999999' })
+    );
+  });
+
+  test('legitimate "no-timer" value does NOT trigger forgery warn', async () => {
+    // The forgery-warn must not false-positive on the no-timer
+    // sentinel (which also maps to null via the helper but is the
+    // legitimate way to clear a timer).
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('conflict → superseded copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    // '30' is in SELF_DESTRUCT_PRESETS. Forged values now reject
+    // BEFORE deferUpdate, so we need a legitimate preset to reach
+    // the transitionFlow → result-handling branches.
+    const int = makeSelectInteraction({ value: '30' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+  });
+
+  test('not_found → expired copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    // '30' is in SELF_DESTRUCT_PRESETS. Forged values now reject
+    // BEFORE deferUpdate, so we need a legitimate preset to reach
+    // the transitionFlow → result-handling branches.
+    const int = makeSelectInteraction({ value: '30' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmNoteButton — opens modal, no flow mutation
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmNoteButton', () => {
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeButtonInteraction(rest = {}) {
+    const int = makeInteraction(rest);
+    int.showModal = jest.fn().mockResolvedValue(undefined);
+    return int;
+  }
+
+  test('opens modal — does NOT mutate flow state (no transitionFlow / deleteFlow)', async () => {
+    const int = makeButtonInteraction();
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.showModal).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
+
+  test('modal pre-filled with RAW input (not sanitized) for round-trip safety', async () => {
+    // The discord.js component mocks don't preserve state, so we
+    // inspect builder method invocations to verify the pre-fill.
+    // Each TextInputBuilder instance has its own jest.fn-based
+    // setValue; the most-recent call captures what the modal passes
+    // to the TextInput.
+    //
+    // CRITICAL: pre-fill uses payload.personalMessageRaw (the raw
+    // user input), NOT payload.personalMessage (the sanitized form).
+    // Without this distinction, pre-filling with `\*\*bold\*\*` and
+    // resubmitting unchanged would re-sanitize → `\\\*\\\*bold\\\*\\\*`
+    // (double-escape), and every Edit cycle would escalate.
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    const payload = {
+      ...basePayload,
+      personalMessage: '\\*\\*bold\\*\\*',  // sanitized form (would render literally)
+      personalMessageRaw: '**bold**',         // what the user actually typed
+    };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(int.showModal).toHaveBeenCalled();
+    // setValue receives the RAW form so the user sees `**bold**` in
+    // the input, not the escaped `\*\*bold\*\*`.
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('**bold**');
+  });
+
+  test('modal pre-fills empty string when no personalMessage is set', async () => {
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('');
+  });
+
+  test('modal pre-fills empty for legacy flow rows missing personalMessageRaw', async () => {
+    // Forward-compat: a flow row created before the personalMessageRaw
+    // field was added has personalMessage but no Raw counterpart.
+    // Falling back to empty string is the safe choice (user sees blank,
+    // can re-type) — pre-filling from the sanitized personalMessage
+    // would re-trigger the double-escape bug this field exists to fix.
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    const legacyPayload = { ...basePayload, personalMessage: '\\*\\*bold\\*\\*' };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: legacyPayload, version: 1 } });
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('');
+  });
+
+  test('safe when clicked after recipients fully chosen (idempotent — no transitionFlow)', async () => {
+    // The "Note button after picking everything" case from the plan:
+    // safe-by-construction because this handler never touches flow
+    // state — the user can repeatedly open + close the modal without
+    // bumping the version or fencing out other interactions.
+    const int = makeButtonInteraction();
+    const payload = { ...basePayload, recipientIds: ['100000000000000001', '100000000000000002'] };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 5 } });
+    expect(int.showModal).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
+
+  test('showModal failure → ephemeral reply fallback (no silent "interaction failed" toast)', async () => {
+    // showModal failure leaves the button-click unacknowledged. The
+    // pre-fix behavior swallowed the error in .catch with only a
+    // warn log, leaving the user with Discord's generic "interaction
+    // failed" toast and no remediation. The fallback ack closes that
+    // gap symmetrically with the menu handlers' error paths.
+    const int = makeButtonInteraction();
+    int.showModal.mockRejectedValueOnce(new Error('Discord 500'));
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not open the note editor/i),
+      ephemeral: true,
+    }));
+    // Flow state must remain untouched — showModal failure is a
+    // pure UX surface; we don't bump the version on it.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
+
+  test('showModal failure → if fallback reply ALSO rejects, no unhandled rejection escapes', async () => {
+    // Dual-500 case: showModal fails (Discord blip) AND the ephemeral
+    // reply fallback fails (interaction already acked by some other
+    // path, or another Discord blip). The .catch(logIgnoredDiscordErr)
+    // on the fallback should absorb the rejection. Without that
+    // safety net, an unhandled rejection escapes and could crash the
+    // event loop or trigger node's `unhandledRejection` listeners.
+    const int = makeButtonInteraction();
+    int.showModal.mockRejectedValueOnce(new Error('Discord 500'));
+    int.reply.mockRejectedValueOnce(new Error('Already acked'));
+    let unhandled = null;
+    const listener = (reason) => { unhandled = reason; };
+    process.on('unhandledRejection', listener);
+    try {
+      await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+      // Microtask flush — any unhandled rejection from the catch
+      // chain would have been queued by now.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toBeNull();
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+    expect(int.showModal).toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalled();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmNoteModal — modal submit persists sanitized note
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmNoteModal', () => {
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: ['100000000000000001'],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeModalInteraction({ inputValue = 'hello', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.fields = { getTextInputValue: jest.fn(() => inputValue) };
+    return int;
+  }
+
+  test('happy path: defers, trims/sanitizes, persists, editReply re-renders', async () => {
+    const int = makeModalInteraction({ inputValue: '  **bold** message  ' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    // deferUpdate guards the 3s ack deadline — without it, a slow
+    // DDB conditional write could push past Discord's hard limit and
+    // both update() and reply() would fail.
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        // sanitizeMessage runs markdown-escape — the `**` becomes `\\*\\*`
+        // so the note renders as literal text in the recipient DM.
+        personalMessage: expect.stringMatching(/\\\*\\\*bold\\\*\\\* message/),
+        // Raw form retained for the next Edit cycle's pre-fill —
+        // without this, opening Edit would show the escaped form
+        // and a no-op resubmit would re-sanitize to double-escape.
+        personalMessageRaw: '**bold** message',
+      }),
+    }));
+    expect(int.editReply).toHaveBeenCalled();
+    // Pin the user-facing render — note shows up in the rerendered
+    // confirm card content, not just DDB.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
+  });
+
+  test('round-trip no-op: re-submit unchanged input → skip transitionFlow + version bump, still re-render', async () => {
+    // Two invariants in one test:
+    //  1. Round-trip is idempotent — re-sanitizing the same raw
+    //     produces the same sanitized form (no double-escape).
+    //  2. No-op submit short-circuits the DDB write + version bump
+    //     (symmetric with expiry / self-destruct handlers). The
+    //     idempotence is what MAKES the no-op short-circuit safe:
+    //     sanitize semantics guarantee the derived forms match the
+    //     stored forms, so the equality check fires correctly.
+    // Simulates: user typed `**bold**`, clicked Edit (pre-fill shows
+    // raw via the button test), submitted unchanged.
+    const int = makeModalInteraction({ inputValue: '**bold**' });
+    const existingPayload = {
+      ...basePayload,
+      personalMessage: '\\*\\*bold\\*\\*',
+      personalMessageRaw: '**bold**',
+    };
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: existingPayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    // No-op skip — no DDB write, no version bump, no sibling fence.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    // Visible feedback fires.
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
+  // The clear-note tests use a payload with a PREVIOUS note so the
+  // round-17 no-op short-circuit doesn't skip the write (it would
+  // for an already-null personalMessage on an empty submit). Each
+  // test exercises a different "stripped to empty" input shape.
+  const payloadWithNote = { ...basePayload, personalMessage: 'old note', personalMessageRaw: 'old note' };
+
+  test('empty input on a payload with an existing note → personalMessage: null (clear)', async () => {
+    const int = makeModalInteraction({ inputValue: '' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
+    }));
+  });
+
+  test('whitespace-only input on a payload with an existing note → personalMessage: null', async () => {
+    const int = makeModalInteraction({ inputValue: '   \n  \t' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
+    }));
+  });
+
+  test('ZWSP-only input on a payload with an existing note → both fields null in lockstep', async () => {
+    // The trim-vs-sanitize gap: zero-width space (U+200B) isn't in
+    // ECMAScript's WhiteSpace set, so .trim() leaves it. But
+    // sanitizeMessage's bidi/zero-width strip removes it, producing
+    // an empty personalMessage. Without the "null out raw if
+    // sanitize stripped to empty" fix, personalMessageRaw would
+    // retain the invisible char — the button would label as "Add a
+    // note" (empty personalMessage is falsy) while the modal pre-
+    // fills invisible chars on the next Edit. Both fields must go
+    // to null in lockstep.
+    const zwsp = String.fromCharCode(0x200B);
+    const int = makeModalInteraction({ inputValue: zwsp.repeat(3) });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: null,
+        personalMessageRaw: null,
+      }),
+    }));
+  });
+
+  test('empty submit on a payload with NO existing note → no-op skip (already cleared)', async () => {
+    // Symmetric with the menu no-op tests. basePayload.personalMessage
+    // is null; submitting empty produces null → no actual change →
+    // skip the write + version bump.
+    const int = makeModalInteraction({ inputValue: '' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.editReply).toHaveBeenCalled();
+  });
+
+  test('conflict → superseded copy via editReply (post-deferUpdate)', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+      components: [],
+    }));
+  });
+
+  test('not_found → expired copy via editReply', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+    }));
+  });
+
+  test('getTextInputValue throws → ephemeral followUp ("could not read"), NO transitionFlow, existing note preserved', async () => {
+    // Customs-id allowlist drift: getTextInputValue throws for an
+    // unknown field id. The previous defensive try/catch silently
+    // routed to clear-note, dropping the user's existing note with no
+    // feedback. New behavior: log + surface an ephemeral followUp
+    // making the failure visible; existing note stays put (no
+    // transitionFlow fired).
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    int.fields.getTextInputValue = jest.fn(() => {
+      throw new Error('Unknown custom_id');
+    });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not read your note input/i),
+      ephemeral: true,
+    }));
+    // Existing payload untouched — no clear-note silently applied.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
+
+  test('transitionFlow throw → ephemeral followUp (NOT update/reply post-defer)', async () => {
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save your note/i),
+      ephemeral: true,
+    }));
+    // Negative assertion — once deferUpdate has fired, reply() and
+    // update() would 409 (interaction already acked). The throw path
+    // MUST surface the error via followUp, not either of those.
+    expect(int.reply).not.toHaveBeenCalled();
+    expect(int.update).not.toHaveBeenCalled();
+  });
+
+  test('sibling-mutation merge: row carries an expiry change made during typing → persisted alongside the note', async () => {
+    // Lock in the merge semantics for the "user types in modal while
+    // another desktop window changes expiry" race. The dispatcher
+    // loads the freshest row at submit time, so row.payload carries
+    // the sibling's mutation. `{ ...row.payload, personalMessage }`
+    // must preserve that mutation — without it, the modal submit
+    // would silently undo whatever the sibling set.
+    //
+    // Setup: row.payload has expiresIn: '7d' (the sibling's change)
+    // and the original selfDestructSeconds. Modal submit's note must
+    // land alongside both.
+    const int = makeModalInteraction({ inputValue: 'hello' });
+    const rowAfterSiblingMenu = {
+      ...basePayload,
+      expiresIn: '7d',          // sibling-changed
+      selfDestructSeconds: 30,  // sibling-changed
+      version: 2,                // version bumped by the sibling
+    };
+    await handleSendConfirmNoteModal(int, {
+      flow_id: 'fid',
+      row: { payload: rowAfterSiblingMenu, version: 2 },
+    });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 2, expect.objectContaining({
+      payload: expect.objectContaining({
+        personalMessage: expect.stringMatching(/hello/),
+        personalMessageRaw: 'hello',
+        // Sibling's changes must survive the merge.
+        expiresIn: '7d',
+        selfDestructSeconds: 30,
+      }),
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// rerenderConfirmCard cache-miss fallback (verified end-to-end via
+// the expiry handler — rerenderConfirmCard isn't exported)
+// ──────────────────────────────────────────────────────────────
+
+describe('rerenderConfirmCard cache-miss recipient fallback', () => {
+  const u1 = '100000000000000001';
+  const persistedAlias = 'Alice (display)';
+
+  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('renders persisted alias when member-cache is empty', async () => {
+    // The bug this guards: a member-cache miss between pick and menu
+    // change would render the raw 18-digit snowflake. Persisting
+    // resolvedAliases at pick-time + reading them in rerenderConfirmCard
+    // means the user always sees a name (cached when available, the
+    // persisted alias otherwise).
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: persistedAlias },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    // No guildMembers — cache miss. The fallback chain should hit
+    // payload.recipientAliases.
+    const int = makeSelectInteraction({ value: '7d', guildMembers: {} });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalled();
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    // Alias renders (markdown chars not present in this alias, so the
+    // escape pass is a no-op). The raw snowflake MUST NOT appear in the
+    // recipient preview line.
+    expect(lastEdit.content).toMatch(/Alice/);
+    expect(lastEdit.content).not.toMatch(new RegExp(u1));
+  });
+
+  test('warningsBlock from payload carries across menu interactions', async () => {
+    // The other half of the cr finding: when slash entry records
+    // "Skipped bots: 1" warnings, changing expiry shouldn't drop
+    // them. Verifies the payload-persisted warningsBlock flows
+    // through rerenderConfirmCard.
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+      warningsBlock: '⚠️ Skipped bots: 1\n\n',
+    };
+    const int = makeSelectInteraction({ value: '7d', guildMembers: { [u1]: {} } });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/Skipped bots/);
+  });
+
+  test('off-EXPIRY_LABELS expiresIn in payload → renderer defaults the 24h option (no first-option misrepresentation)', async () => {
+    // Defense-in-depth: a corrupted DDB row carrying expiresIn outside
+    // EXPIRY_LABELS (e.g. left over from a deprecated value, or written
+    // by a misbehaving migration) would leave every option un-defaulted
+    // in the StringSelectMenu — Discord then renders the first option's
+    // label in the collapsed header, MISREPRESENTING the actual stored
+    // value to the user. The renderer falls back to defaulting '24h'
+    // in that case so the card still shows SOMETHING meaningful AND
+    // matches the codebase default.
+    const { StringSelectMenuBuilder } = require('discord.js');
+    StringSelectMenuBuilder.mockClear();
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: ['100000000000000001'],
+      recipientAliases: { '100000000000000001': 'Alice' },
+      expiresIn: '999d',  // corrupted: not in EXPIRY_LABELS
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    // Use the self-destruct handler to trigger a rerender WITHOUT
+    // overwriting the corrupted expiresIn (the expiry handler would
+    // replace it with the user's pick, masking the bug). Self-destruct
+    // touches only selfDestructSeconds, so the rerender carries the
+    // corrupted expiresIn unchanged through to the renderer.
+    const int = makeInteraction({ guildMembers: { '100000000000000001': {} } });
+    int.values = ['30'];  // legit self-destruct preset
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    // The rerender pass calls StringSelectMenuBuilder twice (self-
+    // destruct row + expiry row). Inspect the addOptions calls and
+    // verify the EXPIRY select has exactly one default-true option,
+    // and that option's value is '24h'.
+    const expirySelectCalls = StringSelectMenuBuilder.mock.results
+      .filter((r) => {
+        const calls = r.value.setCustomId.mock.calls;
+        return calls.length && calls[0][0] === 'qurl_send_confirm_expiry';
+      });
+    expect(expirySelectCalls.length).toBeGreaterThan(0);
+    const expiryAddOptionsArgs = expirySelectCalls[expirySelectCalls.length - 1]
+      .value.addOptions.mock.calls[0];
+    const defaultedExpiryOptions = expiryAddOptionsArgs.filter((o) => o.default);
+    expect(defaultedExpiryOptions).toHaveLength(1);
+    expect(defaultedExpiryOptions[0].value).toBe('24h');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// renderConfirmCardRows — row layout + label flips
+// ──────────────────────────────────────────────────────────────
+
+describe('renderConfirmCardRows', () => {
+  // The renderer lives at module scope but isn't exported directly.
+  // We assert via a behavioral round-trip through handleQurlSlashSend
+  // or by inspecting what renderConfirmCardRows would attach (via the
+  // editReply calls). Simpler: drive via the entry path and inspect.
+
+  test('slash-entry WITHOUT recipients → 4 rows, Send disabled, expiry/self-destruct/note interactable', async () => {
+    // Renderer always produces 4 rows (picker + self-destruct +
+    // expiry + bottom button row). On a no-recipients initial render,
+    // Send must be DISABLED (no recipients to send to) while the
+    // expiry/self-destruct/note selects+button stay INTERACTABLE so
+    // the user can pre-configure their send before picking
+    // recipients. Inspect the ButtonBuilder mock for the Send button's
+    // setDisabled call.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },  // no `recipients` → needsPicker
+    });
+    await handleQurlFile(int);
+    const editReplyCalls = int.editReply.mock.calls;
+    const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
+    expect(lastCall.components).toHaveLength(4);
+    // 3 ButtonBuilders: Note, Send, Cancel. The Send button is the
+    // one with custom id 'qurl_send_confirm_send'. Find it and assert
+    // setDisabled(true) was called.
+    const sendBuilder = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_send_confirm_send'
+    );
+    expect(sendBuilder).toBeDefined();
+    expect(sendBuilder.value.setDisabled).toHaveBeenCalledWith(true);
+  });
+
+  test('slash-entry WITH recipients → 4 rows (picker still attached so layout is stable across menu interactions)', async () => {
+    // Round-4 cr surfaced: the picker was conditionally attached on
+    // initial render (3 rows when recipients supplied) but
+    // rerenderConfirmCard always rendered 4. The row count jumped
+    // from 3 to 4 the first time the user clicked any menu, which
+    // was a visible mid-flow layout shift.
+    //
+    // Round-13 cr removed the conditional entirely: renderer now
+    // always produces 4 rows. The user sees the same layout from
+    // frame 0 through every menu interaction. Matches
+    // handleSendUserSelect's post-pick contract — re-picks stay
+    // possible after a successful pick.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const editReplyCalls = int.editReply.mock.calls;
+    const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
+    expect(lastCall.components).toHaveLength(4);
+  });
+
+  test('button row carries Note + Send + Cancel in that order (3 buttons, identifiable customIds)', async () => {
+    // The discord.js mock's ButtonBuilder doesn't preserve state, but
+    // each instance's `setCustomId` jest.fn captures the call. The
+    // three ButtonBuilder instances created during this render are
+    // the Note, Send, and Cancel buttons — in that left-to-right
+    // construction order, matching the bottom row layout.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    // 3 buttons constructed for the bottom row of the confirm card.
+    expect(ButtonBuilder).toHaveBeenCalledTimes(3);
+    const customIds = ButtonBuilder.mock.results.map(
+      (r) => r.value.setCustomId.mock.calls[0][0]
+    );
+    expect(customIds).toEqual([
+      'qurl_send_confirm_note_btn',
+      'qurl_send_confirm_send',
+      'qurl_send_confirm_cancel',
+    ]);
+  });
+
+  test('Note button label is "Add a note (optional)" when no personal-message set', async () => {
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const noteBtn = ButtonBuilder.mock.results[0].value;
+    expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Add a note/));
+  });
+
+  test('Note button label is "Edit note" when personal-message IS set', async () => {
+    // Split from the "Add a note" test because both share `sendCooldowns`
+    // module state via `setCooldown`; running both in the same test
+    // would put the second invocation on cooldown and short-circuit
+    // before renderConfirmCardRows. beforeEach calls sendCooldowns.clear()
+    // so each test starts fresh.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: {
+        attachment: VALID_ATTACHMENT,
+        recipients: '<@100000000000000001>',
+        'personal-message': 'hello',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const noteBtn = ButtonBuilder.mock.results[0].value;
+    expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -2210,7 +3114,179 @@ describe('constants + exports', () => {
     expect(msg).toBeTruthy();
   });
 
+  test('all four new confirm-card menu customIds are registered (duplicate-register throws)', () => {
+    // Pins the registration of expiry / self-destruct / note button /
+    // note modal customIds. Their siblingMessage is inherited from the
+    // SEND_STAGE_AWAITING_CONFIRM keyed entry above — so a refactor
+    // that fails to register one of these would surface as an
+    // unrouted dispatch, not a wrong siblingMessage. This test exists
+    // to catch the registration-omission shape directly: a duplicate
+    // registerFlow on each customId must throw "already registered".
+    const { registerFlow } = require('../src/flow-dispatch');
+    const newCustomIds = [
+      'qurl_send_confirm_expiry',
+      'qurl_send_confirm_self_destruct',
+      'qurl_send_confirm_note_btn',
+      'qurl_send_confirm_note_modal',
+    ];
+    for (const id of newCustomIds) {
+      expect(() => registerFlow(id, {
+        expectedStage: 'noop_stage_for_collision_check',
+        handler: () => undefined,
+      })).toThrow(/already registered/);
+    }
+  });
+
   test('executeSendPipeline still exported (back-half hook)', () => {
     expect(typeof executeSendPipeline).toBe('function');
+  });
+
+  test('CONTRACT: executeSendPipeline never reads personalMessageRaw', () => {
+    // Static guard against future bit-rot. `personalMessageRaw` is
+    // for modal-prefill only — it's the trimmed user input WITHOUT
+    // NFKC + bidi-strip + markdown-escape passes. A future refactor
+    // that accidentally reads it from any rendering path or the
+    // pipeline would bypass sanitization and could render injected
+    // markdown / masked links into recipient DMs.
+    //
+    // The contract is preserved structurally today: executeSendPipeline
+    // destructures by explicit field name (not `...payload` spread).
+    // This test extracts the function body from source and pins that
+    // the substring `personalMessageRaw` does not appear inside it.
+    //
+    // **If this test fails:** the substring scan is intentionally
+    // coarse — even a comment like `// don't read personalMessageRaw
+    // here` inside executeSendPipeline trips it. Document the
+    // invariant at the field declaration in handleQurlSlashSend
+    // (search commands.js for "CONTRACT: `personalMessageRaw` is for
+    // modal-prefill ONLY"), not inside executeSendPipeline's body.
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/commands.js'), 'utf8');
+    const startMarker = 'async function executeSendPipeline(';
+    const startIdx = src.indexOf(startMarker);
+    expect(startIdx).toBeGreaterThanOrEqual(0);
+    // Walk forward tracking brace depth; first time depth returns to
+    // 0 after entering the body marks the end of the function.
+    // LIMITATION: braces inside string literals / template literals /
+    // regex literals would mis-balance the count. The current
+    // executeSendPipeline body is free of those constructs — if a
+    // future change adds one (e.g. `const re = /\{[^}]*\}/;`), this
+    // walker needs upgrading to a real tokenizer.
+    //
+    // ALSO LIMITATION: destructured default params with object
+    // literals (e.g. `personalMessage = { fallback: null }`) trip
+    // the same brace-count failure mode — the first `{` after the
+    // signature would be the default's, not the body's. The runtime
+    // Proxy CONTRACT test below is the load-bearing safety net for
+    // these cases; this static check is belt-and-suspenders against
+    // the common refactor shape.
+    let i = src.indexOf('{', startIdx);
+    expect(i).toBeGreaterThanOrEqual(0);
+    let depth = 0;
+    let end = -1;
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    expect(end).toBeGreaterThan(startIdx);
+    const fnBody = src.slice(startIdx, end + 1);
+    expect(fnBody).not.toContain('personalMessageRaw');
+  });
+
+  test('CONTRACT (runtime): handleSendConfirmClick never reads payload.personalMessageRaw on the Send path', async () => {
+    // Runtime complement to the static brace-walker above. Wraps
+    // row.payload in a Proxy that throws on any get('personalMessageRaw')
+    // access, then drives handleSendConfirmClick through to the
+    // executeSendPipeline call. If the handler (or anything downstream
+    // it triggers through this payload reference) reads the field, the
+    // Proxy throws and the test fails — survives future syntax changes
+    // the brace-walker can't (string/regex literals containing braces).
+    const u1 = '100000000000000001';
+    const basePayload = {
+      resourceType: 'file',
+      attachment: VALID_ATTACHMENT,
+      locationUrl: null,
+      locationName: null,
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: 'safe content',
+      personalMessageRaw: '**FORBIDDEN_RAW**',
+      warningsBlock: '',
+      sendNonce: 'nonce-contract',
+    };
+    let leaked = false;
+    const trappedPayload = new Proxy(basePayload, {
+      get(target, prop) {
+        if (prop === 'personalMessageRaw') {
+          leaked = true;
+          throw new Error('CONTRACT VIOLATION: handleSendConfirmClick read payload.personalMessageRaw');
+        }
+        return target[prop];
+      },
+    });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: trappedPayload, version: 1 } });
+    expect(leaked).toBe(false);
+  });
+
+  test('CONTRACT (runtime, pipeline-direct): executeSendPipeline never reads personalMessageRaw from its params', async () => {
+    // Complement to the handler-level Proxy test above. cr round-15
+    // flagged that the handler-level test only catches a click-path
+    // refactor that spreads row.payload — it doesn't catch a future
+    // change that adds `personalMessageRaw` to executeSendPipeline's
+    // destructure list. This test wraps the params object that
+    // executeSendPipeline receives in a Proxy that throws on
+    // get('personalMessageRaw'). If the destructure or any internal
+    // access touches the field, the Proxy throws and the test fails.
+    const u1 = '100000000000000001';
+    const validParams = {
+      apiKey: 'apikey-1',
+      resourceType: 'file',
+      attachment: VALID_ATTACHMENT,
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: u1, username: 'Alice', bot: false }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: 'safe content',
+      // Intentionally smuggled into params alongside personalMessage —
+      // a future refactor that destructures it would trip the Proxy.
+      personalMessageRaw: '**FORBIDDEN_RAW**',
+      sendNonce: 'nonce-pipeline-contract',
+    };
+    let leaked = false;
+    const trappedParams = new Proxy(validParams, {
+      get(target, prop) {
+        if (prop === 'personalMessageRaw') {
+          leaked = true;
+          throw new Error('CONTRACT VIOLATION: executeSendPipeline read params.personalMessageRaw');
+        }
+        return target[prop];
+      },
+    });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    // executeSendPipeline does its own resolveRecipientUsers / API
+    // calls; we just need to fire it and verify the Proxy didn't
+    // throw on a destructure. The downstream calls will fail with
+    // mocked-out dependencies, which is fine — the Proxy fires at
+    // destructure-time (function entry), before any IO.
+    try {
+      await executeSendPipeline(int, trappedParams);
+    } catch (err) {
+      // Re-throw only if the Proxy was the one that threw. Other
+      // errors (mocked-axios reject, etc) are expected and irrelevant.
+      if (leaked) throw err;
+    }
+    expect(leaked).toBe(false);
   });
 });
