@@ -2289,7 +2289,14 @@ describe('handleSendConfirmExpirySelect', () => {
     }));
   });
 
-  test('preserves all other payload fields across transition', async () => {
+  test('preserves all other payload fields across transition + warns on corrupted selfDestructSeconds', async () => {
+    // `selfDestructSeconds: 60` is OFF-PRESET (presets are
+    // [0.5, 1, 5, 30, 300, 1800, 3600]). The rerender path's
+    // renderConfirmCardRows logs a warn on this case (cr round-13)
+    // — pin that the expiry-handler entry trips the same forensic
+    // surface, not just the rerenderConfirmCard cache-miss tests.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
     const int = makeSelectInteraction({ value: '7d' });
     const payload = {
       ...basePayload,
@@ -2313,6 +2320,11 @@ describe('handleSendConfirmExpirySelect', () => {
         resourceType: 'file',
       }),
     }));
+    // Corruption warn fired from the rerender pass.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/off-preset selfDestructSeconds/i),
+      expect.objectContaining({ selfDestructSeconds: '60' })
+    );
   });
 });
 
@@ -3140,6 +3152,59 @@ describe('constants + exports', () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
     await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: trappedPayload, version: 1 } });
+    expect(leaked).toBe(false);
+  });
+
+  test('CONTRACT (runtime, pipeline-direct): executeSendPipeline never reads personalMessageRaw from its params', async () => {
+    // Complement to the handler-level Proxy test above. cr round-15
+    // flagged that the handler-level test only catches a click-path
+    // refactor that spreads row.payload — it doesn't catch a future
+    // change that adds `personalMessageRaw` to executeSendPipeline's
+    // destructure list. This test wraps the params object that
+    // executeSendPipeline receives in a Proxy that throws on
+    // get('personalMessageRaw'). If the destructure or any internal
+    // access touches the field, the Proxy throws and the test fails.
+    const u1 = '100000000000000001';
+    const validParams = {
+      apiKey: 'apikey-1',
+      resourceType: 'file',
+      attachment: VALID_ATTACHMENT,
+      locationUrl: null,
+      locationName: null,
+      recipients: [{ id: u1, username: 'Alice', bot: false }],
+      target: 'user',
+      isVoiceContext: false,
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: 'safe content',
+      // Intentionally smuggled into params alongside personalMessage —
+      // a future refactor that destructures it would trip the Proxy.
+      personalMessageRaw: '**FORBIDDEN_RAW**',
+      sendNonce: 'nonce-pipeline-contract',
+    };
+    let leaked = false;
+    const trappedParams = new Proxy(validParams, {
+      get(target, prop) {
+        if (prop === 'personalMessageRaw') {
+          leaked = true;
+          throw new Error('CONTRACT VIOLATION: executeSendPipeline read params.personalMessageRaw');
+        }
+        return target[prop];
+      },
+    });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    // executeSendPipeline does its own resolveRecipientUsers / API
+    // calls; we just need to fire it and verify the Proxy didn't
+    // throw on a destructure. The downstream calls will fail with
+    // mocked-out dependencies, which is fine — the Proxy fires at
+    // destructure-time (function entry), before any IO.
+    try {
+      await executeSendPipeline(int, trappedParams);
+    } catch (err) {
+      // Re-throw only if the Proxy was the one that threw. Other
+      // errors (mocked-axios reject, etc) are expected and irrelevant.
+      if (leaked) throw err;
+    }
     expect(leaked).toBe(false);
   });
 });

@@ -4713,6 +4713,18 @@ async function rerenderConfirmCard(interaction, newPayload) {
   const memberCache = interaction.guild?.members?.cache;
   const persistedAliases = newPayload.recipientAliases || {};
   const validRecipients = recipientIds.map((id) => {
+    // Asymmetric inputs through the same render path:
+    //   - cache-hit returns a Discord.js User object (UNSANITIZED
+    //     fields — username/displayName fresh from the gateway).
+    //   - cache-miss returns { displayName: persistedAlias },
+    //     where the alias was ALREADY sanitized at pick time by
+    //     resolveRecipientAlias.
+    // Both then re-flow through renderConfirmCardContent's
+    // `resolveRecipientAlias` pass. The cache-hit branch sanitizes
+    // fresh; the cache-miss branch is a no-op IF sanitize stays
+    // idempotent (pinned by tests/sanitize.test.js's idempotence
+    // block). If anyone splits these into divergent post-processing,
+    // the cache-miss branch loses its protection.
     const cached = memberCache?.get?.(id);
     if (cached?.user) return cached.user;
     // Both fallback branches set `displayName` (NOT `username`) so
