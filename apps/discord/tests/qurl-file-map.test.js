@@ -161,6 +161,12 @@ jest.mock('../src/places', () => ({
     return url.toString();
   },
   PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
+  encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
+  decodePlaceIdSentinel: (value) => (
+    typeof value === 'string' && value.startsWith('qurl_place:')
+      ? value.slice('qurl_place:'.length)
+      : null
+  ),
 }));
 
 // Flow-state stubs. Each test overrides per-call to assert on the
@@ -625,10 +631,7 @@ describe('resolveLocation', () => {
     // geo-bias — without it, the URL would degrade to /maps/search/<text>
     // behavior which is the bug we're fixing.
     expect(r.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
-    expect(mockGetPlaceDetails).toHaveBeenCalledWith(
-      'ChIJ37FjGE63t4kRD2_jXSF1F9o',
-      expect.objectContaining({ timeoutMs: expect.any(Number) }),
-    );
+    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
   });
 
   test('text branch calls findPlaceFromText and pins to the top result', async () => {
@@ -782,6 +785,24 @@ describe('handleAutocomplete', () => {
     // (qurl_place: + 27-char place_id ≈ 38). Pin this — if a future
     // change starts packing more into the value we want a test to fail.
     expect(choice.value.length).toBeLessThanOrEqual(100);
+  });
+
+  test('drops a choice whose value would exceed the 100-char Discord cap', async () => {
+    // Defensive: Google docs leave place_id length open-ended. If a
+    // future result ships an >89-char place_id, we'd produce a value
+    // > 100 chars, which would fail Discord's API for the whole
+    // response. Drop just that choice so the rest of the dropdown
+    // still works.
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: 'short', name: 'Good', address: 'addr' },
+      { placeId: 'x'.repeat(95), name: 'Bad (too long)', address: 'addr' },
+      { placeId: 'also-short', name: 'Also Good', address: 'addr' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(2);
+    expect(choices.map(c => c.value)).toEqual(['qurl_place:short', 'qurl_place:also-short']);
   });
 
   test('caps results at 25 (Discord choice limit)', async () => {
@@ -1819,10 +1840,7 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(mockFindPlaceFromText).toHaveBeenCalledWith(
-      'Central Park, NYC',
-      expect.objectContaining({ timeoutMs: expect.any(Number) }),
-    );
+    expect(mockFindPlaceFromText).toHaveBeenCalledWith('Central Park, NYC');
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.locationUrl).toContain('query_place_id=ChIJ4zGFAZpYwokRGUGph3Mf37k');
     expect(payload.locationName).toMatch(/Central Park/);
@@ -1847,7 +1865,7 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
-    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJabc', expect.any(Object));
+    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJabc');
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.locationUrl).toContain('query_place_id=ChIJabc');
     expect(payload.locationName).toBe('The White House');

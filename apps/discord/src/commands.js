@@ -39,7 +39,8 @@ const {
   findPlaceFromText,
   getPlaceDetails,
   buildPlaceUrl,
-  PLACE_ID_SENTINEL_PREFIX,
+  encodePlaceIdSentinel,
+  decodePlaceIdSentinel,
 } = require('./places');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
@@ -493,27 +494,17 @@ function safeDecodeURIComponent(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
 
-// Parse a free-form `location:` input into a discriminated shape:
-//   - URL input → { locationUrl, locationName } (synchronous, no API)
-//   - place_id sentinel from the autocomplete dropdown → { placeId }
-//   - free text (sender skipped autocomplete) → { text }
+// Parse a free-form `location:` input into one of three shapes:
+//   - URL input → { locationUrl, locationName }
+//   - place_id sentinel from autocomplete → { placeId }
+//   - free text → { text }
 //
-// Sentinel and text branches return placeholders for locationUrl /
-// locationName so callers can destructure uniformly; the real values
-// come from resolveLocation, which is async and hits Places.
-//
-// Why a sentinel: a synthesized /maps/search/<text> URL is per-viewer
-// geo-biased (Google resolves the query against the recipient's IP),
-// so two recipients of the same qURL can end up at different places.
-// Routing the input through Places + a place_id-pinned URL eliminates
-// the bias — every recipient gets the same canonical destination.
+// Callers pass the result to resolveLocation, which hits Places for the
+// sentinel + text branches. The URL branch synchronously short-circuits.
 function parseLocationInput(rawInput) {
-  if (typeof rawInput === 'string' && rawInput.startsWith(PLACE_ID_SENTINEL_PREFIX)) {
-    return {
-      locationUrl: null,
-      locationName: null,
-      placeId: rawInput.slice(PLACE_ID_SENTINEL_PREFIX.length),
-    };
+  const decodedPlaceId = decodePlaceIdSentinel(rawInput);
+  if (decodedPlaceId) {
+    return { locationUrl: null, locationName: null, placeId: decodedPlaceId };
   }
   let detectedUrl = null;
   for (const pattern of MAPS_URL_PATTERNS) {
@@ -542,54 +533,30 @@ function parseLocationInput(rawInput) {
   };
 }
 
-// Tight timeout on the on-submit Places call. Discord's interaction
-// ACK window is 3 s; we need budget for resolveLocation AND the
-// downstream handleQurlSlashSend defer + render. 1500 ms is well
-// above Google Places p99 for both endpoints — if we hit this
-// timeout, Places is genuinely broken and we'd rather return the
-// error reply within Discord's window than wait longer. Autocomplete
-// keeps the longer default since each keystroke fires its own
-// interaction with its own 3 s budget.
-const RESOLVE_LOCATION_TIMEOUT_MS = 1500;
+// Failure modes of resolveLocation. handleQurlMap maps each to a
+// distinct user-facing reply.
+const RESOLVE_REASON = Object.freeze({
+  NO_API_KEY: 'no_api_key',
+  NOT_FOUND: 'not_found',
+  ERROR: 'error',
+});
 
 // Discriminated result of resolveLocation. Callers check `.ok`:
 //   { ok: true,  locationUrl, locationName }            (success)
-//   { ok: false, reason: 'no_api_key' | 'not_found' | 'error' }
-//
-// Errors are surfaced as honest user messages rather than throwing —
-// handleQurlMap converts each `reason` to its own reply, and the
-// shape lets a test pin the contract without driving the full
-// interaction stack.
+//   { ok: false, reason: RESOLVE_REASON.<...> }         (failure)
 async function resolveLocation(parsed) {
-  // URL branch: parseLocationInput already extracted a Google Maps
-  // URL from the sender input; pass it through without an API call.
-  // Maps shortlinks (goo.gl/...) and /place/<name> URLs are already
-  // stable identifiers — they redirect/resolve to the same destination
-  // for every viewer.
   if (parsed.locationUrl) {
-    return {
-      ok: true,
-      locationUrl: parsed.locationUrl,
-      locationName: parsed.locationName,
-    };
+    return { ok: true, locationUrl: parsed.locationUrl, locationName: parsed.locationName };
   }
   if (!config.GOOGLE_MAPS_API_KEY) {
-    return { ok: false, reason: 'no_api_key' };
+    return { ok: false, reason: RESOLVE_REASON.NO_API_KEY };
   }
   try {
-    let place;
-    if (parsed.placeId) {
-      place = await getPlaceDetails(parsed.placeId, { timeoutMs: RESOLVE_LOCATION_TIMEOUT_MS });
-    } else if (parsed.text) {
-      place = await findPlaceFromText(parsed.text, { timeoutMs: RESOLVE_LOCATION_TIMEOUT_MS });
-    } else {
-      // Defensive: parseLocationInput always populates one of url/
-      // placeId/text. An empty parsed object would mean the input was
-      // whitespace, which handleQurlMap rejects before we get here.
-      return { ok: false, reason: 'not_found' };
-    }
+    const place = parsed.placeId
+      ? await getPlaceDetails(parsed.placeId)
+      : await findPlaceFromText(parsed.text);
     if (!place || !place.placeId) {
-      return { ok: false, reason: 'not_found' };
+      return { ok: false, reason: RESOLVE_REASON.NOT_FOUND };
     }
     return {
       ok: true,
@@ -601,7 +568,7 @@ async function resolveLocation(parsed) {
       kind: parsed.placeId ? 'placeId' : 'text',
       error: err && err.message,
     });
-    return { ok: false, reason: 'error' };
+    return { ok: false, reason: RESOLVE_REASON.ERROR };
   }
 }
 
@@ -3629,25 +3596,18 @@ async function handleQurlMap(interaction) {
     });
   }
 
-  // Resolve the parsed input to a canonical place_id-pinned URL. URL
-  // inputs pass through synchronously (no API call); sentinel + free-
-  // text inputs hit Places at send time so every recipient opens the
-  // same destination regardless of their viewer geo. Without this,
-  // /maps/search/<text> URLs are resolved per-viewer by Google and
-  // recipients in different cities can land at completely different
-  // places — the bug this whole change is fixing.
+  // URL inputs pass through synchronously; sentinel + free-text inputs
+  // hit Places at send time so every recipient opens the same place_id
+  // regardless of viewer geo.
   const resolved = await resolveLocation(parsedLocation);
   if (!resolved.ok) {
     clearCooldown(interaction.user.id);
     let content;
     switch (resolved.reason) {
-      case 'no_api_key':
-        // Hard fail per ops decision — operator must configure the
-        // key, OR the sender can paste a Google Maps URL (URL branch
-        // bypasses Places entirely).
+      case RESOLVE_REASON.NO_API_KEY:
         content = '❌ Location search is unavailable on this server. Re-run with a full Google Maps URL.';
         break;
-      case 'not_found':
+      case RESOLVE_REASON.NOT_FOUND:
         content = `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
         break;
       default:
@@ -5376,14 +5336,8 @@ const commands = [
             opt.setName('location')
               .setDescription('Google Maps URL, or a place / address to search')
               .setRequired(true)
-              // Autocomplete suggests place_id-pinned matches from
-              // Google Places — picking one round-trips a sentinel
-              // value that resolves to a canonical URL at send time,
-              // so every recipient sees the same destination regardless
-              // of their viewer location. Free-text submissions are
-              // also resolved server-side (see resolveLocation), so
-              // the bug-fix is independent of whether the sender uses
-              // the dropdown.
+              // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+              // free text is resolved server-side via resolveLocation.
               .setAutocomplete(true)
               // 500 chars covers full Google Maps URLs (which can be
               // 200-400 chars after place params + coordinates) plus
@@ -5860,27 +5814,23 @@ function isAckTimeoutError(err) {
   return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
 }
 
-// Minimum partial-input length before we hit Places. Below this,
-// suggestions are noise (single-letter prefixes match thousands of
-// places) and the per-keystroke cost isn't justified.
+// Below this length, autocomplete suggestions are noise (single-letter
+// prefixes match thousands of places) and the per-keystroke Places
+// cost isn't justified.
 const AUTOCOMPLETE_MIN_QUERY_LENGTH = 2;
 
-// Discord caps each autocomplete `name` (the user-visible label) and
-// `value` (returned to the handler on submit) at 100 chars each. The
-// value we send is `qurl_place:<placeId>` — typical place_ids are
-// ~28 chars, so the sentinel+id stays well within budget.
+// Discord caps each choice's `name` (label) and `value` (handler input)
+// at 100 chars. Labels (name + address) often need truncation; values
+// (`qurl_place:<placeId>`) almost never do, but we drop pathological
+// ones so one bad result doesn't fail the whole response.
 const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
+const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 
-// Autocomplete dispatcher. Only `/qurl map` + the `location:` option
-// have suggestions today; every other focused field gets an empty
-// response so the dropdown doesn't display stale data.
-//
-// Per Discord's contract, we MUST respond within 3 s — any Places API
-// hiccup falls back to an empty result rather than a thrown handler
-// (which would surface as a "this command is unresponsive" toast).
+// Per Discord's contract, MUST respond within 3 s — Places errors fall
+// back to an empty result rather than a thrown handler (which would
+// surface as a "this command is unresponsive" toast).
 async function handleAutocomplete(interaction) {
-  let respondTo = interaction;
   try {
     if (interaction.commandName !== 'qurl') {
       return interaction.respond([]);
@@ -5894,33 +5844,37 @@ async function handleAutocomplete(interaction) {
     if (rawQuery.length < AUTOCOMPLETE_MIN_QUERY_LENGTH) {
       return interaction.respond([]);
     }
-    // If the sender has already pasted a Google Maps URL, suggestions
-    // would just clutter the dropdown — the URL is already a stable
-    // identifier and parseLocationInput passes it through verbatim.
+    // A pasted URL is already a stable identifier — parseLocationInput
+    // passes it through verbatim and suggestions would just clutter.
     if (/^https?:\/\//i.test(rawQuery)) {
       return interaction.respond([]);
     }
 
     const results = await searchPlaces(rawQuery);
-    const choices = results.slice(0, AUTOCOMPLETE_MAX_CHOICES).map((p) => {
-      // Combine name + address for the visible label, codepoint-aware
-      // truncated to the 100-char cap. Address adds the disambiguation
-      // that motivated this whole change ("White House — 1600 Penn Ave"
-      // vs. "Whitehouse Pub — Manchester, UK").
+    const choices = [];
+    for (const p of results) {
+      if (choices.length >= AUTOCOMPLETE_MAX_CHOICES) break;
+      const value = encodePlaceIdSentinel(p.placeId);
+      if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
       const label = p.address ? `${p.name} — ${p.address}` : p.name;
-      const name = Array.from(label).slice(0, AUTOCOMPLETE_CHOICE_NAME_MAX).join('');
-      return { name, value: `${PLACE_ID_SENTINEL_PREFIX}${p.placeId}` };
-    });
+      // Fast path the common ASCII case — codepoint-aware truncation
+      // matters only when label.length > NAME_MAX, since UTF-16 vs
+      // codepoint counts diverge only past the boundary.
+      const name = label.length <= AUTOCOMPLETE_CHOICE_NAME_MAX
+        ? label
+        : Array.from(label).slice(0, AUTOCOMPLETE_CHOICE_NAME_MAX).join('');
+      choices.push({ name, value });
+    }
     return interaction.respond(choices);
   } catch (err) {
-    logger.warn('autocomplete handler failed', {
+    // Debug, not warn: Places outages would otherwise spam logs at
+    // keystroke rate. The empty-response fallback IS the contract here;
+    // resolveLocation's send-time call carries the load-bearing warn.
+    logger.debug('autocomplete handler failed', {
       command: interaction.commandName,
       error: err && err.message,
     });
-    // Best-effort empty response so the client doesn't show a stuck
-    // spinner. Swallow a second failure (token already expired) —
-    // there's no recovery path from here.
-    try { await respondTo.respond([]); } catch { /* ignore */ }
+    try { await interaction.respond([]); } catch { /* ignore */ }
     return undefined;
   }
 }
@@ -6203,6 +6157,7 @@ module.exports = {
       renderConfirmCardContent,
       parseLocationInput,
       resolveLocation,
+      RESOLVE_REASON,
       handleAutocomplete,
       safeDecodeURIComponent,
       softenCooldown,
