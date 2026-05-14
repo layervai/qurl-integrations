@@ -2519,6 +2519,7 @@ async function handleSetupModal(interaction, { flow_id }) {
 const {
   parseRecipientMentions,
   isVoiceChannelType,
+  isBotMember,
   MAX_SLASH_OPTION_LENGTH: RECIPIENTS_SLASH_MAX_LENGTH,
 } = require('./recipient-parser');
 
@@ -2563,6 +2564,12 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // (replacing the legacy `/qurl send`'s wizard option deleted in
 // PR #313 alongside `getChannelMembers`).
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
+
+// Recipient-rejection reason strings shared by every handler that
+// can drop a selection to empty (picker, voice-everyone). Hoisted
+// from inline literals so a copy-edit (e.g., to "Cannot DM bots")
+// updates every surface at once.
+const RECIPIENT_REASON_BOTS_DROPPED = 'Cannot send to bots';
 // Local to the note modal — kept off the prefix-only customId
 // allowlist because flow-dispatch never routes modal-input fields,
 // only the parent modal customId.
@@ -3033,7 +3040,7 @@ function renderConfirmCardRows({
     if (channel?.members) {
       let n = 0;
       for (const [, m] of channel.members) {
-        if (!m?.user?.bot) n++;
+        if (!isBotMember(m)) n++;
       }
       connectedCount = n;
     }
@@ -3743,7 +3750,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // degraded `⚠ . Re-pick...` message if a future filter is
     // removed and `valid.length === 0` is hit with droppedBots === 0.
     const reasons = [];
-    if (droppedBots > 0) reasons.push('Cannot send to bots');
+    if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in pick';
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
@@ -3863,8 +3870,8 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
 
   const payload = row.payload || {};
-  // resourceType guard mirrors handleConfirmUserSelect:3626 — a
-  // corrupt/stale row would otherwise throw from renderConfirmCardContent.
+  // resourceType guard mirrors handleConfirmUserSelect — a corrupt /
+  // stale row would otherwise throw from renderConfirmCardContent.
   const payloadResource = payload.resourceType;
   if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
     logger.error('handleConfirmVoiceEveryone: corrupt flow payload (unknown resourceType)', {
@@ -3893,6 +3900,8 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
 
   // Re-render with a warning banner. Same shape as the picker's
   // rejectPick path so the user sees why the button didn't take.
+  // Pass the local `voiceChannelId` (already proven truthy above) for
+  // consistency with the other handler reads below.
   const rejectVoice = (warning) => interaction.editReply({
     content: renderConfirmCardContent({
       resourceType: payload.resourceType,
@@ -3910,7 +3919,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
       personalMessage: payload.personalMessage,
-      voiceChannelId: payload.voiceChannelId,
+      voiceChannelId,
       interaction,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -3925,24 +3934,31 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   if (!channel || !channel.members) {
     return rejectVoice(`⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`);
   }
-  // Filter bots inline (mirrors recipient-parser's voice-expansion
-  // pass) and convert GuildMember → User so partitionRecipients sees
-  // the same shape the picker hands it.
+  // True-empty channel gets honest "no one connected" copy.
+  // bots-only flows through partition below and surfaces "Cannot send
+  // to bots" — that copy depends on partitionRecipients owning the
+  // bot filter end-to-end (a pre-filter here would zero out droppedBots
+  // and force the bots-only case into a misleading "no usable
+  // recipients" fallback).
+  if (channel.members.size === 0) {
+    return rejectVoice(`⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`);
+  }
+  // GuildMember → User shape so partitionRecipients sees the same
+  // shape the picker hands it. Skip entries with no .user (defensive
+  // against partial-cache rows); partitionRecipients handles the
+  // bot filter + droppedBots accounting.
   const selectedUsers = [];
   for (const [, m] of channel.members) {
-    if (m?.user?.bot) continue;
     if (m?.user) selectedUsers.push(m.user);
-  }
-  if (selectedUsers.length === 0) {
-    return rejectVoice(`⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`);
   }
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
   if (valid.length === 0) {
-    // Defense-in-depth — the pre-filter above already dropped bots,
-    // so reaching here means every connected non-bot got filtered by
-    // a future addition to partitionRecipients. Surface generic copy.
+    // Reached when every connected member was filtered out — today
+    // that's the bots-only case (droppedBots > 0). The fallback
+    // text covers a future filter addition (e.g., role-blocklist)
+    // that drops everyone for a different reason.
     const reasons = [];
-    if (droppedBots > 0) reasons.push('Cannot send to bots');
+    if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
     const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients in voice channel';
     return rejectVoice(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
   }
@@ -4018,7 +4034,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       expiresIn: payload.expiresIn,
       selfDestructSeconds: payload.selfDestructSeconds,
       personalMessage: payload.personalMessage,
-      voiceChannelId: payload.voiceChannelId,
+      voiceChannelId,
       interaction,
     }),
   }).catch(logIgnoredDiscordErr);
@@ -6277,10 +6293,10 @@ module.exports = {
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
-      // All eight confirm-card customId literals exported so the
-      // contract test in qurl-file-map.test.js can pin every wire
-      // value — a typo in any of these silently breaks routing for
-      // in-flight confirm cards, so they need to be test-asserted.
+      // Every confirm-card customId is exported so the contract test
+      // in qurl-file-map.test.js can pin every wire value — a typo
+      // in any of these silently breaks routing for in-flight confirm
+      // cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,
       CONFIRM_SEND_CUSTOM_ID,
       CONFIRM_CANCEL_CUSTOM_ID,

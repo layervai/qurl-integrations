@@ -2451,6 +2451,42 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.content).toMatch(/No one is connected/i);
   });
 
+  test('bots-only voice channel: surfaces "Cannot send to bots" (NOT the empty-channel copy)', async () => {
+    // Pre-DE-pass had an inline bot pre-filter here that zeroed out
+    // droppedBots, forcing the bots-only case into the misleading
+    // "No one is connected" branch. Letting partitionRecipients own
+    // the bot accounting end-to-end is what produces the accurate
+    // copy. This test pins that behavioral contract.
+    const int = makeVoiceInteraction({ members: [bot1], botIds: [bot1] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Cannot send to bots/i);
+    expect(lastCall.content).not.toMatch(/No one is connected/i);
+  });
+
+  test('cap overshoot (env-overridden small cap): hard-rejects with subset-prompt copy', async () => {
+    // With the production 20k default, voice-channel capacity (99
+    // for voice, larger for stage) never trips this branch — it's
+    // defense-in-depth against a misconfigured env override (e.g.,
+    // a guild operator dialing the cap down to constrain blast
+    // radius). The reject copy steers the user toward picker /
+    // @-mentions for a subset selection.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      const int = makeVoiceInteraction({ members: [u1, u2] });
+      await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+      expect(lastCall.content).toMatch(/Voice channel has 2 connected \(max 1\)/i);
+      expect(lastCall.content).toMatch(/picker or @mentions/i);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
+  });
+
   test('corrupt payload (unknown resourceType): deleteFlow + actionable re-run copy', async () => {
     // Mirrors handleConfirmUserSelect's resourceType guard — a
     // corrupt/stale row would otherwise crash the renderer with a

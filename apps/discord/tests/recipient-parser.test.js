@@ -29,6 +29,7 @@ const {
   MAX_INVALID_TOKEN_LENGTH,
   VOICE_CHANNEL_TYPE,
   STAGE_VOICE_CHANNEL_TYPE,
+  VIEW_CHANNEL_PERMISSION,
 } = require('../src/recipient-parser');
 const logger = require('../src/logger');
 
@@ -57,11 +58,15 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
     }
     roleCache.set(roleId, { members: roleMembers });
   }
-  // Channel shape: { id → { type, members: [id, ...] } } where type
-  // is the numeric ChannelType (2 = GuildVoice, 13 = GuildStageVoice;
-  // any other value tests the non-voice rejection path). Voice-
-  // connected members are added to the guild member cache so the
-  // bot filter (and post-filter dedupe semantics) match production.
+  // Channel shape: { id → { type, members: [id, ...], viewable? } }
+  //   type     numeric ChannelType (2 = GuildVoice, 13 = GuildStageVoice;
+  //            any other value tests the non-voice rejection path).
+  //   members  voice-connected member IDs (added to guild member cache so
+  //            the bot filter + post-filter dedupe semantics match
+  //            production).
+  //   viewable defaults to true; set false to test the ViewChannel-gate
+  //            rejection path (private voice channels the bot has cached
+  //            but the sender can't see in their client).
   const channelCache = new Map();
   for (const [channelId, attrs] of Object.entries(channels)) {
     const memberIds = attrs.members || [];
@@ -71,10 +76,25 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
       memberCache.set(mid, existing);
       chMembers.set(mid, existing);
     }
-    channelCache.set(channelId, { id: channelId, type: attrs.type, members: chMembers });
+    const viewable = attrs.viewable !== false;
+    // permissionsFor is the read-of-record for the ViewChannel gate.
+    // Real discord.js returns a Readonly<PermissionsBitField>; the
+    // mock returns the minimum shape the parser exercises (`.has`).
+    // Argument is ignored — viewability is per-channel-fixture, not
+    // per-caller, which is sufficient because the parser only ever
+    // asks about the invoking user.
+    channelCache.set(channelId, {
+      id: channelId,
+      type: attrs.type,
+      members: chMembers,
+      permissionsFor: () => ({
+        has: (bit) => bit !== VIEW_CHANNEL_PERMISSION || viewable,
+      }),
+    });
   }
   return {
     user: { id: senderId },
+    member: { id: senderId },
     guild: {
       members: { cache: memberCache },
       roles: { cache: roleCache },
@@ -378,6 +398,13 @@ describe('voice-channel type constants (discord.js ChannelType pin)', () => {
     expect(isVoiceChannelType(undefined)).toBe(false);
     expect(isVoiceChannelType(null)).toBe(false);
   });
+
+  // ViewChannel permission bit pinned at 1 << 10 (1024). A discord.js
+  // bump that renumbers the bit would silently break the private-
+  // voice-channel-leak defense — this spec keeps the contract honest.
+  test('VIEW_CHANNEL_PERMISSION is 1 << 10', () => {
+    expect(VIEW_CHANNEL_PERMISSION).toBe(1024n);
+  });
 });
 
 describe('parseRecipientMentions — channel mentions (voice / stage-voice)', () => {
@@ -441,6 +468,40 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
         '500': { type: GUILD_VOICE, members: ['801', '802'] },
       },
     });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('voice channel the sender CANNOT see (ViewChannel denied) lands in invalidTokens — no private-channel-leak', () => {
+    // The bot's channels.cache holds every channel it can see, so
+    // without the ViewChannel gate a user could DM-blast members of
+    // a private voice channel just by knowing its snowflake. Pin
+    // that channels with viewable:false fall through to
+    // invalidTokens despite type=GuildVoice + non-empty members.
+    const int = makeInteraction({
+      channels: {
+        '500': { type: GUILD_VOICE, members: ['111', '222'], viewable: false },
+      },
+    });
+    const res = parseRecipientMentions('<#500>', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual(['<#500>']);
+  });
+
+  test('missing permissionsFor on the channel cache (degraded shape) fails closed', () => {
+    // Defense-in-depth: real discord.js always supplies permissionsFor
+    // on GuildChannel, but a future shape change or partially-mocked
+    // test fixture would otherwise silently bypass the gate. Pin
+    // the fail-closed behavior so the bypass surfaces as "couldn't
+    // expand" rather than a silent leak.
+    const int = makeInteraction();
+    int.guild.channels.cache = new Map([[
+      '500',
+      // intentionally NO permissionsFor — the parser must treat
+      // this as denied, not as "assume allowed".
+      { id: '500', type: GUILD_VOICE, members: new Map([['111', { user: { id: '111', bot: false } }]]) },
+    ]]);
     const res = parseRecipientMentions('<#500>', int);
     expect(res.ids).toEqual([]);
     expect(res.invalidTokens).toEqual(['<#500>']);

@@ -14,16 +14,23 @@
 //   - Role mentions:    <@&987654>                → expand to current
 //                                                   guild members of that role
 //   - Channel mentions: <#456789>                 → only voice / stage-voice
-//                                                   channels; expand to the
-//                                                   voice-connected non-bot
-//                                                   member set via
-//                                                   `channel.members`. Non-
-//                                                   voice channels land in
+//                                                   channels the sender can
+//                                                   see (ViewChannel-gated);
+//                                                   expand to the voice-
+//                                                   connected non-bot member
+//                                                   set via `channel.members`.
+//                                                   Non-voice channels and
+//                                                   non-visible voice
+//                                                   channels both land in
 //                                                   `invalidTokens` so the
 //                                                   caller can surface
 //                                                   "couldn't expand
-//                                                   #text-channel" rather
-//                                                   than silently dropping.
+//                                                   #channel" rather than
+//                                                   silently dropping
+//                                                   (or, worse, leaking
+//                                                   members of a private
+//                                                   channel whose snowflake
+//                                                   the sender knows).
 // Mention extraction is regex-based — separators don't matter for
 // the mentions themselves (`<@111><@222>` matches both). The
 // separator class only affects the residue/invalid-token strip
@@ -141,6 +148,15 @@ const CHANNEL_MENTION_RE = /<#(\d+)>/g;
 // numeric values" spec pins the contract.
 const VOICE_CHANNEL_TYPE = 2;
 const STAGE_VOICE_CHANNEL_TYPE = 13;
+
+// discord.js PermissionFlagsBits.ViewChannel pinned numerically (bit
+// 10 = 1 << 10) for the same reason as the channel-type constants:
+// no discord.js require in the parser, plus a test spec pins the
+// value against future discord.js renumbers. discord.js represents
+// permissions as BigInt; PermissionsBitField.has accepts either a
+// BigInt or a number, so the numeric literal works for both prod
+// (real PermissionsBitField) and tests (Map-shaped mock).
+const VIEW_CHANNEL_PERMISSION = 1n << 10n;
 
 // Hard cap on input length so an adversarial regex-blowup attack
 // (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
@@ -348,21 +364,23 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // getter filters the full guild member cache per call, so N role
   // mentions = N O(guild_size) scans. Bounded by the 4000-char input
   // cap and Discord's slash-option max.
-  // Dedupe role-error pushes by role ID so `<@&999> <@&999>` against
-  // an unknown role yields one invalidTokens entry, not two. The
-  // strip-pass's residue-tokens already dedupe naturally via input
-  // grouping; this set restores the same property for role errors.
+  // Per-kind invalidTokens dedupe sets. Sharing the dedupe helper
+  // across role + channel error paths means `<@&999> <@&999>` and
+  // `<#999> <#999>` each yield one invalidTokens entry, not two —
+  // the strip-pass's residue-tokens already dedupe naturally via
+  // input grouping, and this restores the same property for the
+  // expansion paths.
   const invalidRoleIds = new Set();
-  function pushRoleErrorIfNew(roleId, rawToken) {
-    if (invalidRoleIds.has(roleId)) return;
-    invalidRoleIds.add(roleId);
+  function pushInvalidIfNew(seenIds, id, rawToken) {
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
     invalidTokens.push(rawToken);
   }
   for (const m of input.matchAll(ROLE_MENTION_RE)) {
     const roleId = m[1];
     const role = guild?.roles?.cache?.get(roleId);
     if (!role) {
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
       continue;
     }
     // role.members is a Collection<Snowflake, GuildMember>. Empty for
@@ -371,7 +389,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // "couldn't expand @role").
     const members = role.members;
     if (!members || members.size === 0) {
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
       continue;
     }
     // `usable` counts members that passed the bot filter, INCLUDING
@@ -392,38 +410,22 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       // Role had members but they were all filtered out as bots.
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains bots."
-      pushRoleErrorIfNew(roleId, m[0]);
+      pushInvalidIfNew(invalidRoleIds, roleId, m[0]);
     }
   }
 
   // Channel expansion: voice / stage-voice channels expand to their
-  // currently-connected non-bot member set; every other channel type
-  // (text / forum / category / announcement / thread) lands in
-  // `invalidTokens` so the caller can surface "couldn't expand
-  // #channel" rather than silently send to an empty set. Runs BEFORE
-  // @everyone so explicit channel mentions claim cap slots first.
-  //
-  // `channel.members` for voice channels is discord.js v14's view
-  // over the voice-state cache — populated only when the
-  // `GuildVoiceStates` gateway intent is declared (see
-  // `discord.js` boot canary). Cold-cache / DM-context degrades
-  // safely: `channels.cache.get(id)` returns undefined and the
-  // token lands in `invalidTokens`.
-  //
-  // Dedupe channel-error pushes by channel ID (symmetric with the
-  // role-error dedup path above) so `<#999> <#999>` against an
-  // unknown channel yields ONE entry, not two.
+  // currently-connected non-bot member set. Runs BEFORE @everyone so
+  // explicit channel mentions claim cap slots first. `channel.members`
+  // reads the voice-state cache, which is only populated when the
+  // `GuildVoiceStates` gateway intent is declared (pinned by the boot
+  // canary in discord.js).
   const invalidChannelIds = new Set();
-  function pushChannelErrorIfNew(channelId, rawToken) {
-    if (invalidChannelIds.has(channelId)) return;
-    invalidChannelIds.add(channelId);
-    invalidTokens.push(rawToken);
-  }
   for (const m of input.matchAll(CHANNEL_MENTION_RE)) {
     const channelId = m[1];
     const channel = guild?.channels?.cache?.get(channelId);
     if (!channel) {
-      pushChannelErrorIfNew(channelId, m[0]);
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
     const isVoice = channel.type === VOICE_CHANNEL_TYPE
@@ -435,7 +437,23 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       // by removing it). Voice membership is unambiguously
       // "voice-connected"; text-channel membership is permission-
       // bound and varies across server topologies.
-      pushChannelErrorIfNew(channelId, m[0]);
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
+      continue;
+    }
+    // ViewChannel gate — the bot's channels.cache holds every channel
+    // it has visibility into, so without this check a user who
+    // discovers a private voice channel's snowflake (audit logs,
+    // mod-tool exports, leaked URLs) could DM-blast its connected
+    // members via `/qurl file recipients:<#hidden-voice-id>` even
+    // when they themselves can't see the channel in the client.
+    // Fail-closed: if `permissionsFor` is missing (degraded test
+    // mock, future discord.js shape change) or returns falsy, we
+    // reject the mention. The button-driven voice-everyone path
+    // doesn't need this gate — invoking the slash command from
+    // inside a voice channel intrinsically proves visibility.
+    const viewerPerms = channel.permissionsFor?.(interaction.member ?? interaction.user?.id);
+    if (!viewerPerms || !viewerPerms.has(VIEW_CHANNEL_PERMISSION)) {
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
     // channel.members for voice channels is a Collection<Snowflake,
@@ -446,7 +464,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // role-expansion, and @everyone passes via isBotMember.
     const members = channel.members;
     if (!members || members.size === 0) {
-      pushChannelErrorIfNew(channelId, m[0]);
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
     let usable = 0;
@@ -456,7 +474,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       consider(memberId);
     }
     if (usable === 0) {
-      pushChannelErrorIfNew(channelId, m[0]);
+      pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
     }
   }
 
@@ -464,8 +482,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // channel) get cap priority. If the user typed
   // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
   // first, and @everyone fills the remainder. Reversing this order
-  // silently drops explicit mentions when the cache is partial —
-  // caught by cr round 3 on PR #323.
+  // silently drops explicit mentions when the cache is partial.
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -560,8 +577,9 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
     // Dedupe residue tokens by the post-escape rendered form so
     // `<#456> <#456>` or `alice alice` produces ONE entry, not two.
-    // Symmetric with the role-error dedup path (pushRoleErrorIfNew
-    // above) \u2014 a caller's "couldn't parse: X, X" embed is hostile.
+    // Symmetric with the role/channel-error dedup paths
+    // (pushInvalidIfNew above) \u2014 a caller's "couldn't parse: X, X"
+    // embed is hostile.
     if (residueSeen.has(escaped)) continue;
     residueSeen.add(escaped);
     invalidTokens.push(escaped);
@@ -599,9 +617,11 @@ function isVoiceChannelType(type) {
 module.exports = {
   parseRecipientMentions,
   isVoiceChannelType,
+  isBotMember,
   MAX_INPUT_LENGTH,
   MAX_INVALID_TOKEN_LENGTH,
   MAX_SLASH_OPTION_LENGTH,
   VOICE_CHANNEL_TYPE,
   STAGE_VOICE_CHANNEL_TYPE,
+  VIEW_CHANNEL_PERMISSION,
 };
