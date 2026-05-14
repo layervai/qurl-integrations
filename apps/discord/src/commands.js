@@ -3098,6 +3098,11 @@ async function handleQurlSlashSend(interaction, params) {
     // surfaces `massMentionDenied: true` when the sender tried but
     // lacks permission — the caller renders a permission-specific
     // warning instead of the generic "couldn't parse" copy.
+    //
+    // `interaction.memberPermissions` is the resolved channel-effective
+    // permission set (guild perms + channel overwrites). A future
+    // refactor switching to `interaction.member.permissions` would
+    // silently lose the channel-overwrite respect — keep this property.
     const canMentionEveryone = interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,

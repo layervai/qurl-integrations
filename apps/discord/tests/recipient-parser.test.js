@@ -410,6 +410,53 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
     expect(res.massMentionDenied).toBe(false);
   });
 
+  test('explicit `<@id>` mentions take priority over @everyone expansion when cap is hit', () => {
+    // Critical ordering invariant: the user explicitly named someone
+    // via `<@uncached>`, then also typed `@everyone`. With cache > cap,
+    // an order that ran @everyone FIRST would fill the cap with
+    // arbitrary cached members and silently drop the explicit
+    // `<@uncached>` (since `consider()` adds to `seen` but not `ids`
+    // once `ids.size === cap`). Pin that the explicit mention always
+    // claims a cap slot — @everyone fills the remainder.
+    // Synthetic guild: 30 cached non-bot members at IDs `200000..200029`,
+    // PLUS the explicit mentioned ID `300000000000000001` which is NOT in
+    // the cache. (The bot filter only consults cache for direct mentions,
+    // and a cache miss leaves the ID in per the existing contract.)
+    const cachedUsers = {};
+    for (let i = 0; i < 30; i++) {
+      cachedUsers[`2000000000000${String(i).padStart(5, '0')}`] = {};
+    }
+    const explicitId = '300000000000000001';
+    const int = makeInteraction({ users: cachedUsers });
+    const res = parseRecipientMentions(
+      `<@${explicitId}> @everyone`,
+      int,
+      { allowMassMention: true },
+    );
+    expect(res.ids.length).toBe(25);
+    // The explicit mention must be in the result.
+    expect(res.ids).toContain(explicitId);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('@everyone + <@&role> combined: dedupe across sources, cap applies', () => {
+    // Both expansion sources fire. A user in the role AND in
+    // `@everyone`'s cache should appear exactly once (consider+seen
+    // dedupe). Cap still bounds the total at 25.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '103': {} },
+      roles: { '7000': ['101', '102'] },
+    });
+    const res = parseRecipientMentions(
+      '<@&7000> @everyone',
+      int,
+      { allowMassMention: true },
+    );
+    expect(res.ids.sort()).toEqual(['101', '102', '103']);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
   test('allowed: cap short-circuits the cache scan (large guild cap behavior)', () => {
     // The @everyone expansion iterates guild.members.cache — a large
     // guild could have 10k+ entries. Once `ids.size === cap`, the

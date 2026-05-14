@@ -180,8 +180,12 @@ function isBotMember(member) {
 // double-surfacing.
 //
 // `interaction` is the slash-command interaction; we need it for:
-//   - interaction.guild    → role-mention expansion via members.cache
-//   - interaction.guild.members.cache.get(id).user.bot → bot filter
+//   - interaction.guild               → role-mention expansion via
+//                                       roles.cache + `@everyone`
+//                                       expansion via members.cache
+//   - interaction.guild.members.cache → bot filter (per-id `.user.bot`
+//                                       lookup) + `@everyone` member
+//                                       enumeration
 function parseRecipientMentions(raw, interaction, opts = {}) {
   const allowMassMention = opts.allowMassMention === true;
   // Defensive normalization: getString can return null when the option
@@ -254,58 +258,25 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     if (ids.size < cap) ids.add(id);
   }
 
-  // @everyone handling. Detection BEFORE the user/role mention passes
-  // so the expansion contributes to `seen`/`ids` alongside any direct
-  // `<@id>` or `<@&id>` mentions (which still dedupe via `consider`).
-  // Detect-via-replace (compare strings) instead of `.test()` so the
-  // shared module-scope `/g` regex's `lastIndex` doesn't carry state
-  // across calls. `String.prototype.replace` always resets internally.
+  // Detect-and-strip `@everyone` BEFORE the mention passes so the
+  // token doesn't leak into the residue (which would U+200B-defuse
+  // it into `invalidTokens` regardless of allow/deny). The actual
+  // expansion runs LAST (after user + role mentions), so explicit
+  // mentions get cap priority. Detect-via-replace (compare strings)
+  // instead of `.test()` so the shared module-scope `/g` regex's
+  // `lastIndex` doesn't carry state across calls.
   let massMentionDenied = false;
+  let everyonePresent = false;
   const everyoneStripped = input.replace(EVERYONE_TOKEN_RE, ' ');
   if (everyoneStripped !== input) {
-    // @everyone was present. Strip it from `input` (allowed OR
-    // denied) so the residue pass doesn't double-surface it in
-    // `invalidTokens` via the U+200B defuse path.
     input = everyoneStripped;
-    if (allowMassMention) {
-      const members = guild?.members?.cache;
-      if (members) {
-        // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
-        // above — in large guilds without a recent GUILD_MEMBERS
-        // chunk, the cache reflects only the currently-loaded subset,
-        // not the guild's true member count. Acceptable v1; in
-        // realistic guilds (where bots are <1% of members) the cap
-        // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
-        // `break` below. The pathological all-bots case still walks
-        // the entire cache — bounded only by cache size, not the cap.
-        //
-        // ORDERING is cache-insertion-order (discord.js Collection
-        // is a Map): when the cap short-circuits the loop, the first
-        // ~25 members BY CACHE INSERTION ORDER win the slots — not
-        // alphabetical, role-ordered, or recently-active. Users may
-        // see a different subset across invocations as the cache
-        // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
-        // selection burden onto the user and removes this ambiguity.
-        for (const [memberId, member] of members) {
-          // Short-circuit once we've filled the cap — the cache
-          // can be tens of thousands of entries in a large guild,
-          // and the per-iteration bot check is wasted work after
-          // `ids` is full. `seen` still gets populated for cappedCount
-          // accuracy on the path through `consider`; we trade that
-          // small UX nicety (knowing exactly how many were over the
-          // cap) for not scanning a 10k-member cache. Acceptable for
-          // an @everyone send — the user is already getting "expanded
-          // to N members" and the cap message.
-          if (ids.size >= cap) break;
-          if (isBotMember(member)) continue;
-          consider(memberId);
-        }
-      }
-    } else {
+    everyonePresent = true;
+    if (!allowMassMention) {
       // Denied path — surface so the caller can warn ("you don't
       // have MENTION_EVERYONE permission"). Distinct signal from
       // invalidTokens so the caller can emit the permission copy
-      // rather than the generic "couldn't parse" copy.
+      // rather than the generic "couldn't parse" copy. The allowed-
+      // path expansion happens below, after explicit mentions.
       massMentionDenied = true;
     }
   }
@@ -388,6 +359,43 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains bots."
       pushRoleErrorIfNew(roleId, m[0]);
+    }
+  }
+
+  // @everyone expansion runs LAST so explicit mentions get cap
+  // priority. If the user typed `@everyone <@uncachedUser>`, the
+  // direct mention claims a cap slot first, and @everyone fills the
+  // remainder. Reversing this order silently drops explicit mentions
+  // when the cache is partial — caught by cr round 3.
+  if (everyonePresent && allowMassMention) {
+    const everyoneMembers = guild?.members?.cache;
+    if (everyoneMembers) {
+      // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
+      // above — in large guilds without a recent GUILD_MEMBERS
+      // chunk, the cache reflects only the currently-loaded subset,
+      // not the guild's true member count. Acceptable v1; in
+      // realistic guilds (where bots are <1% of members) the cap
+      // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
+      // `break` below. The pathological all-bots case still walks
+      // the entire cache — bounded only by cache size, not the cap.
+      //
+      // ORDERING is cache-insertion-order (discord.js Collection
+      // is a Map): when the cap short-circuits the loop, members
+      // win the remaining slots BY CACHE INSERTION ORDER — not
+      // alphabetical, role-ordered, or recently-active. Users may
+      // see a different subset across invocations as the cache
+      // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
+      // selection burden onto the user and removes this ambiguity.
+      for (const [memberId, member] of everyoneMembers) {
+        // Short-circuit once we've filled the cap. We accept the
+        // tradeoff of inaccurate cappedCount (no past-cap members
+        // get added to `seen`) over scanning a 10k-member cache.
+        // The cap message still surfaces from any explicit mentions
+        // that overflowed.
+        if (ids.size >= cap) break;
+        if (isBotMember(member)) continue;
+        consider(memberId);
+      }
     }
   }
 
