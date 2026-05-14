@@ -127,6 +127,8 @@ jest.mock('discord.js', () => {
     setPlaceholder: jest.fn().mockReturnThis(),
     setMinValues: jest.fn().mockReturnThis(),
     setMaxValues: jest.fn().mockReturnThis(),
+    setDefaultValues: jest.fn().mockReturnThis(),
+    addDefaultUsers: jest.fn().mockReturnThis(),
   })),
   MentionableSelectMenuBuilder: jest.fn().mockImplementation(() => makeComponentChainable()),
   ModalBuilder: jest.fn().mockImplementation(() => ({
@@ -223,9 +225,9 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-jest.mock('../src/places', () => ({
-  searchPlaces: jest.fn().mockResolvedValue([]),
-}));
+// Shared places-mock — see tests/helpers/places-mock.js.
+const { mockPlacesModule } = require('./helpers/places-mock');
+jest.mock('../src/places', () => mockPlacesModule);
 
 // flow-state is the DDB-backed harness consumed by /qurl revoke
 // post-conversion (PR 5). Mock it here rather than hit DDB.
@@ -2199,26 +2201,29 @@ describe('handleSetupModal (dispatcher path)', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('returns early for unhandled autocomplete focus (e.g. location)', async () => {
+  it('responds empty for short focused-location values (below min-length)', async () => {
+    // /qurl map's location: option is now autocomplete-enabled.
+    // handleCommand routes the interaction to handleAutocomplete,
+    // which gates on a minimum partial-input length (2 chars). 'Eif'
+    // exceeds the gate, so Places gets called — but since the test
+    // mocks searchPlaces to return [], the dropdown stays empty.
+    // The contract here is that respond() IS called (with []), where
+    // previously it was a silent drop.
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
       options: {
         ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'map'),
         getFocused: jest.fn(() => ({ name: 'location', value: 'Eif' })),
       },
     });
 
     await handleCommand(interaction);
 
-    expect(interaction.respond).not.toHaveBeenCalled();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
   });
-
-  // The `target` slash option was removed in the button-driven redesign;
-  // /qurl no longer surfaces any autocomplete. The remaining test above
-  // pins the contract that any autocomplete interaction (legacy client,
-  // stale registration) is short-circuited without dispatch.
 });
 
 // `revokeAllLinks` coverage lives in send-pipeline-back-half.test.js
@@ -2228,20 +2233,24 @@ describe('handleCommand — autocomplete', () => {
 // connector and qurl tests that require resetModules are in send-pipeline-helpers.test.js
 
 describe('autocomplete handling', () => {
-  it('returns early for all autocomplete interactions', async () => {
+  it('routes autocomplete to handleAutocomplete (responds with empty for non-/qurl/map/location focuses)', async () => {
+    // Contract change: handleCommand now dispatches autocomplete to
+    // handleAutocomplete instead of dropping it. For a /qurl autocomplete
+    // whose subcommand isn't 'map', the handler responds with [] (clears
+    // the dropdown) rather than silently dropping the interaction.
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
       isChatInputCommand: jest.fn(() => false),
       options: {
         ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'help'),
         getFocused: jest.fn(() => ({ name: 'location', value: 'test query' })),
       },
       user: { id: 'autocomplete-user', username: 'TestUser' },
     });
     await handleCommand(interaction);
 
-    // Autocomplete handler was removed; handleCommand returns early
-    expect(interaction.respond).not.toHaveBeenCalled();
+    expect(interaction.respond).toHaveBeenCalledWith([]);
   });
 });

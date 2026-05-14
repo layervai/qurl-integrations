@@ -35,6 +35,15 @@ const { deleteLink, getResourceStatus } = require('./qurl');
 const { downloadAndUpload, reUploadBuffer, mintLinks, uploadJsonToConnector, isAllowedSourceUrl } = require('./connector');
 const { deleteFlow, transitionFlow, supersedeOrCreate } = require('./flow-state');
 const { flowIdForInteraction, registerFlow, safeReply, siblingMessageForStage } = require('./flow-dispatch');
+const {
+  searchPlaces,
+  findPlaceFromText,
+  getPlaceDetails,
+  buildPlaceUrl,
+  encodePlaceIdSentinel,
+  decodePlaceIdSentinel,
+  PLACE_ID_SHAPE_RE,
+} = require('./places');
 
 // Max tokens the QURL API allows per resource. When exceeded, a new
 // resource must be created (re-upload) to get a fresh token pool.
@@ -507,6 +516,13 @@ const USER_SELECT_PER_PICK_CAP = 10;
 const WARNING_LIST_DISPLAY_MAX = 10;
 const WARNING_NAME_CODEPOINT_CAP = 80;
 
+// Discord's hard cap on select-menu max_values. The initial confirm-card
+// renderer widens max_values to fit text-resolved recipientIds (so
+// addDefaultUsers can pre-check them — default_values.length ≤
+// max_values is a Discord-side invariant), and that widen is bounded
+// by this cap so we never construct a menu Discord rejects at validation.
+const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
+
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
 // `location:` consumes these — extracted to a single source so a
 // future "new URL shape" tweak only happens here.
@@ -531,16 +547,18 @@ function safeDecodeURIComponent(s) {
   try { return decodeURIComponent(s); } catch { return s; }
 }
 
-// Parse a free-form `location:` input into `{ locationUrl, locationName }`.
-// Detection order:
-//   1. Google Maps URL embedded anywhere in the input → preserve URL,
-//      extract name from `?q=` or `/place/<name>`.
-//   2. Anything else → synthesize a `/maps/search/<input>` URL with the
-//      whole input as the name.
+// Parse a free-form `location:` input into one of three shapes:
+//   - URL input → { locationUrl, locationName }
+//   - place_id sentinel from autocomplete → { placeId }
+//   - free text → { text }
 //
-// Returns BOTH fields; caller is responsible for escaping the name
-// (markdown injection defense) and applying any cap.
+// Callers pass the result to resolveLocation, which hits Places for the
+// sentinel + text branches. The URL branch synchronously short-circuits.
 function parseLocationInput(rawInput) {
+  const decodedPlaceId = decodePlaceIdSentinel(rawInput);
+  if (decodedPlaceId !== null) {
+    return { locationUrl: null, locationName: null, placeId: decodedPlaceId };
+  }
   let detectedUrl = null;
   for (const pattern of MAPS_URL_PATTERNS) {
     const match = rawInput.match(pattern);
@@ -548,16 +566,63 @@ function parseLocationInput(rawInput) {
   }
   if (detectedUrl && isGoogleMapsURL(detectedUrl)) {
     const queryMatch = detectedUrl.match(/[?&]q=([^&]+)/);
+    // `?api=1&query=…` is the canonical "Maps URL" form (the one
+    // resolveLocation constructs). Match it too so a sender who
+    // re-shares a previously-constructed qURL map URL still gets a
+    // name extracted instead of falling back to "location" in the
+    // recipient embed.
+    const apiQueryMatch = detectedUrl.match(/[?&]query=([^&]+)/);
     const placeMatch = detectedUrl.match(/\/place\/([^/@]+)/);
     let name = null;
     if (queryMatch) name = safeDecodeURIComponent(queryMatch[1].replace(/\+/g, ' '));
+    else if (apiQueryMatch) name = safeDecodeURIComponent(apiQueryMatch[1].replace(/\+/g, ' '));
     else if (placeMatch) name = safeDecodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
     return { locationUrl: detectedUrl, locationName: name };
   }
   return {
-    locationUrl: `https://www.google.com/maps/search/${encodeURIComponent(rawInput)}`,
-    locationName: rawInput,
+    locationUrl: null,
+    locationName: null,
+    text: rawInput,
   };
+}
+
+// Failure modes of resolveLocation. handleQurlMap maps each to a
+// distinct user-facing reply.
+const RESOLVE_REASON = Object.freeze({
+  NO_API_KEY: 'no_api_key',
+  NOT_FOUND: 'not_found',
+  ERROR: 'error',
+});
+
+// Discriminated result of resolveLocation. Callers check `.ok`:
+//   { ok: true,  locationUrl, locationName }            (success)
+//   { ok: false, reason: RESOLVE_REASON.<...> }         (failure)
+async function resolveLocation(parsed) {
+  if (parsed.locationUrl) {
+    return { ok: true, locationUrl: parsed.locationUrl, locationName: parsed.locationName };
+  }
+  if (!config.GOOGLE_MAPS_API_KEY) {
+    return { ok: false, reason: RESOLVE_REASON.NO_API_KEY };
+  }
+  try {
+    const place = parsed.placeId
+      ? await getPlaceDetails(parsed.placeId)
+      : await findPlaceFromText(parsed.text);
+    if (!place || !place.placeId) {
+      return { ok: false, reason: RESOLVE_REASON.NOT_FOUND };
+    }
+    return {
+      ok: true,
+      locationUrl: buildPlaceUrl(place.name, place.placeId),
+      locationName: place.name || place.address || null,
+    };
+  } catch (err) {
+    logger.warn('resolveLocation: Places API call failed', {
+      kind: parsed.placeId ? 'placeId' : 'text',
+      error: err && err.message,
+    });
+    return { ok: false, reason: RESOLVE_REASON.ERROR };
+  }
 }
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
@@ -3317,23 +3382,38 @@ function formatPersonalMessagePreview(message) {
 // hint so the label isn't blank.
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
-  voiceChannelId, interaction,
+  voiceChannelId, interaction, recipientIds,
 }) {
   const rows = [];
-  const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  const baseCap = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  // When text-resolved recipients are already present, widen max_values
+  // so we can pre-check them via addDefaultUsers (Discord requires
+  // default_values.length ≤ max_values). Widen clamps at the hard cap;
+  // recipientIds past the hard cap are still in payload.recipientIds and
+  // get the send — only the visual pre-check truncates.
+  const defaults = Array.isArray(recipientIds) ? recipientIds : [];
+  const maxValues = defaults.length > 0
+    ? Math.min(DISCORD_SELECT_MAX_VALUES_HARD_CAP, config.QURL_SEND_MAX_RECIPIENTS, Math.max(baseCap, defaults.length))
+    : baseCap;
   // Placeholder surfaces both ceilings: pick-slot count (Discord's
   // setMaxValues) AND the post-expansion recipient cap. With roles in
   // the picker, a single slot can expand to many members — saying
   // only "1–10" would mislead users who pick 10 roles expecting 10
   // recipients.
   const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
-  rows.push(new ActionRowBuilder().addComponents(
-    new MentionableSelectMenuBuilder()
-      .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
-      .setMinValues(1)
-      .setMaxValues(maxValues)
-  ));
+  const picker = new MentionableSelectMenuBuilder()
+    .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
+    .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
+    .setMinValues(1)
+    .setMaxValues(maxValues);
+  if (defaults.length > 0) {
+    // Text-path recipientIds are user IDs only — parseRecipientMentions
+    // expands roles to members before partition. addDefaultUsers is the
+    // matching API on MentionableSelectMenuBuilder (addDefaultRoles
+    // would be wrong here — we never persist role IDs).
+    picker.addDefaultUsers(...defaults.slice(0, maxValues));
+  }
+  rows.push(new ActionRowBuilder().addComponents(picker));
   // Self-destruct StringSelectMenu: "No self-destruct timer" + 7
   // curated presets sourced from SELF_DESTRUCT_PRESETS in utils/time.
   // The `default: true` flag on the matching option keeps the
@@ -3547,7 +3627,12 @@ async function handleQurlSlashSend(interaction, params) {
   let flow_id;
   let orphanFlowCreated = false;
   try {
-    await interaction.deferReply({ ephemeral: true });
+    // /qurl map defers before resolveLocation; skip the redundant
+    // defer here so discord.js doesn't throw "Already replied or
+    // deferred".
+    if (!interaction.deferred) {
+      await interaction.deferReply({ ephemeral: true });
+    }
 
     const recipientsRaw = interaction.options.getString('recipients');
     const expiresIn = interaction.options.getString('expires-in') || '24h';
@@ -3816,6 +3901,7 @@ async function handleQurlSlashSend(interaction, params) {
       personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds,
     });
     // `return await` (not bare `return`) is load-bearing: without it
     // a Discord-side rejection on the confirm-card delivery would
@@ -4049,10 +4135,9 @@ async function handleQurlMap(interaction) {
   // or a pathological input could throw synchronously before reaching
   // handleQurlSlashSend's safety net, leaving cooldown set with no
   // visible response.
-  let locationUrl;
-  let locationName;
+  let parsedLocation;
   try {
-    ({ locationUrl, locationName } = parseLocationInput(locationValue));
+    parsedLocation = parseLocationInput(locationValue);
   } catch (err) {
     logger.error('handleQurlMap: parseLocationInput threw', {
       user_id: interaction.user.id, error: err && err.message,
@@ -4063,7 +4148,48 @@ async function handleQurlMap(interaction) {
       ephemeral: true,
     });
   }
-  // Explicit location-name override wins over the URL-derived name.
+
+  // Defer before Places resolve to stay inside Discord's 3 s ACK window.
+  // handleQurlSlashSend below checks `interaction.deferred` and skips
+  // its own defer.
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    // Token already expired or Discord transiently degraded — clear
+    // cooldown so the user can retry without waiting it out.
+    logger.warn('handleQurlMap: deferReply failed', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return undefined;
+  }
+  const resolved = await resolveLocation(parsedLocation);
+  if (!resolved.ok) {
+    clearCooldown(interaction.user.id);
+    let content;
+    switch (resolved.reason) {
+      case RESOLVE_REASON.NO_API_KEY:
+        content = '❌ Location search is unavailable on this server. Re-run with a full Google Maps URL.';
+        break;
+      case RESOLVE_REASON.NOT_FOUND:
+        // A stale-sentinel miss (sender picked a suggestion that's since
+        // been deleted upstream) gets a place-specific message. For
+        // free-text misses, echo the (sanitized) input so the sender
+        // can see what they typed.
+        content = parsedLocation.placeId
+          ? '❌ That place is no longer available. Pick another suggestion or paste a Google Maps URL.'
+          : `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
+        break;
+      default:
+        content = '❌ Location lookup failed. Please try again, or paste a Google Maps URL.';
+    }
+    return interaction.editReply({ content });
+  }
+  let { locationUrl, locationName } = resolved;
+
+  // Explicit location-name override wins over the resolved name
+  // (whether that came from a URL, a place_id lookup, or a free-text
+  // resolve).
   if (locationNameRaw && locationNameRaw.trim().length > 0) {
     locationName = locationNameRaw.trim();
   }
@@ -4206,6 +4332,10 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch — no
+      // transitionFlow fires here) so the user can recover their prior
+      // valid selection on re-open instead of starting from empty.
+      recipientIds: payload.recipientIds || [],
     }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
@@ -4377,6 +4507,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId: payload.voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -4490,6 +4621,10 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      // Mirror payload.recipientIds (unchanged on the reject branch —
+      // no transitionFlow fires) so the user can recover their prior
+      // valid selection on re-open of the picker.
+      recipientIds: payload.recipientIds || [],
     }),
   }).catch(logIgnoredDiscordErr);
 
@@ -4633,6 +4768,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
       personalMessage: payload.personalMessage,
       voiceChannelId,
       interaction,
+      recipientIds: newPayload.recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -4710,6 +4846,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
       personalMessage: newPayload.personalMessage,
       voiceChannelId: newPayload.voiceChannelId,
       interaction,
+      recipientIds,
     }),
   }).catch(logIgnoredDiscordErr);
 }
@@ -6126,6 +6263,9 @@ const commands = [
             opt.setName('location')
               .setDescription('Google Maps URL, or a place / address to search')
               .setRequired(true)
+              // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+              // free text is resolved server-side via resolveLocation.
+              .setAutocomplete(true)
               // 500 chars covers full Google Maps URLs (which can be
               // 200-400 chars after place params + coordinates) plus
               // headroom; not tied to the recipients-parser cap because
@@ -6601,13 +6741,152 @@ function isAckTimeoutError(err) {
   return typeof err.message === 'string' && ACK_TIMEOUT_MSG_RE.test(err.message);
 }
 
+// Below this length, autocomplete suggestions are noise (single-letter
+// prefixes match thousands of places) and the per-keystroke Places
+// cost isn't justified.
+const AUTOCOMPLETE_MIN_QUERY_LENGTH = 2;
+
+// Sampled-warn cadence for autocomplete failures. The catch logs at
+// `debug` per-call to avoid keystroke-rate log spam during a Places
+// outage; this counter emits one `warn` per AUTOCOMPLETE_FAILURE_LOG_BURST
+// failures so SRE has a coarse signal that autocomplete is degraded
+// (vs. no traffic) without flooding logs. resolveLocation's send-time
+// `warn` carries the load-bearing signal — this is secondary visibility.
+const AUTOCOMPLETE_FAILURE_LOG_BURST = 50;
+let autocompleteFailureBurst = 0;
+
+// Discord caps each choice's `name` (label) and `value` (handler input)
+// at 100 chars. Labels (name + address) often need truncation; values
+// (`qurl_place:<placeId>`) almost never do, but we drop pathological
+// ones so one bad result doesn't fail the whole response.
+const AUTOCOMPLETE_CHOICE_NAME_MAX = 100;
+const AUTOCOMPLETE_CHOICE_VALUE_MAX = 100;
+const AUTOCOMPLETE_MAX_CHOICES = 25;
+
+// Per Discord's contract, MUST respond within 3 s. Two-layer error
+// handling: the inner try catches Places I/O failures (ticks the
+// sampled SRE counter; that's its intent — "Places is degraded"); the
+// outer try catches anything else (early-return respond([]) throws on
+// expired token, etc.) without ticking the counter, since those aren't
+// Places-degradation signals.
+async function handleAutocomplete(interaction) {
+  try {
+    // `return await` (not bare `return`) so a rejected `respond([])`
+    // promise is caught by the outer try/catch instead of leaking out
+    // of the async function unhandled. Each early-return is the
+    // contract handler — surface the rejection through the outer
+    // recovery path instead of propagating up to the dispatch caller.
+    if (interaction.commandName !== 'qurl') {
+      return await interaction.respond([]);
+    }
+    // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
+    // (see commands.js:~3502) but Discord could still deliver an
+    // autocomplete interaction without a guildId. Without this guard a
+    // user who somehow triggered autocomplete in DM would burn the
+    // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
+    // about to be rejected.
+    if (!interaction.guildId) {
+      return await interaction.respond([]);
+    }
+    const subcommand = interaction.options.getSubcommand(false);
+    const focused = interaction.options.getFocused(true);
+    if (subcommand !== 'map' || focused?.name !== 'location') {
+      return await interaction.respond([]);
+    }
+    const rawQuery = (focused.value || '').trim();
+    if (rawQuery.length < AUTOCOMPLETE_MIN_QUERY_LENGTH) {
+      return await interaction.respond([]);
+    }
+    // A pasted URL is already a stable identifier — parseLocationInput
+    // passes it through verbatim and suggestions would just clutter.
+    if (/^https?:\/\//i.test(rawQuery)) {
+      return await interaction.respond([]);
+    }
+
+    let results;
+    try {
+      results = await searchPlaces(rawQuery);
+    } catch (err) {
+      // Per-call log at debug so keystroke-rate failures don't spam.
+      logger.debug('autocomplete handler failed', {
+        command: interaction.commandName,
+        error: err && err.message,
+      });
+      // Sampled SRE signal: emit one warn per BURST failures so a
+      // Places outage is visible (vs. silent autocomplete-only degrade).
+      if (++autocompleteFailureBurst >= AUTOCOMPLETE_FAILURE_LOG_BURST) {
+        logger.warn('autocomplete handler failure burst', {
+          count: autocompleteFailureBurst,
+          error: err && err.message,
+        });
+        autocompleteFailureBurst = 0;
+      }
+      return await interaction.respond([]);
+    }
+
+    const choices = [];
+    for (const p of results) {
+      if (choices.length >= AUTOCOMPLETE_MAX_CHOICES) break;
+      // Skip dud entries early instead of relying on submit-time decode
+      // to reject them — saves the user a "place no longer available"
+      // error on a malformed Google response.
+      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) {
+        // Debug, not warn: would fire per-keystroke during a Google
+        // place_id format drift, drowning logs. Operator can grep for
+        // this when investigating "why is my dropdown empty?" — that's
+        // the upstream-shape-drift signal.
+        logger.debug('autocomplete: dropped prediction (place_id failed shape check)', {
+          place_id: p.placeId,
+        });
+        continue;
+      }
+      // Places marks `main_text` and `description` as optional; if both
+      // are missing, searchPlaces returns `name: undefined` and the
+      // label would render as the literal string "undefined". Discord
+      // also rejects empty/whitespace names, so just skip.
+      if (!p.name) continue;
+      const value = encodePlaceIdSentinel(p.placeId);
+      if (value.length > AUTOCOMPLETE_CHOICE_VALUE_MAX) continue;
+      const label = p.address ? `${p.name} — ${p.address}` : p.name;
+      // Discord validates name length in UTF-16 code units, not code
+      // points, so we cap by `.length`. Back off by 1 if the boundary
+      // would leave a lone high surrogate so we don't ship a
+      // half-emoji (which Discord renders as tofu). Deliberately NOT
+      // `safeCodepointSlice` — that helper counts codepoints, which
+      // can ship a string whose `.length` > 100 for emoji-heavy
+      // labels (each surrogate pair is 2 UTF-16 units but 1 codepoint).
+      // Always-check (not just on truncation): a label that's exactly
+      // 100 UTF-16 units AND ends with a lone high surrogate would
+      // otherwise slip through the fast path.
+      let end = Math.min(label.length, AUTOCOMPLETE_CHOICE_NAME_MAX);
+      if (end > 0) {
+        const lastUnit = label.charCodeAt(end - 1);
+        if (lastUnit >= 0xD800 && lastUnit <= 0xDBFF) end -= 1;
+      }
+      const name = end === label.length ? label : label.slice(0, end);
+      choices.push({ name, value });
+    }
+    return await interaction.respond(choices);
+  } catch (err) {
+    // Non-Places-I/O failure (respond() on expired token, getSubcommand
+    // throw on malformed interaction, etc.). Doesn't advance the burst
+    // counter — those aren't Places-degradation signals.
+    logger.debug('autocomplete handler unhandled', {
+      command: interaction.commandName,
+      error: err && err.message,
+    });
+    try { await interaction.respond([]); } catch { /* ignore */ }
+    return undefined;
+  }
+}
+
 // Handle command interactions
 async function handleCommand(interaction) {
-  // /qurl now has zero options after the button-driven redesign; no other
-  // command in this file uses autocomplete. Discord can still deliver
-  // autocomplete events (legacy clients, stale registrations) — short-
-  // circuit them so they don't fall through to the chat-input path.
-  if (interaction.isAutocomplete()) return;
+  // Autocomplete fires per-keystroke and must respond within 3s. Route
+  // it off the chat-input path so the autocomplete handler doesn't drag
+  // in the metrics + mode-flip-defense overhead that handleQurlSlashSend
+  // and friends need.
+  if (interaction.isAutocomplete()) return handleAutocomplete(interaction);
 
   if (!interaction.isChatInputCommand()) return;
 
@@ -6894,6 +7173,14 @@ module.exports = {
       renderRecipientWarnings,
       renderConfirmCardContent,
       parseLocationInput,
+      resolveLocation,
+      RESOLVE_REASON,
+      handleAutocomplete,
+      // Test-only reset: the autocomplete-failure burst counter is
+      // module-level state that accumulates across tests within a
+      // file unless explicitly cleared.
+      _resetAutocompleteFailureBurst: () => { autocompleteFailureBurst = 0; },
+      AUTOCOMPLETE_FAILURE_LOG_BURST,
       safeDecodeURIComponent,
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,

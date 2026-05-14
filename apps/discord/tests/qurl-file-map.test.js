@@ -143,7 +143,15 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: jest.fn(),
 }));
 
-jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
+// Shared places-mock — see tests/helpers/places-mock.js for the
+// single source of truth for the encode/decode/shape contract.
+const {
+  mockPlacesModule,
+  mockSearchPlaces,
+  mockFindPlaceFromText,
+  mockGetPlaceDetails,
+} = require('./helpers/places-mock');
+jest.mock('../src/places', () => mockPlacesModule);
 
 // Flow-state stubs. Each test overrides per-call to assert on the
 // supersedeOrCreate/transitionFlow/deleteFlow contracts.
@@ -177,6 +185,11 @@ const {
   renderConfirmCardContent,
   resolveMentionableSelection,
   parseLocationInput,
+  resolveLocation,
+  RESOLVE_REASON,
+  handleAutocomplete,
+  _resetAutocompleteFailureBurst,
+  AUTOCOMPLETE_FAILURE_LOG_BURST,
   safeDecodeURIComponent,
   softenCooldown,
   SEND_STAGE_AWAITING_CONFIRM,
@@ -265,7 +278,7 @@ function makeInteraction({
   });
   const optGetAttachment = jest.fn((name) => options[name] ?? null);
 
-  return {
+  const interaction = {
     user: { id: userId, username: 'Sender' },
     guildId,
     channelId,
@@ -278,13 +291,19 @@ function makeInteraction({
     },
     reply: jest.fn().mockResolvedValue(undefined),
     editReply: jest.fn().mockResolvedValue(undefined),
-    deferReply: jest.fn().mockResolvedValue(undefined),
     followUp: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockResolvedValue(undefined),
     deferUpdate: jest.fn().mockResolvedValue(undefined),
     replied: false,
     deferred: false,
   };
+  // deferReply MUST flip `deferred` so the no-double-defer contract in
+  // handleQurlSlashSend (`if (!interaction.deferred)`) is actually
+  // exercised — otherwise handleQurlMap → handleQurlSlashSend would
+  // double-defer and the test would silently pass on a path that throws
+  // in production with "Already replied or deferred".
+  interaction.deferReply = jest.fn(async () => { interaction.deferred = true; });
+  return interaction;
 }
 
 const VALID_ATTACHMENT = Object.freeze({
@@ -311,6 +330,9 @@ beforeEach(() => {
   mockDeleteFlow.mockReset();
   mockTransitionFlow.mockReset();
   mockDb.getGuildApiKey.mockReset();
+  mockSearchPlaces.mockReset().mockResolvedValue([]);
+  mockFindPlaceFromText.mockReset().mockResolvedValue(null);
+  mockGetPlaceDetails.mockReset().mockResolvedValue(null);
   mockSupersedeOrCreate.mockResolvedValue({ created: true, version: 1 });
   mockDeleteFlow.mockResolvedValue({ deleted: true });
   mockTransitionFlow.mockResolvedValue({ result: 'ok', version: 2 });
@@ -1140,6 +1162,8 @@ describe('parseLocationInput', () => {
   test('Google Maps short URL passes through verbatim', () => {
     const r = parseLocationInput('https://goo.gl/maps/abc123');
     expect(r.locationUrl).toBe('https://goo.gl/maps/abc123');
+    expect(r.placeId).toBeUndefined();
+    expect(r.text).toBeUndefined();
   });
 
   test('Google Maps place URL passes through with derived name', () => {
@@ -1148,63 +1172,520 @@ describe('parseLocationInput', () => {
     expect(r.locationName).toBeTruthy();
   });
 
-  test('plain place name synthesizes a search URL', () => {
+  test('api=1&query= form extracts the name (round-trip for re-shared qURL map URLs)', () => {
+    // The URL form resolveLocation constructs: `/maps/search/?api=1&
+    // query=<name>&query_place_id=<id>`. If a sender re-shares one of
+    // these URLs through /qurl map, parseLocationInput needs to pull
+    // the name out so the recipient embed has a label — without this
+    // branch, only `?q=<name>` and `/place/<name>` were extracted.
+    const url = 'https://www.google.com/maps/search/?api=1&query=Eiffel+Tower&query_place_id=ChIJxxx';
+    const r = parseLocationInput(url);
+    expect(r.locationUrl).toBe(url);
+    expect(r.locationName).toBe('Eiffel Tower');
+  });
+
+  test('place_id sentinel parses into a placeId branch (no URL synthesized)', () => {
+    // Wire contract: the autocomplete handler encodes selected places
+    // as `qurl_place:<placeId>` so the slash submit can route through
+    // a Places Details lookup instead of synthesizing a per-viewer
+    // /maps/search/<text> URL. The sentinel prefix MUST match
+    // PLACE_ID_SENTINEL_PREFIX in places.js — a drift here breaks
+    // every in-flight autocomplete pick.
+    const r = parseLocationInput('qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o');
+    expect(r.placeId).toBe('ChIJ37FjGE63t4kRD2_jXSF1F9o');
+    expect(r.locationUrl).toBeNull();
+    expect(r.locationName).toBeNull();
+  });
+
+  test('plain place name returns text branch for server-side resolution', () => {
+    // The free-text branch no longer synthesizes a /maps/search/<text>
+    // URL — that URL was the source of the per-recipient geo-bias bug.
+    // parseLocationInput now defers resolution to resolveLocation,
+    // which hits Places Find Place at send time and pins to a place_id.
     const r = parseLocationInput('Eiffel Tower, Paris');
-    expect(r.locationUrl).toContain('google.com/maps/search');
-    expect(r.locationName).toBe('Eiffel Tower, Paris');
+    expect(r.locationUrl).toBeNull();
+    expect(r.locationName).toBeNull();
+    expect(r.text).toBe('Eiffel Tower, Paris');
   });
 
-  test('plain non-URL text falls through to synth-search', () => {
+  test('plain non-URL text returns text branch', () => {
     const r = parseLocationInput('not a url just plain text input');
-    expect(r.locationUrl).toContain('google.com/maps/search');
+    expect(r.text).toBe('not a url just plain text input');
+    expect(r.locationUrl).toBeNull();
   });
 
-  test('https URL that does NOT match MAPS_URL_PATTERNS is treated as plain text and synth-searched', () => {
-    // The MAPS_URL_PATTERNS regexes are quite specific (host + path
-    // shape). A non-Google https URL fails them all, so parseLocationInput
-    // falls through to the plain-text branch and synth-searches with
-    // the raw input as the search query. isGoogleMapsURL re-validation
-    // applies inside parseLocationInput when an extracted URL pattern
-    // matches — the fall-through covers the "doesn't even match the
-    // regex" case directly.
+  test('https URL that does NOT match MAPS_URL_PATTERNS falls through to text branch', () => {
+    // A non-Google https URL fails every MAPS_URL_PATTERNS regex, so
+    // parseLocationInput hands it to resolveLocation as free text.
+    // resolveLocation will then ask Places to find a real place — the
+    // spoofed host never lands in locationUrl. (Previously the spoofed
+    // URL was URL-encoded into a synth /maps/search/<text> URL; the
+    // recipient-visible behavior is equivalent — google.com host —
+    // but now goes through a place_id resolution rather than a
+    // per-viewer-biased search query.)
     const r = parseLocationInput('https://evil.example.com/maps/place/x');
-    expect(r.locationUrl).toContain('google.com/maps/search');
-    // The original URL is encoded into the search query, not used as
-    // the locationUrl.
-    expect(r.locationUrl).not.toContain('evil.example.com/maps/place');
+    expect(r.locationUrl).toBeNull();
+    expect(r.text).toBe('https://evil.example.com/maps/place/x');
   });
 
   test('malformed %-encoding in the input does not throw', () => {
     expect(() => parseLocationInput('https://www.google.com/maps/place/%ZZ-broken')).not.toThrow();
   });
 
-  test('spoofed host (google.com.evil.com) fails the regex AND falls through to synth-search', () => {
+  test('spoofed host (google.com.evil.com) fails the regex AND falls through to text branch', () => {
     // Defense-in-depth contract: MAPS_URL_PATTERNS pins the literal
     // `google.com/` token (slash forces an end-of-host boundary), so a
     // spoofed host like `google.com.evil.com/maps/place/x` cannot match
-    // any pattern. parseLocationInput therefore takes the synth-search
-    // fall-through with the entire raw input as the search query —
-    // isGoogleMapsURL never gets a chance to look at the spoofed host.
-    // The conditional `if (detectedUrl && isGoogleMapsURL(detectedUrl))`
-    // remains as defense-in-depth in case a future pattern relaxes the
-    // host pin; this test pins the current contract.
+    // any pattern. parseLocationInput therefore routes the whole input
+    // to the text branch — isGoogleMapsURL never gets a chance to look
+    // at the spoofed host. The conditional `if (detectedUrl &&
+    // isGoogleMapsURL(detectedUrl))` remains as defense-in-depth in
+    // case a future pattern relaxes the host pin; this test pins the
+    // current contract.
+    //
+    // Downstream: resolveLocation feeds the spoofed text to Places
+    // Find Place. Whatever Places returns becomes the locationUrl —
+    // a google.com host, place_id-pinned — so the spoofed host never
+    // becomes the link target regardless of what Places interprets.
     const spoofed = 'https://google.com.evil.com/maps/place/Eiffel-Tower';
     const r = parseLocationInput(spoofed);
-    // INTENDED UX: the recipient embed renders `locationName` as a
-    // LABEL on a Maps link whose TARGET is google.com. The spoofed
-    // string is visible (so the recipient sees what was searched),
-    // but the click goes to google.com/maps/search/?<encoded-spoof>.
-    // sanitizeContentLabel further strips bidi/control + markdown-
-    // escapes the label before it lands in the embed, so the visible
-    // label text can't render as a clickable masked link or flip
-    // direction via U+202E.
-    const parsed = new URL(r.locationUrl);
-    expect(parsed.hostname).toBe('www.google.com');
-    expect(parsed.pathname.startsWith('/maps/search/')).toBe(true);
-    // The raw spoofed input is the search query — recipient embeds
-    // render that as text on a google.com link, not as a clickable
-    // link to the spoofed host.
-    expect(r.locationName).toBe(spoofed);
+    expect(r.locationUrl).toBeNull();
+    expect(r.text).toBe(spoofed);
+  });
+});
+
+describe('resolveLocation', () => {
+  // resolveLocation is the server-side hop that turns a parsed
+  // location input into a place_id-pinned URL. URL inputs short-
+  // circuit (no API call). Sentinel + free-text inputs hit Places
+  // — these tests pin the three reason codes and the success shapes.
+  beforeEach(() => {
+    mockSearchPlaces.mockReset().mockResolvedValue([]);
+    mockFindPlaceFromText.mockReset().mockResolvedValue(null);
+    mockGetPlaceDetails.mockReset().mockResolvedValue(null);
+  });
+
+  test('URL branch passes through without an API call', async () => {
+    const r = await resolveLocation({
+      locationUrl: 'https://goo.gl/maps/abc123',
+      locationName: 'My Place',
+    });
+    expect(r.ok).toBe(true);
+    expect(r.locationUrl).toBe('https://goo.gl/maps/abc123');
+    expect(r.locationName).toBe('My Place');
+    expect(mockFindPlaceFromText).not.toHaveBeenCalled();
+    expect(mockGetPlaceDetails).not.toHaveBeenCalled();
+  });
+
+  test('placeId branch calls getPlaceDetails and builds a place_id-pinned URL', async () => {
+    mockGetPlaceDetails.mockResolvedValueOnce({
+      placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o',
+      name: 'The White House',
+      address: '1600 Pennsylvania Ave NW, Washington, DC',
+    });
+    const r = await resolveLocation({ placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o' });
+    expect(r.ok).toBe(true);
+    expect(r.locationName).toBe('The White House');
+    // The canonical URL must carry both the human-readable query and
+    // the place_id pin. The place_id is what eliminates per-viewer
+    // geo-bias — without it, the URL would degrade to /maps/search/<text>
+    // behavior which is the bug we're fixing.
+    expect(r.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
+    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
+  });
+
+  test('text branch calls findPlaceFromText and pins to the top result', async () => {
+    mockFindPlaceFromText.mockResolvedValueOnce({
+      placeId: 'ChIJxxx',
+      name: 'The White House',
+      address: '1600 Pennsylvania Ave NW',
+    });
+    const r = await resolveLocation({ text: 'the whitehouse' });
+    expect(r.ok).toBe(true);
+    expect(r.locationUrl).toContain('query_place_id=ChIJxxx');
+    expect(r.locationName).toBe('The White House');
+  });
+
+  test('text branch returns not_found when Places has no candidates', async () => {
+    mockFindPlaceFromText.mockResolvedValueOnce(null);
+    const r = await resolveLocation({ text: 'asdfasdfasdf' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
+  });
+
+  test('placeId branch returns not_found when Place Details returns null', async () => {
+    mockGetPlaceDetails.mockResolvedValueOnce(null);
+    const r = await resolveLocation({ placeId: 'ChIJ-deleted-place' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(RESOLVE_REASON.NOT_FOUND);
+  });
+
+  test('text branch returns error when the Places call throws', async () => {
+    mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
+    const r = await resolveLocation({ text: 'somewhere' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(RESOLVE_REASON.ERROR);
+  });
+
+  test('hard-fails with no_api_key when GOOGLE_MAPS_API_KEY is unset', async () => {
+    // Mutate the already-mocked config in place rather than
+    // jest.resetModules — resetting the module registry would force
+    // commands.js to re-execute, which re-runs registerFlow on a
+    // fresh dispatcher and breaks every downstream "duplicate-register
+    // throws" test in the suite.
+    const configMock = require('../src/config');
+    const orig = configMock.GOOGLE_MAPS_API_KEY;
+    delete configMock.GOOGLE_MAPS_API_KEY;
+    try {
+      const r = await resolveLocation({ text: 'eiffel tower' });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe(RESOLVE_REASON.NO_API_KEY);
+    } finally {
+      configMock.GOOGLE_MAPS_API_KEY = orig;
+    }
+  });
+});
+
+describe('handleAutocomplete', () => {
+  // The autocomplete dispatcher must (a) gate on commandName + subcommand
+  // + focused-option-name, (b) honor the min-length cap, (c) skip Places
+  // for URL inputs (where suggestions would just clutter), and (d) build
+  // sentinel `qurl_place:<placeId>` values that the slash submit can
+  // round-trip through resolveLocation. Together these contracts ensure
+  // the autocomplete UX layer feeds the same per-place URL pinning that
+  // the server-side fallback uses.
+  beforeEach(() => {
+    mockSearchPlaces.mockReset().mockResolvedValue([]);
+    // The autocomplete-failure burst counter is module-level state;
+    // reset between tests so a leftover count can't trip the sampled
+    // warn on a later test's first failure.
+    _resetAutocompleteFailureBurst();
+  });
+
+  function makeAutocompleteInteraction({
+    subcommand = 'map',
+    focused = { name: 'location', value: 'whitehouse' },
+    guildId = 'guild-1',
+  } = {}) {
+    const respond = jest.fn().mockResolvedValue(undefined);
+    return {
+      commandName: 'qurl',
+      guildId,
+      respond,
+      options: {
+        getSubcommand: () => subcommand,
+        getFocused: () => focused,
+      },
+    };
+  }
+
+  // Generate a place_id-shaped string for tests. The autocomplete
+  // handler filters out entries that don't match the documented
+  // place_id char class + length floor, so any fake fixture must
+  // mimic the shape (>=16 chars of [A-Za-z0-9_-]).
+  function fakePlaceId(seed) {
+    const s = String(seed);
+    return s.length >= 16 ? s : `ChIJ${'a'.repeat(16 - s.length)}${s}`;
+  }
+
+  test('responds empty for non-qurl commands', async () => {
+    const int = makeAutocompleteInteraction();
+    int.commandName = 'link';
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('responds empty for DM autocomplete (no guildId)', async () => {
+    // handleQurlMap rejects DMs at submit time, but Discord could
+    // still deliver an autocomplete interaction without a guildId.
+    // Without this gate a DM-typed query would burn the operator's
+    // global GOOGLE_MAPS_API_KEY quota for a send that's about to
+    // be rejected anyway.
+    const int = makeAutocompleteInteraction({ guildId: null });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('responds empty for /qurl file (only /qurl map has suggestions)', async () => {
+    const int = makeAutocompleteInteraction({ subcommand: 'file' });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('responds empty for /qurl map with a non-location focused option', async () => {
+    const int = makeAutocompleteInteraction({ focused: { name: 'personal-message', value: 'hi' } });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('skips Places call for partial queries below the min-length cap', async () => {
+    // Cuts per-keystroke Places cost. The user typically pauses for the
+    // dropdown to populate; without this gate single-letter prefixes
+    // would fire a Places call on every keystroke.
+    const int = makeAutocompleteInteraction({ focused: { name: 'location', value: 'a' } });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('skips Places call when input already looks like a URL', async () => {
+    // URLs are already stable identifiers — autocomplete suggestions
+    // would just clutter the dropdown. The slash submit's URL branch
+    // passes them through verbatim.
+    const int = makeAutocompleteInteraction({ focused: { name: 'location', value: 'https://goo.gl/maps/abc' } });
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('returns sentinel-encoded choices with name + address labels', async () => {
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: fakePlaceId('whitehouse_dc_id'), name: 'The White House', address: '1600 Pennsylvania Ave NW, Washington, DC' },
+      { placeId: fakePlaceId('whitehouse_uk_id'), name: 'Whitehouse Pub', address: 'Manchester, UK' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    expect(mockSearchPlaces).toHaveBeenCalledWith('whitehouse');
+    expect(int.respond).toHaveBeenCalledTimes(1);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(2);
+    expect(choices[0]).toEqual({
+      name: 'The White House — 1600 Pennsylvania Ave NW, Washington, DC',
+      value: `qurl_place:${fakePlaceId('whitehouse_dc_id')}`,
+    });
+    expect(choices[1].value).toBe(`qurl_place:${fakePlaceId('whitehouse_uk_id')}`);
+    // Disambiguation is the whole point: the user-visible label has
+    // to differentiate "White House DC" from "Whitehouse Pub UK",
+    // otherwise the autocomplete picker is no better than free text.
+    expect(choices[0].name).not.toBe(choices[1].name);
+  });
+
+  test('truncates a label exceeding the 100-char Discord cap (UTF-16 units)', async () => {
+    const longAddress = '1234 Very Long Street Name, Somewhere Far Away, In A Large City With A Long Name, Region, Country 99999';
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('longlabel'), name: 'Place', address: longAddress }]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choice = int.respond.mock.calls[0][0][0];
+    expect(choice.name.length).toBeLessThanOrEqual(100);
+    // The sentinel value is short enough to never need truncation
+    // (qurl_place: + 27-char place_id ≈ 38). Pin this — if a future
+    // change starts packing more into the value we want a test to fail.
+    expect(choice.value.length).toBeLessThanOrEqual(100);
+  });
+
+  test('boundary — exactly 100 UTF-16 units ending in a lone high surrogate gets backed off', async () => {
+    // Defense-in-depth: a label that's exactly at the cap AND ends
+    // mid-surrogate-pair would otherwise slip past a truncation-only
+    // gate. The check runs on every choice, not just truncated ones.
+    // 98 ASCII + 1 high surrogate + 1 low surrogate = 100 UTF-16
+    // units; the final pair is the boundary. We then trim the source
+    // to 98 + 1 high surrogate = 99 units, ending in a lone high
+    // surrogate (this is contrived — Places wouldn't return this — but
+    // pins the always-check contract).
+    const malformed = 'a'.repeat(99) + '\uD83D'; // lone high surrogate at index 99 → length 100
+    expect(malformed.length).toBe(100);
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('boundary1'), name: malformed, address: '' }]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choice = int.respond.mock.calls[0][0][0];
+    // Backed off by 1 — no lone high surrogate at the boundary.
+    expect(choice.name.length).toBe(99);
+    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    expect(choice.name).not.toMatch(loneHigh);
+  });
+
+  test('truncation does not split a surrogate pair (emoji-heavy label stays valid UTF-16)', async () => {
+    // Discord measures name length in UTF-16 code units; a naïve
+    // codepoint slice could ship a string whose .length > 100 if the
+    // first 100 codepoints contain many surrogate pairs, OR could
+    // leave a lone high surrogate at the boundary. The UTF-16 slice
+    // + surrogate-backoff must produce a string that's <= 100 units
+    // AND has no orphan surrogate.
+    const emoji = '🏛️'; // 🏛 + variation selector — 3 UTF-16 units
+    const name = (emoji + 'X').repeat(40); // 160 UTF-16 units of mixed surrogate + ASCII
+    mockSearchPlaces.mockResolvedValueOnce([{ placeId: fakePlaceId('emojiplace'), name, address: '' }]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choice = int.respond.mock.calls[0][0][0];
+    expect(choice.name.length).toBeLessThanOrEqual(100);
+    // No lone high surrogate at the boundary.
+    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    expect(choice.name).not.toMatch(loneHigh);
+  });
+
+  test('drops a choice whose value would exceed the 100-char Discord cap', async () => {
+    // Defensive: Google docs leave place_id length open-ended. If a
+    // future result ships an >89-char place_id, we'd produce a value
+    // > 100 chars, which would fail Discord's API for the whole
+    // response. Drop just that choice so the rest of the dropdown
+    // still works.
+    const good1 = fakePlaceId('good1_id');
+    const good2 = fakePlaceId('good2_id');
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: good1, name: 'Good', address: 'addr' },
+      { placeId: 'x'.repeat(95), name: 'Bad (too long)', address: 'addr' },
+      { placeId: good2, name: 'Also Good', address: 'addr' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(2);
+    expect(choices.map(c => c.value)).toEqual([`qurl_place:${good1}`, `qurl_place:${good2}`]);
+  });
+
+  test('drops a choice whose name is missing (Places returned no main_text + no description)', async () => {
+    // Places marks both main_text and description as optional. If both
+    // are missing, searchPlaces yields { name: undefined }, and a
+    // naive label would render as the literal string "undefined".
+    // Discord also rejects empty/whitespace names, so the choice must
+    // be skipped — pin both the skip behavior and that valid entries
+    // around it still render.
+    const valid = fakePlaceId('valid_for_label');
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: valid, name: 'Valid', address: 'addr' },
+      { placeId: fakePlaceId('no_name_entry'), name: undefined, address: 'addr2' },
+      { placeId: fakePlaceId('empty_name_xx'), name: '', address: 'addr3' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(1);
+    expect(choices[0].value).toBe(`qurl_place:${valid}`);
+  });
+
+  test('outer-catch handles a rejection from an early-return respond() (return await contract)', async () => {
+    // The early-return guards use `return await interaction.respond([])`
+    // (not bare `return`) so a rejected promise is routed through the
+    // outer try/catch instead of leaking out of the async function. A
+    // bare `return` would propagate the rejection to the dispatch
+    // caller (which would surface as "this command is unresponsive"
+    // to the user). Pin: the rejection IS caught + recovery fires.
+    const int = makeAutocompleteInteraction({ guildId: null });
+    let respondCallCount = 0;
+    int.respond = jest.fn(async () => {
+      respondCallCount += 1;
+      if (respondCallCount === 1) throw new Error('Unknown interaction');
+      // The outer-catch's best-effort fallback respond([]) — let this
+      // one resolve so we don't double-throw.
+    });
+    await handleAutocomplete(int);
+    // Outer catch fired its fallback respond([]) on the rejection.
+    expect(respondCallCount).toBe(2);
+  });
+
+  test('drops a choice whose place_id fails the documented shape check', async () => {
+    // Mirror of the decodePlaceIdSentinel shape gate at encode time.
+    // If Google ever ships a malformed place_id (chars outside
+    // [A-Za-z0-9_-] or shorter than 16 chars), skip that entry rather
+    // than render a dud choice that submit-time decode would reject.
+    const valid = fakePlaceId('valid_id_one');
+    mockSearchPlaces.mockResolvedValueOnce([
+      { placeId: valid, name: 'Valid', address: 'addr' },
+      { placeId: 'tooshort', name: 'Bad short', address: 'addr' },
+      { placeId: 'has spaces in it just bad', name: 'Bad chars', address: 'addr' },
+    ]);
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    const choices = int.respond.mock.calls[0][0];
+    expect(choices).toHaveLength(1);
+    expect(choices[0].value).toBe(`qurl_place:${valid}`);
+  });
+
+  test('caps results at 25 (Discord choice limit)', async () => {
+    mockSearchPlaces.mockResolvedValueOnce(
+      Array.from({ length: 40 }, (_, i) => ({
+        placeId: fakePlaceId(`place_id_${i}_padding_xyz`),
+        name: `Place ${i}`,
+        address: 'addr',
+      })),
+    );
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    expect(int.respond.mock.calls[0][0]).toHaveLength(25);
+  });
+
+  test('responds empty (does not throw) when Places API throws', async () => {
+    // Autocomplete must not surface "this command failed" toasts on a
+    // transient Places hiccup. Empty response keeps the dropdown UX
+    // graceful — the user can still type free text and the server-side
+    // fallback in resolveLocation will retry at send time.
+    mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: OVER_QUERY_LIMIT'));
+    const int = makeAutocompleteInteraction();
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+  });
+
+  test('failure burst counter emits one warn per BURST failures (SRE outage signal)', async () => {
+    // Per-call log is `debug` to avoid keystroke-rate spam. The sampled
+    // `warn` is the visible signal for SRE that autocomplete is degraded
+    // (vs. just no traffic). Pins the contract: one warn fires when the
+    // burst counter crosses AUTOCOMPLETE_FAILURE_LOG_BURST, and resets.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
+      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    // Just below the burst threshold — no warn yet.
+    const burstWarns = () => logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns()).toBe(0);
+
+    // The BURST-th failure trips the sampled warn.
+    mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+    await handleAutocomplete(makeAutocompleteInteraction());
+    expect(burstWarns()).toBe(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'autocomplete handler failure burst',
+      expect.objectContaining({ count: AUTOCOMPLETE_FAILURE_LOG_BURST }),
+    );
+
+    // Counter reset — next burst starts fresh.
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST - 1; i++) {
+      mockSearchPlaces.mockRejectedValueOnce(new Error('Places API status: UNKNOWN_ERROR'));
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    expect(burstWarns()).toBe(1);
+  });
+
+  test('failure burst counter does not increment when the early-return respond() throws', async () => {
+    // Narrow-catch contract: the burst counter is a "Places is
+    // degraded" signal, not a generic handler-failure counter. If an
+    // early-return `interaction.respond([])` throws (e.g. expired
+    // interaction token), that's a Discord-side issue, not a Places
+    // problem — the counter must NOT advance.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
+      const int = makeAutocompleteInteraction({ guildId: null }); // hits DM gate early-return
+      int.respond = jest.fn(async () => { throw new Error('Unknown interaction'); });
+      await handleAutocomplete(int);
+    }
+    const burstWarns = logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns).toBe(0);
+  });
+
+  test('failure burst counter does not increment on the success path', async () => {
+    // A successful autocomplete must NOT advance the burst counter,
+    // otherwise the sampled warn would fire eventually during normal
+    // operation and look like an outage in logs.
+    const logger = require('../src/logger');
+    logger.warn.mockClear();
+    mockSearchPlaces.mockResolvedValue([{ placeId: 'ChIJ1', name: 'X', address: 'Y' }]);
+    for (let i = 0; i < AUTOCOMPLETE_FAILURE_LOG_BURST + 5; i++) {
+      await handleAutocomplete(makeAutocompleteInteraction());
+    }
+    const burstWarns = logger.warn.mock.calls.filter(
+      (call) => call[0] === 'autocomplete handler failure burst',
+    ).length;
+    expect(burstWarns).toBe(0);
   });
 });
 
@@ -2300,7 +2781,50 @@ describe('handleQurlMap — slash entry', () => {
     expect(payload.locationName).toMatch(/Eiffel Tower/);
   });
 
-  test('arbitrary text → synthesized search URL', async () => {
+  test('deferReply throws (expired token) → cooldown cleared, no flow row, no editReply', async () => {
+    // Regression: if Discord's interaction token expires between
+    // setCooldown and deferReply (or Discord transiently degrades),
+    // we must not strand the user in a 30s cooldown window with no
+    // visible response. The catch clears cooldown and returns
+    // without attempting an editReply that would also fail.
+    const int = makeInteraction({
+      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    // Override the mock to throw on defer.
+    int.deferReply = jest.fn(async () => { const e = new Error('Unknown interaction'); e.code = 10062; throw e; });
+    await handleQurlMap(int);
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    expect(int.editReply).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+  });
+
+  test('defers ONCE — handleQurlSlashSend skips its own defer when already deferred', async () => {
+    // Regression: handleQurlMap defers BEFORE resolveLocation so a slow
+    // Places call can't blow Discord's 3s ACK window. handleQurlSlashSend
+    // then guards its own deferReply on `!interaction.deferred`. Without
+    // that guard, the second deferReply would throw "Already replied or
+    // deferred" in production (in tests the mock just resolves twice
+    // silently — see makeInteraction's deferReply override).
+    mockFindPlaceFromText.mockResolvedValueOnce({ placeId: 'ChIJ1', name: 'Place', address: '' });
+    const int = makeInteraction({
+      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    expect(int.deferReply).toHaveBeenCalledTimes(1);
+  });
+
+  test('arbitrary text → resolved through Places to a place_id-pinned URL', async () => {
+    // Free-text inputs route through findPlaceFromText so every
+    // recipient opens the same destination — Google's per-viewer
+    // geo-bias on /maps/search/<text> is the bug this whole change
+    // is fixing.
+    mockFindPlaceFromText.mockResolvedValueOnce({
+      placeId: 'ChIJ4zGFAZpYwokRGUGph3Mf37k',
+      name: 'Central Park',
+      address: 'New York, NY',
+    });
     const int = makeInteraction({
       options: {
         location: 'Central Park, NYC',
@@ -2309,9 +2833,122 @@ describe('handleQurlMap — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     await handleQurlMap(int);
+    expect(mockFindPlaceFromText).toHaveBeenCalledWith('Central Park, NYC');
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
-    expect(payload.locationUrl).toBe('https://www.google.com/maps/search/Central%20Park%2C%20NYC');
+    expect(payload.locationUrl).toContain('query_place_id=ChIJ4zGFAZpYwokRGUGph3Mf37k');
     expect(payload.locationName).toMatch(/Central Park/);
+  });
+
+  test('free-text input is trimmed + 500-char-capped before reaching Places', async () => {
+    // handleQurlMap does `trim().slice(0, 500)` on the slash option;
+    // pin the boundary so a forged interaction can't smuggle a
+    // longer-than-the-server-side-cap query through. Whitespace at the
+    // boundary is trimmed FIRST (so the content slice gets the full
+    // 500 chars, not whitespace + 450 content chars).
+    mockFindPlaceFromText.mockResolvedValueOnce({
+      placeId: 'ChIJ4zGFAZpYwokRGUGph3Mf37k', name: 'X', address: 'Y',
+    });
+    const padding = '  '.repeat(40); // 80 chars of leading whitespace, trimmed first
+    const content = 'a'.repeat(600); // 600 chars of content, slice() caps at 500
+    const int = makeInteraction({
+      options: {
+        location: padding + content + padding,
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const calledWith = mockFindPlaceFromText.mock.calls[0][0];
+    expect(calledWith.length).toBe(500);
+    expect(calledWith.startsWith('a')).toBe(true);
+    expect(calledWith.endsWith('a')).toBe(true);
+  });
+
+  test('place_id sentinel from autocomplete → resolved through Place Details', async () => {
+    // When the sender picks a suggestion from the autocomplete
+    // dropdown, the `location:` value arrives as the sentinel form
+    // `qurl_place:<placeId>`. handleQurlMap routes that through
+    // Place Details (cheap, one API call) to hydrate the canonical
+    // name + address, then pins the URL to the chosen place_id.
+    mockGetPlaceDetails.mockResolvedValueOnce({
+      placeId: 'ChIJ37FjGE63t4kRD2_jXSF1F9o',
+      name: 'The White House',
+      address: '1600 Pennsylvania Ave NW',
+    });
+    const int = makeInteraction({
+      options: {
+        location: 'qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    expect(mockGetPlaceDetails).toHaveBeenCalledWith('ChIJ37FjGE63t4kRD2_jXSF1F9o');
+    const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+    expect(payload.locationUrl).toContain('query_place_id=ChIJ37FjGE63t4kRD2_jXSF1F9o');
+    expect(payload.locationName).toBe('The White House');
+  });
+
+  test('Places returns no match → actionable ephemeral, cooldown cleared, no flow row', async () => {
+    mockFindPlaceFromText.mockResolvedValueOnce(null);
+    const int = makeInteraction({
+      options: {
+        location: 'zzzz-no-such-place',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    // Defers BEFORE the Places call so a slow lookup can't blow
+    // Discord's 3s ACK window — resolveLocation errors land as
+    // editReply, not reply.
+    expect(int.deferReply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Couldn't find/),
+    }));
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    // Honest user error (no matching place) — don't strand them
+    // for 30s. Same shape as the empty-location + DM branches.
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+  });
+
+  test('stale-sentinel NOT_FOUND → place-specific message (does NOT echo the wire sentinel)', async () => {
+    // Reviewer-flagged contract: when a sender picks a suggestion from
+    // autocomplete and the place is deleted upstream between pick and
+    // submit, the error message must not read `Couldn't find a place
+    // matching "qurl_place:ChIJ37FjGE63t4kRD2_jXSF1F9o..."` — that's user-hostile and leaks
+    // the wire format. Branch on parsedLocation.placeId to a place-
+    // specific message instead.
+    mockGetPlaceDetails.mockResolvedValueOnce(null);
+    const int = makeInteraction({
+      options: {
+        location: 'qurl_place:ChIJ-deleted-place',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const editReplyCall = int.editReply.mock.calls[0][0];
+    expect(editReplyCall.content).toMatch(/no longer available/);
+    expect(editReplyCall.content).not.toContain('qurl_place:');
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+  });
+
+  test('Places call throws → actionable ephemeral, cooldown cleared, no flow row', async () => {
+    mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
+    const int = makeInteraction({
+      options: {
+        location: 'somewhere',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/lookup failed/),
+    }));
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
   test('location-name override wins over URL-derived name', async () => {
@@ -4727,6 +5364,73 @@ describe('renderConfirmCardRows', () => {
     await handleQurlFile(int);
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
+  });
+
+  test('slash-entry WITH recipients → picker pre-checks the text-resolved ids via addDefaultUsers', async () => {
+    // Power-user bug: typing `recipients:@a @b` then opening the picker
+    // showed an empty dropdown — the originally-selected users were not
+    // pre-checked. Fix routes the resolved recipientIds through
+    // renderConfirmCardRows → MentionableSelectMenuBuilder.addDefaultUsers
+    // so Discord pre-checks them on dropdown open. The send still
+    // proceeds with the same set; this is purely a re-open UX fix.
+    // Roles in text get expanded to users by parseRecipientMentions, so
+    // we never pre-check roles here (addDefaultRoles would be wrong).
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const int = makeInteraction({
+      options: {
+        attachment: VALID_ATTACHMENT,
+        recipients: '<@100000000000000001> <@100000000000000002>',
+      },
+      guildMembers: {
+        '100000000000000001': {},
+        '100000000000000002': {},
+      },
+    });
+    await handleQurlFile(int);
+    expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.addDefaultUsers).toHaveBeenCalledWith(
+      '100000000000000001',
+      '100000000000000002',
+    );
+  });
+
+  test('slash-entry WITHOUT recipients → picker does NOT call addDefaultUsers', async () => {
+    // When there are no resolved recipients (needsPicker:true), the
+    // renderer must skip the addDefaultUsers call entirely — Discord
+    // rejects a select menu where default_values is empty-but-present,
+    // and the picker stays empty by design for first-pick UX.
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },  // no recipients → needsPicker
+    });
+    await handleQurlFile(int);
+    expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.addDefaultUsers).not.toHaveBeenCalled();
+  });
+
+  test('slash-entry with >USER_SELECT_PER_PICK_CAP recipients widens max_values to fit all defaults', async () => {
+    // Discord requires default_values.length ≤ max_values. The picker's
+    // default per-pick cap is 10; if the user text-resolved 12 valid
+    // recipients, the initial render must widen max_values to 12 so
+    // addDefaultUsers(12 ids) is accepted (bounded by Discord's 25 hard
+    // cap on select-menu max_values).
+    const { MentionableSelectMenuBuilder } = require('discord.js');
+    MentionableSelectMenuBuilder.mockClear();
+    const ids = Array.from({ length: 12 }, (_, i) => `1000000000000000${String(i + 10)}`);
+    const mentionList = ids.map((id) => `<@${id}>`).join(' ');
+    const guildMembers = Object.fromEntries(ids.map((id) => [id, {}]));
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: mentionList },
+      guildMembers,
+    });
+    await handleQurlFile(int);
+    const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+    expect(builder.setMaxValues).toHaveBeenCalledWith(12);
+    expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
   });
 
   test('voice button label stays under Discord\'s 80 UTF-16 cap with an ALL-EMOJI channel name (worst case)', async () => {

@@ -67,6 +67,8 @@ jest.mock('discord.js', () => {
       addOptions: jest.fn().mockReturnThis(),
       setMinValues: jest.fn().mockReturnThis(),
       setMaxValues: jest.fn().mockReturnThis(),
+      setDefaultValues: jest.fn().mockReturnThis(),
+      addDefaultUsers: jest.fn().mockReturnThis(),
       addComponents: jest.fn().mockReturnThis(),
       setDisabled: jest.fn().mockReturnThis(),
       setMaxLength: jest.fn().mockReturnThis(),
