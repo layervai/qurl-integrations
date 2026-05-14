@@ -2509,6 +2509,24 @@ describe('handleSendConfirmNoteButton', () => {
     expect(int.showModal).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
+
+  test('showModal failure → ephemeral reply fallback (no silent "interaction failed" toast)', async () => {
+    // showModal failure leaves the button-click unacknowledged. The
+    // pre-fix behavior swallowed the error in .catch with only a
+    // warn log, leaving the user with Discord's generic "interaction
+    // failed" toast and no remediation. The fallback ack closes that
+    // gap symmetrically with the menu handlers' error paths.
+    const int = makeButtonInteraction();
+    int.showModal.mockRejectedValueOnce(new Error('Discord 500'));
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not open the note editor/i),
+      ephemeral: true,
+    }));
+    // Flow state must remain untouched — showModal failure is a
+    // pure UX surface; we don't bump the version on it.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

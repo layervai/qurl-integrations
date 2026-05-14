@@ -4864,6 +4864,14 @@ async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
     logger.warn('handleSendConfirmNoteButton: showModal failed', {
       flow_id, error: err && err.message,
     });
+    // showModal failure leaves the button-click interaction
+    // unacknowledged. Without a fallback ack the user sees Discord's
+    // generic "interaction failed" toast with no remediation hint —
+    // symmetric with the menu handlers' error-followUp shape.
+    return interaction.reply({
+      content: '❌ Could not open the note editor — try again.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
   });
 }
 
