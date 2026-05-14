@@ -538,14 +538,31 @@ function parseLocationInput(rawInput) {
 }
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
+  // Fail-loud on a missing/invalid expiresAt rather than rendering
+  // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
+  // the contract-violation throw in handleAddRecipients. Validate
+  // FIRST so the description below can interpolate directly.
+  if (!Number.isFinite(expiresAt)) {
+    throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
+  }
+
   // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
   // + 64-char cap + 'Someone' fallback. Centralized so a future caller
   // adding another sender-name surface picks up the same spoof defense.
   const safeSender = sanitizeDisplayName(senderAlias);
 
+  // Tight two-line description folds sender + expiry into one block —
+  // previously a separate addFields() row, which Discord padded with
+  // extra vertical whitespace pushing the button further away.
+  // `<t:N:R>` is Discord's client-side relative-time markdown: the
+  // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
+  // and "1 hour ago" once expired. No bot-side editing needed.
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription(`**${safeSender}** opened a door for you.`);
+    .setDescription(
+      `**${safeSender}** opened a door for you.\n`
+      + `🕐 Closes <t:${expiresAt}:R>`
+    );
 
   if (personalMessage) {
     // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file` and
@@ -568,42 +585,19 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
   }
 
-  embed.addFields(
-    {
-      // Discord's native relative-time markdown: <t:UNIX:R> renders
-      // CLIENT-SIDE based on the viewer's current time, so the recipient
-      // sees "in 1 day" at send time, "in 16 hours" 8 hours later, and
-      // "1 hour ago" once the link has expired. No bot-side editing
-      // needed — Discord handles the live update.
-      //
-      // Fail-loud on a missing/invalid expiresAt rather than rendering
-      // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
-      // the contract-violation throw in handleAddRecipients (same fail-
-      // loud-over-silent-degradation principle).
-      name: '\u200B',
-      value: (() => {
-        if (!Number.isFinite(expiresAt)) {
-          throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
-        }
-        return `\ud83d\udd50 Door closes <t:${expiresAt}:R>`;
-      })(),
-    },
-  );
-
   // Link button: opens qurlLink in the recipient's browser on a
   // single click. No interaction handler needed — Discord handles
-  // the redirect.
+  // the redirect. ButtonStyle.Link is the only style that carries a
+  // URL (Primary/Success/Danger/Secondary fire interaction handlers,
+  // no redirect).
   //
-  // Style is `ButtonStyle.Link` because Discord requires URL buttons
-  // to be Link-style (Primary/Success/Danger/Secondary cannot carry
-  // a URL — they only fire interaction handlers). Link buttons render
-  // gray, which can read as "text" rather than a clickable affordance.
-  // The leading 🔗 emoji adds visual weight so the recipient sees a
-  // clear button shape; arrow `→` dropped from the label since the
-  // emoji conveys the same "go elsewhere" intent.
+  // 🚪 emoji ties the "opened a door for you" copy to the action —
+  // sender line, embed accent, and button emoji all reinforce one
+  // metaphor instead of three. Door is a stronger visual mark on a
+  // grey-Link button than the generic 🔗 chain it replaces.
   const stepThrough = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setEmoji('🔗')
+    .setEmoji('🚪')
     .setLabel('Step Through')
     .setURL(qurlLink);
   const components = [new ActionRowBuilder().addComponents(stepThrough)];
