@@ -24,6 +24,10 @@ function encodePlaceIdSentinel(placeId) {
 // who types `qurl_place:foo` as free text falls through to the text
 // branch (and gets a "couldn't find X" message echoing their input)
 // rather than the misleading "place no longer available" branch.
+// TODO(upstream-place-id-shape): the 16-char floor is our invariant
+// — if Google ever ships a shorter place_id, autocomplete entries
+// for it would be silently dropped and stale picks would refuse to
+// decode. Same drift-marker convention as TODO(upstream-rebrand).
 const PLACE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{16,}$/;
 
 function decodePlaceIdSentinel(value) {

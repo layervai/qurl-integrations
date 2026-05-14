@@ -327,7 +327,6 @@ describe('searchPlaces', () => {
     // We fetch (CAP) distinct queries to fill the cache, then one more
     // distinct query to trigger eviction of the oldest, then re-query
     // the oldest and verify it re-fetches.
-    const places = require('../src/places');
     places._resetAutocompleteCache();
     // Mock 502 distinct fetches with unique payloads so each goes
     // through the API. CAP=500 + 1 overflow + 1 re-query = 502.
