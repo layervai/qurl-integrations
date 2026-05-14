@@ -5868,6 +5868,15 @@ async function handleAutocomplete(interaction) {
     if (interaction.commandName !== 'qurl') {
       return interaction.respond([]);
     }
+    // Reject DM autocomplete — handleQurlMap rejects DMs at submit time
+    // (see commands.js:~3502) but Discord could still deliver an
+    // autocomplete interaction without a guildId. Without this guard a
+    // user who somehow triggered autocomplete in DM would burn the
+    // operator's global GOOGLE_MAPS_API_KEY quota for a send that's
+    // about to be rejected.
+    if (!interaction.guildId) {
+      return interaction.respond([]);
+    }
     const subcommand = interaction.options.getSubcommand(false);
     const focused = interaction.options.getFocused(true);
     if (subcommand !== 'map' || focused?.name !== 'location') {

@@ -711,10 +711,15 @@ describe('handleAutocomplete', () => {
     _resetAutocompleteFailureBurst();
   });
 
-  function makeAutocompleteInteraction({ subcommand = 'map', focused = { name: 'location', value: 'whitehouse' } } = {}) {
+  function makeAutocompleteInteraction({
+    subcommand = 'map',
+    focused = { name: 'location', value: 'whitehouse' },
+    guildId = 'guild-1',
+  } = {}) {
     const respond = jest.fn().mockResolvedValue(undefined);
     return {
       commandName: 'qurl',
+      guildId,
       respond,
       options: {
         getSubcommand: () => subcommand,
@@ -726,6 +731,18 @@ describe('handleAutocomplete', () => {
   test('responds empty for non-qurl commands', async () => {
     const int = makeAutocompleteInteraction();
     int.commandName = 'link';
+    await handleAutocomplete(int);
+    expect(int.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  test('responds empty for DM autocomplete (no guildId)', async () => {
+    // handleQurlMap rejects DMs at submit time, but Discord could
+    // still deliver an autocomplete interaction without a guildId.
+    // Without this gate a DM-typed query would burn the operator's
+    // global GOOGLE_MAPS_API_KEY quota for a send that's about to
+    // be rejected anyway.
+    const int = makeAutocompleteInteraction({ guildId: null });
     await handleAutocomplete(int);
     expect(int.respond).toHaveBeenCalledWith([]);
     expect(mockSearchPlaces).not.toHaveBeenCalled();
@@ -1902,6 +1919,24 @@ describe('handleQurlMap — slash entry', () => {
     expect(payload.resourceType).toBe('maps');
     expect(payload.locationUrl).toMatch(/google\.com\/maps\/place\/Eiffel/);
     expect(payload.locationName).toMatch(/Eiffel Tower/);
+  });
+
+  test('deferReply throws (expired token) → cooldown cleared, no flow row, no editReply', async () => {
+    // Regression: if Discord's interaction token expires between
+    // setCooldown and deferReply (or Discord transiently degrades),
+    // we must not strand the user in a 30s cooldown window with no
+    // visible response. The catch clears cooldown and returns
+    // without attempting an editReply that would also fail.
+    const int = makeInteraction({
+      options: { location: 'somewhere', recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    // Override the mock to throw on defer.
+    int.deferReply = jest.fn(async () => { const e = new Error('Unknown interaction'); e.code = 10062; throw e; });
+    await handleQurlMap(int);
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    expect(int.editReply).not.toHaveBeenCalled();
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
   });
 
   test('defers ONCE — handleQurlSlashSend skips its own defer when already deferred', async () => {

@@ -89,6 +89,9 @@ function cacheGet(key) {
     autocompleteCache.delete(key);
     return null;
   }
+  // Note: TTL is from initial insert — a hot entry still expires at
+  // exactly 60 s. Intentional for autocomplete (refresh-after-60s lets
+  // upstream-changed places propagate), not a window-extending LRU.
   // Defensive copy on read so a caller's mutation can't poison the
   // next hit. Paired with the copy-on-write in cacheSet — together
   // they isolate the cached array from both writer and reader.
@@ -209,12 +212,13 @@ module.exports = {
   PLACE_ID_SENTINEL_PREFIX,
   encodePlaceIdSentinel,
   decodePlaceIdSentinel,
-  // Test-only: clear the cache + in-flight map between tests so leftover
-  // state from one test can't satisfy a fetch expectation in the next.
-  ...(process.env.NODE_ENV !== 'production' && {
-    _resetAutocompleteCache: () => {
-      autocompleteCache.clear();
-      autocompleteInflight.clear();
-    },
-  }),
+  // Test-only reset hook. Exported unconditionally — a NODE_ENV gate
+  // would silently ship to any container without NODE_ENV=production
+  // set (common default-empty case). Calling it in production is a
+  // harmless no-op (cache rebuilds in ≤60s); the underscore-prefixed
+  // name signals it's not part of the public API.
+  _resetAutocompleteCache: () => {
+    autocompleteCache.clear();
+    autocompleteInflight.clear();
+  },
 };
