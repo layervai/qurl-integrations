@@ -250,6 +250,39 @@ describe('searchPlaces', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test('in-flight map cleans up after a rejected request (next call hits the API)', async () => {
+    // Without `.finally(autocompleteInflight.delete)`, a rejected
+    // in-flight promise would stick around as a permanently-rejecting
+    // entry — subsequent calls for the same key would re-await the
+    // same rejection and never retry. Pin the cleanup contract.
+    fetchMock.mockRejectedValueOnce(new Error('transient network failure'));
+    await expect(searchPlaces('eiffel')).rejects.toThrow(/transient/);
+    // Second call must hit fetch again (in-flight slot was freed) and
+    // can succeed independently.
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: 'OK',
+      predictions: [{ place_id: 'ChIJ1', description: 'Eiffel Tower' }],
+    }));
+    const r = await searchPlaces('eiffel');
+    expect(r).toEqual([{ placeId: 'ChIJ1', name: 'Eiffel Tower', address: '' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test('cached results are defensive-copied (caller mutation does not poison the cache)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: 'OK',
+      predictions: [{ place_id: 'ChIJ1', description: 'White House' }],
+    }));
+    const first = await searchPlaces('white');
+    // A future caller could sort/splice the returned array (e.g.
+    // ranking suggestions). Mutating must NOT bleed into the next hit.
+    first.push({ placeId: 'POISON', name: 'X', address: '' });
+    first.length = 0;
+    const second = await searchPlaces('white');
+    expect(second).toEqual([{ placeId: 'ChIJ1', name: 'White House', address: '' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test('strips ASCII control chars + caps at 500 chars before reaching the request URL', async () => {
     // Header-injection defense: a NUL or newline in the query MUST NOT
     // ride into the outgoing URL. (Modern fetch wouldn't allow it
@@ -297,6 +330,18 @@ describe('findPlaceFromText', () => {
 
   test('returns null when status is OK but candidates is empty', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'OK', candidates: [] }));
+    const r = await findPlaceFromText('zzzz');
+    expect(r).toBeNull();
+  });
+
+  test('returns null when the top candidate has no place_id (malformed response)', async () => {
+    // Defensive: a candidate without a place_id can't be pinned to a
+    // URL downstream — buildPlaceUrl would emit `query_place_id=`
+    // which Google renders as a broken search. Surface as not_found.
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: 'OK',
+      candidates: [{ name: 'Place without an id', formatted_address: '...' }],
+    }));
     const r = await findPlaceFromText('zzzz');
     expect(r).toBeNull();
   });
@@ -372,5 +417,17 @@ describe('getPlaceDetails', () => {
     }));
     const r = await getPlaceDetails('ChIJabc');
     expect(r.placeId).toBe('ChIJabc');
+  });
+
+  test('returns null when both the response and caller place_id are empty', async () => {
+    // Edge case: no place_id available anywhere. buildPlaceUrl
+    // downstream would emit `query_place_id=` which Google renders
+    // as a broken search — surface as not_found instead.
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      status: 'OK',
+      result: { name: 'X', formatted_address: 'Y' },
+    }));
+    const r = await getPlaceDetails('');
+    expect(r).toBeNull();
   });
 });

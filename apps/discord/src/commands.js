@@ -503,7 +503,7 @@ function safeDecodeURIComponent(s) {
 // sentinel + text branches. The URL branch synchronously short-circuits.
 function parseLocationInput(rawInput) {
   const decodedPlaceId = decodePlaceIdSentinel(rawInput);
-  if (decodedPlaceId) {
+  if (decodedPlaceId !== null) {
     return { locationUrl: null, locationName: null, placeId: decodedPlaceId };
   }
   let detectedUrl = null;
@@ -3114,10 +3114,9 @@ async function handleQurlSlashSend(interaction, params) {
   let flow_id;
   let orphanFlowCreated = false;
   try {
-    // /qurl map may defer earlier (before its server-side Places resolve)
-    // to harden against the 3 s ACK window when Places is slow. Skip the
-    // second defer in that case — discord.js throws "Already replied or
-    // deferred" otherwise.
+    // /qurl map defers before resolveLocation; skip the redundant
+    // defer here so discord.js doesn't throw "Already replied or
+    // deferred".
     if (!interaction.deferred) {
       await interaction.deferReply({ ephemeral: true });
     }
@@ -3602,12 +3601,20 @@ async function handleQurlMap(interaction) {
     });
   }
 
-  // Defer BEFORE the awaited Places call so a slow lookup can't blow
-  // Discord's 3 s ACK window. handleQurlSlashSend below detects
-  // `interaction.deferred` and skips its own deferReply. The
-  // resolveLocation error replies fall through to editReply since the
-  // interaction is now deferred.
-  await interaction.deferReply({ ephemeral: true });
+  // Defer before Places resolve to stay inside Discord's 3 s ACK window.
+  // handleQurlSlashSend below checks `interaction.deferred` and skips
+  // its own defer.
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    // Token already expired or Discord transiently degraded — clear
+    // cooldown so the user can retry without waiting it out.
+    logger.warn('handleQurlMap: deferReply failed', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return undefined;
+  }
   const resolved = await resolveLocation(parsedLocation);
   if (!resolved.ok) {
     clearCooldown(interaction.user.id);
@@ -3617,7 +3624,13 @@ async function handleQurlMap(interaction) {
         content = '❌ Location search is unavailable on this server. Re-run with a full Google Maps URL.';
         break;
       case RESOLVE_REASON.NOT_FOUND:
-        content = `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
+        // A stale-sentinel miss (sender picked a suggestion that's since
+        // been deleted upstream) gets a place-specific message. For
+        // free-text misses, echo the (sanitized) input so the sender
+        // can see what they typed.
+        content = parsedLocation.placeId
+          ? '❌ That place is no longer available. Pick another suggestion or paste a Google Maps URL.'
+          : `❌ Couldn't find a place matching "${sanitizeContentLabel(locationValue.slice(0, 80))}". Try a more specific name or paste a Google Maps URL.`;
         break;
       default:
         content = '❌ Location lookup failed. Please try again, or paste a Google Maps URL.';
@@ -5869,7 +5882,10 @@ async function handleAutocomplete(interaction) {
       // Discord validates name length in UTF-16 code units, not code
       // points, so we cap by `.length`. Back off by 1 if the cap would
       // land on a lone high surrogate so we don't ship a half-emoji
-      // (which Discord renders as tofu).
+      // (which Discord renders as tofu). Deliberately NOT
+      // `safeCodepointSlice` — that helper counts codepoints, which
+      // can ship a string whose `.length` > 100 for emoji-heavy labels
+      // (each surrogate pair is 2 UTF-16 units but 1 codepoint).
       let name = label;
       if (label.length > AUTOCOMPLETE_CHOICE_NAME_MAX) {
         let end = AUTOCOMPLETE_CHOICE_NAME_MAX;

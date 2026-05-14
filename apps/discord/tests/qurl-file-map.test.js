@@ -1936,6 +1936,28 @@ describe('handleQurlMap — slash entry', () => {
     expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
+  test('stale-sentinel NOT_FOUND → place-specific message (does NOT echo the wire sentinel)', async () => {
+    // Reviewer-flagged contract: when a sender picks a suggestion from
+    // autocomplete and the place is deleted upstream between pick and
+    // submit, the error message must not read `Couldn't find a place
+    // matching "qurl_place:ChIJabc..."` — that's user-hostile and leaks
+    // the wire format. Branch on parsedLocation.placeId to a place-
+    // specific message instead.
+    mockGetPlaceDetails.mockResolvedValueOnce(null);
+    const int = makeInteraction({
+      options: {
+        location: 'qurl_place:ChIJ-deleted-place',
+        recipients: '<@100000000000000001>',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlMap(int);
+    const editReplyCall = int.editReply.mock.calls[0][0];
+    expect(editReplyCall.content).toMatch(/no longer available/);
+    expect(editReplyCall.content).not.toContain('qurl_place:');
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+  });
+
   test('Places call throws → actionable ephemeral, cooldown cleared, no flow row', async () => {
     mockFindPlaceFromText.mockRejectedValueOnce(new Error('upstream timeout'));
     const int = makeInteraction({

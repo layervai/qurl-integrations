@@ -91,7 +91,10 @@ function cacheGet(key) {
     autocompleteCache.delete(key);
     return null;
   }
-  return entry.results;
+  // Defensive copy on read so a caller's mutation can't poison the
+  // next hit. Paired with the copy-on-write in cacheSet — together
+  // they isolate the cached array from both writer and reader.
+  return entry.results.slice();
 }
 
 function cacheSet(key, results) {
@@ -99,7 +102,10 @@ function cacheSet(key, results) {
     const oldest = autocompleteCache.keys().next().value;
     if (oldest !== undefined) autocompleteCache.delete(oldest);
   }
-  autocompleteCache.set(key, { results, expiresAt: Date.now() + AUTOCOMPLETE_CACHE_TTL_MS });
+  // Copy on write: searchPlaces returns the same `results` reference
+  // it hands us. Without this copy, a downstream mutation of the
+  // returned array would also mutate the stored entry.
+  autocompleteCache.set(key, { results: results.slice(), expiresAt: Date.now() + AUTOCOMPLETE_CACHE_TTL_MS });
 }
 
 async function searchPlaces(query) {
@@ -126,6 +132,8 @@ async function searchPlaces(query) {
       name: p.structured_formatting?.main_text || p.description,
       address: p.structured_formatting?.secondary_text || '',
     }));
+    // Cache ZERO_RESULTS too — a typo prefix like "asfasdf" otherwise
+    // hits Places on every keystroke. The 60 s TTL bounds staleness.
     cacheSet(key, results);
     return results;
   })().finally(() => autocompleteInflight.delete(key));
@@ -148,7 +156,7 @@ async function findPlaceFromText(query) {
     throw new Error(`Places API status: ${data.status}`);
   }
   const candidate = (data.candidates || [])[0];
-  if (!candidate) return null;
+  if (!candidate || !candidate.place_id) return null;
   return {
     placeId: candidate.place_id,
     name: candidate.name || candidate.formatted_address || '',
@@ -170,8 +178,14 @@ async function getPlaceDetails(placeId) {
   }
   const r = data.result;
   if (!r) return null;
+  // Fall back to the caller's placeId if the response omits it. Reject
+  // entirely if both are empty so buildPlaceUrl downstream can't ship
+  // a URL with `query_place_id=` (which Google renders as a broken
+  // search).
+  const resolvedId = r.place_id || placeId;
+  if (!resolvedId) return null;
   return {
-    placeId: r.place_id || placeId,
+    placeId: resolvedId,
     name: r.name || r.formatted_address || '',
     address: r.formatted_address || '',
   };
