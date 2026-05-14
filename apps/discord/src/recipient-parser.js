@@ -36,6 +36,14 @@
 //     that Discord would ping (`<@id>`, `<@&id>`) can't reach this
 //     slot because they parse as valid mentions in the passes above.
 //
+//     Note: standalone `@everyone` tokens are intercepted upstream by
+//     the gated detect-and-strip pass (`allowMassMention` opt — see
+//     parseRecipientMentions docstring below). The defuse here is the
+//     fallback for `@here`, `@Everyone` (inert case), and embedded
+//     forms like `here@everyone` that escape the gated path's word-
+//     boundary. Both layers preserve the "caller-can-interpolate-safely"
+//     contract above.
+//
 // SECURITY: `invalidTokens` ARE NOT escaped against Discord markdown — a pasted
 // `[link](https://evil)`, `||spoiler||`, or backtick-fenced content
 // will render with full markdown semantics if a caller interpolates
@@ -428,11 +436,15 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // fan-out-ping the channel. Insert a zero-width-space after `@`
     // — the rendered glyph is identical, but Discord's tokenizer
     // sees a different word and won't trigger the mass mention.
-    // Use a regex (not exact-match) because `@everyone!`,
-    // `@everyone:`, `@everyone.fix` etc. are single tokens after
-    // the strip pass (residue split class doesn't include
-    // punctuation) and would otherwise slip through. Replace all
-    // occurrences so a token like `here@everyone` is fully fenced.
+    // Standalone `@everyone` is intercepted by the gated detect-and-
+    // strip pass above, so the cases this defuse still catches are
+    // `@here`, `@Everyone` (case-mismatched / inert), and embedded
+    // forms like `here@everyone` that escape the gated path's word-
+    // boundary. Use a regex (not exact-match) because shapes like
+    // `@here:`, `here@everyone` survive the strip pass as single
+    // tokens (residue split class doesn't include punctuation) and
+    // would otherwise slip through. Replace all occurrences so a
+    // token like `here@everyone` is fully fenced.
     //
     // INTENTIONALLY case-sensitive (no `/i` flag) \u2014 Discord's mass-
     // mention parser is itself lowercase-only, so `@Everyone` is
