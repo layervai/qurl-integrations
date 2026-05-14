@@ -1,7 +1,8 @@
 /**
- * Comprehensive tests for src/commands.js — covers buildDeliveryEmbed, handleSend,
- * monitorLinkStatus, buildConfirmMsg, handleRevoke, revokeAllLinks, handleCommand,
- * and all slash command execute() functions.
+ * Comprehensive tests for src/commands.js — covers buildDeliveryEmbed,
+ * the send-pipeline back-half, monitorLinkStatus, buildConfirmMsg,
+ * handleRevoke, revokeAllLinks, handleCommand, and all slash command
+ * execute() functions.
  */
 
 // ---------------------------------------------------------------------------
@@ -183,7 +184,6 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -193,7 +193,6 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getChannelMembers: mockGetChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -282,7 +281,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'send'),
+      getSubcommand: jest.fn(() => 'file'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
@@ -1184,9 +1183,8 @@ describe('/qurl help subcommand', () => {
     expect(content).toContain('protected resource');
     expect(content).toContain('access link');
     // (4) Help text doesn't leak internal jargon. The "Large servers"
-    // section explains the /qurl send fanout caveat to end-users
-    // without naming the underlying GUILD_PRESENCES intent. That
-    // section goes away when 7b.3 deletes /qurl send.
+    // section explains the role-fanout caveat to end-users without
+    // naming the underlying GUILD_PRESENCES intent.
     expect(content).not.toContain('GUILD_PRESENCES');
   });
 });

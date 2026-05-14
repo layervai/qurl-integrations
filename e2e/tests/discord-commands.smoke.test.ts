@@ -131,19 +131,23 @@ describe('Discord command registration (smoke)', () => {
       // Prepend scope to the expectation so a mismatch surfaces which
       // scope regressed in the Jest failure header.
       expect({ scope: qurl._scope, subcommands })
-        .toEqual({ scope: qurl._scope, subcommands: ['file', 'help', 'map', 'revoke', 'send', 'setup', 'status'] });
+        .toEqual({ scope: qurl._scope, subcommands: ['file', 'help', 'map', 'revoke', 'setup', 'status'] });
     }
   });
 
-  it('has no ghost subcommands from the Python-bot era', () => {
-    // Intentional overlap with the exact-set assertion above: that test
-    // is the correctness invariant, this one is living documentation
-    // ("`list` and `clear` used to exist, must never return"). If the
-    // exact-set check is ever loosened to allow additional subcommands,
-    // this guard still catches the Kevin-report failure class.
+  it('has no ghost subcommands from the Python-bot era or the pre-/qurl-file flow', () => {
+    // Intentional overlap with the exact-set assertion above: that
+    // test is the correctness invariant, this one is living
+    // documentation for subcommands that USED to exist and must
+    // never return.
     //
-    // Both subcommands were the Python bot's catalog-era commands,
-    // removed when the bot was rewritten in Node.js.
+    // - `list`, `clear`: Python bot's catalog-era commands, removed
+    //   when the bot was rewritten in Node.js.
+    // - `send`: legacy multi-step "Send File / Send Location" wizard,
+    //   replaced by `/qurl file` + `/qurl map` which provide the same
+    //   capabilities with explicit slash options + inline confirm-card
+    //   menus. Removed in PR 7b.3 (no grace period — file/map ship
+    //   the same UX).
     for (const qurl of registrations) {
       const subcommandNames = (qurl.options ?? [])
         .filter((o) => o.type === SUBCOMMAND_OPTION_TYPE)
@@ -157,6 +161,7 @@ describe('Discord command registration (smoke)', () => {
       // regression that also changes the full set.
       expect(subcommandNames).not.toContain('list');
       expect(subcommandNames).not.toContain('clear');
+      expect(subcommandNames).not.toContain('send');
     }
   });
 });

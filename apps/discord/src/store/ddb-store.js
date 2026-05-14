@@ -1005,7 +1005,7 @@ async function recordQURLSendBatch(sends) {
       if (attempt === MAX_RETRIES) {
         // All attempts exhausted — fail loud rather than silently
         // dropping recipients. Caller's retry policy (workflow-level)
-        // decides whether to re-invoke the whole /qurl send command.
+        // decides whether to re-invoke the originating send command.
         throw new Error(`recordQURLSendBatch: ${remaining.length} unprocessed items after ${MAX_RETRIES + 1} attempts`);
       }
       // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms.

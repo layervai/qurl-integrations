@@ -121,7 +121,6 @@ jest.mock('../src/database', () => mockDb);
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
-  getChannelMembers: jest.fn(),
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -540,10 +539,9 @@ describe('safeDecodeURIComponent', () => {
 });
 
 describe('cross-command cooldown contract', () => {
-  // /qurl send, /qurl file, /qurl map share the sendCooldowns Map.
-  // setCooldown from any one MUST block the others — without this
-  // contract, a user could bypass the per-user throttle by alternating
-  // entry points.
+  // /qurl file and /qurl map share the sendCooldowns Map. setCooldown
+  // from one MUST block the other — without this contract, a user
+  // could bypass the per-user throttle by alternating entry points.
   beforeEach(() => sendCooldowns.clear());
 
   test('setCooldown via one user blocks isOnCooldown for the same user across all entry points', () => {
@@ -3254,8 +3252,6 @@ describe('constants + exports', () => {
       locationUrl: null,
       locationName: null,
       recipients: [{ id: u1, username: 'Alice', bot: false }],
-      target: 'user',
-      isVoiceContext: false,
       expiresIn: '24h',
       selfDestructSeconds: null,
       personalMessage: 'safe content',

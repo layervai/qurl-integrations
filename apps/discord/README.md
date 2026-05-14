@@ -5,10 +5,11 @@ linking and auto Contributor-role assignment for community members.
 
 ## Features
 
-- **`/qurl send`** — share a file or Google Maps location as a one-time qURL
-  link, delivered to each recipient via DM. Targets: a specific user, the
-  visible members of the current text channel, or your voice channel.
-- **`/qurl revoke`** — revoke all links from a previous `/qurl send`.
+- **`/qurl file`** — share a file as a one-time qURL link, delivered to each
+  recipient via DM. Recipients picked via @mentions or a user-select menu.
+- **`/qurl map`** — share a Google Maps location as a one-time qURL link,
+  delivered to each recipient via DM.
+- **`/qurl revoke`** — revoke all links from a previous send.
 - **`/qurl help`** — command reference.
 - **`/qurl setup`** / **`/qurl status`** — admin-only, configure the
   guild's qURL API key (stored AES-256-GCM encrypted at rest).
@@ -25,7 +26,8 @@ linking and auto Contributor-role assignment for community members.
 
 | Command | Description |
 |---------|-------------|
-| `/qurl send` | Send a file or location as one-time qURL links to a user / channel / voice-channel |
+| `/qurl file` | Send a file as one-time qURL links to picked recipients |
+| `/qurl map` | Send a Google Maps location as one-time qURL links to picked recipients |
 | `/qurl revoke` | Revoke links from a previous send |
 | `/qurl help` | Usage reference |
 | `/qurl setup` | *(admin)* Configure the guild's qURL API key |

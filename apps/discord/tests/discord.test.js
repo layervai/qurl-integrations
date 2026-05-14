@@ -1,8 +1,8 @@
 /**
  * Tests for src/discord.js — covers refreshCache, assignContributorRole,
  * notifyPRMerge, notifyBadgeEarned, postGoodFirstIssue, postReleaseAnnouncement,
- * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM,
- * getChannelMembers, shutdown, event handlers.
+ * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM, shutdown,
+ * event handlers.
  */
 
 jest.mock('../src/config', () => ({
@@ -104,7 +104,7 @@ const mockClient = {
 
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
-  GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildVoiceStates: 128, DirectMessages: 4096 },
+  GatewayIntentBits: { Guilds: 1, GuildMembers: 2 },
   EmbedBuilder: jest.fn().mockImplementation(() => ({
     setColor: jest.fn().mockReturnThis(), setTitle: jest.fn().mockReturnThis(),
     setDescription: jest.fn().mockReturnThis(), addFields: jest.fn().mockReturnThis(),
@@ -318,82 +318,6 @@ describe('discord module', () => {
       mockClient.users.fetch.mockRejectedValue(new Error('fail'));
       const result = await discord.sendDM('u2', 'Hello');
       expect(result).toBe(false);
-    });
-  });
-
-  describe('getChannelMembers', () => {
-    // Helper: turn a plain Map into something with .filter() returning an
-    // array that also has .map (matches discord.js Collection enough for
-    // these tests without pulling in the real class).
-    const asCollection = (map) => {
-      map.filter = (fn) => {
-        const r = []; for (const [, v] of map) if (fn(v)) r.push(v);
-        r.map = Array.prototype.map.bind(r); return r;
-      };
-      return map;
-    };
-
-    it('filters sender and bots on a text channel', () => {
-      const membersMap = asCollection(new Map([
-        ['s1', { id: 's1', user: { bot: false } }],
-        ['u2', { id: 'u2', user: { bot: false } }],
-        ['b1', { id: 'b1', user: { bot: true } }],
-      ]));
-      const result = discord.getChannelMembers({ type: 0, members: membersMap }, 's1'); // GuildText
-      expect(result).toHaveLength(1);
-    });
-
-    it('returns empty + warns on unsupported channel types (thread, forum, DM)', () => {
-      // The helper supports only GuildText / GuildVoice / GuildStageVoice.
-      // Other types either lack `.members` entirely (DM=1, GuildForum=15,
-      // GuildMedia=16) or expose a different shape (thread types 10/11/12
-      // give a ThreadMemberManager of ThreadMember objects whose `.user`
-      // is lazily populated). The runtime guard returns [] safely.
-      const threadResult = discord.getChannelMembers({ type: 11, members: {}, id: 'th1' }, 's1');
-      expect(threadResult).toEqual([]);
-      const dmResult = discord.getChannelMembers({ type: 1, id: 'dm1' }, 's1');
-      expect(dmResult).toEqual([]);
-      const nullResult = discord.getChannelMembers(null, 's1');
-      expect(nullResult).toEqual([]);
-    });
-
-    it('on a voice channel, returns voice-connected members only (NOT the @everyone view-perm scope)', () => {
-      // Regression: the prior implementation enumerated guild.members.cache
-      // filtered by ViewChannel perm, which on default servers (where
-      // @everyone has view) expanded to the entire guild — the
-      // "sends to everyone in the server" bug. Voice channels now resolve
-      // to channel.members (the voice-connected set in discord.js v14).
-      const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // sender — filtered
-        ['b1', { id: 'b1', user: { id: 'b1', bot: true } }],  // bot — filtered
-      ]));
-      const channel = {
-        type: 2, // GuildVoice — included for clarity; helper no longer branches on type
-        members: connected,
-      };
-      const result = discord.getChannelMembers(channel, 's1');
-      expect(result.map(u => u.id)).toEqual(['u2']);
-    });
-
-    it('on a stage-voice channel, also returns voice-connected only', () => {
-      const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-      ]));
-      const channel = {
-        type: 13, // GuildStageVoice
-        members: connected,
-      };
-      const result = discord.getChannelMembers(channel, 's1');
-      expect(result.map(u => u.id)).toEqual(['u2']);
-    });
-
-    it('returns empty when nobody else is connected to the voice channel', () => {
-      const connected = asCollection(new Map([
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // only sender
-      ]));
-      const result = discord.getChannelMembers({ type: 2, members: connected }, 's1');
-      expect(result).toEqual([]);
     });
   });
 
@@ -662,7 +586,6 @@ describe('discord module', () => {
   describe('exports', () => {
     it('exports all expected functions', () => {
       expect(typeof discord.sendDM).toBe('function');
-      expect(typeof discord.getChannelMembers).toBe('function');
       expect(typeof discord.assignContributorRole).toBe('function');
       expect(typeof discord.notifyPRMerge).toBe('function');
       expect(typeof discord.notifyBadgeEarned).toBe('function');
@@ -685,9 +608,9 @@ describe('discord module', () => {
     // throw path, a future "let's downgrade to a warn" refactor would
     // silently degrade the assertion. These tests pin the contract.
     it('throws when the required intent is not in the intents list', () => {
-      const intentsWithoutVoice = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
-      expect(() => discord.assertIntent(intentsWithoutVoice, 128, 'voice-channel /qurl send'))
-        .toThrow(/Missing required Discord intent for voice-channel \/qurl send/);
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */];
+      expect(() => discord.assertIntent(intentsList, 128, 'test feature'))
+        .toThrow(/Missing required Discord intent for test feature/);
     });
 
     it('throws when the required intent is undefined (partially-mocked GatewayIntentBits)', () => {
@@ -699,7 +622,62 @@ describe('discord module', () => {
     });
 
     it('does not throw when the required intent is present', () => {
-      expect(() => discord.assertIntent([1, 2, 128, 4096], 128, 'voice-channel /qurl send'))
+      expect(() => discord.assertIntent([1, 2, 128], 128, 'test feature'))
+        .not.toThrow();
+    });
+
+    // Pins the actual production canary description strings so a future
+    // refactor of the `assertIntent(..., '<feature>')` arg at discord.js:
+    // 38–39 fails this test instead of silently shipping a stale error
+    // message at boot. The prior version of this spec pinned a `/qurl send`
+    // description; this version tracks the live `/qurl file + /qurl map`
+    // wording.
+    it('production assertIntent invocations surface the live recipient-resolution feature label', () => {
+      // Construct the same intentsList shape src/discord.js declares (the
+      // numeric values are mocked at the top of this file — see the
+      // GatewayIntentBits mock). Drop GuildMembers (=2) to force the
+      // canary; the throw message MUST embed the production label so an
+      // oncall engineer reading boot logs gets the actionable feature.
+      expect(() => discord.assertIntent([1 /* Guilds */], 2 /* GuildMembers */,
+        '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)'))
+        .toThrow(/\/qurl file \+ \/qurl map recipient resolution/);
+    });
+  });
+
+  describe('assertNoIntent (negative canary)', () => {
+    // Pins the negative-intent guard: if a future PR silently adds back
+    // MessageContent / GuildPresences / DirectMessages / GuildVoiceStates
+    // to the intents array, the assertNoIntent invocations at
+    // discord.js:~45-50 fail loud at boot. This test pins both branches
+    // (re-added intent throws; absent intent doesn't).
+    it('throws when the disallowed intent IS in the intents list', () => {
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */, 4096 /* DirectMessages */];
+      expect(() => discord.assertNoIntent(intentsList, 4096, 'DirectMessages'))
+        .toThrow(/Intent `DirectMessages` was re-added without justification/);
+    });
+
+    it('does not throw when the disallowed intent is absent', () => {
+      const intentsList = [1 /* Guilds */, 2 /* GuildMembers */];
+      expect(() => discord.assertNoIntent(intentsList, 4096, 'DirectMessages'))
+        .not.toThrow();
+    });
+
+    it('does not throw when the bit is undefined (partially-mocked GatewayIntentBits)', () => {
+      // Unknown intent name in a future Discord.js bump shouldn't crash
+      // at boot just because the bit isn't in our mock.
+      expect(() => discord.assertNoIntent([1, 2], undefined, 'FutureIntent'))
+        .not.toThrow();
+    });
+
+    // Pin the documented asymmetry: assertIntent fails CLOSED on
+    // undefined (silent missing intent is a silent feature break);
+    // assertNoIntent fails OPEN on undefined (a bit that doesn't exist
+    // in GatewayIntentBits can't have been re-added). Putting both
+    // halves in one spec makes the contract grep-discoverable.
+    it('assertIntent and assertNoIntent disagree on undefined-bit handling (documented asymmetry)', () => {
+      expect(() => discord.assertIntent([1 /* Guilds */, 2 /* GuildMembers */], undefined, 'feature requiring missing intent'))
+        .toThrow(/Missing required Discord intent/);
+      expect(() => discord.assertNoIntent([1 /* Guilds */, 2 /* GuildMembers */], undefined, 'FutureIntent'))
         .not.toThrow();
     });
   });

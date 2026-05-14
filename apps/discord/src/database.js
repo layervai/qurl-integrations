@@ -163,11 +163,11 @@ const SAFE_ALTERS = {
   // dropdown so users don't re-select a no-op and see "0/0 links revoked".
   revoked_at: 'ALTER TABLE qurl_send_configs ADD COLUMN revoked_at TEXT',
   // Self-destruct timer (seconds) — one of the SELF_DESTRUCT_PRESETS the
-  // user picked in the /qurl send modal, forwarded to the connector as
-  // `viewer_ttl_seconds` so the rendered viewer page wipes content after
-  // N seconds. REAL because the smallest preset is 0.5. NULL ⇒ no timer
-  // (default). Persisted so the Add Recipients flow inherits the timer
-  // the original send chose.
+  // user picked on the /qurl file + /qurl map confirm card, forwarded to
+  // the connector as `viewer_ttl_seconds` so the rendered viewer page
+  // wipes content after N seconds. REAL because the smallest preset is
+  // 0.5. NULL ⇒ no timer (default). Persisted so the Add Recipients flow
+  // inherits the timer the original send chose.
   self_destruct_seconds: 'ALTER TABLE qurl_send_configs ADD COLUMN self_destruct_seconds REAL',
 };
 for (const [col, sql] of Object.entries(SAFE_ALTERS)) {

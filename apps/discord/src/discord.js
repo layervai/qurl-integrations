@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -14,20 +14,13 @@ const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 const intents = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
-  GatewayIntentBits.GuildVoiceStates,
-  // Needed for the /qurl send file path's DM-pivot: when the user
-  // clicks Send File from a guild channel, the bot DMs them and
-  // awaitMessages on that DM channel for the file drop. Without
-  // this intent the bot never sees DM messages and the awaitMessages
-  // call times out at 60s — even though the user dropped the file.
-  // Attachment metadata does NOT require MessageContent intent.
-  GatewayIntentBits.DirectMessages,
 ];
 
 // Per-feature intent canaries. Each line pins one intent to one feature
 // and fails loud if the intent has been removed from `intents` above —
-// converting silent-feature-break (e.g., voice-channel /qurl send
-// returning empty) into a startup error with a clear cause.
+// converting silent-feature-break (e.g., role-mention expansion in
+// recipient-parser.js silently resolving to an empty member set when
+// `GuildMembers` is dropped) into a startup error with a clear cause.
 //
 // `assertIntent` takes the intents list as its first argument (rather
 // than closing over the module-level `intents`) so it's directly
@@ -43,9 +36,41 @@ function assertIntent(intentsList, bit, requiredFor) {
   }
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(intents, GatewayIntentBits.GuildMembers, 'text-channel /qurl send recipient resolution (channel.members for view-perm holders)');
-assertIntent(intents, GatewayIntentBits.GuildVoiceStates, 'voice-channel /qurl send recipient resolution (channel.members for voice-connected)');
-assertIntent(intents, GatewayIntentBits.DirectMessages, '/qurl send file-pivot DM capture (awaitMessages for the user\'s file drop)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
+
+// Negative-intent canaries — pin that the bot has NOT silently
+// re-broadened gateway scope. Every intent listed here is either:
+//   - privileged (would re-introduce dev-portal toggle dependency:
+//     MessageContent, GuildPresences); or
+//   - non-privileged but only useful for code paths we deleted (both
+//     symbols were removed by PR #313 and don't exist in the tree —
+//     `git log --diff-filter=D` if you need the historical context):
+//     - DirectMessages → previously consumed by the deleted handleSend
+//       DM file-pivot via `awaitMessages`
+//     - GuildVoiceStates → previously consumed by the deleted
+//       getChannelMembers helper's voice-channel branch
+// A future PR that re-adds any of these without a paired assertIntent
+// + use-case write-up will fail at boot rather than silently expanding
+// what crosses the Discord gateway. See PR #313 / issue #317 for
+// context on why this matters operationally (event volume + portal-
+// toggle drift).
+// `bit === undefined` is INTENTIONALLY permissive here (asymmetric vs
+// assertIntent, which is strict on undefined). Rationale: assertIntent
+// fails closed because a missing intent silently breaks a known feature;
+// assertNoIntent has nothing to defend against when the bit doesn't
+// exist (a Discord.js bump that drops an intent name from
+// GatewayIntentBits can't have silently re-added it). The test at
+// `discord.test.js` ('does not throw when the bit is undefined') pins
+// the asymmetry.
+function assertNoIntent(intentsList, bit, name) {
+  if (bit !== undefined && intentsList.includes(bit)) {
+    throw new Error(`Intent \`${name}\` was re-added without justification. If the new use case is legitimate, document it via assertIntent at apps/discord/src/discord.js and remove the assertNoIntent below; otherwise drop the intent from the \`intents\` array.`);
+  }
+}
+assertNoIntent(intents, GatewayIntentBits.MessageContent, 'MessageContent');
+assertNoIntent(intents, GatewayIntentBits.GuildPresences, 'GuildPresences');
+assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
+assertNoIntent(intents, GatewayIntentBits.GuildVoiceStates, 'GuildVoiceStates');
 
 const client = new Client({ intents });
 
@@ -253,13 +278,13 @@ function setupWeeklyDigest() {
 // so misconfigurations surface immediately. Non-fatal: we still boot in
 // case the permission gap is intentional for a staging tenant.
 //
-// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla /qurl
-// send tool only needs 4 perms (ViewChannel for target:channel/voice
-// member enumeration, SendMessages for interaction replies, EmbedLinks
-// for qURL link previews, UseApplicationCommands for slash commands).
-// ManageRoles/ManageChannels are OpenNHP-only — demanding them in every
-// guild would produce a confusing "missing permissions" error in guilds
-// that correctly granted only the 4 runtime perms.
+// The required set depends on ENABLE_OPENNHP_FEATURES. The vanilla qURL
+// sharing tool only needs 4 perms (ViewChannel so the bot can see and
+// reply in the invoking channel, SendMessages for interaction replies,
+// EmbedLinks for qURL link previews, UseApplicationCommands for slash
+// commands). ManageRoles/ManageChannels are OpenNHP-only — demanding
+// them in every guild would produce a confusing "missing permissions"
+// error in guilds that correctly granted only the 4 runtime perms.
 async function verifyBotPermissions() {
   try {
     const { PermissionFlagsBits } = require('discord.js');
@@ -315,7 +340,7 @@ client.once('ready', async () => {
   await verifyBotPermissions();
   // Weekly digest is OpenNHP-specific (star milestones, contributor
   // stats, announcements to #general). No value in a guild running the
-  // bot purely for /qurl send.
+  // bot purely for qURL sharing.
   if (config.isOpenNHPActive) {
     setupWeeklyDigest();
   }
@@ -387,7 +412,7 @@ client.on('guildMemberAdd', async (member) => {
   // OpenNHP-only behavior. Two short-circuits before any work:
   //   1. Flag off → no welcome DM / "Welcome Back, Contributor!" embed
   //      anywhere, regardless of whether the bot is single-guild or
-  //      multi-tenant. A vanilla /qurl send install shouldn't introduce
+  //      multi-tenant. A vanilla qURL install shouldn't introduce
   //      itself as the OpenNHP community bot.
   //   2. In multi-tenant mode (no single GUILD_ID to scope to) there is
   //      no cached `guild`/`channels` state to post into anyway. The
@@ -858,56 +883,6 @@ async function sendDM(discordId, message) {
   }
 }
 
-// Get non-bot members in a channel, excluding the sender.
-//
-// channel.members semantics in discord.js v14:
-//   - text channels: GuildMembers with ViewChannel perm (viewer set).
-//     Caller must populate guild.members.cache via guild.members.fetch()
-//     first; see commands.js channel-target branch.
-//   - voice / stage-voice channels: GuildMembers CURRENTLY CONNECTED to
-//     voice. Sourced from voice state cache (populated automatically via
-//     gateway events; no fetch needed) — REQUIRES the GuildVoiceStates
-//     intent (declared in the Client config above). If that intent is
-//     ever trimmed, voice/stage-voice paths will silently return empty
-//     here. The boot-time assertion in this file's intent block fails
-//     loud at startup if anyone removes it without replacing the helper.
-//
-// Both are the desired semantic for "Everyone in this channel." Voice
-// channels deliberately resolve to voice-connected only — anything broader
-// expands to ViewChannel-perm scope, which on default servers is the
-// entire guild (the prior "sends to everyone in the server" bug).
-//
-// Trust boundary: this helper supports GuildText, GuildVoice, and
-// GuildStageVoice channels — the three types where `channel.members` is
-// the right "Everyone in this channel" set under discord.js v14
-// (viewer set for text; voice-connected for voice/stage-voice). The
-// helper REJECTS other types via SUPPORTED_CHANNEL_TYPES rather than
-// trusting a documented contract, because /qurl send's slash-command
-// registration does not currently restrict invocation context — a user
-// COULD trigger this helper from a thread / forum / DM today, where
-// `channel.members` either has the wrong shape (thread:
-// ThreadMemberManager of ThreadMember; user lazily populated) or
-// doesn't exist at all (forum / media / DM). Returning [] (with a
-// warn log so the call site's "no recipients" branch surfaces clearly)
-// is safer than letting `.filter().map()` throw on an unexpected shape.
-const SUPPORTED_CHANNEL_TYPES = new Set([
-  ChannelType.GuildText,
-  ChannelType.GuildVoice,
-  ChannelType.GuildStageVoice,
-]);
-function getChannelMembers(channel, senderUserId) {
-  if (!channel || !SUPPORTED_CHANNEL_TYPES.has(channel.type)) {
-    logger.warn('getChannelMembers called with unsupported channel type', {
-      channelId: channel?.id,
-      channelType: channel?.type,
-    });
-    return [];
-  }
-  return channel.members
-    .filter(m => m.id !== senderUserId && !m.user.bot)
-    .map(m => m.user);
-}
-
 // Graceful shutdown — awaits client.destroy() so the caller knows the
 // WebSocket is fully closed and no further events will fire. discord.js
 // v14 returns a Promise from destroy(); swallowing it risked dropped
@@ -937,11 +912,12 @@ module.exports = {
   sendDM,
   refreshCache,
   shutdown,
-  getChannelMembers,
-  // Exported only for unit tests to verify the boot canary throws on
-  // a missing intent. Production callers don't need it — the module-
+  // Exported only for unit tests to verify the boot canaries throw
+  // on a missing intent (assertIntent) or a re-broadened intents array
+  // (assertNoIntent). Production callers don't need them — the module-
   // level invocations above are the load-bearing assertions.
   assertIntent,
+  assertNoIntent,
   getGuild: () => guild,
   getRoles: () => roles,
   getChannels: () => channels,

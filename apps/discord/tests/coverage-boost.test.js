@@ -1,19 +1,13 @@
 /**
- * Additional tests to boost line coverage to 90%+ on commands.js.
+ * Residual coverage tests for commands.js — narrow branches that aren't
+ * covered by the focused specs (qurl-file-map, qurl-send-back-half,
+ * commands-comprehensive, qurl-send).
  *
  * Covers:
- * - buildDeliveryPayload (location path, personalMessage)
- * - buildConfirmMsg truncation with > 5 recipients + expand toggle
- * - collector button handlers (revoke, expand, add recipients)
- * - collector end timeout
- * - handleSend: fewer mintLinks than recipients, no attachment guard,
- *   location modal timeout, resource selection timeout, all links fail
- * - handleCommand: double error (reply + followUp fail)
- * - bulklink: already-linked and forceLink throw paths
- * - Google Maps URL edge cases
- * - voice target with members
- * - autocomplete rate limiting and search error
- * - DM batch with rejected promise
+ * - handleCommand: double error path (reply + followUp both fail)
+ * - bulklink: already-linked-to-another-user, forceLink throw
+ * - handleCommand autocomplete early-return
+ * - isGoogleMapsURL edge cases (goo.gl path-shape rejection)
  */
 
 // ---------------------------------------------------------------------------
@@ -184,7 +178,6 @@ const mockDb = {
 jest.mock('../src/database', () => mockDb);
 
 const mockSendDM = jest.fn().mockResolvedValue(true);
-const mockGetChannelMembers = jest.fn();
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -194,7 +187,6 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
-  getChannelMembers: mockGetChannelMembers,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -253,7 +245,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'send'),
+      getSubcommand: jest.fn(() => 'file'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
@@ -296,38 +288,6 @@ beforeEach(() => {
   sendCooldowns.clear();
 });
 
-// =========================================================================
-// 1. buildDeliveryPayload — location resource type
-// =========================================================================
-
-// =========================================================================
-// 2. buildConfirmMsg truncation & expand toggle
-// =========================================================================
-
-// =========================================================================
-// 3. collector — revoke button
-// =========================================================================
-
-// =========================================================================
-// 4. collector — end timeout
-// =========================================================================
-
-// =========================================================================
-// 5. fewer mint links than recipients
-// =========================================================================
-
-// =========================================================================
-// 6. no attachment guard
-// =========================================================================
-
-// =========================================================================
-// 7. Google Maps URL with query/place param extraction
-// =========================================================================
-
-// =========================================================================
-// 8. handleCommand — double error
-// =========================================================================
-
 describe('handleCommand — double error (reply fail + followUp fail)', () => {
   it('logs error when error response itself fails', async () => {
     const logger = require('../src/logger');
@@ -342,10 +302,6 @@ describe('handleCommand — double error (reply fail + followUp fail)', () => {
     expect(logger.error).toHaveBeenCalledWith('Failed to send error response', expect.objectContaining({ error: 'Cannot send' }));
   });
 });
-
-// =========================================================================
-// 9. bulklink error paths
-// =========================================================================
 
 describe('/bulklink — error paths', () => {
   const findCmd = () => commands.find(c => c.data.name === 'bulklink');
@@ -372,22 +328,6 @@ describe('/bulklink — error paths', () => {
   });
 });
 
-// =========================================================================
-// 10. all location link creation fails
-// =========================================================================
-
-// =========================================================================
-// 11. collector — add recipients (timeout, limit, cooldown)
-// =========================================================================
-
-// =========================================================================
-// 12. voice target with members
-// =========================================================================
-
-// =========================================================================
-// 13. autocomplete rate limiting & search error
-// =========================================================================
-
 describe('handleCommand — autocomplete edge cases', () => {
   it('returns early for all autocomplete interactions without responding', async () => {
     const interaction = makeInteraction({
@@ -402,14 +342,6 @@ describe('handleCommand — autocomplete edge cases', () => {
   });
 });
 
-// =========================================================================
-// 14. DM batch with rejected promise
-// =========================================================================
-
-// =========================================================================
-// 15. goo.gl without /maps/ path
-// =========================================================================
-
 describe('isGoogleMapsURL — goo.gl edge cases', () => {
   it('rejects goo.gl link without /maps/ path', () => {
     expect(isGoogleMapsURL('https://goo.gl/abcdef')).toBe(false);
@@ -418,12 +350,4 @@ describe('isGoogleMapsURL — goo.gl edge cases', () => {
     expect(isGoogleMapsURL('https://goo.gl/search/abc')).toBe(false);
   });
 });
-
-// =========================================================================
-// 16. location modal timeout
-// =========================================================================
-
-// =========================================================================
-// 17. resource selection timeout
-// =========================================================================
 
