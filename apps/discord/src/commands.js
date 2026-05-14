@@ -270,12 +270,14 @@ function isAllowedFileType(contentType) {
 // single-threaded, but the handler awaits `userSelect` prompt + DDB
 // writes, so a second "Add Recipients" button click on the same sendId
 // can interleave between await points within the same collector
-// instance (lines 1508–1512 in executeSendPipeline). The sync
-// check-then-add at entry plus release-in-finally is the single source
-// of truth for "an addRecipients pass is in progress." Also intentional
-// belt-and-suspenders against a future refactor that shares a sendId
-// across collector instances (e.g. flow_state RESUME on a bot restart
-// loading unfinished sends).
+// instance (see the `addRecipientsLocks.has(sendId)` check-then-claim
+// branch inside the `qurl_add_${sendId}` button handler in
+// executeSendPipeline). The sync check-then-add at entry plus
+// release-in-finally is the single source of truth for "an
+// addRecipients pass is in progress." Also intentional belt-and-
+// suspenders against a future refactor that shares a sendId across
+// collector instances (e.g. flow_state RESUME on a bot restart loading
+// unfinished sends).
 const addRecipientsLocks = new Set();
 
 const sendCooldowns = new Map();

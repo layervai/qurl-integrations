@@ -42,9 +42,13 @@ assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map re
 // re-broadened gateway scope. Every intent listed here is either:
 //   - privileged (would re-introduce dev-portal toggle dependency:
 //     MessageContent, GuildPresences); or
-//   - non-privileged but only useful for code paths we deleted
-//     (DirectMessages → handleSend DM file-pivot; GuildVoiceStates →
-//     getChannelMembers voice-channel branch).
+//   - non-privileged but only useful for code paths we deleted (both
+//     symbols were removed by PR #313 and don't exist in the tree —
+//     `git log --diff-filter=D` if you need the historical context):
+//     - DirectMessages → previously consumed by the deleted handleSend
+//       DM file-pivot via `awaitMessages`
+//     - GuildVoiceStates → previously consumed by the deleted
+//       getChannelMembers helper's voice-channel branch
 // A future PR that re-adds any of these without a paired assertIntent
 // + use-case write-up will fail at boot rather than silently expanding
 // what crosses the Discord gateway. See PR #313 / issue #317 for

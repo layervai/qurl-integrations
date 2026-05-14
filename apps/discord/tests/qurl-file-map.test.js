@@ -3252,8 +3252,6 @@ describe('constants + exports', () => {
       locationUrl: null,
       locationName: null,
       recipients: [{ id: u1, username: 'Alice', bot: false }],
-      target: 'user',
-      isVoiceContext: false,
       expiresIn: '24h',
       selfDestructSeconds: null,
       personalMessage: 'safe content',
