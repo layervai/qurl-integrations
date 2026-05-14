@@ -2813,6 +2813,14 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       //    against a pathological all-bot role where the size guard
       //    can never fire. Logs at debug so a user-reported "I picked
       //    a role and got fewer than expected" has a forensic hook.
+      //
+      // The counter is incremented BEFORE the dedupe checks below, so
+      // a bot in two picked roles costs 2 iteration slots even though
+      // it lands in droppedFromRolesSet once. That's intentional —
+      // the bound governs CPU cost (entries inspected), not the
+      // user-visible count semantic. Hoisting the dedupe above the
+      // counter would let a contrived "same 100 members across N
+      // roles" pick grind for free.
       for (const [memberId, member] of source.entries()) {
         if (userMap.size >= config.QURL_SEND_MAX_RECIPIENTS) break;
         if (inspectedFromRoles >= ITER_BOUND) {
@@ -2862,6 +2870,16 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  * string when nothing is worth surfacing — keeps callers simple
  * (`warningsBlock + content`) without a separate "do I have any
  * warnings" check.
+ *
+ * COPY PARITY: the partial-valid pick path renders bulleted lines
+ * from here; the all-invalid pick path in handleConfirmUserSelect
+ * builds its own joined-sentence reasons list with shorter copy
+ * (rejection banner vs. warnings block — different UI contexts).
+ * Both surface the SAME set of signals (droppedBots,
+ * droppedFromRoles, massMentionDenied, everyoneCacheCold). When
+ * adding or renaming a signal, update BOTH surfaces in lockstep —
+ * the helpers don't share a copy table, so a future contributor
+ * could easily land one half and not the other.
  *
  * @param {{
  *   invalidTokens?: string[],
@@ -3866,6 +3884,11 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     // Multiple reasons can fire together: e.g. directly-picked bot
     // and a bot-only role both surface since they describe
     // independent picker actions.
+    //
+    // COPY PARITY: the partial-valid path uses renderRecipientWarnings
+    // for the same set of signals but with longer bulleted copy
+    // (warnings block vs. rejection banner — different UI contexts).
+    // When adding a new reason, update BOTH surfaces.
     const reasons = [];
     if (droppedBots > 0) reasons.push('Cannot send to bots');
     if (massMentionDenied) reasons.push('`@everyone` requires the **Mention Everyone** permission');
