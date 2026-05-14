@@ -2536,6 +2536,23 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.components).toEqual([]);
   });
 
+  test('voice-everyone button succeeds when sender lacks MENTION_EVERYONE (no asymmetric gate)', async () => {
+    // Pins the intentional asymmetry documented at the button block:
+    // ViewChannel-only gating (not MENTION_EVERYONE) is the right
+    // posture for a co-presence surface. If a future security pass
+    // adds the MENTION_EVERYONE gate to one path and forgets the
+    // other, this fails loud.
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    // memberPermissions.has(MENTION_EVERYONE) returns false (default
+    // makeInteraction shape — no permissions populated). Voice path
+    // must still succeed.
+    int.memberPermissions = { has: () => false };
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
+  });
+
   test('transitionFlow not_found → expired message (row TTL elapsed between click and write)', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeVoiceInteraction({ members: [u1, u2] });

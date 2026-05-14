@@ -432,6 +432,18 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // reads the voice-state cache, which is only populated when the
   // `GuildVoiceStates` gateway intent is declared (pinned by the boot
   // canary in discord.js).
+  //
+  // NOT GATED ON MENTION_EVERYONE (intentional asymmetry with the
+  // @everyone path below): voice channels are scoped co-presence
+  // surfaces — the ViewChannel gate above already proves the sender
+  // can see the channel, and Discord's voice-channel cap of 99
+  // connected (stage channels are higher but require explicit
+  // role-eligibility to join speakers) bounds the fan-out at the
+  // platform level. A user who can see a voice channel can DM each
+  // member individually; bundling the operation doesn't escalate
+  // their privilege. Tracked in #339 if a future product decision
+  // (stage channels with thousands of audience members) needs to
+  // revisit this.
   const invalidChannelIds = new Set();
   for (const m of input.matchAll(CHANNEL_MENTION_RE)) {
     const channelId = m[1];

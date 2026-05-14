@@ -2615,13 +2615,28 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // path. Today the live `(N)` count on the button label is the user's
 // best signal that a click against a 500-person stage will fan out
 // to 500 DMs.
+//
+// NOT GATED ON MENTION_EVERYONE (intentional asymmetry with the
+// @everyone slash-text path): the button is rendered only when the
+// slash command was invoked from inside a voice channel, which
+// intrinsically proves the sender's co-presence. A user already in
+// a voice channel can DM each member individually; bundling the
+// operation doesn't escalate privilege. Mirrors the same rationale
+// at the parser `<#voice>` expansion site in recipient-parser.js.
+// Tracked in #339 if a future product decision (stage channels with
+// thousands of audience) needs to revisit this for stage-only.
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 
 // Recipient-rejection reason strings shared by every handler that
 // can drop a selection to empty (picker, voice-everyone). Hoisted
 // from inline literals so a copy-edit (e.g., to "Cannot DM bots")
-// updates every surface at once.
+// updates every surface at once. Voice-specific warning copy is also
+// hoisted here so all the user-visible strings live in one place
+// rather than being scattered through 800+ lines of handler code.
 const RECIPIENT_REASON_BOTS_DROPPED = 'Cannot send to bots';
+const VOICE_REJECT_CHANNEL_UNREADABLE = `⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`;
+const VOICE_REJECT_EMPTY_CHANNEL = `⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`;
+const VOICE_REJECT_CONTEXT_LOST = `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`;
 // Local to the note modal — kept off the prefix-only customId
 // allowlist because flow-dispatch never routes modal-input fields,
 // only the parent modal customId.
@@ -3123,6 +3138,13 @@ function renderConfirmCardRows({
     // is possible; on cache miss (channel was deleted between render
     // and re-render) the legacy "this voice channel" copy is correct,
     // since we can't name a channel we can't read.
+    //
+    // SAFETY: channel.name is interpolated raw into the button label
+    // — Discord BUTTON labels do not render markdown / mentions /
+    // emoji shortcodes, so a channel name containing `**bold**` or
+    // `<@123>` is displayed verbatim. A future refactor that moves
+    // this label into an embed description / message content would
+    // need to escape `channel.name` against markdown/mention parsing.
     const VOICE_LABEL_NAME_BUDGET = 46;
     // safeCodepointSlice (defined above) is codepoint-aware so a
     // surrogate-pair emoji at index 45 doesn't get sliced mid-
@@ -4011,7 +4033,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     return rerenderConfirmCard(interaction, {
       ...payload,
       voiceChannelId: null,
-      warningsBlock: `⚠\u{FE0F} Voice channel context was lost — use the picker below to choose recipients.\n\n`,
+      warningsBlock: VOICE_REJECT_CONTEXT_LOST,
     });
   }
 
@@ -4064,7 +4086,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // recently dropped, etc.) lands in the warning branch.
   const channel = interaction.guild?.channels?.cache?.get(voiceChannelId);
   if (!channel || !channel.members) {
-    return rejectVoice(`⚠\u{FE0F} Couldn't read the voice channel — it may have been deleted. Pick recipients below.\n\n`);
+    return rejectVoice(VOICE_REJECT_CHANNEL_UNREADABLE);
   }
   // True-empty channel gets honest "no one connected" copy.
   // bots-only flows through partition below and surfaces "Cannot send
@@ -4073,7 +4095,7 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // and force the bots-only case into a misleading "no usable
   // recipients" fallback).
   if (channel.members.size === 0) {
-    return rejectVoice(`⚠\u{FE0F} No one is connected to that voice channel right now. Pick recipients below.\n\n`);
+    return rejectVoice(VOICE_REJECT_EMPTY_CHANNEL);
   }
   // GuildMember → User shape so partitionRecipients sees the same
   // shape the picker hands it. Skip entries with no .user (defensive
@@ -4114,6 +4136,20 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // depth against a misconfigured smaller env override rather than the
   // common path. The picker's similar guard at handleConfirmUserSelect
   // is identically structured.
+  //
+  // CAP DIVERGENCE (intentional): the parser's `<#voice>` path
+  // truncates at cap (silent partial-resolution with `cappedCount`
+  // surfaced), while this button path hard-rejects past cap. Different
+  // UX shapes for the same conceptual input ("everyone in voice")
+  // is acceptable because:
+  //   - The button is unambiguous "all-or-nothing" intent — a partial
+  //     fan-out misrepresents the click.
+  //   - The parser path mixes channel mentions with other mentions,
+  //     where partial-resolution is the existing pattern.
+  //   - The reject is unreachable under defaults (voice caps < 20k);
+  //     only env-overridden smaller caps trip it.
+  // Tracked in #339 if a future product decision needs to align
+  // these surfaces (e.g., button truncates with confirm-card warning).
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
     return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} connected (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
   }
