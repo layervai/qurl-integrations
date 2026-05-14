@@ -166,6 +166,13 @@ function safeUrlHost(url) {
  * cap or a UI surface that distinguishes empty from truncated.
  */
 function safeCodepointSlice(s, maxCodepoints) {
+  // Fast path: UTF-16 code-unit count is an upper bound on codepoint
+  // count (every codepoint is 1 or 2 code units), so a string whose
+  // `.length` is below the cap CANNOT exceed the cap in codepoints.
+  // Skips the `Array.from` allocation on the common case where the
+  // input is already well under the cap (the confirm-card render
+  // path hits this branch for every typical-sized message).
+  if (s.length <= maxCodepoints) return s;
   const codepoints = Array.from(s);
   if (codepoints.length <= maxCodepoints) return s;
   let cut = maxCodepoints;
@@ -3688,7 +3695,19 @@ function renderRecipientWarnings({
     // ephemeral. Strip backticks from each token before joining;
     // also cap the listed count at 10 so a pathological list can't
     // blow the Discord content budget.
-    const shown = invalidTokens.slice(0, 10).map((t) => t.replace(/`/g, ''));
+    //
+    // Per-token codepoint cap (80) keeps the worst case bounded:
+    // recipient-parser.js caps each token at 256 chars, so 10 × 256
+    // = 2.5KB of code-fenced text would dwarf the rest of the card
+    // and risk crowding out the action prompt. 80 codepoints is
+    // enough to spot the typo / paste error without rendering the
+    // attacker's entire payload.
+    const TOKEN_DISPLAY_MAX = 80;
+    const shown = invalidTokens.slice(0, 10).map((t) => {
+      const stripped = t.replace(/`/g, '');
+      const sliced = safeCodepointSlice(stripped, TOKEN_DISPLAY_MAX);
+      return sliced === stripped ? stripped : sliced + '…';
+    });
     const more = invalidTokens.length > 10 ? ` (+${invalidTokens.length - 10} more)` : '';
     lines.push('• Could not parse:\n```\n' + shown.join('\n') + '\n```' + more);
   }
@@ -3772,7 +3791,25 @@ function renderConfirmCardContent({
     content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
   }
   content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
-  return content;
+  // Discord's message-content cap is 2000 chars. Adversarial inputs
+  // (10 × 80-char invalidTokens + 256-char resourceLabel + 5 ×
+  // post-escape display names + personalMessage preview) can plausibly
+  // approach this; without a cap, `editReply` would reject with a 400
+  // and the throw would orphan the flow row (cleaned up by the
+  // safety-net catch, but the user sees a confusing generic error
+  // instead of the confirm card). Truncate at 1988 codepoints so the
+  // appended '…(truncated)' marker (12 codepoints) keeps the total at
+  // ≤ 2000 for typical ASCII / BMP-only content. Surrogate-pair-heavy
+  // adversarial input could exceed 2000 UTF-16 units, but real inputs
+  // funnel through `sanitizeContentLabel` / `safeCodepointSlice` which
+  // bound each section's codepoint budget; the pre-render upstream caps
+  // make a surrogate-pair-stuffed payload that crosses the cap exotic.
+  const CONFIRM_CARD_MAX_CODEPOINTS = 1988;
+  const trimmed = safeCodepointSlice(content, CONFIRM_CARD_MAX_CODEPOINTS);
+  // Reference equality is the truncation sentinel: safeCodepointSlice
+  // returns the input unchanged when below the cap (post-fast-path),
+  // so a strict !== means a real truncation occurred.
+  return trimmed === content ? content : trimmed + '…(truncated)';
 }
 
 // Truncate the pre-sanitized message to 80 chars MAX, then back off
@@ -4225,6 +4262,11 @@ async function handleQurlMap(interaction) {
       ephemeral: true,
     });
   }
+  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlFile).
+  // The capacity gate guards the connector upload path that file sends
+  // hit during back-half dispatch; map sends never touch that resource.
+  // Sharing the gate would punish maps for file-pipeline saturation.
+  //
   // Cooldown gate — cross-command bucket shared with /qurl send and
   // /qurl file (sendCooldowns Map). Tests pin the contract.
   if (isOnCooldown(interaction.user.id)) {

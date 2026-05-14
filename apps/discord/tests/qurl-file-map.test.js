@@ -714,6 +714,30 @@ describe('renderRecipientWarnings', () => {
     expect(renderRecipientWarnings({})).toBe('');
     expect(renderRecipientWarnings()).toBe('');
   });
+
+  test('caps each shown invalidToken at 80 codepoints with an ellipsis indicator', () => {
+    // recipient-parser.js caps each token at 256 chars, so worst-case
+    // 10 tokens × 256 = 2.5KB of code-fenced text before any other
+    // warning lines render. The 80-codepoint per-token cap keeps the
+    // warnings block legible and shrinks the worst case meaningfully.
+    const longToken = 'a'.repeat(200);
+    const out = renderRecipientWarnings({ invalidTokens: [longToken] });
+    // The fence-content slice (between the two ```s) carries the
+    // truncated token — confirm it ends with the ellipsis indicator
+    // and that no 81+-char run of `a` survives.
+    const fence = out.split('```')[1] || '';
+    expect(fence).toMatch(/a{80}…/);
+    expect(fence).not.toMatch(/a{81}/);
+  });
+
+  test('does NOT add ellipsis when the token already fits under the cap', () => {
+    // Short tokens render untruncated — pin that the 80-codepoint
+    // cap is not eagerly appending the indicator to every token.
+    const out = renderRecipientWarnings({ invalidTokens: ['shorttoken'] });
+    expect(out).toContain('shorttoken');
+    const fence = out.split('```')[1] || '';
+    expect(fence).not.toContain('…');
+  });
 });
 
 describe('renderConfirmCardContent', () => {
@@ -918,6 +942,36 @@ describe('renderConfirmCardContent', () => {
       personalMessage: 'first line\nsecond\r\nthird fourth fifth',
     });
     expect(out).toContain('> first line second third fourth fifth\n');
+  });
+
+  test('caps total rendered content below Discord\'s 2000-char limit + adds truncation indicator', () => {
+    // Worst-case render: a maximal warningsBlock + a long resourceLabel
+    // + a long personalMessage pre-sanitized preview can plausibly
+    // cross 2000 chars in adversarial inputs. Without a cap, Discord
+    // rejects editReply with a 400 and the throw orphans the flow
+    // row (now cleaned up by the safety-net catch, but the user still
+    // sees a generic error rather than the confirm card).
+    //
+    // Pin: a 3000-char warningsBlock forces the cap to fire, and the
+    // total output stays under 2000 chars with a visible truncation
+    // marker.
+    const bigWarnings = 'WARN ' + 'x'.repeat(3000) + '\n\n';
+    const out = renderConfirmCardContent({
+      ...baseProps,
+      warningsBlock: bigWarnings,
+    });
+    expect(out.length).toBeLessThanOrEqual(2000);
+    expect(out).toMatch(/…\(truncated\)$/);
+  });
+
+  test('does NOT truncate when content fits under the cap (referential-equality fast path)', () => {
+    // The cap path runs `safeCodepointSlice` which returns the input
+    // unchanged when below the cap. Reference equality (`===`) gates
+    // the truncation indicator — pin that the typical case has
+    // neither marker nor extra suffix.
+    const out = renderConfirmCardContent({ ...baseProps });
+    expect(out).not.toMatch(/…\(truncated\)/);
+    expect(out.length).toBeLessThan(2000);
   });
 });
 
