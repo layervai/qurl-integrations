@@ -2919,6 +2919,32 @@ describe('handleConfirmUserSelect', () => {
     expect(updated.content).toMatch(/Send includes you/);
   });
 
+  test('mentionable picker: sender via @everyone-cache expansion → selfIncluded flips on (parity with named-role path)', async () => {
+    // Pin the @everyone branch as well as named-role: a sender-filter
+    // regression inside resolveMentionableSelection on the
+    // guild.members.cache iteration branch would slip past the
+    // named-role test alone. The @everyone path iterates a different
+    // collection (guild.members.cache vs role.members) so it needs
+    // its own coverage.
+    const senderMember = { user: makeUser(SENDER_ID) };
+    const cache = new Map([[SENDER_ID, senderMember]]);
+    const int = makeSelectInteraction({
+      users: [],
+      roles: [],
+      canMentionEveryone: true,
+      guildMemberCache: cache,
+    });
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds).toEqual([SENDER_ID]);
+    expect(payload.selfIncluded).toBe(true);
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Send includes you/);
+  });
+
   test('mentionable picker: missing interaction.memberPermissions → canMentionEveryone defaults false, @everyone denied', async () => {
     // Discord normally populates `memberPermissions` on guild
     // interactions, but the `?.has(...) === true` chain handles

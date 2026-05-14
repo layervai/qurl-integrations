@@ -2749,7 +2749,7 @@ function partitionRecipients(users, senderId) {
 // in prod and plain Maps in tests. Both implement `.values()`,
 // `.entries()`, and `Symbol.iterator` — the duck-type guards below
 // gate on the methods we actually call.
-function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id }) {
+function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id = null }) {
   const guild = interaction.guild;
   const userMap = new Map();
   if (interaction.users && typeof interaction.users.values === 'function') {
@@ -2802,13 +2802,19 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
       const source = isEveryoneRole
         ? guild.members?.cache
         : role?.members;
+      // Two distinct cold-cache shapes both surface the same UX
+      // signal (everyoneCacheCold):
+      //   - `source` undefined / non-iterable: discord.js hasn't
+      //     created the cache slot yet (e.g., `guild.members = {}`
+      //     immediately post-restart).
+      //   - `source.size === 0`: cache slot exists but no members
+      //     populated yet (e.g., between bot ready and
+      //     chunk-on-startup completion).
       if (!source || typeof source.entries !== 'function') {
         if (isEveryoneRole) everyoneCacheCold = true;
         continue;
       }
       if (isEveryoneRole && source.size === 0) {
-        // Cache exists but is empty — same UX problem as missing
-        // cache. Don't iterate (no-op anyway), surface the signal.
         everyoneCacheCold = true;
         continue;
       }
