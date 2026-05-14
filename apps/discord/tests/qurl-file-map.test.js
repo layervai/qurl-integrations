@@ -178,9 +178,9 @@ const {
   safeDecodeURIComponent,
   softenCooldown,
   SEND_STAGE_AWAITING_CONFIRM,
-  SEND_USER_SELECT_CUSTOM_ID,
-  SEND_CONFIRM_SEND_CUSTOM_ID,
-  SEND_CONFIRM_CANCEL_CUSTOM_ID,
+  CONFIRM_USER_SELECT_CUSTOM_ID,
+  CONFIRM_SEND_CUSTOM_ID,
+  CONFIRM_CANCEL_CUSTOM_ID,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -196,13 +196,13 @@ const {
 // registerFlow at boot). _test only exports things that aren't already
 // at the top level.
 const {
-  handleSendUserSelect,
-  handleSendConfirmClick,
-  handleSendCancelClick,
-  handleSendConfirmExpirySelect,
-  handleSendConfirmSelfDestructSelect,
-  handleSendConfirmNoteButton,
-  handleSendConfirmNoteModal,
+  handleConfirmUserSelect,
+  handleConfirmSendClick,
+  handleConfirmCancelClick,
+  handleConfirmExpirySelect,
+  handleConfirmSelfDestructSelect,
+  handleConfirmNoteButton,
+  handleConfirmNoteModal,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -1543,10 +1543,10 @@ describe('handleQurlMap — slash entry', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendConfirmClick — Send button
+// handleConfirmSendClick — Send button
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendConfirmClick', () => {
+describe('handleConfirmSendClick', () => {
   const u1 = '100000000000000001';
   const validPayload = {
     resourceType: 'file',
@@ -1564,7 +1564,7 @@ describe('handleSendConfirmClick', () => {
   test('happy path → deferUpdate + deleteFlow + editReply "Preparing"', async () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     // Defer-ack within the 3s window before any awaits — without this,
     // resolveRecipientUsers + getGuildApiKey + deleteFlow can blow
     // Discord's hard ack deadline on a cold cache.
@@ -1589,7 +1589,7 @@ describe('handleSendConfirmClick', () => {
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Recipients changed|re-click Send/i),
       ephemeral: true,
@@ -1602,7 +1602,7 @@ describe('handleSendConfirmClick', () => {
   test('deleteFlow is version-gated to fence the picker-then-Send race', async () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 7 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 7 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
@@ -1617,7 +1617,7 @@ describe('handleSendConfirmClick', () => {
     });
     // No apiKey mock needed — the all-unresolved branch short-circuits
     // before the Promise.all that resolves the guild API key.
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/no longer reachable/),
@@ -1635,7 +1635,7 @@ describe('handleSendConfirmClick', () => {
     jest.replaceProperty(config, 'QURL_API_KEY', null);
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     sendCooldowns.set(SENDER_ID, Date.now());
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/not configured|setup/i),
     }));
@@ -1659,7 +1659,7 @@ describe('handleSendConfirmClick', () => {
       guildFetchByID: { [gone]: 'unknown' },
     });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithGhost, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: payloadWithGhost, version: 1 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({ reason: 'terminal' }));
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
@@ -1690,7 +1690,7 @@ describe('handleSendConfirmClick', () => {
       guildFetchByID: { [flaky]: 'ratelimit' },
     });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: payloadWithFlaky, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: payloadWithFlaky, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Preparing send/),
     }));
@@ -1726,7 +1726,7 @@ describe('handleSendConfirmClick', () => {
       guildFetchByID: { [flaky]: 'ratelimit' },
     });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: mapPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/rerun \/qurl map/),
       ephemeral: true,
@@ -1745,7 +1745,7 @@ describe('handleSendConfirmClick', () => {
     mockDb.getGuildApiKey.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     sendCooldowns.set(SENDER_ID, Date.now());
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up the qURL API key/),
       ephemeral: true,
@@ -1775,13 +1775,13 @@ describe('handleSendConfirmClick', () => {
     // callback is caught by Promise.allSettled, then resolveRecipientUsers's
     // own try/catch handles it. Simulate a synchronous blow-up inside
     // resolveRecipientUsers by making `interaction.guild.members`
-    // throw on read — that lands *after* handleSendConfirmClick's
+    // throw on read — that lands *after* handleConfirmSendClick's
     // bot-kicked guard (which only checks `interaction.guild`).
     Object.defineProperty(int.guild, 'members', {
       get() { throw new Error('cache exploded'); },
     });
     sendCooldowns.set(SENDER_ID, Date.now());
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: { ...validPayload, recipientIds: [u1] }, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not look up recipients/),
       ephemeral: true,
@@ -1803,7 +1803,7 @@ describe('handleSendConfirmClick', () => {
     // and surfaced "Recipients are no longer reachable (all left the
     // server)" — misleading. Distinguish by droppedSelf/droppedBots > 0.
     const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
-    await handleSendConfirmClick(int, {
+    await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 1 },
     });
@@ -1827,7 +1827,7 @@ describe('handleSendConfirmClick', () => {
     // interaction. The all-unresolved branch's "they left the server"
     // copy is wrong here — nobody left, nobody was ever selected.
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
-    await handleSendConfirmClick(int, {
+    await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [] }, version: 1 },
     });
@@ -1855,7 +1855,7 @@ describe('handleSendConfirmClick', () => {
     // recovery instead of silently wiping v2.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
-    await handleSendConfirmClick(int, {
+    await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [] }, version: 1 },
     });
@@ -1877,7 +1877,7 @@ describe('handleSendConfirmClick', () => {
     // advance and surfaces the recovery.
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
     const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
-    await handleSendConfirmClick(int, {
+    await handleConfirmSendClick(int, {
       flow_id: 'fid',
       row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 5 },
     });
@@ -1905,7 +1905,7 @@ describe('handleSendConfirmClick', () => {
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     int.guild = null;
     sendCooldowns.set(SENDER_ID, Date.now());
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: validPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/bot is no longer in this server/i),
       components: [],
@@ -1923,10 +1923,10 @@ describe('handleSendConfirmClick', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendCancelClick
+// handleConfirmCancelClick
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendCancelClick', () => {
+describe('handleConfirmCancelClick', () => {
   test('happy path → version-gated deleteFlow + cooldown softened to ~5s residual + update', async () => {
     // softenCooldown leaves 5s of throttle so a user can't spam
     // /qurl file → Cancel → /qurl file → Cancel and rack up
@@ -1936,7 +1936,7 @@ describe('handleSendCancelClick', () => {
     const int = makeInteraction();
     const cooldownStart = Date.now();
     sendCooldowns.set(SENDER_ID, cooldownStart);
-    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
@@ -1965,7 +1965,7 @@ describe('handleSendCancelClick', () => {
     const cooldownAt = Date.now();
     sendCooldowns.set(SENDER_ID, cooldownAt);
     const int = makeInteraction();
-    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/card moved/i),
       ephemeral: true,
@@ -1978,7 +1978,7 @@ describe('handleSendCancelClick', () => {
 
   test('Cancel deleteFlow is version-fenced against picker race', async () => {
     const int = makeInteraction();
-    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 11 } });
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 11 } });
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       expectedVersion: 11,
     }));
@@ -1986,7 +1986,7 @@ describe('handleSendCancelClick', () => {
 
   test('deleteFlow throw → ephemeral retry, cooldown preserved (Send may still be in flight)', async () => {
     // Targeted catch around the Cancel deleteFlow
-    // for symmetry with handleSendConfirmClick. A DDB blip during a
+    // for symmetry with handleConfirmSendClick. A DDB blip during a
     // Cancel click now surfaces an actionable ephemeral instead of
     // the dispatcher's generic safety net. Cooldown stays set on the
     // throw path — Send may still be in flight, the user's cooldown
@@ -1994,7 +1994,7 @@ describe('handleSendCancelClick', () => {
     mockDeleteFlow.mockRejectedValueOnce(new Error('ddb gone'));
     sendCooldowns.set(SENDER_ID, Date.now());
     const int = makeInteraction();
-    await handleSendCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
+    await handleConfirmCancelClick(int, { flow_id: 'fid', row: { version: 3 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not cancel right now/),
       ephemeral: true,
@@ -2008,10 +2008,10 @@ describe('handleSendCancelClick', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendUserSelect
+// handleConfirmUserSelect
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendUserSelect', () => {
+describe('handleConfirmUserSelect', () => {
   const u1 = '100000000000000001';
 
   function makeSelectInteraction({ users = [makeUser(u1)], ...rest } = {}) {
@@ -2032,7 +2032,7 @@ describe('handleSendUserSelect', () => {
   test('valid pick → transitionFlow with new recipientIds + update', async () => {
     const beforeSecs = Math.floor(Date.now() / 1000);
     const int = makeSelectInteraction();
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
       payload: expect.objectContaining({ recipientIds: [u1] }),
@@ -2057,7 +2057,7 @@ describe('handleSendUserSelect', () => {
 
   test('empty pick → deferUpdate, no transition, no editReply', async () => {
     const int = makeSelectInteraction({ users: [] });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).not.toHaveBeenCalled();
@@ -2066,15 +2066,15 @@ describe('handleSendUserSelect', () => {
   test('deferUpdate fires before transitionFlow await — protects Discord 3s ack budget on slow DDB', async () => {
     // Without this guard the transitionFlow DDB OCC call can blow
     // Discord's hard ack deadline on tail-latency, surfacing as an
-    // "interaction failed" toast. Mirror handleSendConfirmClick /
-    // handleSendCancelClick: ack first, then do the work.
+    // "interaction failed" toast. Mirror handleConfirmSendClick /
+    // handleConfirmCancelClick: ack first, then do the work.
     let deferAckedBeforeTransition = false;
     const int = makeSelectInteraction();
     mockTransitionFlow.mockImplementationOnce(async () => {
       deferAckedBeforeTransition = int.deferUpdate.mock.calls.length > 0;
       return { result: 'ok', version: 2 };
     });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(deferAckedBeforeTransition).toBe(true);
   });
 
@@ -2087,7 +2087,7 @@ describe('handleSendUserSelect', () => {
     const int = makeSelectInteraction({
       users: [makeUser(bot1, { bot: true }), makeUser(SENDER_ID)],
     });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bots/);
@@ -2105,7 +2105,7 @@ describe('handleSendUserSelect', () => {
     const int = makeSelectInteraction({
       users: [makeUser(u1, { bot: true })],
     });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/bots/);
@@ -2124,7 +2124,7 @@ describe('handleSendUserSelect', () => {
     // pick of 26 to exceed it.
     const users = Array.from({ length: 26 }, (_, i) => makeUser(`1000000000000000${String(i).padStart(2, '0')}`));
     const int = makeSelectInteraction({ users });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Pick at most/);
@@ -2148,7 +2148,7 @@ describe('handleSendUserSelect', () => {
         makeUser(bot1, { bot: true }),
       ],
     });
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ recipientIds: [u1, u2, u3] }),
     }));
@@ -2160,7 +2160,7 @@ describe('handleSendUserSelect', () => {
   test('transitionFlow conflict → superseded message', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeSelectInteraction();
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/),
     }));
@@ -2169,7 +2169,7 @@ describe('handleSendUserSelect', () => {
   test('transitionFlow not_found → expired message', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeSelectInteraction();
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/),
     }));
@@ -2179,11 +2179,11 @@ describe('handleSendUserSelect', () => {
     // Without the targeted catch, a DDB blip during transitionFlow
     // bubbles to the dispatcher's outer catch which surfaces a
     // generic "superseded" message — wrong, since nothing was actually
-    // superseded. Symmetric with handleSendConfirmClick /
-    // handleSendCancelClick's DDB-call guards.
+    // superseded. Symmetric with handleConfirmSendClick /
+    // handleConfirmCancelClick's DDB-call guards.
     mockTransitionFlow.mockRejectedValueOnce(new Error('ddb gone'));
     const int = makeSelectInteraction();
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your pick/i),
       ephemeral: true,
@@ -2211,7 +2211,7 @@ describe('handleSendUserSelect', () => {
       personalMessageRaw: '**hi**',
     };
     const int = makeSelectInteraction();
-    await handleSendUserSelect(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
         personalMessage: '\\*\\*hi\\*\\*',
@@ -2222,10 +2222,10 @@ describe('handleSendUserSelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendConfirmExpirySelect — inline expiry edit on confirm card
+// handleConfirmExpirySelect — inline expiry edit on confirm card
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendConfirmExpirySelect', () => {
+describe('handleConfirmExpirySelect', () => {
   const u1 = '100000000000000001';
   const basePayload = {
     resourceType: 'file',
@@ -2244,7 +2244,7 @@ describe('handleSendConfirmExpirySelect', () => {
 
   test('happy path persists new expiresIn + re-renders', async () => {
     const int = makeSelectInteraction({ value: '7d' });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
@@ -2267,7 +2267,7 @@ describe('handleSendConfirmExpirySelect', () => {
     // version bump. Visible feedback (rerender) still fires so the
     // user knows their click registered.
     const int = makeSelectInteraction({ value: '24h' });  // same as basePayload.expiresIn
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).toHaveBeenCalled();
@@ -2279,7 +2279,7 @@ describe('handleSendConfirmExpirySelect', () => {
     // deferUpdate so the forgery branch uses the cheaper single-call
     // `reply` ack instead of `followUp` after a wasted defer.
     const int = makeSelectInteraction({ value: '999d' });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.deferUpdate).not.toHaveBeenCalled();
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
@@ -2291,7 +2291,7 @@ describe('handleSendConfirmExpirySelect', () => {
   test('conflict result → superseded copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeSelectInteraction({ value: '7d' });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
       components: [],
@@ -2301,7 +2301,7 @@ describe('handleSendConfirmExpirySelect', () => {
   test('not_found result → expired copy', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeSelectInteraction({ value: '7d' });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
       components: [],
@@ -2311,7 +2311,7 @@ describe('handleSendConfirmExpirySelect', () => {
   test('transitionFlow throw → ephemeral retry followUp, no superseded copy', async () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
     const int = makeSelectInteraction({ value: '7d' });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save/i),
       ephemeral: true,
@@ -2341,7 +2341,7 @@ describe('handleSendConfirmExpirySelect', () => {
       // today; this assertion locks the contract.
       personalMessageRaw: 'hi',
     };
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
         expiresIn: '7d',
@@ -2361,10 +2361,10 @@ describe('handleSendConfirmExpirySelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendConfirmSelfDestructSelect — inline self-destruct edit
+// handleConfirmSelfDestructSelect — inline self-destruct edit
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendConfirmSelfDestructSelect', () => {
+describe('handleConfirmSelfDestructSelect', () => {
   const u1 = '100000000000000001';
   const basePayload = {
     resourceType: 'file',
@@ -2386,7 +2386,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     // selfDestructSelectValueToSeconds rejects (returns null) anything off-preset
     // so the test value must match an existing preset for this assertion.
     const int = makeSelectInteraction({ value: '30' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       stage_to: SEND_STAGE_AWAITING_CONFIRM,
@@ -2406,7 +2406,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     // sentinel maps to null; basePayload.selfDestructSeconds is null
     // so this is a no-op.
     const int = makeSelectInteraction({ value: 'no-timer' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).toHaveBeenCalled();
@@ -2421,7 +2421,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     // no-op path).
     const payloadWithTimer = { ...basePayload, selfDestructSeconds: 30 };
     const int = makeSelectInteraction({ value: 'no-timer' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: payloadWithTimer, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: payloadWithTimer, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ selfDestructSeconds: null }),
     }));
@@ -2438,7 +2438,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     const logger = require('../src/logger');
     logger.warn.mockClear();
     const int = makeSelectInteraction({ value: '999999' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.deferUpdate).not.toHaveBeenCalled();
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
@@ -2458,7 +2458,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     const logger = require('../src/logger');
     logger.warn.mockClear();
     const int = makeSelectInteraction({ value: 'no-timer' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -2468,7 +2468,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     // BEFORE deferUpdate, so we need a legitimate preset to reach
     // the transitionFlow → result-handling branches.
     const int = makeSelectInteraction({ value: '30' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
     }));
@@ -2480,7 +2480,7 @@ describe('handleSendConfirmSelfDestructSelect', () => {
     // BEFORE deferUpdate, so we need a legitimate preset to reach
     // the transitionFlow → result-handling branches.
     const int = makeSelectInteraction({ value: '30' });
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
     }));
@@ -2488,10 +2488,10 @@ describe('handleSendConfirmSelfDestructSelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendConfirmNoteButton — opens modal, no flow mutation
+// handleConfirmNoteButton — opens modal, no flow mutation
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendConfirmNoteButton', () => {
+describe('handleConfirmNoteButton', () => {
   const basePayload = {
     resourceType: 'file',
     resourceLabel: 'x.png',
@@ -2509,7 +2509,7 @@ describe('handleSendConfirmNoteButton', () => {
 
   test('opens modal — does NOT mutate flow state (no transitionFlow / deleteFlow)', async () => {
     const int = makeButtonInteraction();
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.showModal).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(mockDeleteFlow).not.toHaveBeenCalled();
@@ -2535,7 +2535,7 @@ describe('handleSendConfirmNoteButton', () => {
       personalMessage: '\\*\\*bold\\*\\*',  // sanitized form (would render literally)
       personalMessageRaw: '**bold**',         // what the user actually typed
     };
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.showModal).toHaveBeenCalled();
     // setValue receives the RAW form so the user sees `**bold**` in
     // the input, not the escaped `\*\*bold\*\*`.
@@ -2547,7 +2547,7 @@ describe('handleSendConfirmNoteButton', () => {
     const { TextInputBuilder } = require('discord.js');
     TextInputBuilder.mockClear();
     const int = makeButtonInteraction();
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     const builder = TextInputBuilder.mock.results[0].value;
     expect(builder.setValue).toHaveBeenCalledWith('');
   });
@@ -2562,7 +2562,7 @@ describe('handleSendConfirmNoteButton', () => {
     TextInputBuilder.mockClear();
     const int = makeButtonInteraction();
     const legacyPayload = { ...basePayload, personalMessage: '\\*\\*bold\\*\\*' };
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: legacyPayload, version: 1 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: legacyPayload, version: 1 } });
     const builder = TextInputBuilder.mock.results[0].value;
     expect(builder.setValue).toHaveBeenCalledWith('');
   });
@@ -2574,7 +2574,7 @@ describe('handleSendConfirmNoteButton', () => {
     // bumping the version or fencing out other interactions.
     const int = makeButtonInteraction();
     const payload = { ...basePayload, recipientIds: ['100000000000000001', '100000000000000002'] };
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 5 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 5 } });
     expect(int.showModal).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
@@ -2587,7 +2587,7 @@ describe('handleSendConfirmNoteButton', () => {
     // gap symmetrically with the menu handlers' error paths.
     const int = makeButtonInteraction();
     int.showModal.mockRejectedValueOnce(new Error('Discord 500'));
-    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not open the note editor/i),
       ephemeral: true,
@@ -2611,7 +2611,7 @@ describe('handleSendConfirmNoteButton', () => {
     const listener = (reason) => { unhandled = reason; };
     process.on('unhandledRejection', listener);
     try {
-      await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+      await handleConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
       // Microtask flush — any unhandled rejection from the catch
       // chain would have been queued by now.
       await new Promise((resolve) => setImmediate(resolve));
@@ -2625,10 +2625,10 @@ describe('handleSendConfirmNoteButton', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleSendConfirmNoteModal — modal submit persists sanitized note
+// handleConfirmNoteModal — modal submit persists sanitized note
 // ──────────────────────────────────────────────────────────────
 
-describe('handleSendConfirmNoteModal', () => {
+describe('handleConfirmNoteModal', () => {
   const basePayload = {
     resourceType: 'file',
     resourceLabel: 'x.png',
@@ -2646,7 +2646,7 @@ describe('handleSendConfirmNoteModal', () => {
 
   test('happy path: defers, trims/sanitizes, persists, editReply re-renders', async () => {
     const int = makeModalInteraction({ inputValue: '  **bold** message  ' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     // deferUpdate guards the 3s ack deadline — without it, a slow
     // DDB conditional write could push past Discord's hard limit and
     // both update() and reply() would fail.
@@ -2686,7 +2686,7 @@ describe('handleSendConfirmNoteModal', () => {
       personalMessage: '\\*\\*bold\\*\\*',
       personalMessageRaw: '**bold**',
     };
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: existingPayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: existingPayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     // No-op skip — no DDB write, no version bump, no sibling fence.
     expect(mockTransitionFlow).not.toHaveBeenCalled();
@@ -2702,7 +2702,7 @@ describe('handleSendConfirmNoteModal', () => {
 
   test('empty input on a payload with an existing note → personalMessage: null (clear)', async () => {
     const int = makeModalInteraction({ inputValue: '' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
     }));
@@ -2710,7 +2710,7 @@ describe('handleSendConfirmNoteModal', () => {
 
   test('whitespace-only input on a payload with an existing note → personalMessage: null', async () => {
     const int = makeModalInteraction({ inputValue: '   \n  \t' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({ personalMessage: null, personalMessageRaw: null }),
     }));
@@ -2728,7 +2728,7 @@ describe('handleSendConfirmNoteModal', () => {
     // to null in lockstep.
     const zwsp = String.fromCharCode(0x200B);
     const int = makeModalInteraction({ inputValue: zwsp.repeat(3) });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: payloadWithNote, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
       payload: expect.objectContaining({
         personalMessage: null,
@@ -2742,7 +2742,7 @@ describe('handleSendConfirmNoteModal', () => {
     // is null; submitting empty produces null → no actual change →
     // skip the write + version bump.
     const int = makeModalInteraction({ inputValue: '' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     expect(int.editReply).toHaveBeenCalled();
@@ -2751,7 +2751,7 @@ describe('handleSendConfirmNoteModal', () => {
   test('conflict → superseded copy via editReply (post-deferUpdate)', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
     const int = makeModalInteraction({ inputValue: 'hi' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/superseded/i),
       components: [],
@@ -2761,7 +2761,7 @@ describe('handleSendConfirmNoteModal', () => {
   test('not_found → expired copy via editReply', async () => {
     mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
     const int = makeModalInteraction({ inputValue: 'hi' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
     }));
@@ -2778,7 +2778,7 @@ describe('handleSendConfirmNoteModal', () => {
     int.fields.getTextInputValue = jest.fn(() => {
       throw new Error('Unknown custom_id');
     });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.deferUpdate).toHaveBeenCalled();
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not read your note input/i),
@@ -2791,7 +2791,7 @@ describe('handleSendConfirmNoteModal', () => {
   test('transitionFlow throw → ephemeral followUp (NOT update/reply post-defer)', async () => {
     mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
     const int = makeModalInteraction({ inputValue: 'hi' });
-    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    await handleConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/Could not save your note/i),
       ephemeral: true,
@@ -2821,7 +2821,7 @@ describe('handleSendConfirmNoteModal', () => {
       selfDestructSeconds: 30,  // sibling-changed
       version: 2,                // version bumped by the sibling
     };
-    await handleSendConfirmNoteModal(int, {
+    await handleConfirmNoteModal(int, {
       flow_id: 'fid',
       row: { payload: rowAfterSiblingMenu, version: 2 },
     });
@@ -2870,7 +2870,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     // No guildMembers — cache miss. The fallback chain should hit
     // payload.recipientAliases.
     const int = makeSelectInteraction({ value: '7d', guildMembers: {} });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     expect(int.editReply).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     // Alias renders (markdown chars not present in this alias, so the
@@ -2896,7 +2896,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
       warningsBlock: '⚠️ Skipped bots: 1\n\n',
     };
     const int = makeSelectInteraction({ value: '7d', guildMembers: { [u1]: {} } });
-    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     expect(lastEdit.content).toMatch(/Skipped bots/);
   });
@@ -2928,7 +2928,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     // corrupted expiresIn unchanged through to the renderer.
     const int = makeInteraction({ guildMembers: { '100000000000000001': {} } });
     int.values = ['30'];  // legit self-destruct preset
-    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    await handleConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     // The rerender pass calls StringSelectMenuBuilder twice (self-
     // destruct row + expiry row). Inspect the addOptions calls and
     // verify the EXPIRY select has exactly one default-true option,
@@ -2936,7 +2936,7 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     const expirySelectCalls = StringSelectMenuBuilder.mock.results
       .filter((r) => {
         const calls = r.value.setCustomId.mock.calls;
-        return calls.length && calls[0][0] === 'qurl_send_confirm_expiry';
+        return calls.length && calls[0][0] === 'qurl_confirm_expiry';
       });
     expect(expirySelectCalls.length).toBeGreaterThan(0);
     const expiryAddOptionsArgs = expirySelectCalls[expirySelectCalls.length - 1]
@@ -2975,10 +2975,10 @@ describe('renderConfirmCardRows', () => {
     const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
     expect(lastCall.components).toHaveLength(4);
     // 3 ButtonBuilders: Note, Send, Cancel. The Send button is the
-    // one with custom id 'qurl_send_confirm_send'. Find it and assert
+    // one with custom id 'qurl_confirm_send'. Find it and assert
     // setDisabled(true) was called.
     const sendBuilder = ButtonBuilder.mock.results.find(
-      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_send_confirm_send'
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_send'
     );
     expect(sendBuilder).toBeDefined();
     expect(sendBuilder.value.setDisabled).toHaveBeenCalledWith(true);
@@ -2994,7 +2994,7 @@ describe('renderConfirmCardRows', () => {
     // Round-13 cr removed the conditional entirely: renderer now
     // always produces 4 rows. The user sees the same layout from
     // frame 0 through every menu interaction. Matches
-    // handleSendUserSelect's post-pick contract — re-picks stay
+    // handleConfirmUserSelect's post-pick contract — re-picks stay
     // possible after a successful pick.
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
@@ -3025,9 +3025,9 @@ describe('renderConfirmCardRows', () => {
       (r) => r.value.setCustomId.mock.calls[0][0]
     );
     expect(customIds).toEqual([
-      'qurl_send_confirm_note_btn',
-      'qurl_send_confirm_send',
-      'qurl_send_confirm_cancel',
+      'qurl_confirm_note_btn',
+      'qurl_confirm_send',
+      'qurl_confirm_cancel',
     ]);
   });
 
@@ -3083,18 +3083,18 @@ describe('constants + exports', () => {
   // SEND_STAGE_AWAITING_CONFIRM, ...})`) already pin them by
   // contract.
   test('customIds match the wire-protocol values Discord routes against', () => {
-    expect(SEND_USER_SELECT_CUSTOM_ID).toBe('qurl_send_user_select');
-    expect(SEND_CONFIRM_SEND_CUSTOM_ID).toBe('qurl_send_confirm_send');
-    expect(SEND_CONFIRM_CANCEL_CUSTOM_ID).toBe('qurl_send_confirm_cancel');
+    expect(CONFIRM_USER_SELECT_CUSTOM_ID).toBe('qurl_confirm_user_select');
+    expect(CONFIRM_SEND_CUSTOM_ID).toBe('qurl_confirm_send');
+    expect(CONFIRM_CANCEL_CUSTOM_ID).toBe('qurl_confirm_cancel');
   });
 
   test('all customIds unique', () => {
-    const ids = new Set([SEND_USER_SELECT_CUSTOM_ID, SEND_CONFIRM_SEND_CUSTOM_ID, SEND_CONFIRM_CANCEL_CUSTOM_ID]);
+    const ids = new Set([CONFIRM_USER_SELECT_CUSTOM_ID, CONFIRM_SEND_CUSTOM_ID, CONFIRM_CANCEL_CUSTOM_ID]);
     expect(ids.size).toBe(3);
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
-    // siblingMessage is registered only on SEND_USER_SELECT_CUSTOM_ID
+    // siblingMessage is registered only on CONFIRM_USER_SELECT_CUSTOM_ID
     // (commands.js's registerFlow blocks), but flow-dispatch stores
     // siblingMessages keyed by EXPECTED_STAGE — so a /qurl revoke
     // supersede that peeks at a row at SEND_STAGE_AWAITING_CONFIRM
@@ -3122,10 +3122,10 @@ describe('constants + exports', () => {
     // registerFlow on each customId must throw "already registered".
     const { registerFlow } = require('../src/flow-dispatch');
     const newCustomIds = [
-      'qurl_send_confirm_expiry',
-      'qurl_send_confirm_self_destruct',
-      'qurl_send_confirm_note_btn',
-      'qurl_send_confirm_note_modal',
+      'qurl_confirm_expiry',
+      'qurl_confirm_self_destruct',
+      'qurl_confirm_note_btn',
+      'qurl_confirm_note_modal',
     ];
     for (const id of newCustomIds) {
       expect(() => registerFlow(id, {
@@ -3195,10 +3195,10 @@ describe('constants + exports', () => {
     expect(fnBody).not.toContain('personalMessageRaw');
   });
 
-  test('CONTRACT (runtime): handleSendConfirmClick never reads payload.personalMessageRaw on the Send path', async () => {
+  test('CONTRACT (runtime): handleConfirmSendClick never reads payload.personalMessageRaw on the Send path', async () => {
     // Runtime complement to the static brace-walker above. Wraps
     // row.payload in a Proxy that throws on any get('personalMessageRaw')
-    // access, then drives handleSendConfirmClick through to the
+    // access, then drives handleConfirmSendClick through to the
     // executeSendPipeline call. If the handler (or anything downstream
     // it triggers through this payload reference) reads the field, the
     // Proxy throws and the test fails — survives future syntax changes
@@ -3224,14 +3224,14 @@ describe('constants + exports', () => {
       get(target, prop) {
         if (prop === 'personalMessageRaw') {
           leaked = true;
-          throw new Error('CONTRACT VIOLATION: handleSendConfirmClick read payload.personalMessageRaw');
+          throw new Error('CONTRACT VIOLATION: handleConfirmSendClick read payload.personalMessageRaw');
         }
         return target[prop];
       },
     });
     const int = makeInteraction({ guildMembers: { [u1]: {} } });
     mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
-    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: trappedPayload, version: 1 } });
+    await handleConfirmSendClick(int, { flow_id: 'fid', row: { payload: trappedPayload, version: 1 } });
     expect(leaked).toBe(false);
   });
 
