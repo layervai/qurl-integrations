@@ -3882,6 +3882,14 @@ async function handleQurlSlashSend(interaction, params) {
   // that never produced a visible response. Every known failure
   // mode below has its own targeted clearCooldown + ephemeral
   // editReply; this catch is the safety net for everything else.
+  //
+  // Hoisted out of the try: `flow_id` (deterministic from the
+  // interaction id) and `orphanFlowCreated` (flipped true ONLY after
+  // supersedeOrCreate.created === true) so the catch can tell whether
+  // a throw between supersedeOrCreate success and the final editReply
+  // left an orphan DDB row that needs cleaning up.
+  let flow_id;
+  let orphanFlowCreated = false;
   try {
     await interaction.deferReply({ ephemeral: true });
 
@@ -3988,7 +3996,7 @@ async function handleQurlSlashSend(interaction, params) {
     // case — sibling-flow disambig surfaces a stage-specific message;
     // same-stage rerun atomically claims the slot. Mirrors /qurl
     // revoke's pattern.
-    const flow_id = flowIdForInteraction(interaction);
+    flow_id = flowIdForInteraction(interaction);
     const sendNonce = crypto.randomBytes(8).toString('hex');
     const payload = {
       resourceType: params.resourceType,
@@ -4026,6 +4034,10 @@ async function handleQurlSlashSend(interaction, params) {
         content: siblingMsg || '❌ Could not start a send — please try again.',
       });
     }
+    // We own the row from here on — a throw before the final editReply
+    // would orphan it. The catch below uses this flag to fire a
+    // best-effort version-checked deleteFlow.
+    orphanFlowCreated = true;
 
     const content = renderConfirmCardContent({
       resourceType: params.resourceType,
@@ -4042,7 +4054,12 @@ async function handleQurlSlashSend(interaction, params) {
       attachPicker: needsPicker,
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
     });
-    return interaction.editReply({ content, components: rows });
+    // `return await` (not bare `return`) is load-bearing: without it
+    // a Discord-side rejection on the confirm-card delivery would
+    // bypass the outer catch entirely, leaving the user with a set
+    // cooldown AND an orphan flow row from the supersedeOrCreate
+    // we just landed.
+    return await interaction.editReply({ content, components: rows });
   } catch (err) {
     // Unanticipated throw. Always clear cooldown — the user got no
     // visible response, so they must not be locked out for the full
@@ -4054,8 +4071,26 @@ async function handleQurlSlashSend(interaction, params) {
     // so they can retry.
     clearCooldown(interaction.user.id);
     logger.error('handleQurlSlashSend: unexpected throw', {
-      user_id: interaction.user.id, error: err && err.message, stack: err && err.stack,
+      user_id: interaction.user.id, flow_id, error: err && err.message, stack: err && err.stack,
     });
+    // Best-effort cleanup of any orphan flow row we created. Only
+    // fires when supersedeOrCreate succeeded and the throw happened
+    // between then and the final editReply — otherwise the row
+    // would sit in DDB until TTL eviction, blocking a fresh /qurl
+    // file or /qurl map invocation under the sibling-flow guard.
+    // Version-gated stage check keeps a concurrent confirm-click
+    // from racing the delete and removing a row that's already
+    // advanced past awaiting-confirm.
+    if (orphanFlowCreated) {
+      deleteFlow(flow_id, {
+        stage: SEND_STAGE_AWAITING_CONFIRM,
+        reason: 'terminal',
+      }).catch((cleanupErr) => {
+        logger.warn('handleQurlSlashSend: orphan-flow cleanup failed', {
+          flow_id, error: cleanupErr && cleanupErr.message,
+        });
+      });
+    }
     const errContent = '❌ Something went wrong — please try again.';
     return interaction.editReply({ content: errContent })
       .catch(() => interaction.reply({ content: errContent, ephemeral: true }).catch(logIgnoredDiscordErr));
@@ -4243,8 +4278,25 @@ async function handleQurlMap(interaction) {
   // Shared parser: see `parseLocationInput` near the top of this file.
   // `/qurl send`'s modal-driven location text calls it too — keep both
   // entry points in lockstep so they produce identical delivered URLs
-  // for the same input.
-  let { locationUrl, locationName } = parseLocationInput(locationValue);
+  // for the same input. Wrap in try/catch as a defensive symmetry with
+  // handleQurlFile's catches: a future regex change in parseLocationInput
+  // or a pathological input could throw synchronously before reaching
+  // handleQurlSlashSend's safety net, leaving cooldown set with no
+  // visible response.
+  let locationUrl;
+  let locationName;
+  try {
+    ({ locationUrl, locationName } = parseLocationInput(locationValue));
+  } catch (err) {
+    logger.error('handleQurlMap: parseLocationInput threw', {
+      user_id: interaction.user.id, error: err && err.message,
+    });
+    clearCooldown(interaction.user.id);
+    return interaction.reply({
+      content: '❌ Could not parse location — please re-run with a Google Maps URL or address.',
+      ephemeral: true,
+    });
+  }
   // Explicit location-name override wins over the URL-derived name.
   if (locationNameRaw && locationNameRaw.trim().length > 0) {
     locationName = locationNameRaw.trim();
@@ -4278,6 +4330,27 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   // handleSendConfirmClick / handleSendCancelClick. All `update`
   // calls below become `editReply` (the interaction is now deferred).
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  // Validate payload.resourceType BEFORE renderConfirmCardContent
+  // would throw on it. A corrupt/stale DDB row (manual mutation,
+  // schema drift, etc.) with an unknown resourceType would otherwise
+  // throw TypeError from the renderer and surface the dispatcher's
+  // generic "superseded" copy — wrong, since nothing was superseded.
+  // Delete the corrupt row + surface actionable "re-run" copy.
+  const payloadResource = (row.payload || {}).resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleSendUserSelect: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
 
   // `interaction.users` is a discord.js Collection in production,
   // duck-typed as a Map in tests — both support `.values()` so the

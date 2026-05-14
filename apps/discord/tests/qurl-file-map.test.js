@@ -1240,6 +1240,74 @@ describe('handleQurlFile — slash entry', () => {
       expect.objectContaining({ user_id: SENDER_ID }),
     );
   });
+
+  test('safety-net catch deletes orphan flow row when post-supersede throw fires', async () => {
+    // When supersedeOrCreate succeeds and then a downstream call
+    // (renderConfirmCardContent, renderConfirmCardRows, the final
+    // editReply, etc.) throws, the DDB row we just claimed would
+    // sit orphaned until TTL eviction — blocking the user's next
+    // /qurl file or /qurl map under the sibling-flow guard.
+    //
+    // Reproduce: let supersedeOrCreate resolve `created: true`, then
+    // force editReply to throw on its first call (the
+    // renderConfirmCardContent + components delivery). The catch's
+    // version-checked deleteFlow should fire with the correct
+    // stage so a racing confirm-click can't be silently revoked.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    int.editReply.mockRejectedValueOnce(new Error('Discord 500'));
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    expect(mockDeleteFlow).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        stage: 'awaiting_send_confirm',
+        reason: 'terminal',
+      }),
+    );
+    expect(isOnCooldown(SENDER_ID)).toBe(false);
+    // Pin `flow_id` in the error-log payload so a refactor that drops
+    // it (and breaks correlating logs ↔ DDB rows during a post-mortem)
+    // surfaces as a test failure rather than silently regressing.
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/unexpected throw/),
+      expect.objectContaining({ flow_id: expect.any(String) }),
+    );
+  });
+
+  test('safety-net catch does NOT call deleteFlow when throw fires before supersedeOrCreate', async () => {
+    // If the throw lands before we ever called supersedeOrCreate
+    // there is no DDB row to clean up — calling deleteFlow would be
+    // a wasted round-trip (and noise in DDB metrics). The
+    // `orphanFlowCreated` flag must gate the cleanup precisely.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    int.deferReply.mockRejectedValueOnce(new Error('token expired'));
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
+
+  test('safety-net catch does NOT call deleteFlow when supersedeOrCreate returned created:false (sibling flow)', async () => {
+    // A sibling-flow supersede returns `created: false` — the row
+    // belongs to a different in-flight flow, not us. Deleting it
+    // would silently revoke another user's open confirm card.
+    mockSupersedeOrCreate.mockResolvedValueOnce({
+      created: false,
+      surviving: { stage: 'awaiting_confirm', flow_id: 'other_flow' },
+    });
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
