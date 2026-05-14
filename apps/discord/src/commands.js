@@ -286,6 +286,11 @@ function setCooldown(userId) {
   // LRU-ish behavior: delete first so set() re-inserts at the end of the
   // Map's insertion order. Combined with the bulk 10%-drop eviction below,
   // active users stay resident while stale entries roll out.
+  //
+  // CAUTION: softenCooldown (below) rides on the same insertion-order
+  // contract — if the eviction strategy ever changes (priority-based,
+  // TTL-based, etc.), softenCooldown's iteration-order test will fail
+  // loudly and both helpers will need rethinking together.
   sendCooldowns.delete(userId);
   sendCooldowns.set(userId, Date.now());
   if (sendCooldowns.size > 10000) {
@@ -4071,6 +4076,14 @@ async function handleQurlFile(interaction) {
   // backpressure, not user fault; locking the user out for 30s on a
   // capacity rejection would be punitive.
   if (activeFileSends >= MAX_CONCURRENT_FILE_SENDS) {
+    // Log at INFO so capacity-tuning has a trend signal — a sudden
+    // burst of these would indicate either MAX_CONCURRENT_FILE_SENDS
+    // is undersized or a downstream pipeline is stuck holding slots.
+    logger.info('handleQurlFile: capacity backpressure', {
+      user_id: interaction.user.id,
+      active_file_sends: activeFileSends,
+      max_concurrent: MAX_CONCURRENT_FILE_SENDS,
+    });
     return interaction.reply({
       content: 'The bot is processing too many file sends right now. Please try again in a moment.',
       ephemeral: true,
@@ -4198,17 +4211,12 @@ async function handleQurlMap(interaction) {
     // Defensive .slice mirrors the modal path's pattern at commands.js:~2096.
     // The slash option's setMaxLength(500) enforces this server-side, so
     // legitimate clients can't exceed it — the slice is forged-interaction
-    // defense (a fabricated interaction could pass an unbounded payload),
-    // matching the modal entry point one-for-one.
+    // defense.
     //
-    // Order matters: trim() FIRST, then slice. Trimming after slicing
-    // could let a forged 500+ chars-of-whitespace payload pass the
-    // length check below if trimming peeled fewer chars than the slice
-    // truncated (e.g. 510 spaces → slice(500) keeps 500 spaces → trim
-    // produces ''; the empty-location branch catches it). Reversing
-    // the order would NOT preserve the empty-after-trim semantics on
-    // a payload whose first 500 chars are non-whitespace + trailing
-    // whitespace.
+    // Order: trim() FIRST so the 500-char slice measures CONTENT, not
+    // whitespace. Slicing first would let a payload like
+    // `<100 leading spaces> + <450 chars of content>` lose 50 content
+    // chars to the cap; trimming first preserves the full content.
     locationValue = interaction.options.getString('location', true).trim().slice(0, 500);
   } catch (err) {
     logger.warn('handleQurlMap: required location option missing', {
@@ -4476,12 +4484,27 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
   // path (nobody left, nobody was ever there); distinct copy + flow
   // delete keeps the dispatcher's outer catch from masking the signal.
   if (!Array.isArray(payload.recipientIds) || payload.recipientIds.length === 0) {
-    await deleteFlow(flow_id, {
+    // Version-gate the delete: a concurrent UserSelect could have
+    // transitioned the row between the dispatcher's loadFlow (which
+    // fed our stale `payload` view) and this click. If `deleted:
+    // false`, the more-recent row is preserved and the user sees the
+    // "card moved" recovery copy instead of a silently wiped pick.
+    const deleteResult = await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
-    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty-recipients failed', {
-      flow_id, error: err && err.message,
-    }));
+      expectedVersion: row.version,
+    }).catch((err) => {
+      logger.warn('handleSendConfirmClick: deleteFlow on empty-recipients failed', {
+        flow_id, error: err && err.message,
+      });
+      return { deleted: false };
+    });
+    if (!deleteResult.deleted) {
+      return interaction.followUp({
+        content: 'The card moved — re-check it and click Send again.',
+        ephemeral: true,
+      }).catch(logIgnoredDiscordErr);
+    }
     return interaction.editReply({
       content: '❌ No recipients were selected — re-run the command.',
       components: [],
@@ -4533,12 +4556,28 @@ async function handleSendConfirmClick(interaction, { flow_id, row }) {
     // misdirects when nobody left — the recipient list was invalid).
     // Terminal for THIS attempt either way: delete the flow so a
     // rerun claims a fresh slot.
-    await deleteFlow(flow_id, {
+    //
+    // Version-gate the delete (same shape as the happy-path Send and
+    // the empty-recipientIds branch): a concurrent UserSelect could
+    // have advanced the row between the dispatcher's loadFlow and
+    // this point. If `deleted: false`, the more-recent row is
+    // preserved and the user sees the "card moved" recovery copy.
+    const deleteResult = await deleteFlow(flow_id, {
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
-    }).catch((err) => logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
-      flow_id, error: err && err.message,
-    }));
+      expectedVersion: row.version,
+    }).catch((err) => {
+      logger.warn('handleSendConfirmClick: deleteFlow on empty failed', {
+        flow_id, error: err && err.message,
+      });
+      return { deleted: false };
+    });
+    if (!deleteResult.deleted) {
+      return interaction.followUp({
+        content: 'The card moved — re-check it and click Send again.',
+        ephemeral: true,
+      }).catch(logIgnoredDiscordErr);
+    }
     const wasInvalidList = droppedBots > 0 || droppedSelf > 0;
     return interaction.editReply({
       content: wasInvalidList

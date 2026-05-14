@@ -1680,9 +1680,59 @@ describe('handleSendConfirmClick', () => {
     expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/no longer reachable/i),
     }));
+    // Version-gated delete: pin expectedVersion so a concurrent
+    // UserSelect transition doesn't silently wipe the more-current row.
     expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
       reason: 'terminal',
+      expectedVersion: 1,
+    }));
+  });
+
+  test('empty recipientIds + concurrent picker race (deleteFlow returns deleted:false) → "card moved" followUp, no editReply wipe', async () => {
+    // Stale-view scenario: dispatcher's loadFlow saw row v1 with
+    // recipientIds=[], but a UserSelect transition advanced the row
+    // to v2 between then and this Send click. The version-gated
+    // deleteFlow returns deleted:false, surfacing the "card moved"
+    // recovery instead of silently wiping v2.
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    await handleSendConfirmClick(int, {
+      flow_id: 'fid',
+      row: { payload: { ...validPayload, recipientIds: [] }, version: 1 },
+    });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/card moved/i),
+      ephemeral: true,
+    }));
+    // The fixed "No recipients were selected" editReply must NOT
+    // fire on the dedup-loser path.
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/No recipients were selected/i),
+    }));
+  });
+
+  test('all-invalid recipients + concurrent picker race (deleteFlow returns deleted:false) → "card moved" followUp', async () => {
+    // Same shape as the empty-recipients race, but the dispatcher
+    // loaded a row whose recipientIds resolved to all-bots or all-
+    // sender. Version-gated delete catches the concurrent picker
+    // advance and surfaces the recovery.
+    mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
+    const int = makeInteraction({ guildMembers: { [SENDER_ID]: {} } });
+    await handleSendConfirmClick(int, {
+      flow_id: 'fid',
+      row: { payload: { ...validPayload, recipientIds: [SENDER_ID] }, version: 5 },
+    });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/card moved/i),
+      ephemeral: true,
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Invalid recipient list/i),
+    }));
+    // expectedVersion threaded through.
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      expectedVersion: 5,
     }));
   });
 
