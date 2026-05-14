@@ -3565,6 +3565,16 @@ async function handleQurlMap(interaction) {
   });
 }
 
+// --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
+// These `handleSend*` names refer to the Send BUTTON on the confirm card
+// (not the deleted `/qurl send` slash command). The associated customId
+// wire literals (`qurl_send_user_select`, `qurl_send_confirm_*`) are
+// preserved post-7b.3 because in-flight `flow_state` rows encode them —
+// renaming would orphan any open confirm card across the deploy
+// boundary. Rename of both the identifiers AND the customIds is tracked
+// in #316, scheduled for a deploy ≥ SEND_FLOW_TTL_SECONDS (180s) after
+// 7b.3 lands so the DDB rows have drained.
+//
 // Stage stays at SEND_STAGE_AWAITING_CONFIRM — `transitionFlow` with
 // `stage_to` === current stage advances the version (OCC guard) and
 // refreshes the TTL, so repeated picker churn doesn't expire the row
