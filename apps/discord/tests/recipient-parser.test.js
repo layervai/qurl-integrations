@@ -572,6 +572,59 @@ describe('parseRecipientMentions — channel mentions (voice / stage-voice)', ()
     expect(res.ids).toEqual([]);
     expect(res.invalidTokens).toEqual(['<#500>']);
   });
+
+  test('explicit channel mentions claim cap slots BEFORE @everyone (priority ordering)', () => {
+    // The parser's channel-expansion pass runs BEFORE @everyone so
+    // direct mentions (user / role / channel) claim cap slots first
+    // and @everyone fills the remainder. Reversing the order would
+    // silently drop explicit mentions when the cache is partial or
+    // the cap is tight — pin the contract here.
+    //
+    // Setup: cap = 25 (test default), 100 unrelated guild members,
+    // 3-member voice channel. With voice running BEFORE @everyone,
+    // the 3 voice members win cap slots first and @everyone fills
+    // the remaining 22.
+    const users = {};
+    for (let i = 1; i <= 100; i++) {
+      users[`9${String(i).padStart(17, '0')}`] = {};
+    }
+    const voiceMembers = ['111', '222', '333'];
+    for (const id of voiceMembers) users[id] = {};
+    const int = makeInteraction({
+      users,
+      channels: { '500': { type: GUILD_VOICE, members: voiceMembers } },
+    });
+    const res = parseRecipientMentions('@everyone <#500>', int, { allowMassMention: true });
+    // All three voice members must appear (proof: they claimed cap
+    // slots before the larger @everyone pool overflowed the cap).
+    for (const id of voiceMembers) expect(res.ids).toContain(id);
+    expect(res.ids).toHaveLength(25);
+  });
+
+  test('voice channel after cap-filling user mentions: silently no-ops (NOT marked invalid)', () => {
+    // Bug-guard: early break on `ids.size >= cap` must NOT mark the
+    // channel invalid when the cap was already filled by upstream
+    // expansions. The channel was perfectly valid; it just had no
+    // room to contribute. Without `capHit` tracking, the channel
+    // would surface as an invalidTokens entry, misleading the user.
+    const users = { '111': {}, '222': {}, '333': {}, 'aaa': {}, 'bbb': {} };
+    const int = makeInteraction({
+      users,
+      channels: { '500': { type: GUILD_VOICE, members: ['aaa', 'bbb'] } },
+    });
+    // Override cap to a small value so the user mentions alone fill it.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 3;
+    try {
+      const res = parseRecipientMentions('<@111> <@222> <@333> <#500>', int);
+      expect(res.ids.sort()).toEqual(['111', '222', '333']);
+      // Channel was valid; it just contributed nothing because the cap was full.
+      expect(res.invalidTokens).toEqual([]);
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
+  });
 });
 
 describe('parseRecipientMentions — @everyone (allowMassMention)', () => {

@@ -467,18 +467,29 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    // Walks every member regardless of cap — `consider()` caps `ids`
-    // but `seen` grows unbounded. Symmetric with the @everyone loop
-    // below: in both cases, iteration is bounded by Discord's channel
-    // capacity (99 for voice, ~10k for stage), and the cost is
-    // dominated by `partitionRecipients` + transitionFlow downstream.
+    // Early-break on cap, mirroring the @everyone loop's
+    // `if (ids.size >= cap) break;` (see the ordering comment block
+    // there for the full rationale on cache-insertion-order semantics
+    // — voice expansion inherits the same caveat: under-cap overflow
+    // wins remaining slots by Discord Collection insertion order, not
+    // alphabetical / role-ordered / recently-active). Without the
+    // break, a stage channel with thousands of members + a small
+    // env-overridden cap would walk the entire member set after the
+    // cap was hit — bounded but wasted work.
+    //
+    // `capHit` separates "no usable members" (empty / bots-only) from
+    // "cap was already filled by earlier expansions, voice silently
+    // no-ops" — the latter must NOT push to invalidTokens, since the
+    // channel itself was perfectly valid; the cap just had no room.
     let usable = 0;
+    let capHit = false;
     for (const [memberId, channelMember] of members) {
+      if (ids.size >= cap) { capHit = true; break; }
       if (isBotMember(channelMember)) continue;
       usable++;
       consider(memberId);
     }
-    if (usable === 0) {
+    if (usable === 0 && !capHit) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
     }
   }
