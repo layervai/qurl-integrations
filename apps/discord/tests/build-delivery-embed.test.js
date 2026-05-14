@@ -281,6 +281,14 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
       .toThrow(/got 1735689600\.5, typeof=number/);
     expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: -1 }))
       .toThrow(/got -1, typeof=number/);
+    // null vs undefined surfaces matter for triage: `typeof null` is
+    // `'object'` (a longstanding JS oddity), so `got null, typeof=object`
+    // is what the operator should see — different shape from
+    // `got undefined, typeof=undefined`. Pin both.
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: null }))
+      .toThrow(/got null, typeof=object/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: undefined }))
+      .toThrow(/got undefined, typeof=undefined/);
   });
 
 

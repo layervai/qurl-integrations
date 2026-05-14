@@ -443,17 +443,20 @@ function resolveRecipientAlias(r, interaction) {
 // — it lives in a top-level component row alongside it. Callers pass the
 // returned payload directly to `sendDM`.
 //
-// Example of what the recipient sees:
+// Example of what the recipient sees AFTER Discord renders the embed
+// (blank rows between sections represent Discord's natural line-spacing
+// padding around the description block + below the button row, not
+// literal newlines — the actual `descLines.join('\n')` produces single-
+// newline separators, which Discord then displays with the spacing
+// shown below):
 //
 //     ┌─────────────────────────────────────────────────────────────┐
 //     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
 //     │                                                             │
-//     │  Vik opened a door for you.                                 │  (description)
-//     │                                                             │
-//     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
-//     │                                                             │
-//     │  🕐 Closes in 1 day                                         │  (Discord <t:N:R> — auto-updates client-side
-//     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
+//     │  Vik opened a door for you.                                 │  (description, line 1)
+//     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
+//     │  🕐 Closes in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
 //     │  │   🚪 Step Through        │  (Link button — opens qURL)
