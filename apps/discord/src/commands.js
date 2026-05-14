@@ -3937,6 +3937,13 @@ function renderConfirmCardRows({
   // back to defaulting the codebase-default '24h' option so the card
   // still shows SOMETHING meaningful.
   const hasExpiryMatch = EXPIRY_CHOICES.some((c) => c.value === expiresIn);
+  if (!hasExpiryMatch && expiresIn != null) {
+    // Log so corrupted rows surface in forensics rather than just
+    // getting papered over by the 24h fallback.
+    logger.warn('renderConfirmCardRows: off-EXPIRY_LABELS expiresIn in payload — falling back to 24h default', {
+      expiresIn: truncForLog(expiresIn),
+    });
+  }
   rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
@@ -4918,12 +4925,24 @@ async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
   // the clear-note branch instead of leaving the modal-submit
   // interaction unresolved past deferUpdate.
   let raw = '';
+  let getValueThrew = false;
   try {
     raw = (interaction.fields.getTextInputValue(SEND_NOTE_MODAL_FIELD_ID) || '').trim();
   } catch (err) {
+    getValueThrew = true;
     logger.warn('handleSendConfirmNoteModal: getTextInputValue threw', {
       flow_id, error: err && err.message,
     });
+  }
+  // If the field read threw (customId allowlist drift), don't
+  // silently clear the existing note — surface an ephemeral error
+  // so the user knows their submit failed and their stored note is
+  // unchanged. The early-return preserves the existing payload.
+  if (getValueThrew) {
+    return interaction.followUp({
+      content: '❌ Could not read your note input — try again. (Your existing note, if any, is unchanged.)',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
   }
   // Cap matches the slash-entry path; both forms derive from the same
   // trimmed-and-capped raw so an Edit round-trip is idempotent.

@@ -2538,6 +2538,32 @@ describe('handleSendConfirmNoteButton', () => {
     // pure UX surface; we don't bump the version on it.
     expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
+
+  test('showModal failure → if fallback reply ALSO rejects, no unhandled rejection escapes', async () => {
+    // Dual-500 case: showModal fails (Discord blip) AND the ephemeral
+    // reply fallback fails (interaction already acked by some other
+    // path, or another Discord blip). The .catch(logIgnoredDiscordErr)
+    // on the fallback should absorb the rejection. Without that
+    // safety net, an unhandled rejection escapes and could crash the
+    // event loop or trigger node's `unhandledRejection` listeners.
+    const int = makeButtonInteraction();
+    int.showModal.mockRejectedValueOnce(new Error('Discord 500'));
+    int.reply.mockRejectedValueOnce(new Error('Already acked'));
+    let unhandled = null;
+    const listener = (reason) => { unhandled = reason; };
+    process.on('unhandledRejection', listener);
+    try {
+      await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+      // Microtask flush — any unhandled rejection from the catch
+      // chain would have been queued by now.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toBeNull();
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+    expect(int.showModal).toHaveBeenCalled();
+    expect(int.reply).toHaveBeenCalled();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -2641,6 +2667,27 @@ describe('handleSendConfirmNoteModal', () => {
     expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/expired/i),
     }));
+  });
+
+  test('getTextInputValue throws → ephemeral followUp ("could not read"), NO transitionFlow, existing note preserved', async () => {
+    // Customs-id allowlist drift: getTextInputValue throws for an
+    // unknown field id. The previous defensive try/catch silently
+    // routed to clear-note, dropping the user's existing note with no
+    // feedback. New behavior: log + surface an ephemeral followUp
+    // making the failure visible; existing note stays put (no
+    // transitionFlow fired).
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    int.fields.getTextInputValue = jest.fn(() => {
+      throw new Error('Unknown custom_id');
+    });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not read your note input/i),
+      ephemeral: true,
+    }));
+    // Existing payload untouched — no clear-note silently applied.
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
   });
 
   test('transitionFlow throw → ephemeral followUp (NOT update/reply post-defer)', async () => {
@@ -3025,5 +3072,45 @@ describe('constants + exports', () => {
     expect(end).toBeGreaterThan(startIdx);
     const fnBody = src.slice(startIdx, end + 1);
     expect(fnBody).not.toContain('personalMessageRaw');
+  });
+
+  test('CONTRACT (runtime): handleSendConfirmClick never reads payload.personalMessageRaw on the Send path', async () => {
+    // Runtime complement to the static brace-walker above. Wraps
+    // row.payload in a Proxy that throws on any get('personalMessageRaw')
+    // access, then drives handleSendConfirmClick through to the
+    // executeSendPipeline call. If the handler (or anything downstream
+    // it triggers through this payload reference) reads the field, the
+    // Proxy throws and the test fails — survives future syntax changes
+    // the brace-walker can't (string/regex literals containing braces).
+    const u1 = '100000000000000001';
+    const basePayload = {
+      resourceType: 'file',
+      attachment: VALID_ATTACHMENT,
+      locationUrl: null,
+      locationName: null,
+      resourceLabel: 'x.png',
+      recipientIds: [u1],
+      recipientAliases: { [u1]: 'Alice' },
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: 'safe content',
+      personalMessageRaw: '**FORBIDDEN_RAW**',
+      warningsBlock: '',
+      sendNonce: 'nonce-contract',
+    };
+    let leaked = false;
+    const trappedPayload = new Proxy(basePayload, {
+      get(target, prop) {
+        if (prop === 'personalMessageRaw') {
+          leaked = true;
+          throw new Error('CONTRACT VIOLATION: handleSendConfirmClick read payload.personalMessageRaw');
+        }
+        return target[prop];
+      },
+    });
+    const int = makeInteraction({ guildMembers: { [u1]: {} } });
+    mockDb.getGuildApiKey.mockResolvedValueOnce('apikey-1');
+    await handleSendConfirmClick(int, { flow_id: 'fid', row: { payload: trappedPayload, version: 1 } });
+    expect(leaked).toBe(false);
   });
 });
