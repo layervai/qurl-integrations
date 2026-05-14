@@ -425,17 +425,18 @@ function resolveRecipientAlias(r, interaction) {
 
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Door closes")
+// embed copy is intentionally evocative ("opened a door", "Closes")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
-// The qURL link is rendered as a `🔗 Step Through` Link button rather
+// The qURL link is rendered as a `🚪 Step Through` Link button rather
 // than a bare URL field; recipients click the button to open the link
 // in their default browser.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) sourced from resolveSenderAlias.
 // `personalMessage` is optional caller-provided context; if present, it
-// renders as an italicized blockquote above the body paragraph.
+// renders as an italicized blockquote between the sender line and the
+// expiry line.
 //
 // Returns the full Discord message options object (`embeds` + `components`)
 // rather than just the embed, since the button is not part of the embed
