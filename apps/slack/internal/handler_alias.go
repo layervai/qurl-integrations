@@ -63,9 +63,10 @@ const aliasMaxLen = 64
 // aliasCharsetPattern matches the recognized alias charset: lowercase
 // alnum + dash, with the leading and trailing char alnum. Intentionally
 // permissive on internal `--` runs because qurl-service's own
-// authoritative validator accepts them; the parser only enforces the
-// leading/trailing rule, which is what surfaces with a friendlier
-// error than punting downstream.
+// authoritative validator (the sparse GSI key handler from nhp #1825)
+// accepts them; the parser only enforces the leading/trailing rule,
+// which is what surfaces with a friendlier error than punting
+// downstream.
 var aliasCharsetPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 // aliasUsage is the help-text body returned when setalias/unsetalias
