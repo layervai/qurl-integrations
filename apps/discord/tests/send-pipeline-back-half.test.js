@@ -801,6 +801,27 @@ describe('renderSendConfirm — post-send confirmation overflow', () => {
     expect(r.needsExpand).toBe(true);
   });
 
+  // Pin the third header segment: self-destruct status. The 7b.3 follow-up
+  // replaced the legacy "One-time links" trailer with the timer the user
+  // picked (or "off" when no timer is set), so the sender sees the actual
+  // viewer behavior right next to the link expiry.
+  it('header includes "Self-destruct: <label>" when a timer is set', () => {
+    const r = renderSendConfirm({
+      ...baseArgs, delivered: 1, successNames: ['alice'], selfDestructSeconds: 300,
+    });
+    expect(r.content).toContain('| Self-destruct: 5 minutes');
+    expect(r.content).not.toContain('One-time');
+  });
+
+  it('header renders "Self-destruct: off" when no timer is set', () => {
+    // selfDestructSeconds omitted (undefined) — same as a send with no
+    // timer picked. The segment is still present for header alignment.
+    const r = renderSendConfirm({
+      ...baseArgs, delivered: 1, successNames: ['alice'],
+    });
+    expect(r.content).toContain('| Self-destruct: off');
+  });
+
   it('small list, showAll=true: full names inline, no truncation marker', () => {
     const successNames = Array.from({ length: REVOKE_TRUNC_LIMIT + 2 }, (_, i) => `u${i}`);
     const r = renderSendConfirm({ ...baseArgs, delivered: successNames.length, successNames, showAll: true });

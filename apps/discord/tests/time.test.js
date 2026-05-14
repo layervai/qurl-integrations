@@ -16,6 +16,7 @@ const {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
+  formatSelfDestructSegment,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
@@ -151,6 +152,33 @@ describe('utils/time', () => {
       expect(formatSelfDestructLabel(-Infinity)).toBe('(invalid)');
     });
 
+  });
+
+  describe('formatSelfDestructSegment', () => {
+    it('renders each preset as "Self-destruct: <label>"', () => {
+      for (const preset of SELF_DESTRUCT_PRESETS) {
+        expect(formatSelfDestructSegment(preset.seconds))
+          .toBe(`Self-destruct: ${preset.label}`);
+      }
+    });
+
+    it('renders "Self-destruct: off" when no timer is set', () => {
+      // The post-send confirm header always shows a self-destruct
+      // segment for visual alignment — null/undefined map to the same
+      // "off" sentinel as the form-side "No timer" dropdown option.
+      expect(formatSelfDestructSegment(null)).toBe('Self-destruct: off');
+      expect(formatSelfDestructSegment(undefined)).toBe('Self-destruct: off');
+    });
+
+    it('renders "Self-destruct: off" for non-finite / non-positive values', () => {
+      // Same defense as formatSelfDestructLabel — a corrupted DB row
+      // surfacing NaN/Infinity, or a 0 / negative value, falls through
+      // to the "off" sentinel rather than leaking "(invalid)" or "0s".
+      expect(formatSelfDestructSegment(NaN)).toBe('Self-destruct: off');
+      expect(formatSelfDestructSegment(Infinity)).toBe('Self-destruct: off');
+      expect(formatSelfDestructSegment(0)).toBe('Self-destruct: off');
+      expect(formatSelfDestructSegment(-5)).toBe('Self-destruct: off');
+    });
   });
 
   describe('expiryToISO', () => {

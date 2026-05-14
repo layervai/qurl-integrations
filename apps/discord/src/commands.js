@@ -22,6 +22,7 @@ const {
   expiryToISO,
   expiryToMs,
   formatSelfDestructLabel,
+  formatSelfDestructSegment,
   selfDestructSelectValueToSeconds,
   isLegitimateSelfDestructSelectValue,
   SELF_DESTRUCT_PRESETS,
@@ -1344,7 +1345,7 @@ async function executeSendPipeline(interaction, {
   // file; message-content rendering escapes per name.
   const failedNamesPlain = failedUsers.map(u => resolveRecipientAlias(u, interaction));
   const buildConfirmMsg = (showAll) => renderSendConfirm({
-    delivered, expiresIn,
+    delivered, expiresIn, selfDestructSeconds,
     failedNamesPlain, successNames, showAll,
   });
 
@@ -1582,7 +1583,7 @@ async function executeSendPipeline(interaction, {
               // Tell the monitor to track the new links (including new resource IDs for location sends)
               monitor.addRecipients(addResult.delivered, addResult.newResourceIds);
               const totalSent = delivered + addRecipientsCount;
-              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+              confirmMsg = `Sent to ${totalSent} user${totalSent !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
               if (failed > 0) confirmMsg += `\n${failed} could not be reached`;
               monitor.updateBaseMsg(confirmMsg);
               await interaction.editReply({ content: monitor.getFullMsg(), components: [buttonRow] });
@@ -4438,10 +4439,10 @@ function renderRevokeMsg(sendId, names, total, showAll, success = names.length) 
 // `recipients.txt` attachment; "(see attached)" is appended only to
 // lines that were actually truncated.
 function renderSendConfirm({
-  delivered, expiresIn,
+  delivered, expiresIn, selfDestructSeconds,
   failedNamesPlain = [], successNames = [], showAll = false,
 }) {
-  const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | One-time links`;
+  const header = `Sent to ${delivered} user${delivered !== 1 ? 's' : ''} | Expires: ${expiresIn} | ${formatSelfDestructSegment(selfDestructSeconds)}`;
   const escapedFailed = failedNamesPlain.map(escapeDiscordMarkdown);
   const escapedSuccess = successNames.map(escapeDiscordMarkdown);
 
