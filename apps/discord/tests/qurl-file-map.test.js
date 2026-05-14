@@ -611,6 +611,38 @@ describe('resolveMentionableSelection', () => {
     expect(r.droppedFromRoles).toBe(ITER_BOUND);
   });
 
+  test('ITER_BOUND accumulates ACROSS roles (function-scoped, not per-role)', () => {
+    // The inspectedFromRoles counter is function-scoped intentionally
+    // so a pathological role A can pre-truncate role B's expansion.
+    // Without this test, a future refactor moving `let
+    // inspectedFromRoles = 0;` inside the outer for-loop would silently
+    // flip the semantics to per-role bounds — passing the single-role
+    // test above but allowing N × 100-iteration grinds. Pin the
+    // cross-role accumulation behavior here.
+    const config = require('../src/config');
+    const ITER_BOUND = 4 * config.QURL_SEND_MAX_RECIPIENTS;
+    // Role A: 100 bots (will fully exhaust ITER_BOUND).
+    const botsA = Array.from({ length: 100 }, (_, i) => ({
+      user: makeUser(`100000000000000${String(i).padStart(3, '0')}`, { bot: true }),
+    }));
+    // Role B: 10 humans (would normally land in userMap, but role A
+    // exhausted the iteration budget first).
+    const humansB = Array.from({ length: 10 }, (_, i) => ({
+      user: makeUser(`200000000000000${String(i).padStart(3, '0')}`),
+    }));
+    const int = makeMentionableInteraction({
+      pickedRoles: [
+        makeRole({ id: 'role-a-bots', members: botsA }),
+        makeRole({ id: 'role-b-humans', members: humansB }),
+      ],
+    });
+    const r = resolveMentionableSelection({ interaction: int, canMentionEveryone: false });
+    // Role B's humans were never reached — ITER_BOUND tripped during
+    // role A's iteration.
+    expect(r.users).toEqual([]);
+    expect(r.droppedFromRoles).toBe(ITER_BOUND);
+  });
+
   test('overlap dedup: same bot in two picked roles counted once in droppedFromRoles', () => {
     // Set-backed droppedFromRoles means the same bot ID across two
     // picked roles contributes 1 to the user-visible count, not 2.
@@ -2866,6 +2898,35 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/@everyone/);
     expect(updated.content).toMatch(/Mention Everyone/);
+  });
+
+  test('mentionable picker: partial-valid pick with cold-cache @everyone → flow advances AND everyoneCacheCold warning surfaces', async () => {
+    // UX asymmetry parallel to the droppedFromRoles partial-valid
+    // surfacing: a user with MENTION_EVERYONE who picks one named
+    // user + @everyone (cache cold post-restart) gets the named user
+    // through partition (selected.length === 1, valid.length === 1)
+    // BUT @everyone silently expanded to zero. Without surfacing
+    // everyoneCacheCold in renderRecipientWarnings, the user has no
+    // way to know @everyone failed and would assume the bot honored
+    // their pick correctly.
+    const u1 = makeUser('100000000000000001');
+    const int = makeSelectInteraction({
+      users: [u1],
+      roles: [],
+      canMentionEveryone: true,
+    });
+    // Strip the cache — guild remains, cache undefined.
+    int.guild.members = {};
+    const everyoneId = int.guild.id;
+    int.roles = new Map([[everyoneId, { id: everyoneId, members: new Map() }]]);
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    // Flow advances with the named user.
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+    // But the warning surfaces so the user knows @everyone failed.
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(updated.content).toMatch(/Member cache not yet ready/);
+    expect(updated.content).toMatch(/expanded to 0 members/);
   });
 
   test('mentionable picker: guild without members.cache (cold cache after restart) → surfaces "Member cache not yet ready" reason', async () => {

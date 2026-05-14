@@ -2871,6 +2871,7 @@ function resolveMentionableSelection({ interaction, canMentionEveryone, flow_id 
  *   droppedBots?: number,
  *   droppedFromRoles?: number,
  *   massMentionDenied?: boolean,
+ *   everyoneCacheCold?: boolean,
  * }} [opts]
  */
 function renderRecipientWarnings({
@@ -2881,6 +2882,7 @@ function renderRecipientWarnings({
   droppedBots = 0,
   droppedFromRoles = 0,
   massMentionDenied = false,
+  everyoneCacheCold = false,
 } = {}) {
   const lines = [];
   if (cappedCount > 0) {
@@ -2927,6 +2929,13 @@ function renderRecipientWarnings({
     // user took a different picker action (selecting a role rather
     // than an individual bot).
     lines.push(`• ${droppedFromRoles} bot(s) filtered from picked role(s) — skipped.`);
+  }
+  if (everyoneCacheCold) {
+    // Symmetric with droppedFromRoles: surfaced even on partial-valid
+    // picks (named user + @everyone with cold cache → user lands but
+    // @everyone silently expanded to zero, which the user would
+    // otherwise have no way to know).
+    lines.push('• Member cache not yet ready — `@everyone` expanded to 0 members. Try again in a few seconds.');
   }
   if (massMentionDenied) {
     // Specific copy beats the generic "couldn't parse" path so the
@@ -3073,10 +3082,16 @@ function renderConfirmCardRows({
 }) {
   const rows = [];
   const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
+  // Placeholder surfaces both ceilings: pick-slot count (Discord's
+  // setMaxValues) AND the post-expansion recipient cap. With roles in
+  // the picker, a single slot can expand to many members — saying
+  // only "1–10" would mislead users who pick 10 roles expecting 10
+  // recipients.
+  const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
   rows.push(new ActionRowBuilder().addComponents(
     new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick users or roles (1–${maxValues})`)
+      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
       .setMinValues(1)
       .setMaxValues(maxValues)
   ));
@@ -3879,6 +3894,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     droppedBots,
     droppedFromRoles,
     massMentionDenied,
+    everyoneCacheCold,
   });
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
