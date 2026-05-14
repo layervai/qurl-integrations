@@ -15,7 +15,8 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.js', '!src/index.js'],
   coverageDirectory: 'coverage',
   coverageThreshold: {
-    // 78/68/78/78 floors. Coverage on commands.js is held by:
+    // 78/68/78/78 floors. Coverage on commands.js is held by four
+    // files, each owning a distinct slice:
     //   - qurl-file-map.test.js: /qurl file + /qurl map front-half
     //     (slash-option parsing, recipient resolution, confirm-card
     //     render/dispatch, forgery-rejection gates).
@@ -24,6 +25,13 @@ module.exports = {
     //     LRU eviction, revokeAllLinks per-link failures,
     //     handleAddRecipients pre-flight guards + file/location paths +
     //     DB-failure mid-flow, mintLinksInBatches batch boundaries).
+    //   - commands-comprehensive.test.js: dispatcher (handleCommand) +
+    //     audit-event emission paths + non-send slash commands (/link,
+    //     /unlink, /bulklink, etc.).
+    //   - coverage-boost.test.js: residual handleCommand double-error
+    //     paths, /bulklink failure modes, isGoogleMapsURL edge cases.
+    //   - qurl-send.test.js: shared helpers + the qURL client + connector
+    //     client + DB methods used by the send pipeline.
     global: {
       statements: 78,
       branches: 68,

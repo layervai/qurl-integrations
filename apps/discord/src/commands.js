@@ -519,15 +519,15 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     .setDescription(`**${safeSender}** opened a door for you.`);
 
   if (personalMessage) {
-    // CONTRACT: `personalMessage` arrives pre-sanitized — `/qurl file`
-    // and `/qurl map` pipe raw input through `sanitizeMessage` (markdown
-    // escape + @-mention strip) before constructing this payload, and
-    // the addRecipients path reads from `sendConfig.personal_message`
-    // which was sanitized at write time. Raw interpolation into the
-    // template below is safe
-    // ONLY because of that upstream pass. A future caller that bypasses
-    // sanitizeMessage (or a DB row read that skips re-sanitize) would
-    // silently regress to markdown injection — keep the contract.
+    // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file` and
+    // `/qurl map` pipe raw input through `sanitizeMessage` (markdown
+    // escape + @-mention strip) before constructing this payload, and the
+    // addRecipients path reads from `sendConfig.personal_message` which
+    // was sanitized at write time. Raw interpolation into the template
+    // below is safe ONLY because of that upstream pass. A future caller
+    // that bypasses sanitizeMessage (or a DB row read that skips re-
+    // sanitize) would silently regress to markdown injection — keep the
+    // contract.
     //
     // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
     // does not span newlines, so a multi-line message would render with
@@ -1080,16 +1080,15 @@ async function executeSendPipeline(interaction, {
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
-  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the
-  // `/qurl file` + `/qurl map` front-half today; this is defense-
-  // in-depth for a future caller (deserialized payload, programmatic
-  // retry, admin tool) that skips those checks. Trips here would
-  // otherwise surface deep
-  // inside mintLinksInBatches as "Failed to create any links" with
-  // no caller-side breadcrumb. The non-empty check ALSO fences the
-  // chain of `recipients.length` reads that follow (the cap check
-  // below, then the editReply) — a non-array reaching either site
-  // would crash on `.length` lookup against undefined.
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl file`
+  // + `/qurl map` front-half today; this is defense-in-depth for a
+  // future caller (deserialized payload, programmatic retry, admin tool)
+  // that skips those checks. Trips here would otherwise surface deep
+  // inside mintLinksInBatches as "Failed to create any links" with no
+  // caller-side breadcrumb. The non-empty check ALSO fences the chain
+  // of `recipients.length` reads that follow (the cap check below, then
+  // the editReply) — a non-array reaching either site would crash on
+  // `.length` lookup against undefined.
   if (!Array.isArray(recipients) || recipients.length === 0) {
     // Same canonical `typeof=`, `value=` rendering as the
     // isVoiceContext gate above. Empty-array case renders the literal

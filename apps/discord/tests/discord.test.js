@@ -1,8 +1,8 @@
 /**
  * Tests for src/discord.js — covers refreshCache, assignContributorRole,
  * notifyPRMerge, notifyBadgeEarned, postGoodFirstIssue, postReleaseAnnouncement,
- * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM,
- * getChannelMembers, shutdown, event handlers.
+ * postStarMilestone, postToGitHubFeed, postWeeklyDigest, sendDM, shutdown,
+ * event handlers.
  */
 
 jest.mock('../src/config', () => ({
@@ -321,82 +321,6 @@ describe('discord module', () => {
     });
   });
 
-  describe('getChannelMembers', () => {
-    // Helper: turn a plain Map into something with .filter() returning an
-    // array that also has .map (matches discord.js Collection enough for
-    // these tests without pulling in the real class).
-    const asCollection = (map) => {
-      map.filter = (fn) => {
-        const r = []; for (const [, v] of map) if (fn(v)) r.push(v);
-        r.map = Array.prototype.map.bind(r); return r;
-      };
-      return map;
-    };
-
-    it('filters sender and bots on a text channel', () => {
-      const membersMap = asCollection(new Map([
-        ['s1', { id: 's1', user: { bot: false } }],
-        ['u2', { id: 'u2', user: { bot: false } }],
-        ['b1', { id: 'b1', user: { bot: true } }],
-      ]));
-      const result = discord.getChannelMembers({ type: 0, members: membersMap }, 's1'); // GuildText
-      expect(result).toHaveLength(1);
-    });
-
-    it('returns empty + warns on unsupported channel types (thread, forum, DM)', () => {
-      // The helper supports only GuildText / GuildVoice / GuildStageVoice.
-      // Other types either lack `.members` entirely (DM=1, GuildForum=15,
-      // GuildMedia=16) or expose a different shape (thread types 10/11/12
-      // give a ThreadMemberManager of ThreadMember objects whose `.user`
-      // is lazily populated). The runtime guard returns [] safely.
-      const threadResult = discord.getChannelMembers({ type: 11, members: {}, id: 'th1' }, 's1');
-      expect(threadResult).toEqual([]);
-      const dmResult = discord.getChannelMembers({ type: 1, id: 'dm1' }, 's1');
-      expect(dmResult).toEqual([]);
-      const nullResult = discord.getChannelMembers(null, 's1');
-      expect(nullResult).toEqual([]);
-    });
-
-    it('on a voice channel, returns voice-connected members only (NOT the @everyone view-perm scope)', () => {
-      // Regression: the prior implementation enumerated guild.members.cache
-      // filtered by ViewChannel perm, which on default servers (where
-      // @everyone has view) expanded to the entire guild — the
-      // "sends to everyone in the server" bug. Voice channels now resolve
-      // to channel.members (the voice-connected set in discord.js v14).
-      const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // sender — filtered
-        ['b1', { id: 'b1', user: { id: 'b1', bot: true } }],  // bot — filtered
-      ]));
-      const channel = {
-        type: 2, // GuildVoice — included for clarity; helper no longer branches on type
-        members: connected,
-      };
-      const result = discord.getChannelMembers(channel, 's1');
-      expect(result.map(u => u.id)).toEqual(['u2']);
-    });
-
-    it('on a stage-voice channel, also returns voice-connected only', () => {
-      const connected = asCollection(new Map([
-        ['u2', { id: 'u2', user: { id: 'u2', bot: false } }],
-      ]));
-      const channel = {
-        type: 13, // GuildStageVoice
-        members: connected,
-      };
-      const result = discord.getChannelMembers(channel, 's1');
-      expect(result.map(u => u.id)).toEqual(['u2']);
-    });
-
-    it('returns empty when nobody else is connected to the voice channel', () => {
-      const connected = asCollection(new Map([
-        ['s1', { id: 's1', user: { id: 's1', bot: false } }], // only sender
-      ]));
-      const result = discord.getChannelMembers({ type: 2, members: connected }, 's1');
-      expect(result).toEqual([]);
-    });
-  });
-
   describe('shutdown', () => {
     it('destroys client', () => {
       discord.shutdown();
@@ -662,7 +586,6 @@ describe('discord module', () => {
   describe('exports', () => {
     it('exports all expected functions', () => {
       expect(typeof discord.sendDM).toBe('function');
-      expect(typeof discord.getChannelMembers).toBe('function');
       expect(typeof discord.assignContributorRole).toBe('function');
       expect(typeof discord.notifyPRMerge).toBe('function');
       expect(typeof discord.notifyBadgeEarned).toBe('function');

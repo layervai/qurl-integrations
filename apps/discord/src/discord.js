@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ChannelType } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const cron = require('node-cron');
 const config = require('./config');
 const logger = require('./logger');
@@ -14,7 +14,6 @@ const { escapeDiscordMarkdown: md } = require('./utils/sanitize');
 const intents = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
-  GatewayIntentBits.GuildVoiceStates,
 ];
 
 // Per-feature intent canaries. Each line pins one intent to one feature
@@ -36,8 +35,7 @@ function assertIntent(intentsList, bit, requiredFor) {
   }
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (channel.members for view-perm holders)');
-assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl map voice-channel recipient resolution (channel.members for voice-connected)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
 
 const client = new Client({ intents });
 
@@ -850,57 +848,6 @@ async function sendDM(discordId, message) {
   }
 }
 
-// Get non-bot members in a channel, excluding the sender.
-//
-// channel.members semantics in discord.js v14:
-//   - text channels: GuildMembers with ViewChannel perm (viewer set).
-//     Caller must populate guild.members.cache via guild.members.fetch()
-//     first; see commands.js channel-target branch.
-//   - voice / stage-voice channels: GuildMembers CURRENTLY CONNECTED to
-//     voice. Sourced from voice state cache (populated automatically via
-//     gateway events; no fetch needed) — REQUIRES the GuildVoiceStates
-//     intent (declared in the Client config above). If that intent is
-//     ever trimmed, voice/stage-voice paths will silently return empty
-//     here. The boot-time assertion in this file's intent block fails
-//     loud at startup if anyone removes it without replacing the helper.
-//
-// Both are the desired semantic for "Everyone in this channel." Voice
-// channels deliberately resolve to voice-connected only — anything broader
-// expands to ViewChannel-perm scope, which on default servers is the
-// entire guild (the prior "sends to everyone in the server" bug).
-//
-// Trust boundary: this helper supports GuildText, GuildVoice, and
-// GuildStageVoice channels — the three types where `channel.members` is
-// the right "Everyone in this channel" set under discord.js v14
-// (viewer set for text; voice-connected for voice/stage-voice). The
-// helper REJECTS other types via SUPPORTED_CHANNEL_TYPES rather than
-// trusting a documented contract, because /qurl file + /qurl map's
-// slash-command registration does not currently restrict invocation
-// context — a user COULD trigger this helper from a thread / forum /
-// DM today, where
-// `channel.members` either has the wrong shape (thread:
-// ThreadMemberManager of ThreadMember; user lazily populated) or
-// doesn't exist at all (forum / media / DM). Returning [] (with a
-// warn log so the call site's "no recipients" branch surfaces clearly)
-// is safer than letting `.filter().map()` throw on an unexpected shape.
-const SUPPORTED_CHANNEL_TYPES = new Set([
-  ChannelType.GuildText,
-  ChannelType.GuildVoice,
-  ChannelType.GuildStageVoice,
-]);
-function getChannelMembers(channel, senderUserId) {
-  if (!channel || !SUPPORTED_CHANNEL_TYPES.has(channel.type)) {
-    logger.warn('getChannelMembers called with unsupported channel type', {
-      channelId: channel?.id,
-      channelType: channel?.type,
-    });
-    return [];
-  }
-  return channel.members
-    .filter(m => m.id !== senderUserId && !m.user.bot)
-    .map(m => m.user);
-}
-
 // Graceful shutdown — awaits client.destroy() so the caller knows the
 // WebSocket is fully closed and no further events will fire. discord.js
 // v14 returns a Promise from destroy(); swallowing it risked dropped
@@ -930,7 +877,6 @@ module.exports = {
   sendDM,
   refreshCache,
   shutdown,
-  getChannelMembers,
   // Exported only for unit tests to verify the boot canary throws on
   // a missing intent. Production callers don't need it — the module-
   // level invocations above are the load-bearing assertions.

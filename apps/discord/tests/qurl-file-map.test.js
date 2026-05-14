@@ -121,7 +121,6 @@ jest.mock('../src/database', () => mockDb);
 
 jest.mock('../src/discord', () => ({
   sendDM: jest.fn().mockResolvedValue(true),
-  getChannelMembers: jest.fn(),
 }));
 
 jest.mock('../src/utils/admin', () => ({
