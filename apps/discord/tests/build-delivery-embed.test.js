@@ -254,6 +254,21 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     }
   });
 
+  // Locks the operator-facing diagnostic shape: the throw message must
+  // include both the stringified value AND its typeof so an oncall
+  // doesn't have to guess whether the bad input was an object, a
+  // function, or a stringified number. `${{}}` would otherwise coerce
+  // to `[object Object]` via valueOf (acceptable), but the typeof tag
+  // is what makes the distinction loud.
+  it('error message exposes both String(value) and typeof for diagnosis', () => {
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: {} }))
+      .toThrow(/got \[object Object\], typeof=object/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 'soon' }))
+      .toThrow(/got soon, typeof=string/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600.5 }))
+      .toThrow(/got 1735689600\.5, typeof=number/);
+  });
+
 
   // Locks the Step Through button shape: a future refactor that drops
   // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave

@@ -551,7 +551,11 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // (NFKC + bidi/zero-width strip + markdown escape + 64-char cap +
   // 'Someone' fallback — never throws on any input shape).
   if (!Number.isInteger(expiresAt)) {
-    throw new Error(`buildDeliveryPayload: expiresAt must be an integer Unix-seconds number (got ${expiresAt})`);
+    // String() over template interpolation so {} renders as "[object
+    // Object]" instead of being coerced via valueOf; typeof gives the
+    // operator the shape at a glance for non-primitive contract
+    // violations (object, function, symbol).
+    throw new Error(`buildDeliveryPayload: expiresAt must be an integer Unix-seconds number (got ${String(expiresAt)}, typeof=${typeof expiresAt})`);
   }
 
   // sanitizeDisplayName centralizes spoof defense so a future caller
