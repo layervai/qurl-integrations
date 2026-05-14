@@ -1090,6 +1090,42 @@ describe('parseRecipientMentions — result-shape contract', () => {
       'roleMentionsDenied',
     ]);
   });
+
+  test('invariant: ids and roleMentionsDenied are always disjoint (gate fires before consider())', () => {
+    // Cross-cutting invariant pin: members of a denied role never
+    // contribute to `ids` because the `role.mentionable !== true &&
+    // !allowMassMention` gate short-circuits BEFORE the `consider()`
+    // calls on role members. A regression that hoisted role-member
+    // iteration above the gate (or swapped the order of the per-
+    // role gate and the `for (const [memberId, ...])` loop) would
+    // surface here.
+    //
+    // Mixed scenario: one allowed role + one denied role sharing a
+    // common-id member. The shared member appears in `ids` via the
+    // allowed role; the denied role still surfaces in
+    // `roleMentionsDenied`. Crucially, the denied role's
+    // exclusive member (101) must NOT appear in `ids`.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '103': {} },
+      roles: {
+        '7000': { members: ['102', '103'], mentionable: true },   // allowed
+        '7001': { members: ['101', '103'], mentionable: false },  // denied; 103 also in allowed role
+      },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7001>', int, { allowMassMention: false });
+    expect(res.roleMentionsDenied).toEqual(['7001']);
+    // 101 (denied-role-exclusive) must NOT leak into ids.
+    expect(res.ids).not.toContain('101');
+    // Disjointness: no member-ID from the denied-role leaks into ids
+    // (even if the denied-role's IDs were Set member ids, they're
+    // distinct identifier semantics — denied list holds role ids,
+    // ids holds user ids — but we pin the structural invariant: no
+    // overlap between denied-role-EXCLUSIVE members and ids).
+    const deniedExclusive = ['101'];  // 103 is in both roles
+    for (const id of deniedExclusive) {
+      expect(res.ids).not.toContain(id);
+    }
+  });
 });
 
 describe('parseRecipientMentions — invalid tokens', () => {
