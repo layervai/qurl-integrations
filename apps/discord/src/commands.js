@@ -4761,6 +4761,10 @@ async function rerenderConfirmCard(interaction, newPayload) {
 // option gate — Discord enforces the choice set server-side, but a
 // forged interaction could land an off-set value here.
 async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
+  // `interaction.values && ...` is paranoia, not load-bearing —
+  // Discord guarantees `values` is an array for StringSelectMenu
+  // interactions. The guard catches a forged interaction missing
+  // the field entirely; legitimate UI paths always provide it.
   const picked = interaction.values && interaction.values[0];
   // Validate before deferring so the forgery branch can use `reply`
   // (the cheaper, single-call ack) instead of `followUp` after a
@@ -4816,6 +4820,8 @@ async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
 // selfDestructOptionToSeconds. The helper falls back to null for any
 // unexpected value (forged interaction), which is the safe default.
 async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
+  // `interaction.values && ...` is paranoia (see expiry handler) —
+  // legitimate StringSelectMenu interactions always carry the array.
   const pickedValue = interaction.values && interaction.values[0];
   // Validate against the closed legitimate set BEFORE acknowledging.
   // Discord enforces the choice list server-side; an off-set value
