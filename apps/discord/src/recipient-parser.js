@@ -491,6 +491,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
 
 module.exports = {
   parseRecipientMentions,
+  isBotMember,
   MAX_INPUT_LENGTH,
   MAX_INVALID_TOKEN_LENGTH,
   MAX_SLASH_OPTION_LENGTH,
