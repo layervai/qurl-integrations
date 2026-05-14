@@ -272,11 +272,53 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
 
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
-    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
-    const msgField = fields.find(f => typeof f.value === 'string' && f.value.includes('line one'));
-    expect(msgField).toBeDefined();
-    expect(msgField.value).toBe('> *"line one line two line three"*');
-    expect(msgField.value).not.toMatch(/\n/);
+    const desc = capturedEmbeds[0]._description;
+    // Personal-message line sits inside the description block (folded
+    // alongside sender + expiry so all three render in design order —
+    // sender → message → expiry).
+    expect(desc).toContain('> *"line one line two line three"*');
+    // Newlines inside the message itself are flattened to spaces; the
+    // only newlines in the description are the block separators between
+    // sender / message / expiry lines.
+    const messageLine = desc.split('\n').find(l => l.includes('line one'));
+    expect(messageLine).toBeDefined();
+    expect(messageLine).not.toMatch(/\r/);
+  });
+
+  // Ordering depends on which Embed slot each piece lands in: Discord
+  // renders the description block above any fields, so a personal
+  // message split into addFields would land AFTER the expiry line, not
+  // between sender and expiry. Folding all three into one
+  // setDescription is what guarantees the design ordering. Pin the
+  // relative order so a future refactor that splits any of the three
+  // back into addFields would be caught.
+  it('renders sender → personal message → expiry in that order when all three are present', () => {
+    buildDeliveryPayload({
+      ...baseArgs,
+      senderAlias: 'Vik',
+      personalMessage: 'Quarterly numbers — for your eyes only.',
+      expiresAt: 1735689600,
+    });
+    const desc = capturedEmbeds[0]._description;
+    const senderIdx = desc.indexOf('**Vik**');
+    const messageIdx = desc.indexOf('Quarterly numbers');
+    const expiryIdx = desc.indexOf('Closes <t:');
+    expect(senderIdx).toBeGreaterThanOrEqual(0);
+    expect(messageIdx).toBeGreaterThan(senderIdx);
+    expect(expiryIdx).toBeGreaterThan(messageIdx);
+    // And no addFields call — folded entirely into description.
+    expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
+  });
+
+  // When personalMessage is absent, the description still renders
+  // sender → expiry in order (no orphaned blank line between them).
+  it('renders sender → expiry with no gap when personalMessage is omitted', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
+    const desc = capturedEmbeds[0]._description;
+    const lines = desc.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
   });
 });
 

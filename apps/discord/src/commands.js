@@ -451,11 +451,11 @@ function resolveRecipientAlias(r, interaction) {
 //     │                                                             │
 //     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
 //     │                                                             │
-//     │  🕐 Door closes in 1 day                                    │  (Discord <t:N:R> — auto-updates client-side
+//     │  🕐 Closes in 1 day                                         │  (Discord <t:N:R> — auto-updates client-side
 //     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
-//     │  │   🔗 Step Through        │  (Link button — opens qURL)
+//     │  │   🚪 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
@@ -541,49 +541,57 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // Fail-loud on a missing/invalid expiresAt rather than rendering
   // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
   // the contract-violation throw in handleAddRecipients. Validate
-  // FIRST so the description below can interpolate directly.
+  // FIRST so the description below can interpolate directly. Safe to
+  // run before `sanitizeDisplayName` because that helper is total
+  // (NFKC + bidi/zero-width strip + markdown escape + 64-char cap +
+  // 'Someone' fallback — never throws on any input shape).
   if (!Number.isFinite(expiresAt)) {
     throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
   }
 
-  // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
-  // + 64-char cap + 'Someone' fallback. Centralized so a future caller
-  // adding another sender-name surface picks up the same spoof defense.
+  // sanitizeDisplayName centralizes spoof defense so a future caller
+  // adding another sender-name surface picks up the same protections.
   const safeSender = sanitizeDisplayName(senderAlias);
 
-  // Tight two-line description folds sender + expiry into one block —
-  // previously a separate addFields() row, which Discord padded with
-  // extra vertical whitespace pushing the button further away.
+  // Single description block: sender → optional personal message →
+  // expiry. Folding all three into one setDescription (rather than
+  // splitting personal message into addFields) keeps the rendered
+  // order matching the design — Discord renders fields BELOW the
+  // description, so an addFields personal-message would land after
+  // the expiry line, not between sender and expiry. It also keeps
+  // the embed compact: addFields adds vertical padding that pushes
+  // the Step Through button further from the sender line.
+  //
   // `<t:N:R>` is Discord's client-side relative-time markdown: the
   // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
   // and "1 hour ago" once expired. No bot-side editing needed.
+  //
+  // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file`
+  // and `/qurl map` pipe raw input through `sanitizeMessage`
+  // (markdown escape + @-mention strip) before constructing this
+  // payload, and the addRecipients path reads from
+  // `sendConfig.personal_message` which was sanitized at write time.
+  // Raw interpolation below is safe ONLY because of that upstream
+  // pass. A future caller that bypasses sanitizeMessage (or a DB row
+  // read that skips re-sanitize) would silently regress to markdown
+  // injection — keep the contract.
+  //
+  // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
+  // does not span newlines, so a multi-line message would render with
+  // only the first line styled. Flatten newlines to a space so the
+  // recipient sees one tidy quote — matches the design mockup which
+  // shows the message as a single-line styled box. 280-char cap keeps
+  // the embed visually compact.
+  const descLines = [`**${safeSender}** opened a door for you.`];
+  if (personalMessage) {
+    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
+    descLines.push(`> *"${capped}"*`);
+  }
+  descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
+
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription(
-      `**${safeSender}** opened a door for you.\n`
-      + `🕐 Closes <t:${expiresAt}:R>`
-    );
-
-  if (personalMessage) {
-    // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file` and
-    // `/qurl map` pipe raw input through `sanitizeMessage` (markdown
-    // escape + @-mention strip) before constructing this payload, and the
-    // addRecipients path reads from `sendConfig.personal_message` which
-    // was sanitized at write time. Raw interpolation into the template
-    // below is safe ONLY because of that upstream pass. A future caller
-    // that bypasses sanitizeMessage (or a DB row read that skips re-
-    // sanitize) would silently regress to markdown injection — keep the
-    // contract.
-    //
-    // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
-    // does not span newlines, so a multi-line message would render with
-    // only the first line styled. Flatten newlines to a space so the
-    // recipient sees one tidy quote — matches the design mockup which
-    // shows the message as a single-line styled box. 280-char cap keeps
-    // the embed visually compact now that the fixed body copy is gone.
-    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
-    embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
-  }
+    .setDescription(descLines.join('\n'));
 
   // Link button: opens qurlLink in the recipient's browser on a
   // single click. No interaction handler needed — Discord handles
@@ -1298,7 +1306,9 @@ async function executeSendPipeline(interaction, {
     // Audit in `finally` so the metric fires for every recipient regardless
     // of where the dispatch fails — sendDM resolving to false, sendDM
     // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // buildDeliveryPayload throwing (e.g. on a non-finite expiresAt — see
+    // its `Number.isFinite` guard; would throw on every iteration of the
+    // batch, since expiresAt is computed once above).
     // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
     // it either — that's the failure mode the audit metric exists to
     // measure. Coverage spans the entire dispatch attempt, not just the
