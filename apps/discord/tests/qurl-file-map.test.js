@@ -1008,7 +1008,14 @@ describe('resolveRoleNames (#326 helper)', () => {
     expect(resolveRoleNames(guild, [])).toEqual([]);
   });
 
-  test('returns [] when guild is null (defensive — DM context shouldn\'t reach here, but parity with optional chains)', () => {
+  test('guild=null/undefined with non-empty ids → unknown-role fallback per entry (DM context shouldn\'t reach here, but optional chains carry through)', () => {
+    // Defensive: the text-path call site is reachable from DM context
+    // (where `interaction.guild` is null) even though the parser's
+    // role loop won't actually populate `parsed.roleMentionsDenied`
+    // without a guild. If a future caller path bypasses that
+    // invariant, the optional chain `guild?.roles?.cache?.get(id)`
+    // returns undefined and the `||` falls through to `unknown-role`
+    // — symmetric with the cache-miss behavior, not a hard crash.
     expect(resolveRoleNames(null, ['7000'])).toEqual(['unknown-role']);
     expect(resolveRoleNames(undefined, ['7000'])).toEqual(['unknown-role']);
   });
@@ -3357,6 +3364,40 @@ describe('handleConfirmUserSelect', () => {
     const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(updated.content).toMatch(/Cannot send to bots/);
     expect(updated.content).toMatch(/no non-bot members/i);
+  });
+
+  test('mentionable picker: multi-signal pick (bot user + denied non-mentionable role) → banner reasons follow renderRecipientWarnings ordering', async () => {
+    // Pin the reason-ordering parity between the all-invalid
+    // rejection banner and the warnings-block bullets. Both surfaces
+    // sequence multi-signal picks as droppedBots → droppedFromRoles →
+    // everyoneCacheCold → massMentionDenied → roleMentionsDenied, so
+    // a future refactor that reshuffles one side without the other
+    // silently breaks the COPY PARITY contract in
+    // renderRecipientWarnings's docstring. Two signals (droppedBots
+    // + roleMentionsDenied) are the minimum to expose ordering.
+    const directBot = makeUser('100000000000000099', { bot: true });
+    const u1 = makeUser('100000000000000001');
+    const deniedRole = ['role-admin', {
+      id: 'role-admin',
+      name: 'admin',
+      mentionable: false,
+      members: new Map([[u1.id, { user: u1 }]]),
+    }];
+    const int = makeSelectInteraction({
+      users: [directBot],
+      roles: [deniedRole],
+      canMentionEveryone: false,
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const updated = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    // Index-of comparison pins ordering without depending on the
+    // exact joiner between reasons (currently ". ").
+    const botIdx = updated.content.indexOf('Cannot send to bots');
+    const roleIdx = updated.content.indexOf('Non-mentionable role');
+    expect(botIdx).toBeGreaterThanOrEqual(0);
+    expect(roleIdx).toBeGreaterThanOrEqual(0);
+    expect(botIdx).toBeLessThan(roleIdx);
   });
 
   test('re-pick preserves personalMessageRaw + personalMessage through the spread', async () => {
