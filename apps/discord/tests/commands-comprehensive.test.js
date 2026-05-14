@@ -222,20 +222,9 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: mockGetResourceStatus,
 }));
 
-jest.mock('../src/places', () => ({
-  searchPlaces: jest.fn().mockResolvedValue([]),
-  findPlaceFromText: jest.fn().mockResolvedValue(null),
-  getPlaceDetails: jest.fn().mockResolvedValue(null),
-  buildPlaceUrl: (name, placeId) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name || placeId)}&query_place_id=${encodeURIComponent(placeId)}`,
-  PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
-  PLACE_ID_SHAPE_RE: /^[A-Za-z0-9_-]{16,}$/,
-  encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
-  decodePlaceIdSentinel: (value) => {
-    if (typeof value !== 'string' || !value.startsWith('qurl_place:')) return null;
-    const placeId = value.slice('qurl_place:'.length);
-    return /^[A-Za-z0-9_-]{16,}$/.test(placeId) ? placeId : null;
-  },
-}));
+// Shared places-mock — see tests/helpers/places-mock.js.
+const { mockPlacesModule } = require('./helpers/places-mock');
+jest.mock('../src/places', () => mockPlacesModule);
 
 // flow-state is the DDB-backed harness consumed by /qurl revoke
 // post-conversion (PR 5). Mock it here rather than hit DDB.

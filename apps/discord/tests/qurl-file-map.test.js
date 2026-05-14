@@ -142,35 +142,15 @@ jest.mock('../src/qurl', () => ({
   getResourceStatus: jest.fn(),
 }));
 
-// places.js is mocked because the resolveLocation server-side path hits
-// Google Places at send time. Defaults: searchPlaces (autocomplete) and
-// findPlaceFromText (free-text fallback) return empty by default — each
-// describe block overrides per-test to assert the contract.
-const mockSearchPlaces = jest.fn().mockResolvedValue([]);
-const mockFindPlaceFromText = jest.fn().mockResolvedValue(null);
-const mockGetPlaceDetails = jest.fn().mockResolvedValue(null);
-jest.mock('../src/places', () => ({
-  searchPlaces: (...a) => mockSearchPlaces(...a),
-  findPlaceFromText: (...a) => mockFindPlaceFromText(...a),
-  getPlaceDetails: (...a) => mockGetPlaceDetails(...a),
-  buildPlaceUrl: (name, placeId) => {
-    const url = new URL('https://www.google.com/maps/search/');
-    url.searchParams.set('api', '1');
-    url.searchParams.set('query', name || placeId);
-    url.searchParams.set('query_place_id', placeId);
-    return url.toString();
-  },
-  PLACE_ID_SENTINEL_PREFIX: 'qurl_place:',
-  PLACE_ID_SHAPE_RE: /^[A-Za-z0-9_-]{16,}$/,
-  encodePlaceIdSentinel: (placeId) => `qurl_place:${placeId}`,
-  // Mirror the production shape check so a test that smuggles a
-  // too-short fake place_id doesn't pass here while failing in prod.
-  decodePlaceIdSentinel: (value) => {
-    if (typeof value !== 'string' || !value.startsWith('qurl_place:')) return null;
-    const placeId = value.slice('qurl_place:'.length);
-    return /^[A-Za-z0-9_-]{16,}$/.test(placeId) ? placeId : null;
-  },
-}));
+// Shared places-mock — see tests/helpers/places-mock.js for the
+// single source of truth for the encode/decode/shape contract.
+const {
+  mockPlacesModule,
+  mockSearchPlaces,
+  mockFindPlaceFromText,
+  mockGetPlaceDetails,
+} = require('./helpers/places-mock');
+jest.mock('../src/places', () => mockPlacesModule);
 
 // Flow-state stubs. Each test overrides per-call to assert on the
 // supersedeOrCreate/transitionFlow/deleteFlow contracts.

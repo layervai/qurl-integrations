@@ -5928,7 +5928,16 @@ async function handleAutocomplete(interaction) {
       // Skip dud entries early instead of relying on submit-time decode
       // to reject them — saves the user a "place no longer available"
       // error on a malformed Google response.
-      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) continue;
+      if (!PLACE_ID_SHAPE_RE.test(p.placeId)) {
+        // Debug, not warn: would fire per-keystroke during a Google
+        // place_id format drift, drowning logs. Operator can grep for
+        // this when investigating "why is my dropdown empty?" — that's
+        // the upstream-shape-drift signal.
+        logger.debug('autocomplete: dropped prediction (place_id failed shape check)', {
+          place_id: p.placeId,
+        });
+        continue;
+      }
       // Places marks `main_text` and `description` as optional; if both
       // are missing, searchPlaces returns `name: undefined` and the
       // label would render as the literal string "undefined". Discord
