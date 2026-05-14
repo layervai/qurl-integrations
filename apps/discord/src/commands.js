@@ -3517,6 +3517,18 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 const SEND_USER_SELECT_CUSTOM_ID = 'qurl_send_user_select';
 const SEND_CONFIRM_SEND_CUSTOM_ID = 'qurl_send_confirm_send';
 const SEND_CONFIRM_CANCEL_CUSTOM_ID = 'qurl_send_confirm_cancel';
+// Confirm-card menus / button restored from the OLD `/qurl send` UX —
+// slash options on /qurl file + /qurl map remain as initial defaults
+// (one-shot for power users), but a user who didn't fill them in can
+// still adjust expiry, self-destruct, and note inline on the card.
+const SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_send_confirm_expiry';
+const SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_send_confirm_self_destruct';
+const SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_send_confirm_note_btn';
+const SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_send_confirm_note_modal';
+// Local to the note modal — kept off the prefix-only customId
+// allowlist because flow-dispatch never routes modal-input fields,
+// only the parent modal customId.
+const SEND_NOTE_MODAL_INPUT_ID = 'message_value';
 
 // 3-minute confirm-card window. Matches /qurl send's Step-3 form
 // timeout at line ~2293 so users have the same time-to-finish budget
@@ -3857,13 +3869,22 @@ function formatPersonalMessagePreview(message) {
 // Build the ActionRow set for the confirm card. When `attachPicker`,
 // row 0 is a UserSelectMenu (recipients absent OR a prior pick is in
 // the payload and the user might want to re-pick); otherwise no
-// picker row. Send/Cancel always in the last row.
+// picker row. Self-destruct + Expiry StringSelectMenus follow (each
+// requires its own row — Discord forbids combining selects with
+// buttons in the same ActionRow). The last row packs the optional
+// note button + Send + Cancel.
+//
+// Row math (Discord 5-row max):
+//   attachPicker=true:  UserSelect + SelfDestruct + Expiry + [Note,Send,Cancel] = 4 rows
+//   attachPicker=false: SelfDestruct + Expiry + [Note,Send,Cancel] = 3 rows
 //
 // Renamed from `needsPicker` so the content/rows divergence at the
 // post-pick call site (content rendered WITHOUT picker, rows rendered
 // WITH picker — to let the user re-pick) is impossible to silently
 // merge in a future refactor.
-function renderConfirmCardRows({ attachPicker, sendDisabled }) {
+function renderConfirmCardRows({
+  attachPicker, sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
+}) {
   const rows = [];
   if (attachPicker) {
     const maxValues = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
@@ -3875,7 +3896,51 @@ function renderConfirmCardRows({ attachPicker, sendDisabled }) {
         .setMaxValues(maxValues)
     ));
   }
+  // Self-destruct StringSelectMenu. Mirrors the OLD /qurl send form's
+  // shape at commands.js:~2334: "No self-destruct timer" + 7 presets.
+  // The `default: true` flag on the matching option keeps the
+  // collapsed-header text reflective of the current value across
+  // re-renders. `hasTimer` + `hasMatchingPreset` defend against a
+  // corrupted DDB row carrying an off-preset finite value (which would
+  // otherwise leave every option un-defaulted and force Discord to
+  // render the first option's label — wrong UX).
+  const hasTimer = Number.isFinite(selfDestructSeconds) && selfDestructSeconds > 0;
+  const hasMatchingPreset = hasTimer && SELF_DESTRUCT_PRESETS.some((p) => p.seconds === selfDestructSeconds);
   rows.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID)
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        { label: 'No self-destruct timer', value: SELF_DESTRUCT_NO_TIMER_VALUE, default: !hasMatchingPreset },
+        ...SELF_DESTRUCT_PRESETS.map((p) => ({
+          label: `\u{1F4A5} ${p.label}`,
+          value: String(p.seconds),
+          default: hasMatchingPreset && selfDestructSeconds === p.seconds,
+        }))
+      )
+  ));
+  // Expiry StringSelectMenu. Default-true on the matching option same
+  // as self-destruct above. EXPIRY_CHOICES is shared with the slash-
+  // option choice list so users see identical labels in autocomplete
+  // and in the form.
+  rows.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID)
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(
+        ...EXPIRY_CHOICES.map((c) => ({ label: c.name, value: c.value, default: c.value === expiresIn }))
+      )
+  ));
+  // Bottom row: Note button + Send + Cancel. Label flips between
+  // "Add a note" and "Edit note" based on current state so the user
+  // can tell at a glance whether a note is attached.
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID)
+      .setLabel(personalMessage ? '✏\u{FE0F} Edit note' : '✏\u{FE0F} Add a note (optional)')
+      .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(SEND_CONFIRM_SEND_CUSTOM_ID)
       .setLabel('\u{1F4E4} Send')
@@ -4092,6 +4157,9 @@ async function handleQurlSlashSend(interaction, params) {
     const rows = renderConfirmCardRows({
       attachPicker: needsPicker,
       sendDisabled: needsPicker,  // Send stays disabled until UserSelectMenu fires
+      expiresIn,
+      selfDestructSeconds,
+      personalMessage,
     });
     // `return await` (not bare `return`) is load-bearing: without it
     // a Discord-side rejection on the confirm-card delivery would
@@ -4444,7 +4512,13 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
       needsPicker: true,
       interaction,
     }),
-    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: true }),
+    components: renderConfirmCardRows({
+      attachPicker: true,
+      sendDisabled: true,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+    }),
   }).catch(logIgnoredDiscordErr);
   if (valid.length === 0) {
     // No transitionFlow on the all-invalid branch — the card stays at
@@ -4538,7 +4612,258 @@ async function handleSendUserSelect(interaction, { flow_id, row }) {
   });
   return interaction.editReply({
     content,
-    components: renderConfirmCardRows({ attachPicker: true, sendDisabled: false }),
+    components: renderConfirmCardRows({
+      attachPicker: true,
+      sendDisabled: false,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+    }),
+  }).catch(logIgnoredDiscordErr);
+}
+
+// Shared re-render after a confirm-card menu/button updates the flow
+// payload (expiry / self-destruct / note). Each menu handler builds
+// `newPayload` and calls this with the post-transition `interaction` +
+// payload. Keeping the re-render shape in one place avoids the three
+// handlers drifting on `attachPicker` / `sendDisabled` / content flags.
+//
+// `attachPicker: true` matches `handleSendUserSelect`'s post-pick
+// behavior (the picker stays attached so the user can re-pick).
+// `sendDisabled` is derived from recipientIds — without it, a user
+// who opened /qurl file without `recipients:` could change expiry
+// before picking and see an enabled Send button against an empty
+// recipient set.
+async function rerenderConfirmCard(interaction, newPayload) {
+  const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
+  // Re-resolve the User objects from cache for the preview. Cache-only
+  // (no members.fetch) — handleSendConfirmClick re-fetches at Send
+  // time; the preview here just needs the username/nickname for
+  // display. A picked user that left the guild between pick and
+  // menu-click renders as their ID via resolveRecipientAlias's
+  // fallback, which is correct (the actual partial-drop handling
+  // lives at Send-click time).
+  const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
+  const validRecipients = recipientIds.map((id) => {
+    const cached = memberCache && memberCache.get && memberCache.get(id);
+    return cached && cached.user ? cached.user : { id, username: id, bot: false };
+  });
+  const needsPicker = recipientIds.length === 0;
+  const content = renderConfirmCardContent({
+    resourceType: newPayload.resourceType,
+    resourceLabel: newPayload.resourceLabel,
+    validRecipients,
+    expiresIn: newPayload.expiresIn,
+    selfDestructSeconds: newPayload.selfDestructSeconds,
+    personalMessage: newPayload.personalMessage,
+    warningsBlock: '',
+    needsPicker,
+    interaction,
+  });
+  return interaction.editReply({
+    content,
+    components: renderConfirmCardRows({
+      attachPicker: true,
+      sendDisabled: needsPicker,
+      expiresIn: newPayload.expiresIn,
+      selfDestructSeconds: newPayload.selfDestructSeconds,
+      personalMessage: newPayload.personalMessage,
+    }),
+  }).catch(logIgnoredDiscordErr);
+}
+
+// Expiry StringSelectMenu → update payload.expiresIn. Defense-in-depth
+// validation against EXPIRY_LABELS mirrors handleQurlSlashSend's slash-
+// option gate — Discord enforces the choice set server-side, but a
+// forged interaction could land an off-set value here.
+async function handleSendConfirmExpirySelect(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  const picked = interaction.values && interaction.values[0];
+  if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
+    logger.warn('handleSendConfirmExpirySelect: forged off-set expiry value', {
+      flow_id, value: picked,
+    });
+    return interaction.followUp({
+      content: '❌ Unrecognized expiry value. Re-pick from the list.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  const payload = row.payload || {};
+  const newPayload = { ...payload, expiresIn: picked };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleSendConfirmExpirySelect: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your pick right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  return rerenderConfirmCard(interaction, newPayload);
+}
+
+// Self-destruct StringSelectMenu → update payload.selfDestructSeconds.
+// Uses the FORM value-space helper (selfDestructSelectValueToSeconds)
+// because the menu options use SELF_DESTRUCT_NO_TIMER_VALUE — distinct
+// from the slash option's `'none'` value handled by
+// selfDestructOptionToSeconds. The helper falls back to null for any
+// unexpected value (forged interaction), which is the safe default.
+async function handleSendConfirmSelfDestructSelect(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+  const selfDestructSeconds = selfDestructSelectValueToSeconds(
+    interaction.values && interaction.values[0]
+  );
+  const payload = row.payload || {};
+  const newPayload = { ...payload, selfDestructSeconds };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleSendConfirmSelfDestructSelect: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your pick right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  return rerenderConfirmCard(interaction, newPayload);
+}
+
+// Note button → opens a modal with the current personalMessage pre-
+// filled. Does NOT call transitionFlow — the flow row is untouched
+// until the modal SUBMITS (handleSendConfirmNoteModal below). This
+// asymmetry matters: clicking the button to peek at the current note
+// (or even to discard it via cancel) must not bump the flow version
+// and risk fencing out a concurrent picker/expiry/self-destruct
+// mutation.
+async function handleSendConfirmNoteButton(interaction, { flow_id, row }) {
+  const payload = row.payload || {};
+  const modal = new ModalBuilder()
+    .setCustomId(SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID)
+    .setTitle('Personal message');
+  modal.addComponents(new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId(SEND_NOTE_MODAL_INPUT_ID)
+      .setLabel('Optional note (leave blank to clear)')
+      .setStyle(TextInputStyle.Paragraph)
+      .setMaxLength(280)
+      .setRequired(false)
+      .setValue(payload.personalMessage || '')
+  ));
+  return interaction.showModal(modal).catch((err) => {
+    logger.warn('handleSendConfirmNoteButton: showModal failed', {
+      flow_id, error: err && err.message,
+    });
+  });
+}
+
+// Note modal-submit → sanitize input, update payload.personalMessage.
+// Modal-submit interactions get a fresh 3s ack window; using
+// `editReply` after `update()` mirrors handleSetupModal's shape.
+// `update()` ACKs against the ORIGINAL message (the confirm card)
+// because flow-dispatch wires modal submits to the same message-bound
+// interaction context.
+async function handleSendConfirmNoteModal(interaction, { flow_id, row }) {
+  const raw = interaction.fields.getTextInputValue(SEND_NOTE_MODAL_INPUT_ID).trim();
+  const personalMessage = raw ? sanitizeMessage(raw) : null;
+  const payload = row.payload || {};
+  const newPayload = { ...payload, personalMessage };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleSendConfirmNoteModal: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.reply({
+      content: '❌ Could not save your note right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.update({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.update({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  // Build the same re-rendered content/rows shape as the menus, but
+  // ACK via `update` (modal-submit) instead of editReply (deferred).
+  const recipientIds = Array.isArray(newPayload.recipientIds) ? newPayload.recipientIds : [];
+  const memberCache = interaction.guild && interaction.guild.members && interaction.guild.members.cache;
+  const validRecipients = recipientIds.map((id) => {
+    const cached = memberCache && memberCache.get && memberCache.get(id);
+    return cached && cached.user ? cached.user : { id, username: id, bot: false };
+  });
+  const needsPicker = recipientIds.length === 0;
+  const content = renderConfirmCardContent({
+    resourceType: newPayload.resourceType,
+    resourceLabel: newPayload.resourceLabel,
+    validRecipients,
+    expiresIn: newPayload.expiresIn,
+    selfDestructSeconds: newPayload.selfDestructSeconds,
+    personalMessage: newPayload.personalMessage,
+    warningsBlock: '',
+    needsPicker,
+    interaction,
+  });
+  return interaction.update({
+    content,
+    components: renderConfirmCardRows({
+      attachPicker: true,
+      sendDisabled: needsPicker,
+      expiresIn: newPayload.expiresIn,
+      selfDestructSeconds: newPayload.selfDestructSeconds,
+      personalMessage: newPayload.personalMessage,
+    }),
   }).catch(logIgnoredDiscordErr);
 }
 
@@ -6355,6 +6680,28 @@ registerFlow(SEND_CONFIRM_CANCEL_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleSendCancelClick,
 });
+// Confirm-card menus + note button/modal. All share the same
+// expectedStage as the original three customIds above; siblingMessage
+// is keyed by stage (registered on USER_SELECT only), so no
+// re-registration here. Each handler reads `row.payload` from the
+// dispatcher's loadFlow and uses `expectedVersion: row.version` on
+// transitionFlow for the picker-vs-menu race.
+registerFlow(SEND_CONFIRM_EXPIRY_SELECT_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmExpirySelect,
+});
+registerFlow(SEND_CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmSelfDestructSelect,
+});
+registerFlow(SEND_CONFIRM_NOTE_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmNoteButton,
+});
+registerFlow(SEND_CONFIRM_NOTE_MODAL_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleSendConfirmNoteModal,
+});
 
 module.exports = {
   commands,
@@ -6368,6 +6715,10 @@ module.exports = {
   handleSendUserSelect,
   handleSendConfirmClick,
   handleSendCancelClick,
+  handleSendConfirmExpirySelect,
+  handleSendConfirmSelfDestructSelect,
+  handleSendConfirmNoteButton,
+  handleSendConfirmNoteModal,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with

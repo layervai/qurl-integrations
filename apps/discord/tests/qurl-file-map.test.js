@@ -200,6 +200,10 @@ const {
   handleSendUserSelect,
   handleSendConfirmClick,
   handleSendCancelClick,
+  handleSendConfirmExpirySelect,
+  handleSendConfirmSelfDestructSelect,
+  handleSendConfirmNoteButton,
+  handleSendConfirmNoteModal,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -2160,6 +2164,440 @@ describe('handleSendUserSelect', () => {
       expect.stringMatching(/transitionFlow threw/),
       expect.objectContaining({ flow_id: 'fid' }),
     );
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmExpirySelect — inline expiry edit on confirm card
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmExpirySelect', () => {
+  const u1 = '100000000000000001';
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [u1],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeSelectInteraction({ value = '7d', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('happy path persists new expiresIn + re-renders', async () => {
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({ expiresIn: '7d', recipientIds: [u1] }),
+      terminal: false,
+      set_expires_at: expect.any(Number),
+    }));
+    expect(int.editReply).toHaveBeenCalled();
+    // Pin the user-facing render — verifies the new value reaches the
+    // confirm-card content, not just DDB. A refactor landing the right
+    // value in flow state but rendering the old label would slip past
+    // the wire-protocol assertion above.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/7 days/);
+  });
+
+  test('forged off-set expiry value → followUp warn, NO transitionFlow', async () => {
+    // Defense-in-depth: Discord enforces the choice set, but a forged
+    // interaction could land an arbitrary string. Reject before persisting.
+    const int = makeSelectInteraction({ value: '999d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Unrecognized expiry/i),
+      ephemeral: true,
+    }));
+  });
+
+  test('conflict result → superseded copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+      components: [],
+    }));
+  });
+
+  test('not_found result → expired copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+      components: [],
+    }));
+  });
+
+  test('transitionFlow throw → ephemeral retry followUp, no superseded copy', async () => {
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeSelectInteraction({ value: '7d' });
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save/i),
+      ephemeral: true,
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+  });
+
+  test('preserves all other payload fields across transition', async () => {
+    const int = makeSelectInteraction({ value: '7d' });
+    const payload = { ...basePayload, selfDestructSeconds: 60, personalMessage: 'hi' };
+    await handleSendConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        expiresIn: '7d',
+        recipientIds: [u1],
+        selfDestructSeconds: 60,
+        personalMessage: 'hi',
+        resourceType: 'file',
+      }),
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmSelfDestructSelect — inline self-destruct edit
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmSelfDestructSelect', () => {
+  const u1 = '100000000000000001';
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [u1],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeSelectInteraction({ value = '60', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.values = [value];
+    return int;
+  }
+
+  test('happy path persists new selfDestructSeconds + re-renders', async () => {
+    // Use 30 — SELF_DESTRUCT_PRESETS only contains [0.5, 1, 5, 30, 300, 1800, 3600].
+    // selfDestructSelectValueToSeconds rejects (returns null) anything off-preset
+    // so the test value must match an existing preset for this assertion.
+    const int = makeSelectInteraction({ value: '30' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({ selfDestructSeconds: 30 }),
+      terminal: false,
+    }));
+    expect(int.editReply).toHaveBeenCalled();
+    // Pin the user-facing render — wire-protocol assertion above proves
+    // we persisted the new value; this proves the rerendered content
+    // shows it back to the user.
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    expect(lastEdit.content).toMatch(/30 seconds/);
+  });
+
+  test('"no-timer" form-side sentinel → null', async () => {
+    // Form value-space uses SELF_DESTRUCT_NO_TIMER_VALUE (distinct
+    // from the slash-option side's 'none'). The helper maps it to
+    // null. Pin so a refactor that conflates the two value-spaces
+    // fails this test.
+    const int = makeSelectInteraction({ value: 'no-timer' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ selfDestructSeconds: null }),
+    }));
+  });
+
+  test('unknown forged value → null (safe fallback)', async () => {
+    // selfDestructSelectValueToSeconds returns null for any value not
+    // in the closed preset set. A forged '999999' here lands as
+    // selfDestructSeconds: null — same shape as "no timer." Safe
+    // default; the alternative (rejecting like the expiry handler
+    // does) would deny the user any save until they re-pick from the
+    // legit list, which is needlessly punishing for a defensive case.
+    const int = makeSelectInteraction({ value: '999999' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ selfDestructSeconds: null }),
+    }));
+  });
+
+  test('conflict → superseded copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeSelectInteraction({ value: '60' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+  });
+
+  test('not_found → expired copy', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeSelectInteraction({ value: '60' });
+    await handleSendConfirmSelfDestructSelect(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.editReply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmNoteButton — opens modal, no flow mutation
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmNoteButton', () => {
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeButtonInteraction(rest = {}) {
+    const int = makeInteraction(rest);
+    int.showModal = jest.fn().mockResolvedValue(undefined);
+    return int;
+  }
+
+  test('opens modal — does NOT mutate flow state (no transitionFlow / deleteFlow)', async () => {
+    const int = makeButtonInteraction();
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.showModal).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
+
+  test('modal pre-filled with current personalMessage when one exists', async () => {
+    // The discord.js component mocks don't preserve state, so we
+    // inspect builder method invocations to verify the pre-fill.
+    // Each TextInputBuilder instance has its own jest.fn-based
+    // setValue; the most-recent call captures what the modal passes
+    // to the TextInput.
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    const payload = { ...basePayload, personalMessage: 'existing note' };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    expect(int.showModal).toHaveBeenCalled();
+    // The TextInputBuilder was constructed once; its setValue was
+    // called with the pre-fill string.
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('existing note');
+  });
+
+  test('modal pre-fills empty string when no personalMessage is set', async () => {
+    const { TextInputBuilder } = require('discord.js');
+    TextInputBuilder.mockClear();
+    const int = makeButtonInteraction();
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const builder = TextInputBuilder.mock.results[0].value;
+    expect(builder.setValue).toHaveBeenCalledWith('');
+  });
+
+  test('safe when clicked after recipients fully chosen (idempotent — no transitionFlow)', async () => {
+    // The "Note button after picking everything" case from the plan:
+    // safe-by-construction because this handler never touches flow
+    // state — the user can repeatedly open + close the modal without
+    // bumping the version or fencing out other interactions.
+    const int = makeButtonInteraction();
+    const payload = { ...basePayload, recipientIds: ['100000000000000001', '100000000000000002'] };
+    await handleSendConfirmNoteButton(int, { flow_id: 'fid', row: { payload, version: 5 } });
+    expect(int.showModal).toHaveBeenCalled();
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleSendConfirmNoteModal — modal submit persists sanitized note
+// ──────────────────────────────────────────────────────────────
+
+describe('handleSendConfirmNoteModal', () => {
+  const basePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: ['100000000000000001'],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+  };
+
+  function makeModalInteraction({ inputValue = 'hello', ...rest } = {}) {
+    const int = makeInteraction(rest);
+    int.update = jest.fn().mockResolvedValue(undefined);
+    int.fields = { getTextInputValue: jest.fn(() => inputValue) };
+    return int;
+  }
+
+  test('happy path: trims input, sanitizes markdown, persists, updates message', async () => {
+    const int = makeModalInteraction({ inputValue: '  **bold** message  ' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({
+        // sanitizeMessage runs markdown-escape — the `**` becomes `\\*\\*`
+        // so the note renders as literal text in the recipient DM.
+        personalMessage: expect.stringMatching(/\\\*\\\*bold\\\*\\\* message/),
+      }),
+    }));
+    expect(int.update).toHaveBeenCalled();
+    // Pin the user-facing render — note shows up in the rerendered
+    // confirm card content, not just DDB.
+    const lastUpdate = int.update.mock.calls.slice(-1)[0][0];
+    expect(lastUpdate.content).toMatch(/\\\*\\\*bold\\\*\\\* message/);
+  });
+
+  test('empty input → personalMessage: null (clear note)', async () => {
+    const int = makeModalInteraction({ inputValue: '' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ personalMessage: null }),
+    }));
+  });
+
+  test('whitespace-only input → personalMessage: null', async () => {
+    const int = makeModalInteraction({ inputValue: '   \n  \t' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      payload: expect.objectContaining({ personalMessage: null }),
+    }));
+  });
+
+  test('conflict → superseded copy via update (not editReply — modal-submit context)', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+      components: [],
+    }));
+  });
+
+  test('not_found → expired copy via update', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/expired/i),
+    }));
+  });
+
+  test('transitionFlow throw → ephemeral reply (modal-submit has no defer to follow up from)', async () => {
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeModalInteraction({ inputValue: 'hi' });
+    await handleSendConfirmNoteModal(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save your note/i),
+      ephemeral: true,
+    }));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// renderConfirmCardRows — row layout + label flips
+// ──────────────────────────────────────────────────────────────
+
+describe('renderConfirmCardRows', () => {
+  // The renderer lives at module scope but isn't exported directly.
+  // We assert via a behavioral round-trip through handleQurlSlashSend
+  // or by inspecting what renderConfirmCardRows would attach (via the
+  // editReply calls). Simpler: drive via the entry path and inspect.
+
+  test('with attachPicker=true → 4 rows (picker + 2 selects + button row)', async () => {
+    // handleQurlSlashSend's needsPicker branch (recipients omitted)
+    // renders with attachPicker:true. Inspect the editReply payload.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT },  // no `recipients` → needsPicker
+    });
+    await handleQurlFile(int);
+    const editReplyCalls = int.editReply.mock.calls;
+    const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
+    expect(lastCall.components).toHaveLength(4);
+  });
+
+  test('with attachPicker=false → 3 rows (no picker, 2 selects + button row)', async () => {
+    // Provide a valid recipient via the `recipients:` slash option —
+    // partition resolves it, needsPicker becomes false, rows render
+    // without the UserSelectMenu.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const editReplyCalls = int.editReply.mock.calls;
+    const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
+    expect(lastCall.components).toHaveLength(3);
+  });
+
+  test('button row carries Note + Send + Cancel in that order (3 buttons, identifiable customIds)', async () => {
+    // The discord.js mock's ButtonBuilder doesn't preserve state, but
+    // each instance's `setCustomId` jest.fn captures the call. The
+    // three ButtonBuilder instances created during this render are
+    // the Note, Send, and Cancel buttons — in that left-to-right
+    // construction order, matching the bottom row layout.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    // 3 buttons constructed for the bottom row of the confirm card.
+    expect(ButtonBuilder).toHaveBeenCalledTimes(3);
+    const customIds = ButtonBuilder.mock.results.map(
+      (r) => r.value.setCustomId.mock.calls[0][0]
+    );
+    expect(customIds).toEqual([
+      'qurl_send_confirm_note_btn',
+      'qurl_send_confirm_send',
+      'qurl_send_confirm_cancel',
+    ]);
+  });
+
+  test('Note button label is "Add a note (optional)" when no personal-message set', async () => {
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const noteBtn = ButtonBuilder.mock.results[0].value;
+    expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Add a note/));
+  });
+
+  test('Note button label is "Edit note" when personal-message IS set', async () => {
+    // Split from the "Add a note" test because both share `sendCooldowns`
+    // module state via `setCooldown`; running both in the same test
+    // would put the second invocation on cooldown and short-circuit
+    // before renderConfirmCardRows. beforeEach calls sendCooldowns.clear()
+    // so each test starts fresh.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const int = makeInteraction({
+      options: {
+        attachment: VALID_ATTACHMENT,
+        recipients: '<@100000000000000001>',
+        'personal-message': 'hello',
+      },
+      guildMembers: { '100000000000000001': {} },
+    });
+    await handleQurlFile(int);
+    const noteBtn = ButtonBuilder.mock.results[0].value;
+    expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
   });
 });
 
