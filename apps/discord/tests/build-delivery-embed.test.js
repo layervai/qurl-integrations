@@ -357,6 +357,11 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const desc = capturedEmbeds[0]._description;
     const lines = desc.split('\n');
+    // EXACTLY 2 lines — guards against an orphan blank line creeping
+    // in between sender and expiry when personalMessage is absent.
+    // Do NOT loosen to `toBeGreaterThanOrEqual(2)`: a 3-line desc
+    // would mean someone re-introduced `descLines.push('')` for
+    // padding, which renders as a visible empty row in Discord.
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('**Vik** opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
@@ -384,6 +389,9 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     const desc = capturedEmbeds[0]._description;
     expect(desc).not.toContain('> *""*');
     const lines = desc.split('\n');
+    // EXACTLY 2 lines — same orphan-blank-line guard as the no-
+    // personalMessage path above; an empty blockquote line creeping
+    // back in would push this to 3 and render visibly in Discord.
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('**Vik** opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
