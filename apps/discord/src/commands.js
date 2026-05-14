@@ -1318,9 +1318,9 @@ async function executeSendPipeline(interaction, {
     // Audit in `finally` so the metric fires for every recipient regardless
     // of where the dispatch fails — sendDM resolving to false, sendDM
     // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a non-finite expiresAt — see
-    // its `Number.isFinite` guard; would throw on every iteration of the
-    // batch, since expiresAt is computed once above).
+    // buildDeliveryPayload throwing (e.g. on a non-integer expiresAt —
+    // see its `Number.isInteger` guard; would throw on every iteration
+    // of the batch, since expiresAt is computed once above).
     // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
     // it either — that's the failure mode the audit metric exists to
     // measure. Coverage spans the entire dispatch attempt, not just the
