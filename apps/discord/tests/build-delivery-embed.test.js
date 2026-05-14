@@ -247,6 +247,22 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // `Number.isInteger` guard tightens the contract from any-finite-number
   // to exactly-what-the-markdown-accepts. Matches the contract guard in
   // handleAddRecipients.
+  // Positive test for the upper-bound reasoning documented in the
+  // throw test below: there is no clean "finite integer that
+  // Number.isInteger rejects" boundary because doubles can exactly
+  // represent every integer up to 2^53. Pin that `Number.MAX_SAFE_INTEGER`
+  // itself is accepted (and renders into the description as the literal
+  // integer), so a future reader who tries `MAX_SAFE_INTEGER + 1` and
+  // sees it still pass doesn't have to re-derive the reasoning. Discord's
+  // <t:N:R> parser will overflow well before 2^53 (its accepted range is
+  // ±10000 years from epoch), but that's Discord's responsibility — the
+  // validator's contract is "positive integer", not "renderable timestamp".
+  it('accepts Number.MAX_SAFE_INTEGER as a positive integer (no synthetic upper bound)', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: Number.MAX_SAFE_INTEGER });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toContain(`🕐 Closes <t:${Number.MAX_SAFE_INTEGER}:R>`);
+  });
+
   it('throws if expiresAt is missing, non-finite, a float, or non-positive (fail-loud)', () => {
     // Note on the "beyond MAX_SAFE_INTEGER" boundary: doubles can
     // exactly represent every integer up to 2^53, so 2^53 itself is

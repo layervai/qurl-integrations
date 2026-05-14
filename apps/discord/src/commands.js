@@ -542,25 +542,14 @@ function parseLocationInput(rawInput) {
 }
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
-  // Fail-loud on a missing/invalid expiresAt rather than rendering
-  // literal "<t:undefined:R>" or "<t:1735689600.5:R>" to a recipient.
-  // Matches the contract-violation throw in handleAddRecipients.
-  // Discord's `<t:N:R>` markdown wants integer Unix seconds; the lone
-  // call site already wraps in `Math.floor`, so `Number.isInteger`
-  // tightens the contract from "any finite number" to "exactly what
-  // the markdown accepts" without changing legitimate inputs. Validate
-  // FIRST so the description below can interpolate directly. Safe to
-  // run before `sanitizeDisplayName` because that helper is total
-  // (NFKC + bidi/zero-width strip + markdown escape + 64-char cap +
-  // 'Someone' fallback — never throws on any input shape).
+  // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
+  // value; anything else renders a misleading recipient surface (e.g.
+  // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
+  // `<t:1735689600.5:R>` → parse failure). Match the contract exactly
+  // and fail loud — call sites all compute via `Math.floor(...)` so no
+  // legitimate input is rejected. `typeof` in the throw closes the
+  // null-vs-undefined-vs-object triage gap for operators.
   if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
-    // String() over template interpolation so {} renders as "[object
-    // Object]" instead of being coerced via valueOf; typeof gives the
-    // operator the shape at a glance for non-primitive contract
-    // violations (object, function, symbol). The `> 0` clause closes
-    // the negative-timestamp gap: `<t:-1:R>` renders as "55 years ago"
-    // in Discord rather than failing visibly, so reject before the
-    // interpolation can produce a misleading recipient surface.
     throw new Error(`buildDeliveryPayload: expiresAt must be a positive integer Unix-seconds number (got ${String(expiresAt)}, typeof=${typeof expiresAt})`);
   }
 
@@ -606,6 +595,14 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     // `if (personalMessage)`. This guard only matters if a future
     // caller bypasses that contract — belt-and-braces vs rendering
     // a visible-but-empty `> *""*` row between sender and expiry.
+    //
+    // Order is intentional: substring → replace → trim. The 280 cap
+    // applies to RAW input (bounds the work done by replace/trim
+    // against a 10KB single-line pathological input) rather than to
+    // the rendered output. A future "fix" to `replace().trim().
+    // substring(0, 280)` would be a subtly different contract — the
+    // visible output would be capped at 280 chars but unbounded work
+    // would happen before the cap.
     const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
     if (capped) descLines.push(`> *"${capped}"*`);
   }
