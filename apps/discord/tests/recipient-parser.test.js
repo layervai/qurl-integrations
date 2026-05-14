@@ -62,23 +62,23 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
 describe('parseRecipientMentions — basic shape', () => {
   test('returns empty result for null/undefined/empty input', () => {
     const int = makeInteraction();
-    expect(parseRecipientMentions(null, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
-    expect(parseRecipientMentions(undefined, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
-    expect(parseRecipientMentions('', int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
-    expect(parseRecipientMentions('   \t\n', int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions(null, int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions(undefined, int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('', int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions('   \t\n', int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
   });
 
   test('returns empty result when raw is a non-string (defense vs caller bugs)', () => {
     const int = makeInteraction();
-    expect(parseRecipientMentions(42, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
-    expect(parseRecipientMentions({}, int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
-    expect(parseRecipientMentions([], int)).toEqual({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions(42, int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions({}, int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
+    expect(parseRecipientMentions([], int)).toMatchObject({ ids: [], invalidTokens: [], cappedCount: 0 });
   });
 
   test('extracts a single user mention', () => {
     const int = makeInteraction({ users: { '111111111111111111': {} } });
     expect(parseRecipientMentions('<@111111111111111111>', int))
-      .toEqual({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('accepts both <@id> and <@!id> forms (legacy nickname mention)', () => {
@@ -86,13 +86,13 @@ describe('parseRecipientMentions — basic shape', () => {
       users: { '111111111111111111': {}, '222222222222222222': {} },
     });
     expect(parseRecipientMentions('<@111111111111111111> <@!222222222222222222>', int))
-      .toEqual({ ids: ['111111111111111111', '222222222222222222'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['111111111111111111', '222222222222222222'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('dedupes repeated mentions', () => {
     const int = makeInteraction({ users: { '111111111111111111': {} } });
     expect(parseRecipientMentions('<@111111111111111111> <@111111111111111111> <@!111111111111111111>', int))
-      .toEqual({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['111111111111111111'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('cappedCount is 0 when input has no mentions (no false-positive cap signal)', () => {
@@ -135,7 +135,7 @@ describe('parseRecipientMentions — filtering', () => {
       users: { '900000000000000001': {} },
     });
     expect(parseRecipientMentions('<@900000000000000001>', int))
-      .toEqual({ ids: ['900000000000000001'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['900000000000000001'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('excludes bots flagged in the member cache', () => {
@@ -143,7 +143,7 @@ describe('parseRecipientMentions — filtering', () => {
       users: { '111': { bot: true }, '222': {} },
     });
     expect(parseRecipientMentions('<@111> <@222>', int))
-      .toEqual({ ids: ['222'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['222'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('completely empty interaction ({}) does not throw, returns empty result', () => {
@@ -154,7 +154,7 @@ describe('parseRecipientMentions — filtering', () => {
     // switched `.guild?.x` to `.guild.x?` on the assumption "we've
     // already null-checked" would surface here.
     expect(parseRecipientMentions('<@111>', {}))
-      .toEqual({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('best-effort bot filter: cache miss leaves the ID in (back-half re-checks)', () => {
@@ -164,7 +164,7 @@ describe('parseRecipientMentions — filtering', () => {
     // check (existing form's "Cannot send to a bot" path) catch it.
     const int = makeInteraction({});  // empty cache
     expect(parseRecipientMentions('<@555>', int))
-      .toEqual({ ids: ['555'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['555'], invalidTokens: [], cappedCount: 0 });
   });
 });
 
@@ -175,7 +175,7 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': ['101', '102', '103'] },
     });
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: ['101', '102', '103'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['101', '102', '103'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('merges role expansion with direct user mentions, deduped', () => {
@@ -202,7 +202,7 @@ describe('parseRecipientMentions — role mentions', () => {
   test('role unknown to the guild lands in invalidTokens', () => {
     const int = makeInteraction({});
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
+      .toMatchObject({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
   test('role with no usable members (all bots) lands in invalidTokens', () => {
@@ -223,13 +223,13 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': ['900'] },
     });
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: ['900'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['900'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('DM context (guild=undefined) treats role mentions as invalid', () => {
     const int = { user: { id: '900' }, guild: undefined };
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
+      .toMatchObject({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
   test('DM context (guild=null) also treats role mentions as invalid', () => {
@@ -240,7 +240,7 @@ describe('parseRecipientMentions — role mentions', () => {
     // on this test, not in prod.
     const int = { user: { id: '900' }, guild: null };
     expect(parseRecipientMentions('<@&7000>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
+      .toMatchObject({ ids: [], invalidTokens: ['<@&7000>'], cappedCount: 0 });
   });
 
   test('repeated residue tokens dedupe in invalidTokens (symmetric with role-error dedup)', () => {
@@ -250,9 +250,9 @@ describe('parseRecipientMentions — role mentions', () => {
     // isn't user-hostile.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <#456> <#456>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
     expect(parseRecipientMentions('<@111> alice alice bob alice', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
   });
 
   test('repeated invalid role mention dedupes in invalidTokens', () => {
@@ -262,7 +262,7 @@ describe('parseRecipientMentions — role mentions', () => {
     // token each time. Symmetric with the residue dedupe above.
     const int = makeInteraction({});  // no role 999
     expect(parseRecipientMentions('<@&999> <@&999> <@&999>', int))
-      .toEqual({ ids: [], invalidTokens: ['<@&999>'], cappedCount: 0 });
+      .toMatchObject({ ids: [], invalidTokens: ['<@&999>'], cappedCount: 0 });
   });
 
   test('direct mentions always win the cap over role-expansion members', () => {
@@ -310,7 +310,7 @@ describe('parseRecipientMentions — role mentions', () => {
       roles: { '7000': ['101'] },
     });
     expect(parseRecipientMentions('<@101> <@&7000>', int))
-      .toEqual({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
+      .toMatchObject({ ids: ['101'], invalidTokens: [], cappedCount: 0 });
   });
 
   test('role mention repeated in input expands once (no double-counting)', () => {
@@ -329,11 +329,220 @@ describe('parseRecipientMentions — role mentions', () => {
   });
 });
 
+describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
+  test('allowed: expands to all non-bot guild members', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '801': { bot: true }, '103': {} },
+    });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids.sort()).toEqual(['101', '102', '103']);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('allowed: merges with direct mentions, deduped', () => {
+    // Same user reached via both `@everyone` and a direct `<@id>` is
+    // contributed once (the parser uses a single `consider()` that
+    // dedupes via `seen`). The role-expansion test pins the same
+    // contract for roles; this pins it for the mass-mention path.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('<@101> @everyone', int, { allowMassMention: true });
+    expect(res.ids.sort()).toEqual(['101', '102']);
+  });
+
+  test('denied (default): surfaces massMentionDenied=true, no expansion, no invalidTokens entry', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('@everyone', int);
+    expect(res.ids).toEqual([]);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(true);
+  });
+
+  test('denied: explicit allowMassMention=false is equivalent to default', () => {
+    const int = makeInteraction({ users: { '101': {} } });
+    expect(parseRecipientMentions('@everyone <@101>', int, { allowMassMention: false }))
+      .toMatchObject({ ids: ['101'], invalidTokens: [], massMentionDenied: true });
+  });
+
+  test('no @everyone in input → massMentionDenied=false regardless of permission', () => {
+    const int = makeInteraction({ users: { '101': {} } });
+    // Allowed but not used.
+    expect(parseRecipientMentions('<@101>', int, { allowMassMention: true })
+      .massMentionDenied).toBe(false);
+    // Denied but not attempted.
+    expect(parseRecipientMentions('<@101>', int, { allowMassMention: false })
+      .massMentionDenied).toBe(false);
+  });
+
+  test('allowed: bot filter applies during expansion', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '801': { bot: true }, '802': { bot: true } },
+    });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids).toEqual(['101']);
+  });
+
+  test('allowed with no guild member cache returns empty (DM-context guard)', () => {
+    // DM-context guild=null/undefined: expansion is impossible, but
+    // the parser should NOT throw. Returns empty ids, massMentionDenied
+    // stays false (the user HAD permission, the cache just had nothing).
+    const int = { user: { id: '900' }, guild: undefined };
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('allowed but every cached member is a bot → empty expansion, massMentionDenied still false', () => {
+    // Distinguish "expanded to nothing" (cache has only bots) from
+    // "denied" (no MENTION_EVERYONE perm). The caller renders these
+    // differently: "no valid recipients" generic copy vs. the
+    // permission-specific @everyone copy. Pin that the allowed-but-
+    // empty path stays on the generic side.
+    const int = makeInteraction({
+      users: { '801': { bot: true }, '802': { bot: true } },
+    });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('explicit `<@id>` mentions take priority over @everyone expansion when cap is hit', () => {
+    // Critical ordering invariant: the user explicitly named someone
+    // via `<@uncached>`, then also typed `@everyone`. With cache > cap,
+    // an order that ran @everyone FIRST would fill the cap with
+    // arbitrary cached members and silently drop the explicit
+    // `<@uncached>` (since `consider()` adds to `seen` but not `ids`
+    // once `ids.size === cap`). Pin that the explicit mention always
+    // claims a cap slot — @everyone fills the remainder.
+    // Synthetic guild: 30 cached non-bot members at IDs `200000..200029`,
+    // PLUS the explicit mentioned ID `300000000000000001` which is NOT in
+    // the cache. (The bot filter only consults cache for direct mentions,
+    // and a cache miss leaves the ID in per the existing contract.)
+    const cachedUsers = {};
+    for (let i = 0; i < 30; i++) {
+      cachedUsers[`2000000000000${String(i).padStart(5, '0')}`] = {};
+    }
+    const explicitId = '300000000000000001';
+    const int = makeInteraction({ users: cachedUsers });
+    const res = parseRecipientMentions(
+      `<@${explicitId}> @everyone`,
+      int,
+      { allowMassMention: true },
+    );
+    expect(res.ids.length).toBe(25);
+    // The explicit mention must be in the result.
+    expect(res.ids).toContain(explicitId);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('@everyone + <@&role> combined: dedupe across sources, cap applies', () => {
+    // Both expansion sources fire. A user in the role AND in
+    // `@everyone`'s cache should appear exactly once (consider+seen
+    // dedupe). Cap still bounds the total at 25.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '103': {} },
+      roles: { '7000': ['101', '102'] },
+    });
+    const res = parseRecipientMentions(
+      '<@&7000> @everyone',
+      int,
+      { allowMassMention: true },
+    );
+    expect(res.ids.sort()).toEqual(['101', '102', '103']);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('allowed: cap short-circuits the cache scan (large guild cap behavior)', () => {
+    // The @everyone expansion iterates guild.members.cache — a large
+    // guild could have 10k+ entries. Once `ids.size === cap`, the
+    // loop breaks rather than scanning the remainder. We can't easily
+    // assert "break ran" directly without instrumentation, but we
+    // can assert the cap-bounded result: 25 (the cap) ids out of 40
+    // synthetic non-bot members, with NO cappedCount surfaced for the
+    // skipped members (the early break is the tradeoff — we don't
+    // count past-cap members in @everyone expansion, unlike the
+    // text-mention path).
+    const users = {};
+    for (let i = 0; i < 40; i++) users[`u${String(i).padStart(18, '0')}`] = {};
+    const int = makeInteraction({ users });
+    const res = parseRecipientMentions('@everyone', int, { allowMassMention: true });
+    expect(res.ids.length).toBe(25);
+    // cappedCount reflects only the members the loop actually saw
+    // past `ids.size === cap`. Since we break immediately, no members
+    // get added to `seen` beyond the cap, so cappedCount stays at 0.
+    expect(res.cappedCount).toBe(0);
+  });
+
+  test('mixed `@everyone @here` in one input: @everyone gated separately, @here defuses', () => {
+    // Both shapes hit different paths simultaneously. With
+    // allowMassMention=false: @everyone surfaces massMentionDenied,
+    // @here surfaces in invalidTokens via the legacy defuse. Pin
+    // the two paths don't interfere.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('@everyone @here <@111>', int);
+    expect(res.ids).toEqual(['111']);
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['@​here']);
+  });
+
+  test('repeated `@everyone @everyone` triggers expansion once (single-shot dedupe via `seen`)', () => {
+    // Even though the parser sees `@everyone` twice, the expansion is
+    // a single pass — consider() dedupes via `seen`. Pin that a
+    // repeated mass-mention doesn't produce duplicate ids.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('@everyone @everyone', int, { allowMassMention: true });
+    expect(res.ids.sort()).toEqual(['101', '102']);
+    expect(res.invalidTokens).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+  });
+
+  test('Unicode word boundary: `@everyoneé` (Unicode letter trailing) does NOT match', () => {
+    // EVERYONE_TOKEN_RE uses `\p{L}\p{N}_` (Unicode-aware) instead of
+    // ASCII-only `[A-Za-z0-9_]` so non-ASCII letters following
+    // `@everyone` don't break the word boundary. Pin that
+    // `@everyoneé` falls through to the residue path (NOT mass-mention
+    // expansion). ASCII-only boundary would have over-matched here.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+    });
+    const res = parseRecipientMentions('@everyoneé', int, { allowMassMention: true });
+    expect(res.ids).toEqual([]);
+    expect(res.massMentionDenied).toBe(false);
+    expect(res.invalidTokens).toEqual(['@​everyoneé']);
+  });
+});
+
+describe('parseRecipientMentions — result-shape contract', () => {
+  test('result shape pins exactly four keys (ids, invalidTokens, cappedCount, massMentionDenied)', () => {
+    // Empire of `.toMatchObject` in other tests admits new fields by
+    // design (the result shape is allowed to grow), but the closed
+    // set of CURRENT keys is load-bearing — callers destructure these
+    // names. Pin the closed set so a future PR that adds a 5th field
+    // surfaces here intentionally rather than slipping past
+    // partial-match assertions.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('<@111>', int);
+    expect(Object.keys(res).sort()).toEqual([
+      'cappedCount',
+      'ids',
+      'invalidTokens',
+      'massMentionDenied',
+    ]);
+  });
+});
+
 describe('parseRecipientMentions — invalid tokens', () => {
   test('channel mentions land in invalidTokens', () => {
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <#456>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['<#456>'], cappedCount: 0 });
   });
 
   test('custom emoji (static and animated) land in invalidTokens', () => {
@@ -342,15 +551,15 @@ describe('parseRecipientMentions — invalid tokens', () => {
     // (`<@!?(\d+)>`) or ROLE_MENTION_RE (`<@&(\d+)>`) shapes.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111> <:smile:789>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<:smile:789>'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['<:smile:789>'], cappedCount: 0 });
     expect(parseRecipientMentions('<@111> <a:dance:790>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<a:dance:790>'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['<a:dance:790>'], cappedCount: 0 });
   });
 
   test('bare plaintext usernames land in invalidTokens', () => {
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('alice <@111> bob', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['alice', 'bob'], cappedCount: 0 });
   });
 
   test('mention with missing closer (truncated input) is treated as invalid', () => {
@@ -362,20 +571,27 @@ describe('parseRecipientMentions — invalid tokens', () => {
     expect(res.invalidTokens.length).toBeGreaterThan(0);
   });
 
-  test('@everyone / @here are pre-escaped with zero-width-space in invalidTokens', () => {
-    // Discord's @everyone / @here are NOT `<@id>` mentions — they're
-    // bare tokens that the API expands at message-send time. A caller
-    // naively interpolating `invalidTokens` into a user-visible
-    // message (`` `Couldn't parse: ${invalidTokens.join(', ')}` ``)
-    // would fan-out-ping the channel. To make the boundary safe by
-    // default, the parser inserts a zero-width space (U+200B) after
-    // the `@` — visually identical, but Discord's tokenizer no longer
-    // recognizes the mass-mention shape.
+  test('@everyone (denied) surfaces massMentionDenied + does NOT defuse into invalidTokens', () => {
+    // With `allowMassMention` defaulting to false, `@everyone` is
+    // recognized but the caller-side gate denies expansion. The
+    // parser surfaces `massMentionDenied: true` so the caller can
+    // emit a permission-specific warning, and strips the token from
+    // input so the residue pass doesn't double-surface it as a
+    // defused invalidToken. Distinct UX from "couldn't parse."
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('@everyone <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: [], cappedCount: 0, massMentionDenied: true });
+  });
+
+  test('@here still defuses with zero-width-space (no presence intent, not implemented)', () => {
+    // `@here` would need GUILD_PRESENCES intent to filter online
+    // members — the bot only runs GuildMembers, so @here is left
+    // on the legacy defuse path (rewritten with U+200B in
+    // invalidTokens). Pin the invariant so a future PR that
+    // implements @here flips this test deliberately, not silently.
+    const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('@here <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['@\u200bhere'], cappedCount: 0, massMentionDenied: false });
   });
 
   test('@Everyone / @Here (capitalized) are NOT escaped — Discord parser is lowercase-only', () => {
@@ -387,27 +603,57 @@ describe('parseRecipientMentions — invalid tokens', () => {
     // silently widen the regex without flipping this test.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('@Everyone <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@Everyone'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['@Everyone'], cappedCount: 0 });
     expect(parseRecipientMentions('@Here <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@Here'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['@Here'], cappedCount: 0 });
   });
 
-  test('@everyone with trailing punctuation is also escaped (single-token residue)', () => {
-    // The strip-pass split class `[\s,;|/]+` does NOT include `.`,
-    // `:`, `!`, `?`, `-`, so `@everyone!` and `@everyone.fix` survive
-    // as single tokens. Exact-match escape would slip these past the
-    // guard. Pin that the regex-based escape catches them.
+  test('@here with trailing punctuation still defuses into invalidTokens', () => {
+    // @here remains on the legacy defuse path until presence intent
+    // lands — pin that trailing punctuation cases still get U+200B
+    // protection regardless of @everyone's separate gated path.
     const int = makeInteraction({ users: { '111': {} } });
-    expect(parseRecipientMentions('@everyone! <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone!'], cappedCount: 0 });
-    expect(parseRecipientMentions('@everyone.fix <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@\u200beveryone.fix'], cappedCount: 0 });
     expect(parseRecipientMentions('@here: <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['@\u200bhere:'], cappedCount: 0 });
-    // Embedded mid-token (paste artifact). Regex replaces ALL
-    // occurrences so no `@everyone` / `@here` substring escapes.
+      .toMatchObject({ ids: ['111'], invalidTokens: ['@\u200bhere:'], cappedCount: 0 });
+  });
+
+  test('@everyone with trailing punctuation (denied) still surfaces massMentionDenied + leftover lands in invalidTokens', () => {
+    // `@everyone!`, `@everyone.fix`, etc. — the parser's
+    // EVERYONE_TOKEN_RE matches `@everyone` with a non-word lookahead,
+    // so trailing punctuation isn't consumed but the gate still fires.
+    // Any leftover residue (`!`, `.fix`) is a tradeoff worth making —
+    // surfacing the @everyone permission notice is the load-bearing
+    // signal; the leftover punctuation gets a generic "couldn't
+    // parse" treatment. Pin the residue shape so a future regression
+    // that double-surfaces (`@everyone!` AS A WHOLE in invalidTokens
+    // alongside the massMentionDenied flag) or silently swallows the
+    // `!` is caught here.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('@everyone! <@111>', int);
+    expect(res.ids).toEqual(['111']);
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['!']);
+  });
+
+  test('@everyone.fix (denied) leaves `.fix` in invalidTokens (parallel to `!` case)', () => {
+    // `.fix` survives the strip-pass split class `[\s,;|/]+` — same
+    // shape as `@everyone!`. Pin the residue so a future split-class
+    // refactor that consumed `.` would surface here, not silently
+    // change UX.
+    const int = makeInteraction({ users: { '111': {} } });
+    const res = parseRecipientMentions('@everyone.fix <@111>', int);
+    expect(res.ids).toEqual(['111']);
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.invalidTokens).toEqual(['.fix']);
+  });
+
+  test('here@everyone (embedded) stays on the defuse path (not a standalone @everyone)', () => {
+    // Word-boundary semantics: `here@everyone` has `e` before the `@`,
+    // so EVERYONE_TOKEN_RE's lookbehind rejects it. Falls into the
+    // residue pass and gets U+200B-defused like before.
+    const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('here@everyone <@111>', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['here@\u200beveryone'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['here@\u200beveryone'], cappedCount: 0, massMentionDenied: false });
   });
 
   test('newline characters separate tokens (split regex includes \\n)', () => {
@@ -418,7 +664,7 @@ describe('parseRecipientMentions — invalid tokens', () => {
     // bare-name token.
     const int = makeInteraction({ users: { '111': {} } });
     expect(parseRecipientMentions('<@111>\n<#456>\n\nstray', int))
-      .toEqual({ ids: ['111'], invalidTokens: ['<#456>', 'stray'], cappedCount: 0 });
+      .toMatchObject({ ids: ['111'], invalidTokens: ['<#456>', 'stray'], cappedCount: 0 });
   });
 });
 

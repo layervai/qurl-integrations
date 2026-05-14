@@ -36,6 +36,14 @@
 //     that Discord would ping (`<@id>`, `<@&id>`) can't reach this
 //     slot because they parse as valid mentions in the passes above.
 //
+//     Note: standalone `@everyone` tokens are intercepted upstream by
+//     the gated detect-and-strip pass (`allowMassMention` opt — see
+//     parseRecipientMentions docstring below). The defuse here is the
+//     fallback for `@here`, `@Everyone` (inert case), and embedded
+//     forms like `here@everyone` that escape the gated path's word-
+//     boundary. Both layers preserve the "caller-can-interpolate-safely"
+//     contract above.
+//
 // SECURITY: `invalidTokens` ARE NOT escaped against Discord markdown — a pasted
 // `[link](https://evil)`, `||spoiler||`, or backtick-fenced content
 // will render with full markdown semantics if a caller interpolates
@@ -48,10 +56,14 @@
 //
 // Output shape:
 //   {
-//     ids:           [<user_id>, ...],        // deduped, cap-applied
-//     invalidTokens: [<raw_token>, ...],      // pre-escaped (see above)
-//     cappedCount:   <number>,                // 0 if not capped; else
+//     ids:                [<user_id>, ...],   // deduped, cap-applied
+//     invalidTokens:      [<raw_token>, ...], // pre-escaped (see above)
+//     cappedCount:        <number>,           // 0 if not capped; else
 //                                             // `total_pre_cap - cap`
+//     massMentionDenied:  <boolean>,          // true when @everyone
+//                                             // appeared but the caller
+//                                             // denied via the
+//                                             // `allowMassMention` opt
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
@@ -88,6 +100,21 @@ const logger = require('./logger');
 // regex instance.)
 const USER_MENTION_RE = /<@!?(\d+)>/g;
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
+// Matches `@everyone` as a standalone token (Unicode word boundaries
+// on both sides). Intentionally narrower than the U+200B defuse regex
+// below — here we're matching for INCLUSION, so we want only real
+// Discord mass-mention tokens, not substrings like `@everyonefoo`
+// that would false-positive. Case-sensitive because Discord's mass-
+// mention parser is itself lowercase-only (`@Everyone` is inert).
+// `\p{L}\p{N}_` (Unicode letters/numbers + underscore) instead of
+// ASCII-only `[A-Za-z0-9_]` so `@everyoneé` / `@everyonefoö` don't
+// false-match the way an ASCII boundary would. Discord's tokenizer
+// is itself Unicode-aware here; the `/u` flag aligns with that.
+// `@here` is NOT matched — would need GUILD_PRESENCES intent (we
+// only run GuildMembers) to filter online members, and treating it
+// as `@everyone` would be deceptive. Falls through to the invalidTokens
+// defuse path as before; revisit if the bot ever adds the intent.
+const EVERYONE_TOKEN_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])/gu;
 
 // Hard cap on input length so an adversarial regex-blowup attack
 // (10MB of `<@1>` repetitions) doesn't tie up the worker. Discord's
@@ -134,24 +161,47 @@ const MAX_INVALID_TOKEN_LENGTH = 256;
 // which oncall benefits from seeing as a pattern.
 const MASSIVE_OVERSHOOT_MULTIPLIER = 2;
 
-// Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / etc.) to
-// a flat user-ID list with the cap + bot filter applied. Returns
-// `{ ids, invalidTokens, cappedCount }`; never throws on parse errors —
-// invalid tokens always land in `invalidTokens` for caller-side
-// surfacing. Sender is NOT filtered — self-send is supported; the
-// confirm-card renderer surfaces a neutral notice when sender appears
-// in `ids`.
+// Single-source the GuildMember-shape bot check used by every
+// expansion path (direct user mention, role expansion, @everyone
+// expansion). A future discord.js rename of `.user.bot` only needs
+// to touch one line.
+function isBotMember(member) {
+  return member?.user?.bot === true;
+}
+
+// Resolve a list of mention tokens (raw "<@..>" / "<@&..>" / `@everyone`)
+// to a flat user-ID list with the cap + bot filter applied. Returns
+// `{ ids, invalidTokens, cappedCount, massMentionDenied }`; never
+// throws on parse errors — invalid tokens always land in
+// `invalidTokens` for caller-side surfacing. Sender is NOT filtered —
+// self-send is supported; the confirm-card renderer surfaces a neutral
+// notice when sender appears in `ids`.
+//
+// `@everyone` is a privileged mention shape. The caller decides whether
+// to honor it via `opts.allowMassMention` (typically gated behind
+// Discord's MENTION_EVERYONE permission, checked on the slash-command
+// interaction). When the token appears in input:
+//   - allowed → expanded to all non-bot guild members in the cache.
+//   - denied  → `massMentionDenied: true` in the result so the caller
+//               can surface "you don't have permission to @everyone".
+// Either way the token is stripped from `invalidTokens` to avoid
+// double-surfacing.
 //
 // `interaction` is the slash-command interaction; we need it for:
-//   - interaction.guild    → role-mention expansion via members.cache
-//   - interaction.guild.members.cache.get(id).user.bot → bot filter
-function parseRecipientMentions(raw, interaction) {
+//   - interaction.guild               → role-mention expansion via
+//                                       roles.cache + `@everyone`
+//                                       expansion via members.cache
+//   - interaction.guild.members.cache → bot filter (per-id `.user.bot`
+//                                       lookup) + `@everyone` member
+//                                       enumeration
+function parseRecipientMentions(raw, interaction, opts = {}) {
+  const allowMassMention = opts.allowMassMention === true;
   // Defensive normalization: getString can return null when the option
   // is omitted, and the empty-string path is the same shape — return
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0 };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -159,7 +209,7 @@ function parseRecipientMentions(raw, interaction) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0 };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -189,7 +239,7 @@ function parseRecipientMentions(raw, interaction) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0 };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -216,6 +266,29 @@ function parseRecipientMentions(raw, interaction) {
     if (ids.size < cap) ids.add(id);
   }
 
+  // Detect-and-strip `@everyone` BEFORE the mention passes so the
+  // token doesn't leak into the residue (which would U+200B-defuse
+  // it into `invalidTokens` regardless of allow/deny). The actual
+  // expansion runs LAST (after user + role mentions), so explicit
+  // mentions get cap priority. Detect-via-replace (compare strings)
+  // instead of `.test()` so the shared module-scope `/g` regex's
+  // `lastIndex` doesn't carry state across calls.
+  let massMentionDenied = false;
+  let everyonePresent = false;
+  const everyoneStripped = input.replace(EVERYONE_TOKEN_RE, ' ');
+  if (everyoneStripped !== input) {
+    input = everyoneStripped;
+    everyonePresent = true;
+    if (!allowMassMention) {
+      // Denied path — surface so the caller can warn ("you don't
+      // have MENTION_EVERYONE permission"). Distinct signal from
+      // invalidTokens so the caller can emit the permission copy
+      // rather than the generic "couldn't parse" copy. The allowed-
+      // path expansion happens below, after explicit mentions.
+      massMentionDenied = true;
+    }
+  }
+
   for (const m of input.matchAll(USER_MENTION_RE)) {
     const id = m[1];
     // Bot filter — best-effort via cache. A cache miss (cold cache,
@@ -226,7 +299,7 @@ function parseRecipientMentions(raw, interaction) {
     // is acceptable. 7b.2 wiring should NOT assume the parser
     // filtered bots.
     const member = guild?.members?.cache?.get(id);
-    if (member?.user?.bot) continue;
+    if (isBotMember(member)) continue;
     consider(id);
   }
 
@@ -285,7 +358,7 @@ function parseRecipientMentions(raw, interaction) {
     // that order.
     let usable = 0;
     for (const [memberId, roleMember] of members) {
-      if (roleMember?.user?.bot) continue;
+      if (isBotMember(roleMember)) continue;
       usable++;
       consider(memberId);
     }
@@ -294,6 +367,52 @@ function parseRecipientMentions(raw, interaction) {
       // Surface as "no usable members" rather than silently no-op so
       // the caller can tell the user "the role only contains bots."
       pushRoleErrorIfNew(roleId, m[0]);
+    }
+  }
+
+  // @everyone expansion runs LAST so explicit mentions get cap
+  // priority. If the user typed `@everyone <@uncachedUser>`, the
+  // direct mention claims a cap slot first, and @everyone fills the
+  // remainder. Reversing this order silently drops explicit mentions
+  // when the cache is partial — caught by cr round 3.
+  if (everyonePresent && allowMassMention) {
+    const everyoneMembers = guild?.members?.cache;
+    if (everyoneMembers) {
+      // PARTIAL-CACHE BLIND SPOT: same caveat as role expansion
+      // above — in large guilds without a recent GUILD_MEMBERS
+      // chunk, the cache reflects only the currently-loaded subset,
+      // not the guild's true member count. Acceptable v1; in
+      // realistic guilds (where bots are <1% of members) the cap
+      // (QURL_SEND_MAX_RECIPIENTS) bounds the iteration via the
+      // `break` below. The pathological all-bots case still walks
+      // the entire cache — bounded only by cache size, not the cap.
+      //
+      // ORDERING is cache-insertion-order (discord.js Collection
+      // is a Map): when the cap short-circuits the loop, members
+      // win the remaining slots BY CACHE INSERTION ORDER — not
+      // alphabetical, role-ordered, or recently-active. Users may
+      // see a different subset across invocations as the cache
+      // churns. v2 picker (#324 — MentionableSelectMenu) shifts the
+      // selection burden onto the user and removes this ambiguity.
+      //
+      // ITERATION ASSUMES NO CONCURRENT MUTATION: discord.js itself
+      // doesn't guarantee iteration safety for Collections under
+      // gateway-driven mutation (member join/leave events). This
+      // parser runs synchronously inside the slash-command handler
+      // — no awaits between the start of this loop and its `break`
+      // — so the cache snapshot is effectively frozen for the loop
+      // body. A future refactor that introduced an `await` here
+      // would break that assumption.
+      for (const [memberId, member] of everyoneMembers) {
+        // Short-circuit once we've filled the cap. We accept the
+        // tradeoff of inaccurate cappedCount (no past-cap members
+        // get added to `seen`) over scanning a 10k-member cache.
+        // The cap message still surfaces from any explicit mentions
+        // that overflowed.
+        if (ids.size >= cap) break;
+        if (isBotMember(member)) continue;
+        consider(memberId);
+      }
     }
   }
 
@@ -317,11 +436,15 @@ function parseRecipientMentions(raw, interaction) {
     // fan-out-ping the channel. Insert a zero-width-space after `@`
     // — the rendered glyph is identical, but Discord's tokenizer
     // sees a different word and won't trigger the mass mention.
-    // Use a regex (not exact-match) because `@everyone!`,
-    // `@everyone:`, `@everyone.fix` etc. are single tokens after
-    // the strip pass (residue split class doesn't include
-    // punctuation) and would otherwise slip through. Replace all
-    // occurrences so a token like `here@everyone` is fully fenced.
+    // Standalone `@everyone` is intercepted by the gated detect-and-
+    // strip pass above, so the cases this defuse still catches are
+    // `@here`, `@Everyone` (case-mismatched / inert), and embedded
+    // forms like `here@everyone` that escape the gated path's word-
+    // boundary. Use a regex (not exact-match) because shapes like
+    // `@here:`, `here@everyone` survive the strip pass as single
+    // tokens (residue split class doesn't include punctuation) and
+    // would otherwise slip through. Replace all occurrences so a
+    // token like `here@everyone` is fully fenced.
     //
     // INTENTIONALLY case-sensitive (no `/i` flag) \u2014 Discord's mass-
     // mention parser is itself lowercase-only, so `@Everyone` is
@@ -363,7 +486,7 @@ function parseRecipientMentions(raw, interaction) {
     });
   }
 
-  return { ids: finalIds, invalidTokens, cappedCount };
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied };
 }
 
 module.exports = {
