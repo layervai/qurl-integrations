@@ -123,6 +123,14 @@
 // (Strict ceiling is cap + RECEIVE_MAX_MESSAGES - 1; the .env.example
 // rounds up by 1 for headroom math.)
 //
+// Error classification: pollLoop's catch routes errors into three
+// buckets — abort (silent continue, stop()-triggered), permanent
+// (fatal log + process.exit(1) so ECS surfaces the misconfig in
+// deploy-time monitoring), and transient (log + POLL_ERROR_BACKOFF_MS
+// backoff). Permanent codes are typo'd queue URL, missing IAM perm,
+// region drift, and bad creds — anything a retry won't fix. See
+// PERMANENT_AWS_ERROR_CODES for the full set.
+//
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
 // `client.actions.InteractionCreate.handle(data)` call. The listener
@@ -836,6 +844,48 @@ function isAbortError(err) {
   return false;
 }
 
+// AWS error codes that indicate permanent misconfiguration rather than
+// transient flakiness. Retrying these forever just spams logs without
+// resolving the underlying problem — better to crash so ECS surfaces
+// the misconfig as a high task-restart rate in deploy-time monitoring.
+// The boot-time `missingEventShipperKeys` check catches the *missing*
+// queue URL case; this catches the *misconfigured-but-set* URL,
+// missing IAM perms, region mismatch, and bad-credential cases.
+//
+// Names include both AWS-API-layer codes (v2-style, still present in
+// error.Code on some SDK paths) and SDK-v3 error class names
+// (error.name). Walking err.cause matches the isAbortError pattern
+// for parity with how @aws-sdk wraps errors across versions.
+const PERMANENT_AWS_ERROR_CODES = new Set([
+  // Queue doesn't exist (typo'd URL or wrong region in queue URL).
+  'QueueDoesNotExist',
+  'AWS.SimpleQueueService.NonExistentQueue',
+  // IAM lacks sqs:ReceiveMessage on the queue.
+  'AccessDenied',
+  'AccessDeniedException',
+  // Malformed queue URL.
+  'InvalidAddress',
+  'InvalidQueueUrl',
+  // Bad endpoint (typically AWS_REGION drift between deploy + queue).
+  'UnknownEndpoint',
+  // Bad/expired credentials.
+  'UnrecognizedClientException',
+  'InvalidClientTokenId',
+]);
+
+function permanentAwsErrorCode(err) {
+  const visited = new Set();
+  let current = err;
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
+    if (PERMANENT_AWS_ERROR_CODES.has(current.name)) return current.name;
+    if (PERMANENT_AWS_ERROR_CODES.has(current.code)) return current.code;
+    if (PERMANENT_AWS_ERROR_CODES.has(current.Code)) return current.Code;
+    current = current.cause;
+  }
+  return null;
+}
+
 // Sleep that resolves either when the timeout fires OR when
 // stopController.signal fires. Without the early-out, a stop() call
 // during the error-backoff would block for the full
@@ -905,6 +955,22 @@ async function pollLoop(client) {
         // signal.aborted check exits next iteration; no logging or
         // backoff (this is a clean interruption, not a failure).
         continue;
+      }
+      const permanentCode = permanentAwsErrorCode(err);
+      if (permanentCode) {
+        // Permanent AWS misconfig (typo'd queue URL, missing IAM
+        // perm, region drift, bad creds). Crash so ECS surfaces it
+        // as a high task-restart rate in deploy-time monitoring —
+        // retrying would just spam logs and bleed the misconfig
+        // into runtime noise. The boot check catches the missing-
+        // URL case; this catches the misconfigured-but-set ones.
+        logger.error('Event consumer: permanent AWS failure, exiting', {
+          error: err.message, code: permanentCode,
+        });
+        process.exit(1);
+        // Defensive return: test mocks process.exit, so without this
+        // the loop would iterate again into the same failure.
+        return;
       }
       // ReceiveMessage failure (transient AWS, throttling, etc.) —
       // brief backoff so we don't burn CPU on a sustained outage.
@@ -1145,6 +1211,7 @@ module.exports = {
     processMessage,
     pollOnce,
     isAbortError,
+    permanentAwsErrorCode,
     abortableSleep,
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
