@@ -74,14 +74,20 @@
 //
 // Output shape:
 //   {
-//     ids:                [<user_id>, ...],   // deduped, cap-applied
-//     invalidTokens:      [<raw_token>, ...], // pre-escaped (see above)
-//     cappedCount:        <number>,           // 0 if not capped; else
-//                                             // `total_pre_cap - cap`
-//     massMentionDenied:  <boolean>,          // true when @everyone
-//                                             // appeared but the caller
-//                                             // denied via the
-//                                             // `allowMassMention` opt
+//     ids:                  [<user_id>, ...],   // deduped, cap-applied
+//     invalidTokens:        [<raw_token>, ...], // pre-escaped (see above)
+//     cappedCount:          <number>,           // 0 if not capped; else
+//                                               // `total_pre_cap - cap`
+//     massMentionDenied:    <boolean>,          // true when @everyone
+//                                               // appeared but the caller
+//                                               // denied via the
+//                                               // `allowMassMention` opt
+//     massMentionExpanded:  <boolean>,          // true when @everyone
+//                                               // appeared AND was
+//                                               // expanded (allowed +
+//                                               // walked guild members).
+//                                               // Mutually exclusive
+//                                               // with massMentionDenied.
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
@@ -263,7 +269,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -271,7 +277,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -301,7 +307,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -720,7 +726,16 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     });
   }
 
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied };
+  // `massMentionExpanded` mirrors the parser's internal
+  // `everyonePresent && allowMassMention` predicate — the condition
+  // under which the @everyone expansion ran above. Surfacing it lets
+  // callers route the slash-text "@everyone" path into RECIPIENT_MODE_
+  // EVERYONE without duplicating the regex-match-and-permission-check
+  // (or reaching past the parser to detect the `<@&{guildId}>` wire
+  // form). False when the user typed @everyone but lacked permission
+  // (the denied path lands on `massMentionDenied` instead).
+  const massMentionExpanded = everyonePresent && allowMassMention;
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the

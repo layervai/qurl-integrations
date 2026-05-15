@@ -1073,11 +1073,11 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
 });
 
 describe('parseRecipientMentions — result-shape contract', () => {
-  test('result shape pins exactly five keys (ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied)', () => {
+  test('result shape pins exactly six keys (ids, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied)', () => {
     // Empire of `.toMatchObject` in other tests admits new fields by
     // design (the result shape is allowed to grow), but the closed
     // set of CURRENT keys is load-bearing — callers destructure these
-    // names. Pin the closed set so a future PR that adds a 6th field
+    // names. Pin the closed set so a future PR that adds a 7th field
     // surfaces here intentionally rather than slipping past
     // partial-match assertions.
     const int = makeInteraction({ users: { '111': {} } });
@@ -1087,6 +1087,7 @@ describe('parseRecipientMentions — result-shape contract', () => {
       'ids',
       'invalidTokens',
       'massMentionDenied',
+      'massMentionExpanded',
       'roleMentionsDenied',
     ]);
   });

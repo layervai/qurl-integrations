@@ -2915,7 +2915,7 @@ const CONFIRM_EXPIRY_SELECT_CUSTOM_ID = 'qurl_confirm_expiry';
 const CONFIRM_SELF_DESTRUCT_SELECT_CUSTOM_ID = 'qurl_confirm_self_destruct';
 const CONFIRM_NOTE_BUTTON_CUSTOM_ID = 'qurl_confirm_note_btn';
 const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
-// Confirm-card "Everyone in this voice channel" button. Rendered only
+// Confirm-card "Everyone on voice" button. Rendered only
 // when the slash command was invoked from a voice / stage-voice channel
 // (`payload.voiceChannelId` is set by `handleQurlSlashSend`). Mirrors
 // the role-mention/`<#voice>` parser path: resolve voice-connected
@@ -2946,11 +2946,12 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // Tracked in #339 if a future product decision (stage channels with
 // thousands of audience) needs to revisit this for stage-only.
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
-// "Pick people instead" button — rendered only in voice-mode (i.e.
-// `payload.recipientMode === 'voice'`). Clearing it flips the card
-// back to picker-mode (recipientIds dropped, MentionableSelect row
-// restored). Lives on its own customId so flow-dispatch routes
-// directly instead of branching inside the voice-everyone handler.
+// "Pick people instead" button — rendered in voice-mode and
+// everyone-mode (i.e. `payload.recipientMode === 'voice' || 'everyone'`).
+// Clicking it flips the card back to picker-mode (recipientIds
+// dropped, MentionableSelect row restored). Lives on its own customId
+// so flow-dispatch routes directly instead of branching inside the
+// voice/@everyone handlers.
 const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
 // Whole-guild `@everyone` button on the confirm card. Workaround for
 // Discord's MentionableSelectMenu omitting the `@everyone` role from
@@ -2958,33 +2959,44 @@ const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
 // MENTION_EVERYONE-bearing users with no in-picker affordance for
 // the "fan out to the whole server" intent. Click-time semantics
 // match a synthetic `@everyone` text-mention pick. Picker-mode only —
-// voice-mode already targets the voice population and rendering the
-// button there would mislead users about what "everyone" means.
+// voice-mode already targets the voice population (different
+// "everyone"), and everyone-mode is the post-click state where this
+// button has already done its job (re-rendering it would invite a
+// re-click that just churns the version with no state change).
 const CONFIRM_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_everyone';
 
-// Two recipient-source modes carried on `payload.recipientMode`:
+// Three recipient-source modes carried on `payload.recipientMode`:
 //   - 'picker' (default): MentionableSelect row is the source of
-//     truth; bottom row carries the "🔊 Everyone in #voice" affordance
-//     when the slash command was invoked from voice.
+//     truth; bottom row carries the "🔊 Everyone on voice" affordance
+//     when the slash command was invoked from voice, plus the
+//     "📢 @everyone" affordance when the sender has MENTION_EVERYONE.
 //   - 'voice': recipientIds were resolved from `channel.members` and
 //     the picker row is hidden. Bottom row swaps in "👥 Pick people
 //     instead" so the user can fall back to manual selection.
+//   - 'everyone': recipientIds were resolved from the guild's full
+//     non-bot member set via the 📢 @everyone shortcut. Like voice,
+//     the picker row is hidden and the bottom row carries the
+//     "👥 Pick people instead" escape hatch — auto-filling the
+//     picker would either silently truncate at Discord's 25-entry
+//     hard cap or read back through `handleConfirmUserSelect` and
+//     replace the @everyone fan-out with a subset.
 // Stale flow_state rows (created before this field existed) read as
 // undefined — `normalizeRecipientMode` below maps undefined / any
 // off-set value to RECIPIENT_MODE_PICKER so they keep the legacy
 // picker shape until they expire.
 const RECIPIENT_MODE_PICKER = 'picker';
 const RECIPIENT_MODE_VOICE = 'voice';
+const RECIPIENT_MODE_EVERYONE = 'everyone';
 
-// Single source of truth for "this token is voice; everything else
-// reads as picker." Three render sites (renderConfirmCardContent,
-// renderConfirmCardRows, rerenderConfirmCard) previously open-coded
-// `mode === RECIPIENT_MODE_VOICE ? VOICE : PICKER` — if any of those
-// drifted (e.g. someone tested `mode === 'voice'` against a typo'd
-// constant), the layout would split between branches. The helper
-// pins the stale-row default in one place.
+// Single source of truth for the closed-set map. Multiple render
+// sites (renderConfirmCardContent, renderConfirmCardRows,
+// rerenderConfirmCard) previously open-coded the ternary; an off-set
+// or typo'd constant would silently fall through to PICKER and break
+// the layout swap. The helper pins the stale-row default in one place.
 function normalizeRecipientMode(mode) {
-  return mode === RECIPIENT_MODE_VOICE ? RECIPIENT_MODE_VOICE : RECIPIENT_MODE_PICKER;
+  if (mode === RECIPIENT_MODE_VOICE) return RECIPIENT_MODE_VOICE;
+  if (mode === RECIPIENT_MODE_EVERYONE) return RECIPIENT_MODE_EVERYONE;
+  return RECIPIENT_MODE_PICKER;
 }
 
 // Recipient-rejection reason strings shared by every handler that
@@ -3168,10 +3180,10 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
   for (const u of users) {
     if (u.bot) { droppedBots++; continue; }
     // Voice-everyone path drops the sender silently — they pressed
-    // the "Everyone in #voice" affordance, which semantically means
+    // the "Everyone on voice" affordance, which semantically means
     // "everyone else." No droppedBots-style accounting because the
-    // user-visible message ("you not included") is rendered from
-    // the recipientMode, not from a partition counter.
+    // exclusion is inferred from voice-mode semantics rather than
+    // surfaced in user-visible copy.
     if (u.id === senderId && excludeSender) continue;
     if (u.id === senderId) selfIncluded = true;
     valid.push(u);
@@ -3562,8 +3574,8 @@ function renderConfirmCardContent({
   // + handleConfirmPickManual), so `selfIncluded === true` is
   // structurally unreachable in voice-mode. The guard is defense
   // against a forged or schema-drifted payload that would otherwise
-  // produce contradictory copy: "Send includes you." stacked on top
-  // of "(you not included)" in the voice-mode "To:" line.
+  // produce contradictory copy ("Send includes you." stacked on top
+  // of a voice-mode "To:" line whose semantics exclude the sender).
   if (selfIncluded && mode !== RECIPIENT_MODE_VOICE) {
     content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
@@ -3573,20 +3585,22 @@ function renderConfirmCardContent({
     // Voice-mode "To:" — names omitted in favor of the channel context.
     // The #voice mention is the source of truth for who's included;
     // listing alias names would just duplicate the scrollback the user
-    // already sees in Discord. "(you not included)" makes the sender-
-    // exclusion contract explicit on the card.
+    // already sees in Discord. Sender exclusion is left inferred from
+    // voice-mode semantics (the user clicked "Everyone on voice" knowing
+    // they themselves wouldn't qURL themselves) rather than spelled out
+    // — the explicit "(you not included)" disclosure dropped per UX
+    // call; selfIncluded:false is still load-bearing on the data side.
     //
     // SAFETY: use Discord's native channel-mention syntax `<#id>` (which
     // Discord renders client-side from the channel id) instead of
     // interpolating `channel.name` raw. A name like `**spoiler**`,
-    // `_underline_`, `||hidden||`, or one containing the literal
-    // `*(you not included)*` substring would otherwise inject markdown
+    // `_underline_`, or `||hidden||` would otherwise inject markdown
     // into the confirm card. Mirrors the same gotcha noted at the
     // voice-button label site (where button-label rendering doesn't
     // process markdown, but message content does).
     const channelRef = voiceChannelId ? `<#${voiceChannelId}>` : 'the voice channel';
     const userWord = validRecipients.length === 1 ? 'user' : 'users';
-    content += `\n**To:** ${validRecipients.length} ${userWord} in ${channelRef} *(you not included)*\n`;
+    content += `\n**To:** ${validRecipients.length} ${userWord} in ${channelRef}\n`;
   } else {
     // First-N preview keeps the card scannable when a paste resolves
     // to many users. resolveRecipientAlias prefers nickname > globalName >
@@ -3681,22 +3695,27 @@ function formatPersonalMessagePreview(message) {
 // need the 180s flow_state drain coordination from #316.
 //
 // Row math (Discord 5-row max, 5-buttons-per-row max):
-//   PICKER mode: Mentionable + SelfDestruct + Expiry +
-//     [(optional 🔊 Voice), Note, Send, Cancel] = 4 rows, ≤ 4 buttons
-//   VOICE mode:  SelfDestruct + Expiry +
+//   PICKER mode:   Mentionable + SelfDestruct + Expiry +
+//     [(optional 🔊 Voice), (optional 📢 @everyone), Note, Send, Cancel]
+//     = 4 rows, ≤ 5 buttons
+//   VOICE mode:    SelfDestruct + Expiry +
+//     [👥 Pick people instead, Note, Send, Cancel]   = 3 rows, 4 buttons
+//   EVERYONE mode: SelfDestruct + Expiry +
 //     [👥 Pick people instead, Note, Send, Cancel]   = 3 rows, 4 buttons
 //
 // The bottom-row affordance flips with the mode:
-//   - `'picker'` + voiceChannelId set → 🔊 Everyone in #voice button.
+//   - `'picker'` + voiceChannelId set → 🔊 Everyone on voice button.
 //     Disabled with a `(0)` count when the channel has no connected
 //     non-bot members at render time — honest UX so the user can see
 //     WHY the button is inert.
-//   - `'voice'` → 👥 Pick people instead button. Picker row is removed
-//     entirely; the user has committed to voice-everyone semantics and
-//     this button is their escape hatch back to manual selection.
+//   - `'voice'` or `'everyone'` → 👥 Pick people instead button.
+//     Picker row is removed entirely; the user has committed to a
+//     bulk-select semantics and this button is their escape hatch
+//     back to manual selection. Both modes share a single handler
+//     (handleConfirmPickManual) that resets recipientMode to 'picker'.
 // The actual member resolution still happens at click time (see
-// `handleConfirmVoiceEveryone`); the count here is a snapshot hint so
-// the label isn't blank.
+// `handleConfirmVoiceEveryone` and `handleConfirmEveryone`); the
+// counts here are snapshot hints so the labels aren't blank.
 //
 // `recipientMode` defaults to RECIPIENT_MODE_PICKER for stale rows that
 // existed before this field was introduced; the legacy shape is exactly
@@ -3852,13 +3871,23 @@ function renderConfirmCardRows({
   // note" based on current state so the user can tell at a glance
   // whether a note is attached. The leading-button affordance is
   // mode-dependent: picker-mode shows the voice-everyone entry button
-  // (only when the slash was invoked from voice); voice-mode shows the
-  // "Pick people instead" escape hatch.
+  // (only when the slash was invoked from voice); voice-mode and
+  // everyone-mode show the "Pick people instead" escape hatch.
   const bottomRow = new ActionRowBuilder();
   if (mode === RECIPIENT_MODE_VOICE && voiceChannelId) {
     // Voice-mode escape hatch. The handler clears recipientIds and
     // flips recipientMode back to 'picker'. Style as Secondary so it
     // doesn't compete visually with Send (Success).
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
+        .setLabel('\u{1F465} Pick people instead')
+        .setStyle(ButtonStyle.Secondary),
+    );
+  } else if (mode === RECIPIENT_MODE_EVERYONE) {
+    // Everyone-mode escape hatch — same handler as voice-mode. Picker
+    // row is hidden above; this is the only path back to manual
+    // selection without re-running the slash command.
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
@@ -3891,8 +3920,12 @@ function renderConfirmCardRows({
     // will silently overstate the click-time set — keep the two
     // filter sources aligned, or accept a stale label and document
     // the drift here.
+    // Live connected-non-bot count is still computed so the button
+    // can be disabled when the channel is empty or unreadable — it
+    // just doesn't surface in the label anymore (kept terse per
+    // product UX call). `connectedCount == null` is the single
+    // sentinel for "render the disabled button shell."
     let connectedCount = null;
-    let channelName = null;
     if (interaction) {
       const channel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
       if (channel?.members) {
@@ -3901,51 +3934,12 @@ function renderConfirmCardRows({
           if (!isBotMember(m)) n++;
         }
         connectedCount = n;
-        channelName = channel.name || null;
       }
     }
-    const labelCount = connectedCount == null ? '?' : String(connectedCount);
-    // Name the target channel in the label so a user who invoked
-    // from #voice-A and drifted to #voice-B mid-flow can tell the
-    // button still targets the original channel. Discord button-label
-    // hard cap is 80 UTF-16 code units (NOT codepoints — Discord
-    // measures UTF-16 surrogate-pair-aware, so an emoji-heavy 46-
-    // codepoint name occupies up to 92 UTF-16 units). Budget the
-    // name in UTF-16 units (channelName.length, which IS UTF-16 unit
-    // count in JS strings) so the upper bound is hard-guaranteed
-    // regardless of emoji density.
-    //
-    // Fixed prefix + suffix:
-    //   `🔊 ` (3) + `Everyone in #` (13) + ` (NNNNN)` (max 8) = 24
-    //   (🔊 is a surrogate pair = 2 UTF-16 units + a space).
-    // 50 leaves 6 units of headroom for label evolution. The `…`
-    // ellipsis adds 1 UTF-16 unit, so the budget includes its slot:
-    // a max-truncation label measures 24 + 49 + 1 = 74 UTF-16 units.
-    //
-    // SAFETY: channel.name is interpolated raw into the button label
-    // — Discord BUTTON labels do not render markdown / mentions /
-    // emoji shortcodes, so a channel name containing `**bold**` or
-    // `<@123>` is displayed verbatim. A future refactor that moves
-    // this label into an embed description / message content would
-    // need to escape `channel.name` against markdown/mention parsing.
-    const VOICE_LABEL_NAME_UTF16_BUDGET = 50;
-    // Back off if the cut would split a surrogate pair (a high
-    // surrogate at the last position with no paired low surrogate
-    // would render as `�`). Reserve 1 UTF-16 unit for the ellipsis.
-    const safeName = (() => {
-      if (!channelName) return null;
-      if (channelName.length <= VOICE_LABEL_NAME_UTF16_BUDGET) return channelName;
-      let cut = VOICE_LABEL_NAME_UTF16_BUDGET - 1;
-      // High surrogate at cut-1 → cut would split it; back off 1 unit.
-      const code = channelName.charCodeAt(cut - 1);
-      if (code >= 0xD800 && code <= 0xDBFF) cut -= 1;
-      return `${channelName.slice(0, cut)}…`;
-    })();
-    const labelTarget = safeName ? `#${safeName}` : 'this voice channel';
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID)
-        .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
+        .setLabel('\u{1F50A} Everyone on voice')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(connectedCount == null || connectedCount === 0),
     );
@@ -3993,12 +3987,11 @@ function renderConfirmCardRows({
     //    handleConfirmEveryone (authoritative — partition runs against
     //    the prewarmed cache).
     const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
-    const labelCount = displayCount == null ? '?' : String(displayCount);
-    const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
-    // No `VOICE_LABEL_NAME_UTF16_BUDGET`-equivalent here because no
-    // user-controlled string is interpolated: worst-case label is
-    // `📢 @everyone (NNNNN) — exceeds NNNNN cap` ≈ 41 UTF-16 units,
-    // well under Discord's 80-unit button-label cap.
+    // Fixed label — no live count, no overcap suffix. The disabled+
+    // greyed-out button is the visual signal for the three degraded
+    // states (count unavailable, empty guild, exceeds cap); the click-
+    // time reject in `handleConfirmEveryone` carries the actionable
+    // reason copy when the disable can't fire (cold-cache overcap).
     //
     // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
     // components. The current worst-case render is
@@ -4009,7 +4002,7 @@ function renderConfirmCardRows({
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
-        .setLabel(`\u{1F4E2} @everyone (${labelCount})${labelSuffix}`)
+        .setLabel('\u{1F4E2} @everyone')
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(displayCount == null || displayCount === 0 || overCap),
     );
@@ -4236,8 +4229,8 @@ async function handleQurlSlashSend(interaction, params) {
       });
     }
 
-    // Voice-channel context snapshot. The "Everyone in this voice
-    // channel" confirm-card button is rendered when this is set.
+    // Voice-channel context snapshot. The "Everyone on voice"
+    // confirm-card button is rendered when this is set.
     // Snapshot at slash-command time (NOT re-derived at button-click)
     // because:
     //   - interaction.channel at click time tracks the channel the
@@ -4246,7 +4239,7 @@ async function handleQurlSlashSend(interaction, params) {
     //     contract and matches the rest of the flow-state pattern.
     //   - A user who opens /qurl file from a voice channel, then
     //     drags themselves into a different channel mid-confirm,
-    //     should still see "Everyone in this voice channel" target
+    //     should still see "Everyone on voice" target
     //     the channel they invoked from, not the channel they're now
     //     in.
     // The actual member resolution still happens at click time via
@@ -4262,7 +4255,7 @@ async function handleQurlSlashSend(interaction, params) {
     // behave the way users naturally expect — the room is the audience.
     //
     // Sender is filtered pre-validity via partitionRecipients's
-    // `excludeSender` option; the "Everyone in #voice" affordance
+    // `excludeSender` option; the "Everyone on voice" affordance
     // semantically means "everyone else," not "and CC myself."
     //
     // Banner asymmetry on the picker-mode fallback: sender-only /
@@ -4276,7 +4269,7 @@ async function handleQurlSlashSend(interaction, params) {
     // SNAPSHOT vs. CLICK-TIME asymmetry: this slash-entry path freezes
     // `recipientIds` at command receipt — someone joining the channel
     // between `/qurl file` and the Send click is NOT added. The "🔊
-    // Everyone in #voice" button (handleConfirmVoiceEveryone) goes the
+    // Everyone on voice" button (handleConfirmVoiceEveryone) goes the
     // other way: re-resolves `channel.members` at click time. The two
     // shapes are reachable from the same UI but produce different
     // recipient sets; that's a deliberate UX call (the auto-default
@@ -4287,7 +4280,22 @@ async function handleQurlSlashSend(interaction, params) {
     let finalValid = valid;
     let finalSelfIncluded = selfIncluded;
     let finalWarningsBlock = warningsBlock;
-    if (recipientsOmitted && voiceChannelId) {
+    // Text-mention `@everyone` (typed in the `recipients:` slash option,
+    // or its `<@&{guildId}>` wire form) lands the card in EVERYONE
+    // mode — same as clicking the 📢 @everyone confirm-card button.
+    // Auto-filling the picker with up to 25 of the expanded set would
+    // either misrepresent the recipient list (only a subset shows) or
+    // invite a picker re-interaction that silently replaces the
+    // expansion with a truncated subset via handleConfirmUserSelect.
+    // Hiding the picker matches the button-click UX.
+    //
+    // Gated on `valid.length > 0` because the empty-after-partition
+    // case is already handled above with a "❌ No valid recipients"
+    // banner; landing that in EVERYONE-mode would render a card with
+    // no recipients but no picker either.
+    if (parsed.massMentionExpanded && valid.length > 0) {
+      recipientMode = RECIPIENT_MODE_EVERYONE;
+    } else if (recipientsOmitted && voiceChannelId) {
       // Read voice-connected members through the same channel cache
       // lookup that handleConfirmVoiceEveryone and the bottom-button
       // count use (`guild.channels.cache.get(voiceChannelId)`). Reading
@@ -5051,10 +5059,12 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     selfIncluded,
     // Picker activity definitionally lands the card in picker-mode.
     // If the user clicked the picker (which is the only entry to this
-    // handler), they are NOT in voice-everyone mode — even if the
-    // inbound payload still carried `'voice'` from a stale superseded
-    // flow. Explicit override here keeps a `...payload` spread from
-    // leaking voice-mode forward.
+    // handler), they are NOT in voice or everyone mode — even if the
+    // inbound payload still carried `'voice'` / `'everyone'` from a
+    // stale superseded flow (picker is hidden in those modes, but a
+    // forged interaction or stale UI could still emit the event).
+    // Explicit override here keeps a `...payload` spread from leaking
+    // a non-picker mode forward.
     recipientMode: RECIPIENT_MODE_PICKER,
   };
   // Targeted catch around transitionFlow mirrors the same shape
@@ -5125,7 +5135,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   }).catch(logIgnoredDiscordErr);
 }
 
-// Confirm-card "Everyone in this voice channel" button. Mirrors the
+// Confirm-card "Everyone on voice" button. Mirrors the
 // UserSelectMenu handler's shape (deferUpdate → resolve → partition →
 // transitionFlow → re-render) but reads the voice-connected member
 // set AT CLICK TIME from the guild's voice-state cache rather than
@@ -5421,18 +5431,20 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   }).catch(logIgnoredDiscordErr);
 }
 
-// Confirm-card "👥 Pick people instead" button — voice-mode escape
-// hatch. Flips `recipientMode` back to 'picker', clears recipientIds
-// (the voice-resolved set was authored for "everyone," not a starting
-// point for hand-curation; carrying it forward would land the user in
-// picker-mode with the voice population pre-selected, which is a
-// confusing "did my switch take?" state).
+// Confirm-card "👥 Pick people instead" button — escape hatch from
+// both voice-mode and everyone-mode back to picker-mode. Flips
+// `recipientMode` to 'picker', clears recipientIds (the voice- or
+// guild-resolved set was authored for "everyone," not a starting
+// point for hand-curation; carrying it forward would land the user
+// in picker-mode with the population pre-selected, which is a
+// confusing "did my switch take?" state — and a 25-entry truncated
+// view of any larger set).
 //
 // No resource resolution / member lookups happen here — purely a UI
 // mode toggle. transitionFlow still fires so the persisted payload
 // matches what the card shows; otherwise a subsequent expiry / note
 // re-render would re-derive picker layout from a payload that still
-// said `recipientMode: 'voice'` and snap back.
+// carried the prior mode and snap back.
 async function handleConfirmPickManual(interaction, { flow_id, row }) {
   await interaction.deferUpdate().catch(logIgnoredDiscordErr);
 
@@ -5695,18 +5707,20 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const newRecipientAliases = Object.fromEntries(
     valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
   );
-  // recipientMode stays PICKER — the @everyone button doesn't switch
-  // modes (unlike voice-everyone which moves to RECIPIENT_MODE_VOICE).
-  // Semantically the user is multi-picking from the picker dropdown
-  // via a shortcut; the picker row remains visible for further
-  // adjustment.
+  // Mode switches to EVERYONE — like voice-everyone, the click is
+  // unambiguous "fan out to all" intent. Picker row is hidden in the
+  // re-render so the user can't accidentally read back a 25-entry
+  // truncated picker selection over the @everyone fan-out (Discord's
+  // MentionableSelect default_values is capped at 25, and any picker
+  // interaction routes through handleConfirmUserSelect which replaces
+  // recipientIds with the picker's view of the world).
   const newPayload = {
     ...payload,
     recipientIds: valid.map((u) => u.id),
     recipientAliases: newRecipientAliases,
     warningsBlock: newWarningsBlock,
     selfIncluded,
-    recipientMode: RECIPIENT_MODE_PICKER,
+    recipientMode: RECIPIENT_MODE_EVERYONE,
   };
   let result;
   try {
@@ -5815,8 +5829,8 @@ async function rerenderConfirmCard(interaction, newPayload) {
   // `needsPicker` (the "Pick recipients below" prompt) is only shown
   // in picker-mode with no recipients yet. In voice-mode with an empty
   // recipientIds (e.g., voice channel emptied after switch), the card
-  // shows "To: 0 users in #voice (you not included)" — the user can
-  // click "Pick people instead" to recover.
+  // shows "To: 0 users in #voice" — the user can click "Pick people
+  // instead" to recover.
   const needsPicker = recipientMode === RECIPIENT_MODE_PICKER && recipientIds.length === 0;
   // Send-disabled is recipient-empty regardless of mode.
   const sendDisabled = recipientIds.length === 0;
@@ -8192,8 +8206,8 @@ registerFlow(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmVoiceEveryone,
 });
-// "Pick people instead" — voice-mode → picker-mode toggle. Same stage
-// contract as the other CONFIRM_* registrations.
+// "Pick people instead" — voice/everyone-mode → picker-mode toggle.
+// Same stage contract as the other CONFIRM_* registrations.
 registerFlow(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmPickManual,
@@ -8340,6 +8354,7 @@ module.exports = {
       CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
       RECIPIENT_MODE_PICKER,
       RECIPIENT_MODE_VOICE,
+      RECIPIENT_MODE_EVERYONE,
       normalizeRecipientMode,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,

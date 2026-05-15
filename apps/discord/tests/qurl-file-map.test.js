@@ -444,8 +444,8 @@ describe('partitionRecipients', () => {
   test('excludeSender:true drops the sender pre-validity (selfIncluded stays false)', () => {
     // Voice-everyone semantics. The sender is dropped silently — no
     // droppedBots-style accounting, and `selfIncluded` cannot be true
-    // on this path. The user-visible "you not included" copy is
-    // rendered from recipientMode, not from this partition return.
+    // on this path. The sender exclusion is inferred from voice-mode
+    // UI semantics rather than surfaced in user-visible copy.
     const users = [
       makeUser('100000000000000001'),
       makeUser(SENDER_ID),
@@ -2030,10 +2030,10 @@ describe('renderConfirmCardContent', () => {
     // Every production voice-mode write path sets selfIncluded:false,
     // so this state is structurally unreachable. The renderer guard
     // exists for a forged or schema-drifted payload that would
-    // otherwise stack a contradictory "Send includes you." notice on
-    // top of the voice-mode "(you not included)" copy on the "To:"
-    // line. Pin the guard so a future refactor can't silently let the
-    // two messages coexist.
+    // otherwise stack a "Send includes you." notice on top of a
+    // voice-mode "To:" line whose semantics already exclude the
+    // sender. Pin the guard so a future refactor can't silently let
+    // the contradiction surface.
     const u1 = { id: '100000000000000001', username: 'alice' };
     const out = renderConfirmCardContent({
       ...baseProps,
@@ -2043,8 +2043,8 @@ describe('renderConfirmCardContent', () => {
       voiceChannelId: 'voice-ch',
     });
     expect(out).not.toMatch(/Send includes you/);
-    // Voice-mode "To:" still renders correctly.
-    expect(out).toMatch(/you not included/);
+    // Voice-mode "To:" still renders correctly with the channel mention.
+    expect(out).toMatch(/<#voice-ch>/);
   });
 
   test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
@@ -2967,6 +2967,55 @@ describe('handleQurlFile — slash entry', () => {
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.recipientIds).toEqual([u1]);
+    });
+
+    test('text `@everyone` in recipients → EVERYONE mode (picker hidden, no auto-fill)', async () => {
+      // Mirror of the 📢 @everyone button-click path. When the user
+      // types `@everyone` in the recipients field and has
+      // MENTION_EVERYONE, the parser's `massMentionExpanded` flag
+      // lands the card in EVERYONE mode so the picker stays hidden —
+      // auto-filling it would either truncate at Discord's 25-entry
+      // default_values cap or invite a picker re-interaction that
+      // silently replaces the fan-out via handleConfirmUserSelect.
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        guildMembers: {
+          [SENDER_ID]: {},
+          '100000000000000051': {},
+          '100000000000000052': {},
+        },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 3;
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('everyone');
+      // Fan-out includes the sender (selfIncluded=true), matching
+      // the button-click path's semantics.
+      expect(payload.selfIncluded).toBe(true);
+      expect(payload.recipientIds.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test('text `@everyone` WITHOUT MENTION_EVERYONE → stays PICKER (parser denied expansion)', async () => {
+      // Counter-test: `massMentionDenied:true` does NOT set the
+      // EVERYONE-mode trigger — `massMentionExpanded` is mutually
+      // exclusive with `massMentionDenied`. The slash-entry hits the
+      // permission-denied warning banner and renders the picker
+      // normally for the user to choose recipients manually.
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        guildMembers: { [SENDER_ID]: {} },
+      });
+      // Default permission shape → no MENTION_EVERYONE.
+      await handleQurlFile(int);
+      const supersedeCalls = mockSupersedeOrCreate.mock.calls;
+      // No confirm card persisted (recipientsOmitted=false + valid=0 →
+      // the "no valid recipients" early-return fires before
+      // supersedeOrCreate). This is the existing behavior; the EVERYONE-
+      // mode trigger isn't reached because the parser denied the
+      // expansion. Pin via the absence of a supersedeOrCreate call so
+      // a future refactor that changes the denied-path UX surfaces here.
+      expect(supersedeCalls.length).toBe(0);
     });
   });
 });
@@ -4694,7 +4743,7 @@ describe('handleConfirmUserSelect', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleConfirmVoiceEveryone — "Everyone in this voice channel"
+// handleConfirmVoiceEveryone — "Everyone on voice"
 // button on the confirm card, rendered only when the slash command
 // was invoked from a voice / stage-voice channel. Resolves voice-
 // connected non-bot members AT CLICK TIME from the voice-state
@@ -5160,9 +5209,11 @@ describe('handleConfirmEveryone', () => {
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
     expect(payload.recipientIds.sort()).toEqual([u1, u2, SENDER_ID].sort());
     expect(payload.selfIncluded).toBe(true);
-    // Mode stays in PICKER — @everyone is multi-pick shortcut, not a
-    // mode switch (unlike voice-everyone which moves to VOICE mode).
-    expect(payload.recipientMode).toBe('picker');
+    // Mode switches to EVERYONE so the re-render hides the picker
+    // row. Auto-filling the picker would either silently truncate at
+    // Discord's 25-entry default_values cap or read back through the
+    // picker handler and replace the @everyone fan-out with a subset.
+    expect(payload.recipientMode).toBe('everyone');
   });
 
   test('without MENTION_EVERYONE → reject with permission warning, no transition', async () => {
@@ -6240,9 +6291,11 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
     const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
     // Voice-mode rendering still applies — content shows the channel
-    // mention + "(you not included)" notice even with zero recipients.
+    // mention even with zero recipients.
     expect(lastEdit.content).toMatch(/0 users in <#voice-empty>/);
-    expect(lastEdit.content).toMatch(/you not included/);
+    // The "(you not included)" disclosure used to ride along here;
+    // dropped per UX call. Sender exclusion stays inferred.
+    expect(lastEdit.content).not.toMatch(/you not included/);
     // The picker prompt MUST NOT appear (we're in voice-mode).
     expect(lastEdit.content).not.toMatch(/Pick recipients below/);
     // Send is disabled (no recipients), pick-manual is rendered as
@@ -6442,34 +6495,26 @@ describe('renderConfirmCardRows', () => {
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
   });
 
-  test('voice button label stays under Discord\'s 80 UTF-16 cap with an ALL-EMOJI channel name (worst case)', async () => {
-    // Round-14 cr bug-guard: a 46-codepoint all-emoji channel name
-    // (which Discord allows up to its 100-char limit) occupies 92
-    // UTF-16 units. The prior codepoint-based budget would slice at
-    // 46 codepoints (=92 UTF-16 units) + prefix + suffix → ~116-unit
-    // label, busting Discord's 80-UTF-16 hard cap and getting
-    // rejected at API send. The UTF-16-unit budget caps this.
+  test('voice button label is the fixed "Everyone on voice" form, independent of channel name', async () => {
+    // The label used to interpolate `#{channelName}` (with UTF-16-
+    // aware truncation against Discord's 80-unit button-label cap),
+    // and also carried a live `(N)` count. It's now a fixed string
+    // with no count and no channel name. Pin the new shape so a
+    // future refactor that re-introduces either has to update this
+    // test deliberately (and reconsider the markdown-injection surface
+    // area that came with channel-name interpolation).
     const { ButtonBuilder } = require('discord.js');
     ButtonBuilder.mockClear();
-    // 46 🎉 emoji — each is a surrogate pair (U+1F389, 2 UTF-16 units)
-    // so the channel name occupies 92 UTF-16 units. Discord caps
-    // channel names at 100 chars, so this is realistic. The prior
-    // codepoint-based budget would slice at 46 codepoints (92
-    // UTF-16 units) + prefix + suffix → ~116-unit label, busting
-    // Discord's 80-UTF-16 hard cap.
-    const allEmojiName = '🎉'.repeat(46);
-    expect(allEmojiName.length).toBe(92); // confirm worst-case UTF-16
-    // Pass a `recipients:` mention so the slash-entry path stays in
-    // picker-mode — the voice button is rendered (and label-truncated)
-    // only in picker-mode. The voice-mode auto-default would swap in
-    // a "Pick people instead" button instead, hiding what we're testing.
+    // An adversarial channel name that previously had to be UTF-16-
+    // truncated. Now it should not appear in the label at all.
+    const adversarialName = '🎉'.repeat(46) + '**bold**<@123>';
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000099>' },
       guildMembers: { '100000000000000099': {} },
     });
-    int.channel = { id: 'voice-emoji', type: 2 };
-    int.guild.channels.cache.set('voice-emoji', {
-      id: 'voice-emoji', name: allEmojiName, type: 2,
+    int.channel = { id: 'voice-fixed', type: 2 };
+    int.guild.channels.cache.set('voice-fixed', {
+      id: 'voice-fixed', name: adversarialName, type: 2,
       members: new Map([['111', { user: { id: '111', bot: false } }]]),
     });
     await handleQurlFile(int);
@@ -6478,70 +6523,19 @@ describe('renderConfirmCardRows', () => {
     );
     expect(voiceBtn).toBeDefined();
     const label = voiceBtn.value.setLabel.mock.calls[0][0];
-    // The hard contract: under 80 UTF-16 units regardless of input.
+    // Fixed-shape contract — no count, no channel name.
+    expect(label).toBe('\u{1F50A} Everyone on voice');
+    // Discord 80-UTF-16-unit cap stays trivially satisfied.
     expect(label.length).toBeLessThanOrEqual(80);
-    expect(label).toMatch(/…/);
-    // Surrogate-pair safety still holds for the all-emoji case.
-    for (let i = 0; i < label.length; i++) {
-      const code = label.charCodeAt(i);
-      if (code >= 0xD800 && code <= 0xDBFF) {
-        const next = label.charCodeAt(i + 1);
-        expect(next).toBeGreaterThanOrEqual(0xDC00);
-        expect(next).toBeLessThanOrEqual(0xDFFF);
-        i++;
-      }
-    }
-  });
-
-  test('voice button label stays under Discord\'s 80 UTF-16 cap even with a 100-char emoji-containing channel name', async () => {
-    // Pins the codepoint-aware truncation: a channel name with an
-    // emoji at position 45 must NOT split a UTF-16 surrogate pair
-    // (would render `�` on the button) AND the full label must stay
-    // under Discord's 80 UTF-16 unit hard cap. Without the
-    // safeCodepointSlice / Array.from length check, a long emoji-
-    // containing name would either overflow or render mangled.
-    const { ButtonBuilder } = require('discord.js');
-    ButtonBuilder.mockClear();
-    // 100-char name with emoji (🎉 = surrogate pair) at index 44,
-    // 45, 46 to land near the slice boundary.
-    const longName = 'a'.repeat(44) + '🎉🎉🎉' + 'b'.repeat(47);
-    const int = makeInteraction({
-      // `recipients:` keeps the slash-entry in picker-mode so the
-      // voice-everyone button (the subject under test) renders.
-      // Voice-mode auto-default would otherwise swap it for "Pick
-      // people instead."
-      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000099>' },
-      guildMembers: { '100000000000000099': {} },
-      // Inject the channel into the interaction so renderConfirmCardRows'
-      // live read finds it.
-    });
-    int.channel = { id: 'voice-long', type: 2 };
-    int.guild.channels.cache.set('voice-long', {
-      id: 'voice-long', name: longName, type: 2,
-      members: new Map([['111', { user: { id: '111', bot: false } }]]),
-    });
-    await handleQurlFile(int);
-    const voiceBtn = ButtonBuilder.mock.results.find(
-      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
-    );
-    expect(voiceBtn).toBeDefined();
-    const labelCall = voiceBtn.value.setLabel.mock.calls[0];
-    const label = labelCall[0];
-    // UTF-16 unit length (string.length) must stay under 80.
-    expect(label.length).toBeLessThanOrEqual(80);
-    // Truncation indicator present when the name was longer than the budget.
-    expect(label).toMatch(/…/);
-    // Surrogate pair safety: no orphan lead-surrogate (0xD800-0xDBFF
-    // without a paired trail surrogate). Quick scan.
-    for (let i = 0; i < label.length; i++) {
-      const code = label.charCodeAt(i);
-      if (code >= 0xD800 && code <= 0xDBFF) {
-        const next = label.charCodeAt(i + 1);
-        expect(next).toBeGreaterThanOrEqual(0xDC00);
-        expect(next).toBeLessThanOrEqual(0xDFFF);
-        i++; // skip the trail surrogate
-      }
-    }
+    // Channel name (including the markdown-injection payload) is not
+    // interpolated.
+    expect(label).not.toContain('🎉');
+    expect(label).not.toContain('**');
+    expect(label).not.toContain('<@');
+    expect(label).not.toContain('#');
+    expect(label).not.toContain('…');
+    // No live count suffix anymore.
+    expect(label).not.toMatch(/\(\d+\)/);
   });
 
   describe('voice-mode layout (recipientMode:"voice")', () => {
@@ -6550,7 +6544,7 @@ describe('renderConfirmCardRows', () => {
     // auto-default lands the card in voice-mode, which:
     //   - HIDES the MentionableSelect picker row
     //   - SHOWS a "👥 Pick people instead" button
-    //   - DOES NOT show the "🔊 Everyone in #voice" button (that's
+    //   - DOES NOT show the "🔊 Everyone on voice" button (that's
     //     the entry point INTO voice mode; once you're in, it's gone)
     // Without these pins, a future refactor that re-enables the picker
     // in voice-mode (or drops the pick-manual button) passes every
@@ -6581,7 +6575,7 @@ describe('renderConfirmCardRows', () => {
       expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
     });
 
-    test('"Pick people instead" button IS rendered; "Everyone in #voice" button is NOT', async () => {
+    test('"Pick people instead" button IS rendered; "Everyone on voice" button is NOT', async () => {
       const { ButtonBuilder } = require('discord.js');
       ButtonBuilder.mockClear();
       const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
@@ -6677,7 +6671,99 @@ describe('renderConfirmCardRows', () => {
       expect(customIds).not.toContain('qurl_confirm_voice_everyone');
       const lastCall = int.editReply.mock.calls.slice(-1)[0][0];
       expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
-      expect(lastCall.content).toMatch(/you not included/);
+      // "(you not included)" disclosure was dropped per UX call;
+      // sender exclusion is inferred from voice-mode semantics.
+      expect(lastCall.content).not.toMatch(/you not included/);
+    });
+  });
+
+  describe('everyone-mode layout (recipientMode:"everyone")', () => {
+    // Mirror of the voice-mode layout block above. After handleConfirmEveryone
+    // commits a fan-out, the card re-renders in everyone-mode, which:
+    //   - HIDES the MentionableSelect picker row (so a stray picker
+    //     interaction can't replace the fan-out with a 25-cap subset)
+    //   - SHOWS a "👥 Pick people instead" button as the escape hatch
+    //   - DOES NOT show the "📢 @everyone" or "🔊 Everyone on voice"
+    //     entry buttons (you're already past them)
+    // Driven through the renderer directly so the layout is asserted
+    // without re-running the full slash → click round trip.
+    const renderEveryoneRows = (overrides = {}) => {
+      const { MentionableSelectMenuBuilder, ButtonBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      ButtonBuilder.mockClear();
+      const memberCache = new Map([
+        ['100000000000000001', { user: { id: '100000000000000001', bot: false } }],
+        ['100000000000000002', { user: { id: '100000000000000002', bot: false } }],
+      ]);
+      const interaction = {
+        guild: {
+          id: 'g-everyone-layout',
+          members: { cache: memberCache },
+          memberCount: 2,
+          channels: { cache: new Map() },
+        },
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      const { renderConfirmCardRows } = commands._test;
+      renderConfirmCardRows({
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction,
+        recipientIds: ['100000000000000001', '100000000000000002'],
+        recipientMode: 'everyone',
+        ...overrides,
+      });
+      return { MentionableSelectMenuBuilder, ButtonBuilder };
+    };
+
+    test('picker row is NOT rendered', () => {
+      const { MentionableSelectMenuBuilder } = renderEveryoneRows();
+      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
+    });
+
+    test('"Pick people instead" button IS rendered', () => {
+      const { ButtonBuilder } = renderEveryoneRows();
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+    });
+
+    test('"@everyone" entry button is NOT rendered (already past the entry point)', () => {
+      const { ButtonBuilder } = renderEveryoneRows();
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+    });
+
+    test('"Everyone on voice" entry button is NOT rendered (even with voiceChannelId set)', () => {
+      // The voiceChannelId snapshot survives on the payload across modes;
+      // make sure the mode gate still hides the voice-everyone entry
+      // button so the user doesn't see a stale affordance.
+      const { ButtonBuilder } = renderEveryoneRows({ voiceChannelId: 'voice-ch-1' });
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).not.toContain('qurl_confirm_voice_everyone');
+    });
+
+    test('bottom row has exactly 4 buttons in order: Pick-manual, Note, Send, Cancel', () => {
+      // Matches the voice-mode layout exactly — everyone-mode shares the
+      // same escape-hatch row shape.
+      const { ButtonBuilder } = renderEveryoneRows();
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toEqual([
+        'qurl_confirm_pick_manual',
+        'qurl_confirm_note_btn',
+        'qurl_confirm_send',
+        'qurl_confirm_cancel',
+      ]);
     });
   });
 
@@ -6716,29 +6802,13 @@ describe('renderConfirmCardRows', () => {
       expect(customIds).not.toContain('qurl_confirm_everyone');
     });
 
-    test('label shows live count from guild.memberCount when cache cold', async () => {
-      // Cold cache (cache.size < memberCount) → label falls back to
-      // memberCount. Overcounts by bot population, but it's the only
-      // reliable number before the click-time pre-warm fires.
-      const { ButtonBuilder } = require('discord.js');
-      ButtonBuilder.mockClear();
-      const int = makeInteraction({
-        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
-        guildMembers: { '100000000000000001': {} },  // cache.size === 1
-      });
-      int.memberPermissions = { has: jest.fn(() => true) };
-      int.guild.memberCount = 42;  // memberCount > cache.size → cold
-      await handleQurlFile(int);
-      const everyoneBtn = ButtonBuilder.mock.results.find(
-        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
-      );
-      expect(everyoneBtn).toBeDefined();
-      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(42)'));
-    });
-
-    test('label shows non-bot count when cache fully populated', async () => {
-      // Warm cache (cache.size >= memberCount) → filter bots and use
-      // the accurate non-bot count.
+    test('label is the fixed "📢 @everyone" form — no live count, no overcap suffix', async () => {
+      // The label used to carry a `(N)` count and an `— exceeds N cap`
+      // suffix; both were dropped per UX call so the label stays terse
+      // and the disabled+greyed-out button is the only state signal.
+      // `computeEveryoneDisplayCount` still runs for the disable check
+      // (see counts-and-disable tests below); only the label-surface
+      // changed.
       const { ButtonBuilder } = require('discord.js');
       ButtonBuilder.mockClear();
       const int = makeInteraction({
@@ -6750,21 +6820,27 @@ describe('renderConfirmCardRows', () => {
         },
       });
       int.memberPermissions = { has: jest.fn(() => true) };
-      int.guild.memberCount = 3;  // matches cache.size → warm
+      int.guild.memberCount = 3;
       await handleQurlFile(int);
       const everyoneBtn = ButtonBuilder.mock.results.find(
         (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
       );
       expect(everyoneBtn).toBeDefined();
-      // 3 cached, 1 is a bot → label shows (2).
-      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(2)'));
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith('\u{1F4E2} @everyone');
+      // Defense-in-depth: pin the missing pieces directly so a future
+      // refactor that re-introduces them surfaces here.
+      const label = everyoneBtn.value.setLabel.mock.calls[0][0];
+      expect(label).not.toMatch(/\(\d+\)/);
+      expect(label).not.toMatch(/exceeds/);
+      expect(label).not.toMatch(/\(\?\)/);
     });
 
     test('disabled when memberCount unavailable AND cache cold (displayCount null)', async () => {
       // Edge case: cold cache + missing memberCount → can't compute a
-      // count → button shows `(?)` label and stays disabled so the
-      // user sees the button can't act rather than getting a silent
-      // no-op click against a count-less label.
+      // count → button stays disabled so the user sees the button can't
+      // act rather than getting a silent no-op click. The label no
+      // longer carries a `(?)` indicator (UX call); the disabled state
+      // is communicated by the greyed-out button alone.
       const { ButtonBuilder } = require('discord.js');
       ButtonBuilder.mockClear();
       const int = makeInteraction({
@@ -6779,7 +6855,6 @@ describe('renderConfirmCardRows', () => {
         (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
       );
       expect(everyoneBtn).toBeDefined();
-      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(?)'));
       expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
     });
 
@@ -6880,15 +6955,30 @@ describe('renderConfirmCardRows', () => {
     test('memo busts on cache.size change', () => {
       // Member join/leave changes `cache.size` (or `memberCount`),
       // which fingerprints the memo entry and forces re-computation.
+      // Verified via direct iteration counter — the label is now
+      // fixed and can't observe the recomputation, but the memo is
+      // still load-bearing for the disable check (over-cap / zero /
+      // null branches), so we pin it via the same Proxy iterator
+      // pattern as the memoization test above.
       const commands = require('../src/commands');
       const { renderConfirmCardRows, _everyoneCountMemo } = commands._test;
       const memberCache = new Map([
         ['u1', { user: { id: 'u1', bot: false } }],
         ['u2', { user: { id: 'u2', bot: false } }],
       ]);
+      let iterations = 0;
+      const iterCountingCache = new Proxy(memberCache, {
+        get(target, prop) {
+          if (prop === Symbol.iterator) {
+            iterations++;
+            return target[Symbol.iterator].bind(target);
+          }
+          return Reflect.get(target, prop);
+        },
+      });
       const guild = {
         id: 'guild-memo-bust',
-        members: { cache: memberCache },
+        members: { cache: iterCountingCache },
         memberCount: 2,
         channels: { cache: new Map() },
       };
@@ -6903,27 +6993,23 @@ describe('renderConfirmCardRows', () => {
         recipientIds: [],
         recipientMode: 'picker',
       };
-      renderConfirmCardRows(args);  // memo populated with count=2
+      renderConfirmCardRows(args);  // memo populated, 1 iteration
+      expect(iterations).toBe(1);
       // Member joins → cache grows + memberCount grows. Fingerprint
-      // flips, memo busts on next render.
+      // flips, memo busts on next render → cache re-walked.
       memberCache.set('u3', { user: { id: 'u3', bot: false } });
       guild.memberCount = 3;
-      const { ButtonBuilder } = require('discord.js');
-      ButtonBuilder.mockClear();
       renderConfirmCardRows(args);
-      const everyoneBtn = ButtonBuilder.mock.results.find(
-        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
-      );
-      expect(everyoneBtn).toBeDefined();
-      // Post-bust label reflects the new count (3 non-bots), not the
-      // memoized 2.
-      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(3)'));
+      expect(iterations).toBe(2);
     });
 
-    test('disabled with "exceeds cap" suffix when warm-cache non-bot count > cap', async () => {
+    test('disabled when warm-cache non-bot count > cap (no overcap suffix in label)', async () => {
       // Render-time over-cap disable fires ONLY when the count is
       // accurate (warm cache + bot-filtered). Cold-cache over-cap
       // defers to click-time hard-reject — see counter-test below.
+      // The label used to carry an "— exceeds N cap" suffix in this
+      // branch; dropped per UX call. The disabled+greyed-out button
+      // is the only state signal now.
       const config = require('../src/config');
       const { ButtonBuilder } = require('discord.js');
       const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
@@ -6946,7 +7032,7 @@ describe('renderConfirmCardRows', () => {
           (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
         );
         expect(everyoneBtn).toBeDefined();
-        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('exceeds 2 cap'));
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith('\u{1F4E2} @everyone');
         expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
       } finally {
         Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
