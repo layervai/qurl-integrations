@@ -881,15 +881,19 @@ function abortableSleep(ms) {
         clearTimeout(t);
         resolve();
       };
-      // Timeout-wins branch above removeEventListener's; { once: true }
-      // here is defensive — AbortSignal fires 'abort' at most once per spec.
+      // Timeout-wins branch (above) removes the listener explicitly;
+      // { once: true } here is defensive — AbortSignal fires 'abort'
+      // at most once per spec.
       ctrl.signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
 
 async function pollLoop(client) {
-  // Null-guard symmetric with abortableSleep + stop().
+  // Null-guard symmetric with abortableSleep + stop(). Paranoia, not
+  // a real path: start() always assigns stopController before invoking
+  // pollLoop, and stop() nulls it only after `await loopPromise`
+  // resolves (by which point pollLoop has already exited).
   while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);

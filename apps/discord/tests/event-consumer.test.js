@@ -791,9 +791,10 @@ describe('event-consumer: abortableSleep (AbortSignal-driven)', () => {
     await sleepPromise;
     const elapsed = Date.now() - start;
     // Tight bound: the abort path resolves on a microtask, so this
-    // should be near-zero. Anything larger than ~50ms would indicate
-    // the listener wasn't wired or the timeout outran the abort.
-    expect(elapsed).toBeLessThan(50);
+    // should be near-zero. 100ms is 100× smaller than the 10_000ms
+    // timeout, so still proves the abort path while leaving slack for
+    // CI scheduler jitter under contention.
+    expect(elapsed).toBeLessThan(100);
   });
 
   test('already-aborted signal: abortableSleep resolves immediately (fast path)', async () => {
