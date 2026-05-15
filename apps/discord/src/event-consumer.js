@@ -937,6 +937,15 @@ async function stop() {
   // pass !running, both abort, both await loopPromise. Harmless but
   // racy on the running=false reset; the stopping check makes the
   // single-stopper invariant explicit.
+  //
+  // Caveat for a hypothetical second caller: the early-return DOES
+  // NOT wait for the first caller's drain to complete. A second
+  // stop() that lands during drain returns immediately. In practice
+  // gracefulShutdown only calls stop() once, so this is theoretical
+  // — but if a future refactor opens the door to concurrent stops,
+  // the second caller would need to await the first's loopPromise
+  // (or a shared "drainPromise" handle) to get "drain complete"
+  // semantics, not just "stop is already in progress."
   if (!running || stopping) return;
   stopping = true;
   // Cancel the in-flight long-poll so stop() returns within tens of
@@ -957,15 +966,27 @@ async function stop() {
   }
   logger.info('Event consumer: stopping');
   try {
-    await loopPromise;
-    // After loopPromise resolves, every processMessage's
-    // synchronous-emit window has completed, so trackDispatch has
-    // captured all in-flight handler promises that the worker
-    // dispatched. Wait up to DRAIN_DEADLINE_MS for those detached
-    // handlers (DDB writes, REST calls, DM fan-out) to settle so
-    // the subsequent db.close() in gracefulShutdown doesn't race
-    // them. The deadline is non-negotiable — index.js's 10s
-    // force-exit fires regardless, so we cap our wait at 3s to
+    // Isolate the loopPromise wait from the drain: if pollLoop
+    // rejects (rare — its own catch covers routine errors, so this
+    // is an unforeseen sync throw or similar), we still want to
+    // drain. trackDispatch's set is maintained synchronously around
+    // emits, so its state after a loop crash still accurately
+    // reflects in-flight handler promises — draining is meaningful
+    // even if the loop itself died.
+    try {
+      await loopPromise;
+    } catch (err) {
+      logger.error('Event consumer: error during stop', { error: err.message });
+    }
+
+    // After loopPromise settles (success or failure), every
+    // processMessage's synchronous-emit window has completed, so
+    // trackDispatch has captured all in-flight handler promises
+    // the worker dispatched. Wait up to DRAIN_DEADLINE_MS for those
+    // detached handlers (DDB writes, REST calls, DM fan-out) to
+    // settle so the subsequent db.close() in gracefulShutdown
+    // doesn't race them. The deadline is non-negotiable — index.js's
+    // 10s force-exit fires regardless, so we cap our wait at 3s to
     // leave room for db.close() and any other shutdown work.
     //
     // Spread for readability — passing the Set directly would behave
@@ -973,7 +994,10 @@ async function stop() {
     // reads more directly as "await each of these promises."
     if (inFlightPromises.size > 0) {
       const drainCount = inFlightPromises.size;
-      const drainStart = Date.now();
+      // hrtime.bigint() is monotonic — Date.now() is wall-clock and
+      // can jump under NTP adjustments mid-drain. Cost is the same;
+      // monotonic is the correct shape for elapsed measurement.
+      const drainStartNs = process.hrtime.bigint();
       logger.info('Event consumer: draining in-flight handlers', {
         count: drainCount,
         deadlineMs: DRAIN_DEADLINE_MS,
@@ -989,7 +1013,13 @@ async function stop() {
       } finally {
         clearTimeout(drainTimer);
       }
-      const elapsed = Date.now() - drainStart;
+      const elapsedMs = Number((process.hrtime.bigint() - drainStartNs) / 1_000_000n);
+      // The post-race size check is the discriminator (not the race
+      // winner): when allSettled wins, each promise's trackDispatch-
+      // registered `.finally` runs before allSettled's continuation,
+      // so by the time we read `.size` here the set is already empty
+      // on the happy path. On the deadline path the set still holds
+      // whatever didn't settle.
       if (inFlightPromises.size > 0) {
         // Deadline elapsed before all handlers settled. Log at warn —
         // the same race the pre-#391 path always had (handlers racing
@@ -998,17 +1028,15 @@ async function stop() {
         logger.warn('Event consumer: drain deadline elapsed, proceeding with handlers still in-flight', {
           unsettled: inFlightPromises.size,
           settled: drainCount - inFlightPromises.size,
-          elapsedMs: elapsed,
+          elapsedMs,
         });
       } else {
         logger.info('Event consumer: drain complete', {
           count: drainCount,
-          elapsedMs: elapsed,
+          elapsedMs,
         });
       }
     }
-  } catch (err) {
-    logger.error('Event consumer: error during stop', { error: err.message });
   } finally {
     running = false;
     // Reset stopping alongside running so a caller introspecting
@@ -1110,5 +1138,11 @@ module.exports = {
     // run quickly. `_resetStateForTest` restores the default between
     // tests so changes don't leak.
     _setDrainDeadlineForTest: (ms) => { DRAIN_DEADLINE_MS = ms; },
+    // Test-only setter for `loopPromise`. Lets tests inject a
+    // rejected promise to simulate a pollLoop crash without
+    // actually crashing the loop — the "drain runs even when
+    // loopPromise rejects" test uses this. `_resetStateForTest`
+    // sets loopPromise back to null.
+    _setLoopPromiseForTest: (p) => { loopPromise = p; },
   },
 };

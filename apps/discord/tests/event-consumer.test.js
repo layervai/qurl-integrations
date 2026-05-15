@@ -1013,6 +1013,47 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(eventConsumer._test.getDrainDeadlineMs()).toBe(50);
   });
 
+  test('stop() drains even when loopPromise rejects (loop crash does not skip drain)', async () => {
+    // Pin the round-3 cr fix: a pollLoop crash (rare — its own catch
+    // covers routine errors) used to skip the drain because the
+    // drain block was inside the same try as `await loopPromise`.
+    // Restructured so the loop-crash log and the drain are
+    // independent: the trackDispatch set's state is coherent after
+    // a loop crash (additions are synchronous around emits), so
+    // draining is meaningful regardless of loop outcome.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    eventConsumer._test._setDrainDeadlineForTest(500);
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Replace the loopPromise with one that rejects so the inner
+    // try/catch fires (simulating a pollLoop crash). The drain
+    // should still run because it's outside that inner try.
+    eventConsumer._test._setLoopPromiseForTest(Promise.reject(new Error('loop crashed')));
+
+    const resolvers = [];
+    withWorkerDispatch(() => {
+      let resolve;
+      const p = new Promise((r) => { resolve = r; });
+      resolvers.push(resolve);
+      eventConsumer.trackDispatch(p);
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+
+    setTimeout(() => resolvers.forEach((r) => r('done')), 20);
+    await eventConsumer.stop();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Event consumer: error during stop',
+      expect.objectContaining({ error: 'loop crashed' }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.objectContaining({ count: 1 }),
+    );
+  });
+
   test('stop() skips drain branch when no handlers are in-flight (no spurious logs)', async () => {
     // Pins the no-op path: an idle worker stop()s without firing the
     // drain logs (drainCount > 0 gate). Common case in production —
