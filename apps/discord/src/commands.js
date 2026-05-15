@@ -5600,6 +5600,19 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
+  // Audit-log parity with handleConfirmEveryone — voice fan-outs
+  // need to be findable in logs without a qurl_send_configs scan.
+  // Asymmetry: no guild-total peer at voice scope (channel.userLimit
+  // is a capacity cap, not a count), so one channel-size field —
+  // (voice_member_count - valid_count) = partial-cache + filter gap.
+  logger.info('handleConfirmVoiceEveryone: voice @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    voice_channel_id: voiceChannelId,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: false,
+    voice_member_count: channel.members.size,
+  });
+
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,

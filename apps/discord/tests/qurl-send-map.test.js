@@ -5082,6 +5082,108 @@ describe('handleConfirmVoiceEveryone', () => {
     const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastCall.content).toMatch(/Card data is corrupted/);
   });
+
+  test('success-path emits info-level audit log with counts', async () => {
+    // Mirror handleConfirmEveryone's success-log test — a successful
+    // voice-channel fan-out is a load-bearing audit signal ("did
+    // someone fan to N members of #voice-channel?") and should be
+    // findable in logs without a DDB scan of qurl_send_configs.
+    //
+    // Exact-value asserts (vs expect.any) catch regressions where
+    // the bot filter double-counts, partial-cache rows leak into the
+    // valid set, or voice_member_count drifts away from
+    // channel.members.size. guild_id + user_id pinned so a future
+    // forensics consumer that greps by them is protected by the spec.
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.objectContaining({
+        flow_id: 'fid',
+        guild_id: int.guildId,
+        user_id: int.user.id,
+        voice_channel_id: VOICE_CH,
+        valid_count: 2,
+        dropped_bots: 0,
+        partial_cache_drops: 0,
+        self_included: false,
+        voice_member_count: 2,
+      }),
+    );
+  });
+
+  test('success-log: voice_member_count tracks channel.members.size, NOT valid.length, under partial-cache drops', async () => {
+    // Locks down the voice_member_count semantic: it's the *raw* size
+    // of channel.members BEFORE the partial-cache + bot filter drop
+    // members. A regression that swaps it to `valid.length` would
+    // pass the happy-path test (counts match when no drops) but lose
+    // the audit signal — operators would no longer see the shrinkage
+    // gap (voice_member_count - valid_count = drops).
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    // Inject a partial-cache row so channel.members.size = 3 but
+    // valid.length stays at 2 after the partial-cache drop. The
+    // empty object `{}` triggers the no-`.user` branch in the voice
+    // resolution loop (commands.js: `if (m?.user) ... else partialCacheDrops++`).
+    const channel = int.guild.channels.cache.get(VOICE_CH);
+    channel.members.set('partial-cache-id', {});
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.objectContaining({
+        valid_count: 2,
+        partial_cache_drops: 1,
+        voice_member_count: 3,
+      }),
+    );
+  });
+
+  test('success-log does NOT fire on transitionFlow conflict / not_found / throw', async () => {
+    // The audit log is reserved for the actual flow-advancement path.
+    // Surfacing it on conflict / not_found / throw would mislead
+    // operators auditing fan-outs ("did this admin send to N members?")
+    // — the answer is NO on those branches. Pin the negative spec so
+    // a future log-placement refactor that moves the .info() ahead of
+    // the early-returns regresses loudly.
+    const logger = require('../src/logger');
+
+    // conflict (OCC race)
+    logger.info.mockClear();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+
+    // not_found (row TTL elapsed)
+    logger.info.mockClear();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+
+    // synchronous throw (DDB blip)
+    logger.info.mockClear();
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB unavailable'));
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
