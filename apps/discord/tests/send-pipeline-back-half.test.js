@@ -1183,7 +1183,19 @@ describe('handleAddRecipients — pre-flight guards', () => {
     );
 
     expect(result.msg).toMatch(/saved expiry is invalid/i);
+    // UX: surface that the ORIGINAL send is intact — only Add
+    // Recipients is blocked. Support-ticket-friendly wording.
+    expect(result.msg).toMatch(/original send's links still work/i);
     expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    // Audit signal: pin the structured log so a future operator-
+    // facing metric can be wired on the same shape. The motivation
+    // for #352 was preserving audit visibility on the orphan-row
+    // failure mode; the entry gate's log is the operator-side
+    // counterpart to user-visible `result.msg`.
+    expect(logger.error).toHaveBeenCalledWith(
+      'addRecipients refused invalid expires_in',
+      expect.objectContaining({ sendId: 'send-1', expiresIn: '25h' }),
+    );
   });
 
   // #352 belt-and-suspenders: even if a future expires_in slips

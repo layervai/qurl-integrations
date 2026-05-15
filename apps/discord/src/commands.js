@@ -1795,7 +1795,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
     logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
-      msg: 'Cannot add recipients — saved expiry is invalid. Please create a new send.',
+      msg: 'Cannot add recipients — this send\'s saved expiry is invalid (the original send\'s links still work; create a new send to reach additional recipients).',
       newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }
