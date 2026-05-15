@@ -2871,6 +2871,15 @@ const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 // restored). Lives on its own customId so flow-dispatch routes
 // directly instead of branching inside the voice-everyone handler.
 const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
+// Whole-guild `@everyone` button on the confirm card. Workaround for
+// Discord's MentionableSelectMenu omitting the `@everyone` role from
+// its dropdown (platform UI filter), which would otherwise leave
+// MENTION_EVERYONE-bearing users with no in-picker affordance for
+// the "fan out to the whole server" intent. Click-time semantics
+// match a synthetic `@everyone` text-mention pick. Picker-mode only —
+// voice-mode already targets the voice population and rendering the
+// button there would mislead users about what "everyone" means.
+const CONFIRM_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_everyone';
 
 // Two recipient-source modes carried on `payload.recipientMode`:
 //   - 'picker' (default): MentionableSelect row is the source of
@@ -3815,6 +3824,47 @@ function renderConfirmCardRows({
         .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(connectedCount == null || connectedCount === 0),
+    );
+  }
+  // @everyone button — workaround for Discord's MentionableSelectMenu
+  // filtering @everyone out of its dropdown. Gated on the sender's
+  // MENTION_EVERYONE permission (channel-effective, same as the text-
+  // path #323 gate) AND on picker-mode + guild context. In voice-mode
+  // the card already targets the voice population, so showing the
+  // button there would confuse "everyone" semantics. DM context has
+  // no @everyone meaning.
+  //
+  // Count is render-time non-bot when the cache is fully populated
+  // (`cache.size >= memberCount`); falls back to `guild.memberCount`
+  // (total, includes bots — over-count, but the only reliable number
+  // when the cache is cold). Same filter-drift trade-off the voice-
+  // everyone button accepts — `partitionRecipients` is still the
+  // click-time authority.
+  if (
+    mode === RECIPIENT_MODE_PICKER
+    && interaction && interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
+  ) {
+    const guild = interaction.guild;
+    const cache = guild.members?.cache;
+    const memberCount = guild.memberCount;
+    let displayCount = null;
+    if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
+      let n = 0;
+      for (const [, m] of cache) {
+        if (!isBotMember(m)) n++;
+      }
+      displayCount = n;
+    } else if (typeof memberCount === 'number') {
+      displayCount = memberCount;
+    }
+    const labelCount = displayCount == null ? '?' : String(displayCount);
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
+        .setLabel(`\u{1F4E2} @everyone (${labelCount})`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(displayCount === 0),
     );
   }
   bottomRow.addComponents(
@@ -5302,6 +5352,158 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
+  return rerenderConfirmCard(interaction, newPayload);
+}
+
+// @everyone button — workaround for Discord's MentionableSelectMenu
+// filtering out the @everyone role from its dropdown. Click-time
+// semantics mirror handleConfirmUserSelect's @everyone-role branch:
+// pre-warm cache → expand to all non-bot guild members → partition →
+// transition flow. Permission re-check is defense-in-depth against a
+// forged button click (renderConfirmCardRows already gates button
+// visibility on MENTION_EVERYONE + picker-mode; this defends against
+// a crafted HTTP interaction bypassing the render).
+async function handleConfirmEveryone(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  const payload = row.payload || {};
+  const payloadResource = payload.resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleConfirmEveryone: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Symmetric with handleConfirmVoiceEveryone's rejectVoice — same
+  // surface shape (warning banner + re-render with needsPicker). The
+  // persisted recipientIds stay unchanged on rejection (no transition-
+  // Flow fires); the picker re-pick is the natural recovery.
+  const rejectEveryone = (warning) => interaction.editReply({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+      recipientMode: RECIPIENT_MODE_PICKER,
+      voiceChannelId: payload.voiceChannelId,
+    }),
+    components: renderConfirmCardRows({
+      sendDisabled: true,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
+      recipientIds: payload.recipientIds || [],
+      recipientMode: RECIPIENT_MODE_PICKER,
+    }),
+  }).catch(logIgnoredDiscordErr);
+
+  // Defense-in-depth permission re-check. The render-time gate already
+  // hides the button without MENTION_EVERYONE, but a forged HTTP
+  // interaction could carry the custom_id without the underlying perm.
+  // Channel-effective perms (interaction.memberPermissions) — same as
+  // the text-path gate at handleQurlSlashSend.
+  const canMentionEveryone = !!interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true;
+  if (!canMentionEveryone) {
+    logger.warn('handleConfirmEveryone: click without MENTION_EVERYONE — likely forged', {
+      flow_id, interaction_id: interaction.id,
+    });
+    return rejectEveryone('⚠\u{FE0F} `@everyone` requires the **Mention Everyone** permission.\n\n');
+  }
+
+  await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmEveryone', flow_id });
+
+  // Include bots in selectedUsers and let partitionRecipients filter
+  // them — same pattern as handleConfirmVoiceEveryone. Without this,
+  // the bots-only case would surface as "cache not ready" (misleading)
+  // instead of "all recipients are bots" (accurate); droppedBots count
+  // is also load-bearing for the warning copy.
+  const selectedUsers = [];
+  const cache = interaction.guild.members?.cache;
+  if (cache && typeof cache.entries === 'function') {
+    for (const [, member] of cache) {
+      if (member?.user) selectedUsers.push(member.user);
+    }
+  }
+  if (selectedUsers.length === 0) {
+    return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
+  }
+  const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
+  if (valid.length === 0) {
+    const reasons = [];
+    if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients';
+    return rejectEveryone(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
+  }
+  // Cap rejection mirrors handleConfirmVoiceEveryone: hard-reject past
+  // QURL_SEND_MAX_RECIPIENTS rather than silently truncate — the click
+  // is unambiguous all-or-nothing intent.
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return rejectEveryone(`⚠\u{FE0F} Guild has ${valid.length} non-bot members (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+  }
+
+  const newWarningsBlock = renderRecipientWarnings({ droppedBots });
+  const newRecipientAliases = Object.fromEntries(
+    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+  );
+  // recipientMode stays PICKER — the @everyone button doesn't switch
+  // modes (unlike voice-everyone which moves to RECIPIENT_MODE_VOICE).
+  // Semantically the user is multi-picking from the picker dropdown
+  // via a shortcut; the picker row remains visible for further
+  // adjustment.
+  const newPayload = {
+    ...payload,
+    recipientIds: valid.map((u) => u.id),
+    recipientAliases: newRecipientAliases,
+    warningsBlock: newWarningsBlock,
+    selfIncluded,
+    recipientMode: RECIPIENT_MODE_PICKER,
+  };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleConfirmEveryone: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your selection right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
   return rerenderConfirmCard(interaction, newPayload);
 }
 
@@ -7631,6 +7833,13 @@ registerFlow(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmPickManual,
 });
+// @everyone button — only rendered when sender has MENTION_EVERYONE
+// and recipientMode is PICKER. Same stage + siblingMessage-keyed-by-
+// stage contract as the other CONFIRM_* registrations.
+registerFlow(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleConfirmEveryone,
+});
 
 module.exports = {
   commands,
@@ -7650,6 +7859,7 @@ module.exports = {
   handleConfirmNoteModal,
   handleConfirmVoiceEveryone,
   handleConfirmPickManual,
+  handleConfirmEveryone,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
