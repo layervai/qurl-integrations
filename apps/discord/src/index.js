@@ -312,20 +312,36 @@ if (isGateway || isWorker) {
   // mix two state machines (slash dispatch vs. flow-resume) under
   // one error-handling envelope; cleaner to wire them separately.
   client.on('interactionCreate', (interaction) => {
+    let result;
     if (interaction.isChatInputCommand() || interaction.isAutocomplete()) {
-      return handleCommand(interaction);
+      result = handleCommand(interaction);
+    } else if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
+      result = handleFlowInteraction(interaction);
+    } else {
+      // Future Discord interaction types we don't ship today fall
+      // through here. Log at debug so an operator triaging "why isn't
+      // my new component routing" sees the unrouted type rather than
+      // the silent-drop black box the pre-conversion code provided.
+      // No trackDispatch call: there's no handler promise to register,
+      // and the consumer's at-cap accounting should not count the
+      // unrouted no-op against its in-flight budget.
+      logger.debug('interactionCreate: unrouted interaction type', {
+        type: interaction.type,
+      });
+      return undefined;
     }
-    if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
-      return handleFlowInteraction(interaction);
-    }
-    // Future Discord interaction types we don't ship today fall
-    // through here. Log at debug so an operator triaging "why isn't
-    // my new component routing" sees the unrouted type rather than
-    // the silent-drop black box the pre-conversion code provided.
-    logger.debug('interactionCreate: unrouted interaction type', {
-      type: interaction.type,
-    });
-    return undefined;
+    // Register the dispatch promise with the consumer's backpressure
+    // tracker. No-op for gateway-WS-driven dispatches (the consumer's
+    // isWorkerDispatch flag is only true during its synchronous emit
+    // call); during a consumer-driven emit, the increment runs here
+    // and the decrement fires when the handler settles.
+    //
+    // No trailing `return result;` — EventEmitter listeners discard
+    // their return value, and a pre-conversion vestigial return would
+    // imply otherwise to a future reader. The unrouted branch's
+    // `return undefined` IS load-bearing (it short-circuits before
+    // trackDispatch), so the asymmetry is intentional.
+    eventConsumer.trackDispatch(result);
   });
 }
 
@@ -362,8 +378,15 @@ if (isGateway) {
 // entire process on any stray rejection (transient Discord timeouts, network
 // blips) which made the bot fragile. Truly fatal errors surface via
 // uncaughtException below.
+// `kind: 'unhandledRejection'` matches the tag emitted by
+// trackDispatch's .catch in event-consumer.js. A single CloudWatch
+// query filtering on the structured field finds both this gateway-WS-
+// driven path AND the worker-tier path that absorbs rejections in the
+// SQS consumer. Without the parity, dashboards either grep the
+// message text or miss one of the tiers.
 process.on('unhandledRejection', (error, _promise) => {
   logger.error('Unhandled promise rejection (logged, not fatal)', {
+    kind: 'unhandledRejection',
     error: error?.message || error,
     stack: error?.stack,
   });

@@ -85,19 +85,36 @@
 // TODO(infra-publisher-set)` from any infra-side change surfaces
 // this requirement.
 //
-// No backpressure between the consumer and detached handlers: the
-// poll loop keeps pulling 10-message batches as long as the queue
-// has work, but `handleCommand` / `handleFlowInteraction` run
-// detached after the synchronous emit. Under a bursty arrival
-// pattern with slow downstream DDB/REST work, in-flight handler
-// promises accumulate without an upper bound — risking memory
-// pressure if a sustained backlog grows faster than handlers
-// drain. Today's volume bounds (invite-only beta, ~thousands of
-// guilds) make this comfortably theoretical; tracked as an
-// operational concern to revisit before flag-flip in PR 10. If
-// in-flight handler count needs to be capped, a semaphore around
-// `pollOnce` (max N concurrent dispatches before the next receive)
-// is the natural shape. See #388 for the follow-up.
+// Backpressure: the poll loop tracks in-flight detached handlers
+// and pauses receives when `inFlightCount >= MAX_INFLIGHT_HANDLERS`
+// (env-overridable; see QURL_BOT_MAX_INFLIGHT_HANDLERS). Without
+// this, under a bursty arrival pattern with slow downstream
+// DDB/REST work, handler promises would accumulate without bound,
+// risking memory pressure if the backlog grows faster than handlers
+// drain. The cap is the safety net before the worker tier flag-flip
+// in PR 10.
+//
+// This is a soft cap, not a hard semaphore. pollOnce checks
+// `inFlightCount >= cap` BEFORE issuing a ReceiveMessage, but a
+// receive that passes the check can return up to RECEIVE_MAX_MESSAGES
+// (10) messages, and each subsequent processMessage increments via
+// trackDispatch. So in a sustained burst, inFlightCount can transiently
+// reach `cap + RECEIVE_MAX_MESSAGES - 1` (≈9% overshoot at the default
+// cap of 100) before the next pollOnce gates. The cap is a backpressure
+// signal — "stop pulling new work" — not a precise upper bound; size
+// memory headroom assuming `cap + RECEIVE_MAX_MESSAGES` simultaneous
+// handler promises. (Strict ceiling is cap + RECEIVE_MAX_MESSAGES - 1;
+// the .env.example rounds up by 1 for headroom math.)
+//
+// How tracking works without coupling to handler internals: the
+// consumer sets `isWorkerDispatch = true` synchronously around the
+// `client.actions.InteractionCreate.handle(data)` call. The listener
+// in src/index.js calls `eventConsumer.trackDispatch(result)` on
+// every dispatch; trackDispatch checks the flag and only registers
+// the promise's settle handler when the dispatch is consumer-driven
+// (worker tier), NOT when it's gateway-WS-driven. The increment
+// runs inside the synchronous emit window; the decrement fires
+// whenever the dispatch promise settles, however much later.
 
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
@@ -220,17 +237,19 @@ function recordSeen(eventId) {
 // What stop() does NOT await: the async handlers registered on
 // `interactionCreate` (handleCommand / handleFlowInteraction) run
 // detached after the synchronous `client.actions.InteractionCreate.handle`
-// emit. Their promises aren't captured anywhere we can await. A
-// handler still mid-DDB-write when SIGTERM lands could race
-// gracefulShutdown's eventual `db.close()` — same race the
-// pre-existing in-process gateway path has, since the gateway also
-// emits + runs detached. Not worse here than today.
+// emit. The backpressure tracker (trackDispatch / inFlightCount)
+// CAPTURES those promises for bounding-the-cap purposes but stop()
+// doesn't await them — graceful-shutdown's 10s budget would be
+// blown by a long-running DM-fan-out handler. A handler still
+// mid-DDB-write when SIGTERM lands could race gracefulShutdown's
+// eventual `db.close()` — same race the pre-existing in-process
+// gateway path has, since the gateway also emits + runs detached.
 //
 // If a tighter "drain handlers before db close" guarantee is ever
-// needed, options are: (a) capture handler promises via a WeakMap
-// registry the listener populates and the consumer reads; (b) call
-// the dispatcher functions directly instead of going through the
-// emit path. Both are PR-10-or-later refactors.
+// needed, trackDispatch would have to additionally capture each
+// promise in a Set (it currently only retains the count) so stop()
+// could `await Promise.allSettled([...inFlightPromises])` with its
+// own deadline cap (e.g. 3s). Deferred until needed.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -244,6 +263,92 @@ let stopping = false;
 let loopPromise = null;
 let receiveAbortController = null;
 let sqsClient = null;
+
+// Backpressure cap (see module header). pollOnce early-returns
+// when inFlightCount >= MAX_INFLIGHT_HANDLERS and waits
+// INFLIGHT_BACKOFF_MS for the count to drain before re-polling.
+// Default of 100 sized for the realistic invite-only-beta worst
+// case (10-message batches × ~5-10 batches before slowest
+// handler completes). Operator can override via env when prod
+// volume + slowness data is in hand.
+//
+// Captured at module load, not re-read per-poll: operators retuning
+// QURL_BOT_MAX_INFLIGHT_HANDLERS via SSM/task-def must redeploy for
+// the new value to take effect. Per-poll re-read would let a typo
+// in the env-update path silently change behavior without an audit
+// trail in the deploy log.
+const DEFAULT_MAX_INFLIGHT_HANDLERS = 100;
+const MAX_INFLIGHT_HANDLERS = (() => {
+  const raw = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+  if (!raw) return DEFAULT_MAX_INFLIGHT_HANDLERS;
+  // Use Number() + Number.isInteger() rather than parseInt — parseInt
+  // is lenient ('100abc' → 100), and the .env.example promises "must
+  // be a positive integer." Trailing garbage in the env value is more
+  // likely a templating typo than intent; rejecting it surfaces the
+  // bug at boot instead of silently truncating.
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    // Intentional console.warn (not logger.warn) for boot-time
+    // visibility before any logger transports attach to a structured
+    // sink. A misconfigured env-var should be obvious on container
+    // stdout regardless of LOG_LEVEL or transport state.
+    console.warn(
+      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${JSON.stringify(raw)} rejected ` +
+      `(must be a positive integer); using default ${DEFAULT_MAX_INFLIGHT_HANDLERS}.`,
+    );
+    return DEFAULT_MAX_INFLIGHT_HANDLERS;
+  }
+  // Defense-in-depth: values below RECEIVE_MAX_MESSAGES produce
+  // degenerate overshoot ratios (cap=1 can transiently reach 10
+  // in-flight, 10x the configured value). Accept the value — an
+  // operator who wants cap=1 to rate-limit hard may have a reason —
+  // but warn so the booted ceiling matches their mental model.
+  if (parsed < RECEIVE_MAX_MESSAGES) {
+    console.warn(
+      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${parsed} is below ` +
+      `RECEIVE_MAX_MESSAGES (${RECEIVE_MAX_MESSAGES}); effective in-flight ceiling ` +
+      `is ${parsed + RECEIVE_MAX_MESSAGES - 1} due to batch overshoot. ` +
+      `Pick ${RECEIVE_MAX_MESSAGES}+ for the overshoot ratio to match the cap value.`,
+    );
+  }
+  return parsed;
+})();
+
+// Brief pause when at-cap. Short enough that handlers draining
+// quickly resume normal polling; long enough that we don't burn
+// CPU re-checking the cap on every microtask. abortableSleep
+// honors `stopping` so a SIGTERM during a backpressure pause still
+// exits inside the graceful-shutdown budget.
+const INFLIGHT_BACKOFF_MS = 100;
+
+// In-flight handler count (incremented in trackDispatch when a
+// consumer-driven dispatch's promise is registered; decremented
+// when that promise settles). isWorkerDispatch is the per-emit
+// gate that distinguishes consumer-driven dispatches (which we
+// want to count) from gateway-WS-driven dispatches in combined
+// mode (which we don't — the gateway tier doesn't backpressure
+// against itself). The flag is set true synchronously around
+// `client.actions.InteractionCreate.handle(data)` in processMessage
+// and cleared in the finally; the listener's emit fires inside that
+// window because EventEmitter.emit is synchronous.
+let inFlightCount = 0;
+let isWorkerDispatch = false;
+
+// State-machine rate-limit on the at-cap log. Sustained at-cap
+// (slow downstream + bursty arrivals) wakes pollOnce every
+// INFLIGHT_BACKOFF_MS, so without throttling a single backlog
+// produces ~10 lines/sec/worker. Pattern matches
+// `lastMissingEventIdWarnMs`: the *transition* into at-cap is the
+// loud signal (warn), steady-state at-cap is debug, and the
+// transition back to below-cap is info. atCapPauseLogged is the
+// "we've already logged the warn for this streak" gate; cleared
+// when pollOnce next observes a below-cap state. Log messages
+// pulled into constants so monitoring alerts that grep for them
+// stay in sync with the call site even if the wording drifts.
+let atCapPauseLogged = false;
+const AT_CAP_PAUSE_WARN_MSG = 'Event consumer: in-flight cap reached, pausing receive until handlers drain';
+const AT_CAP_PAUSE_DEBUG_MSG = 'Event consumer: still at in-flight cap, continuing pause';
+const AT_CAP_RELEASED_INFO_MSG = 'Event consumer: in-flight cap released, resuming receive';
 
 // Hook for unit tests: lets the test inject a mock SQSClient
 // (aws-sdk-client-mock'd in tests/event-consumer.test.js) without
@@ -409,6 +514,29 @@ async function processMessage(client, message) {
   // The shared listener registered in src/index.js (gated on
   // isGateway || isWorker) handles routing.
   let dispatchOk = true;
+  // Flag for trackDispatch (called by the listener in src/index.js).
+  // EventEmitter.emit is synchronous, so the listener fires while
+  // this flag is still true; trackDispatch reads the flag and only
+  // registers consumer-driven dispatches in the backpressure cap.
+  // Cleared in the finally so a gateway-WS-driven dispatch landing
+  // after this returns is correctly untracked.
+  //
+  // CRITICAL INVARIANT — DO NOT add `await` inside this try/finally.
+  // The flag-wrap is correct only because there is no yield between
+  // `isWorkerDispatch = true` and `isWorkerDispatch = false`. A
+  // pre-emit `await logger.x()` or an `await` on handle() would let
+  // a concurrent processMessage (under Promise.allSettled in
+  // pollOnce) observe a leaked true flag, silently miscounting
+  // gateway-WS-driven dispatches against the worker cap in combined
+  // mode. If you need async work, do it BEFORE this block or AFTER
+  // the finally clears the flag.
+  //
+  // The FLAG-WRAP-START / FLAG-WRAP-END sentinels below bracket the
+  // block; the static invariant test in tests/event-consumer.test.js
+  // slices between them and asserts no `await` appears. Do NOT rename
+  // or relocate the sentinels without updating the test.
+  // FLAG-WRAP-START
+  isWorkerDispatch = true;
   try {
     client.actions.InteractionCreate.handle(data);
   } catch (err) {
@@ -422,7 +550,10 @@ async function processMessage(client, message) {
       eventId,
       messageId: message.MessageId,
     });
+  } finally {
+    isWorkerDispatch = false;
   }
+  // FLAG-WRAP-END
 
   if (isDup) {
     // Debug log only — at-least-once delivery means a "dup" might
@@ -447,7 +578,108 @@ async function processMessage(client, message) {
   await deleteMessage(message.ReceiptHandle);
 }
 
+// Called by the `interactionCreate` listener in src/index.js for
+// every dispatch. Reads the isWorkerDispatch flag set synchronously
+// around the consumer's `handle()` call to distinguish consumer-
+// driven dispatches (which count against the backpressure cap)
+// from gateway-WS-driven dispatches (which don't — gateway tier
+// doesn't backpressure against itself). Increment runs inside the
+// synchronous emit window; decrement registers on the dispatch
+// promise's `.finally()` so both success and rejection bring the
+// counter back down. A non-promise return (older handlers, or
+// nothing returned for unrouted interaction types) is a no-op.
+function trackDispatch(maybePromise) {
+  if (!isWorkerDispatch) return;
+  if (!maybePromise || typeof maybePromise.then !== 'function') return;
+  inFlightCount += 1;
+  // `.finally` runs before `.catch` on rejection, so the decrement
+  // always lands first — the .catch below sees the rejection AFTER
+  // the counter has dropped.
+  //
+  // Math.max guards against negative drift if a stale promise
+  // resolves after `_resetStateForTest` cleared the count, or
+  // (under `jest --watch` / hot-reload) a stale promise resolves
+  // into the freshly-required module's clean counter. Tests that
+  // don't await their resolvable promises before resetting would
+  // otherwise leak a decrement into the next test's starting
+  // state. Production can't reach this — every increment is paired
+  // with exactly one decrement on the same promise.
+  maybePromise.finally(() => {
+    inFlightCount = Math.max(0, inFlightCount - 1);
+  }).catch((err) => {
+    // Attaching `.finally()` above counts as a handler for Node's
+    // unhandled-rejection bookkeeping, so a rejection that pre-PR
+    // would have surfaced at `process.on('unhandledRejection', ...)`
+    // in src/index.js is now absorbed here. Log it explicitly so a
+    // failing handler still produces an error signal — otherwise the
+    // backpressure tracker would silently mask handler bugs.
+    //
+    // `kind: 'unhandledRejection'` tags the log so a single CloudWatch
+    // query (filtering on the structured field) can find both this
+    // consumer-driven path AND the gateway-WS-driven path that still
+    // routes through `process.on('unhandledRejection', ...)`. The
+    // gateway handler in src/index.js will be updated in PR 10 to
+    // emit the same field so dashboards see a unified signal. The
+    // `err?.message || String(err)` fallback mirrors the gateway
+    // handler's shape for non-Error rejections.
+    logger.error('Event consumer: dispatch handler rejected', {
+      kind: 'unhandledRejection',
+      error: err?.message || String(err),
+      stack: err?.stack,
+    });
+  });
+}
+
 async function pollOnce(client) {
+  // Backpressure check: if too many handlers are in-flight, pause
+  // receives until they drain. Returns from this iteration without
+  // pulling messages; pollLoop will call us again, and the
+  // `while (!stopping)` check naturally exits if stop() lands during
+  // the pause. abortableSleep also honors stopping so the pause
+  // doesn't blow the graceful-shutdown budget.
+  //
+  // Log throttling: only the transition into at-cap is loud (warn);
+  // subsequent at-cap polls in the same streak are debug. The
+  // transition back to below-cap (handled after this branch) logs
+  // at info. This matches the `lastMissingEventIdWarnMs` pattern
+  // already in this file — transition-loud, steady-state-quiet.
+  // Snapshot capPayload at pollOnce entry. Shared across at-cap
+  // warn/debug AND the release-info branch — so the release log's
+  // `inFlight` field is the value that *triggered* the release
+  // (necessarily below cap), not "drained to N" at the moment of
+  // logging. That's the right framing for pairing pause-start
+  // (entry-snapshot at cap) with pause-end (entry-snapshot below
+  // cap) in CloudWatch.
+  const capPayload = { inFlight: inFlightCount, cap: MAX_INFLIGHT_HANDLERS };
+  // `>=` (not `>`): the cap is the first paused value, so cap=100
+  // means we pause AT 100 in-flight, not at 101. Steady-state ceiling
+  // is therefore (cap - 1) + RECEIVE_MAX_MESSAGES overshoot. Off-by-
+  // one is intentional and matches the .env.example math.
+  if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
+    if (!atCapPauseLogged) {
+      logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
+      atCapPauseLogged = true;
+    } else {
+      logger.debug(AT_CAP_PAUSE_DEBUG_MSG, capPayload);
+    }
+    // Clear the previous iteration's controller before sleeping —
+    // there's no in-flight ReceiveMessage during a backpressure
+    // pause, so the invariant "non-null iff a receive is in flight"
+    // holds. A stop() landing during the sleep would otherwise call
+    // .abort() on a settled controller (safe no-op today, but the
+    // null-during-sleep shape is the cleaner contract).
+    receiveAbortController = null;
+    await abortableSleep(INFLIGHT_BACKOFF_MS);
+    return;
+  }
+  // Below-cap path: if we just transitioned out of at-cap, log the
+  // release so operators can match "pause started" with "pause ended"
+  // pairs in CloudWatch. Reset the gate so the next at-cap entry
+  // re-fires the warn (each streak gets exactly one warn).
+  if (atCapPauseLogged) {
+    logger.info(AT_CAP_RELEASED_INFO_MSG, capPayload);
+    atCapPauseLogged = false;
+  }
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
     QueueUrl: queueUrl,
@@ -712,6 +944,12 @@ async function stop() {
     // start() (no-op today via the running guard) wouldn't abort a
     // stale controller.
     receiveAbortController = null;
+    // Reset the at-cap log gate so a `start → at-cap → stop → start`
+    // round-trip doesn't inherit a stale `true` and miss the next
+    // streak's transition warn. Production never restarts after stop,
+    // but integration tests that exercise the lifecycle would
+    // otherwise see a phantom suppressed warn.
+    atCapPauseLogged = false;
     // Intentionally do NOT null `sqsClient`. Production never calls
     // start() after stop() — gracefulShutdown runs once at SIGTERM,
     // then process.exit. Reusing the client across a hypothetical
@@ -738,11 +976,15 @@ function _resetStateForTest() {
   sqsClient = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
+  inFlightCount = 0;
+  isWorkerDispatch = false;
+  atCapPauseLogged = false;
 }
 
 module.exports = {
   start,
   stop,
+  trackDispatch,
   _test: {
     _setSqsClientForTest,
     _resetStateForTest,
@@ -760,6 +1002,20 @@ module.exports = {
     isAbortError,
     abortableSleep,
     SEEN_EVENT_ID_CAP,
+    MAX_INFLIGHT_HANDLERS,
+    INFLIGHT_BACKOFF_MS,
+    AT_CAP_PAUSE_WARN_MSG,
+    AT_CAP_PAUSE_DEBUG_MSG,
+    AT_CAP_RELEASED_INFO_MSG,
     getReceiveAbortController: () => receiveAbortController,
+    getInFlightCount: () => inFlightCount,
+    isWorkerDispatching: () => isWorkerDispatch,
+    isAtCapPauseLogged: () => atCapPauseLogged,
+    // Test-only setter. trackDispatch reads the module-level
+    // `isWorkerDispatch` directly (not via `isWorkerDispatching()`),
+    // so a jest.spyOn on the introspection helper can't influence it.
+    // Tests that want to simulate the synchronous flag wrap done by
+    // processMessage call this helper instead.
+    _setWorkerDispatchingForTest: (v) => { isWorkerDispatch = !!v; },
   },
 };

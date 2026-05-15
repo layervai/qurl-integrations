@@ -913,6 +913,456 @@ describe('event-consumer: start/stop lifecycle', () => {
   // ≥ 1), which covers the underlying concern.
 });
 
+describe('event-consumer: backpressure (in-flight handler cap)', () => {
+  // Test helpers. Pulled up here so the tests below stay focused on
+  // intent rather than re-stating boilerplate.
+
+  // Flush queued microtasks. The trackDispatch chain is exactly
+  // two hops today: `.finally` (decrement) then `.catch` (error log
+  // or pass-through). Default n=3 = 2 hops + 1 margin, so a future
+  // chain extension (e.g., another `.then` between finally and catch)
+  // doesn't require revisiting every test. The +1 margin is the
+  // load-bearing slack — drop it only if you re-derive the chain
+  // depth and confirm no implicit hop sneaks in.
+  async function flushMicrotasks(n = 3) {
+    for (let i = 0; i < n; i += 1) {
+      // eslint-disable-next-line no-await-in-loop -- sequential by design
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  // Run `fn` with isWorkerDispatch flipped true (matches the
+  // synchronous flag-wrap processMessage performs around handle()),
+  // then restore. Six tests repeat this pattern; helper keeps the
+  // setup intent visible and the flag flip impossible to miss.
+  function withWorkerDispatch(fn) {
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      return fn();
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+  }
+
+  test('trackDispatch is a no-op when isWorkerDispatch is false (gateway mode)', () => {
+    // Pins the contract that the gateway-WS-driven path doesn't
+    // count against the worker's cap. The flag stays false unless
+    // the consumer's processMessage explicitly sets it; a stray
+    // call from the listener in gateway-only mode increments
+    // nothing.
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+    eventConsumer.trackDispatch(Promise.resolve('ignored'));
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch handles non-promise inputs without throwing', () => {
+    // The listener returns undefined for unrouted interaction types.
+    // trackDispatch must accept that without throwing or counting.
+    eventConsumer.trackDispatch(undefined);
+    eventConsumer.trackDispatch(null);
+    eventConsumer.trackDispatch('not a promise');
+    eventConsumer.trackDispatch({ then: 'not-a-fn' });
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('processMessage sets isWorkerDispatch true around handle() and clears in finally', async () => {
+    // The flag must be true exactly during the synchronous
+    // client.actions.InteractionCreate.handle(data) call so the
+    // listener's emit fires inside the window. Verified by spying
+    // on handle and asserting the flag's value inside the spy.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    let observedDuringHandle = false;
+    client.actions.InteractionCreate.handle.mockImplementation(() => {
+      observedDuringHandle = eventConsumer._test.isWorkerDispatching();
+    });
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      data: { id: 'i1' },
+      event_id: '0:1',
+    })));
+
+    expect(observedDuringHandle).toBe(true);
+    // After processMessage returns, the flag is back to false.
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+  });
+
+  test('processMessage clears isWorkerDispatch even when handle() throws', async () => {
+    // Pin the finally — without it, a reconstruction throw would
+    // leave the flag stuck at true, and a subsequent gateway-WS
+    // dispatch in combined mode would be incorrectly counted
+    // against the worker cap.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    client.actions.InteractionCreate.handle.mockImplementation(() => {
+      throw new Error('reconstruction failed');
+    });
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      data: { type: 99 },
+      event_id: '0:err',
+    })));
+
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+    // Counter should not have been incremented either — handle()
+    // threw before the listener could fire its return value into
+    // trackDispatch. Pinning this ensures a future refactor that
+    // moves the increment outside the listener can't leak a slot.
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch increments then decrements on promise resolve', async () => {
+    // Simulate a consumer-driven dispatch by manually flipping the
+    // flag (mirrors what processMessage does synchronously around
+    // handle()). Register a pending promise; assert the counter
+    // ticks up. Resolve it; assert the counter ticks back down.
+    let resolveHandler;
+    const handlerPromise = new Promise((r) => { resolveHandler = r; });
+
+    // Mirror processMessage's flag wrap.
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
+
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    resolveHandler('done');
+    // Wait for the finally callback to run (microtask boundary).
+    await handlerPromise;
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch decrements on promise rejection', async () => {
+    // Same as above but reject the promise; the finally should
+    // still decrement the counter so a failing handler doesn't
+    // leak a slot in the cap.
+    let rejectHandler;
+    const handlerPromise = new Promise((_resolve, reject) => { rejectHandler = reject; });
+    // Pre-attach a catch so the rejection doesn't surface as an
+    // unhandledRejection in the test runtime.
+    handlerPromise.catch(() => { /* absorbed */ });
+
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
+
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    rejectHandler(new Error('handler failed'));
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch with an already-settled promise still drains the counter', async () => {
+    // A handler that completes synchronously (or returns a resolved
+    // promise from an early short-circuit) lands here. The `.finally`
+    // callback still runs on the microtask boundary, so the
+    // increment-then-decrement holds — but it's worth pinning the
+    // contract so a future refactor that tries to skip registration
+    // for already-settled promises (as a "perf optimization") is
+    // caught.
+    withWorkerDispatch(() => {
+      eventConsumer.trackDispatch(Promise.resolve('already-done'));
+    });
+
+    // Increment was synchronous (inside withWorkerDispatch).
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    // Decrement is deferred to the .finally microtask.
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch logs handler rejections (preserves error visibility)', async () => {
+    // Regression for cr feedback on PR #389: attaching `.finally()`
+    // in trackDispatch counts as a handler for Node's unhandled-
+    // rejection bookkeeping, so a rejection that pre-PR would have
+    // surfaced at `process.on('unhandledRejection', ...)` in
+    // src/index.js gets absorbed in the trailing `.catch`. Pin the
+    // contract that the catch logs at error so handler bugs still
+    // produce a CloudWatch signal.
+    const handlerPromise = Promise.reject(new Error('handler boom'));
+    // Pre-attach to absorb the rejection in the test runtime as a
+    // separate chain; trackDispatch's logging path is independent.
+    handlerPromise.catch(() => { /* absorbed */ });
+
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
+
+    // Allow the .finally + .catch microtasks to flush.
+    await flushMicrotasks();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Event consumer: dispatch handler rejected',
+      expect.objectContaining({
+        kind: 'unhandledRejection',
+        error: 'handler boom',
+      }),
+    );
+  });
+
+  test('pollOnce early-returns + backs off when in-flight at cap', async () => {
+    // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
+    // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let
+    // handlers drain. Pins that the cap is enforced + the receive
+    // path is bypassed.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+
+    // Manually crank inFlightCount up to cap via the tracker. Use
+    // pending promises so the count stays elevated for the duration
+    // of the test.
+    const pendingHandlers = [];
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        const p = new Promise(() => {}); // never resolves
+        eventConsumer.trackDispatch(p);
+        pendingHandlers.push(p);
+      }
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(cap);
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [{ Body: '{}', ReceiptHandle: 'x' }] });
+    const client = makeStubClient();
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+
+    // The receive was NOT called (cap blocked it).
+    expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+    // First at-cap poll in the streak warns (transition signal),
+    // not debug — see the state-machine throttle in pollOnce.
+    // Assert against the module-level constant so a wording drift
+    // in event-consumer.js fails the test instead of silently
+    // breaking CloudWatch alarms that grep the literal string.
+    expect(logger.warn).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_WARN_MSG,
+      expect.objectContaining({ inFlight: cap, cap }),
+    );
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+  });
+
+  test('pollOnce only warns once per at-cap streak (debug for subsequent polls)', async () => {
+    // Pins the throttle: a sustained at-cap condition produces one
+    // warn at the entry transition and debug lines for the rest of
+    // the streak. Without this, a slow downstream wedge would spam
+    // logger.warn ~10x/s per worker.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        eventConsumer.trackDispatch(new Promise(() => {})); // never resolves
+      }
+    });
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // First poll: warn fires.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.debug).not.toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
+      expect.anything(),
+    );
+
+    // Subsequent polls in the same streak: debug only, no extra warn.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.warn).toHaveBeenCalledTimes(1); // still 1
+    expect(logger.debug).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
+      expect.objectContaining({ inFlight: cap, cap }),
+    );
+  });
+
+  test('pollOnce logs cap-released info on transition back to below-cap', async () => {
+    // Pins the recovery path: after an at-cap streak, dropping
+    // below cap fires the release-info log so operators can pair
+    // pause-start with pause-end events in CloudWatch. Uses
+    // resolvable promises so the drain runs through trackDispatch's
+    // real .finally decrement path — no test-only setter shortcut.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    const resolvers = [];
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        let resolve;
+        const p = new Promise((r) => { resolve = r; });
+        resolvers.push(resolve);
+        eventConsumer.trackDispatch(p);
+      }
+    });
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // Enter at-cap state (warn fires, gate is set).
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+
+    // Drain all handlers: resolve every tracked promise, then let
+    // the .finally microtask chain flush so inFlightCount drops to 0.
+    resolvers.forEach((r) => r('done'));
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+    // Below-cap poll: release-info fires, gate clears.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.info).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
+      expect.objectContaining({ cap }),
+    );
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+  });
+
+  test('pollOnce proceeds with receive when below cap', async () => {
+    // Sanity-check the other side of the gate — when inFlightCount
+    // is below the cap, pollOnce calls ReceiveMessage normally.
+    expect(eventConsumer._test.getInFlightCount()).toBeLessThan(eventConsumer._test.MAX_INFLIGHT_HANDLERS);
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+
+    expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(1);
+  });
+
+  test('MAX_INFLIGHT_HANDLERS defaults to 100', () => {
+    // Pins the default — operators reading the .env.example see
+    // this number and may rely on it for their soak headroom math.
+    expect(eventConsumer._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+  });
+
+  test('processMessage flag-wrap has no `await` between isWorkerDispatch toggles (static invariant)', () => {
+    // Load-bearing invariant: the synchronous flag-wrap around
+    // `client.actions.InteractionCreate.handle(data)` in
+    // processMessage is correct ONLY because there's no `await`
+    // between `isWorkerDispatch = true` and the matching
+    // `isWorkerDispatch = false` in the finally. An `await` inside
+    // the try/finally would let a concurrent processMessage (running
+    // under Promise.allSettled in pollOnce) observe a leaked-true
+    // flag and silently miscount a gateway-WS-driven dispatch as
+    // worker-driven in combined mode.
+    //
+    // Test by reading the source: scan the slice of event-consumer.js
+    // between `// FLAG-WRAP-START` and `// FLAG-WRAP-END` sentinels
+    // bracketing the wrap, and assert no `await` token appears.
+    // Approximate (no JS parse), but pins the constraint better than
+    // a comment alone — a future editor who adds `await logger.x()`
+    // inside the block trips this test. Sentinel-based bracketing
+    // survives file reordering or future additional flag assignments
+    // elsewhere in the module.
+    const src = require('fs').readFileSync(
+      require('path').resolve(__dirname, '../src/event-consumer.js'),
+      'utf8',
+    );
+    const startMarker = '// FLAG-WRAP-START';
+    const endMarker = '// FLAG-WRAP-END';
+    const startIdx = src.indexOf(startMarker);
+    const endIdx = src.indexOf(endMarker, startIdx);
+    expect(startIdx).toBeGreaterThan(0);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    // Also pin uniqueness — if the sentinels appear more than once,
+    // a future refactor may have copied the block and the slice no
+    // longer represents a single contiguous wrap.
+    expect(src.indexOf(startMarker, startIdx + startMarker.length)).toBe(-1);
+    expect(src.indexOf(endMarker, endIdx + endMarker.length)).toBe(-1);
+
+    const block = src.slice(startIdx, endIdx);
+    // Strip BOTH line comments and block comments so a documenting
+    // reference to `await` in either form doesn't false-positive.
+    // Template literals containing the word `await` aren't expected
+    // in the wrap (we'd notice during code review of a tight 25-line
+    // block), so we don't try to strip those — defense-in-depth has
+    // diminishing returns past comments.
+    const stripped = block
+      .replace(/\/\*[\s\S]*?\*\//g, '') // block comments first (multi-line)
+      .replace(/\/\/[^\n]*/g, ''); // then line comments
+    expect(stripped).not.toMatch(/\bawait\b/);
+  });
+
+  describe('MAX_INFLIGHT_HANDLERS env validation (module-load IIFE)', () => {
+    // The IIFE that parses QURL_BOT_MAX_INFLIGHT_HANDLERS runs at
+    // module-load. To exercise it under varying env values we
+    // re-require the module inside jest.isolateModules with the env
+    // var stubbed, capture console.warn output, and assert the
+    // resolved value + warning content. Pins the validation branch
+    // that production depends on for fail-loud-on-typo behavior.
+    function withIsolatedEnv(envValue, run) {
+      jest.isolateModules(() => {
+        const prev = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+        const origConsoleWarn = console.warn;
+        const warns = [];
+        console.warn = (...args) => warns.push(args.join(' '));
+        try {
+          if (envValue === undefined) {
+            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+          } else {
+            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = envValue;
+          }
+          const fresh = require('../src/event-consumer');
+          run(fresh, warns);
+        } finally {
+          console.warn = origConsoleWarn;
+          if (prev === undefined) {
+            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+          } else {
+            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = prev;
+          }
+        }
+      });
+    }
+
+    test.each([
+      ['100abc', 'trailing garbage'],
+      ['-5', 'negative integer'],
+      ['0', 'zero'],
+      ['1.5', 'non-integer'],
+      ['Infinity', 'infinity literal'],
+      ['NaN', 'NaN literal'],
+      ['abc', 'non-numeric'],
+      [' ', 'whitespace'],
+    ])('rejects %p (%s) and falls back to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+        expect(warns.some((w) => w.includes('QURL_BOT_MAX_INFLIGHT_HANDLERS') && w.includes('rejected'))).toBe(true);
+      });
+    });
+
+    test.each([
+      ['50', 50],
+      ['200', 200],
+      ['10', 10], // exactly RECEIVE_MAX_MESSAGES — no soft-floor warning
+    ])('accepts %p as %i without warning', (envValue, expected) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
+        // No rejection AND no soft-floor warning for cap >= 10.
+        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+        expect(warns.some((w) => w.includes('below'))).toBe(false);
+      });
+    });
+
+    test.each([
+      ['1', 1],
+      ['5', 5],
+      ['9', 9],
+    ])('accepts %p as %i but warns about degenerate overshoot ratio', (envValue, expected) => {
+      // Defense-in-depth: cap < RECEIVE_MAX_MESSAGES is accepted (the
+      // operator may want it for rate-limit testing) but warned about
+      // because the effective ceiling overshoots the configured value
+      // by a wide margin (cap=1 → 10 in-flight ceiling = 10x overshoot).
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
+        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+        expect(
+          warns.some((w) => w.includes('below') && w.includes('RECEIVE_MAX_MESSAGES'))
+        ).toBe(true);
+      });
+    });
+
+    test('unset env var resolves to default without warning', () => {
+      withIsolatedEnv(undefined, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+        expect(warns).toHaveLength(0);
+      });
+    });
+  });
+});
+
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {
   test('package.json pins discord.js to a single exact version', () => {
     const pkg = require('../package.json');
