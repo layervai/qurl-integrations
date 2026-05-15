@@ -2334,20 +2334,14 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
         },
       });
       await handleCommand(interaction);
-      expect(interaction.reply).toHaveBeenCalledWith({
-        content: _test.QURL_MAP_DISABLED_REPLY,
-        ephemeral: true,
-      });
-      // Negative assertion: NONE of the reply calls should be the
-      // "qURL is not configured" gate copy. If a future refactor
-      // accidentally re-adds 'map' to API_KEY_GATED_SUBCOMMANDS, the
-      // dispatcher would reply with the not-configured message
-      // first (and either skip the disabled reply entirely or call
-      // reply twice — both regressions covered by this check).
+      // Strict shape: exactly one reply call, exactly the disabled
+      // copy. A future refactor that re-adds 'map' to
+      // API_KEY_GATED_SUBCOMMANDS would either: (a) reply with
+      // "qURL is not configured" instead, OR (b) reply twice (gate
+      // copy first, then disabled copy on fall-through). Both
+      // regressions are caught by the length + value assertion.
       const allReplies = interaction.reply.mock.calls.map(([arg]) => arg?.content || '');
-      for (const content of allReplies) {
-        expect(content).not.toContain('qURL is not configured');
-      }
+      expect(allReplies).toEqual([_test.QURL_MAP_DISABLED_REPLY]);
     } finally {
       configMock.QURL_API_KEY = origQurlApiKey;
     }

@@ -3188,8 +3188,10 @@ const API_KEY_GATED_SUBCOMMANDS = new Set(
 
 // User-facing reply for stale /qurl map submissions when the toggle
 // is off. Reached when a Discord client routes a cached `map`
-// submission after the registration has dropped it.
-const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl file` to share resources securely.';
+// submission after the registration has dropped it. Copy mirrors
+// the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
+// the same remaining capability.
+const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl file` to share files securely.';
 
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
@@ -7927,15 +7929,20 @@ const commands = [
         // Flag-on and flag-off help-copy variants kept side-by-side
         // so a future edit to one branch is obviously checked against
         // the other. `cmd` is referenced twice (Terms + Large servers);
-        // single token keeps them in lockstep.
+        // single token keeps them in lockstep. `sectionVerb` makes
+        // the "Getting started" header track what's actually
+        // registered ("Share files" reads more accurately than
+        // "Share resources" when /qurl map is off).
         const mapCopy = config.MAP_COMMAND_ENABLED
           ? {
+            sectionVerb: 'Share resources',
             bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
             runLine: '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
             resource: 'the file or location',
             cmd: '`/qurl file` or `/qurl map`',
           }
           : {
+            sectionVerb: 'Share files',
             bullet: '',
             runLine: '\t1. Run `/qurl file` and attach the file you want to share\n',
             resource: 'the file',
@@ -7943,7 +7950,7 @@ const commands = [
           };
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
-            '**Getting started — Share resources securely via one-time links:**\n' +
+            `**Getting started — ${mapCopy.sectionVerb} securely via one-time links:**\n` +
             '  `/qurl file` — share a file with users via one-time qURL links\n' +
             mapCopy.bullet +
             '  `/qurl revoke` — revoke links from a previous send\n' +

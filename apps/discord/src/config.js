@@ -283,6 +283,12 @@ module.exports = {
   // can't silently re-enable a command that requires a working
   // GOOGLE_MAPS_API_KEY in SSM. See the slash-command builder IIFE
   // in commands.js for the full set of MAP_COMMAND_ENABLED gates.
+  //
+  // Snapshot semantics: this value is read ONCE at module load and
+  // baked into the slash registration (commands.js IIFE) +
+  // SETUP_SUCCESS_MSG. Flipping MAP_COMMAND_ENABLED at runtime is
+  // a no-op until the task restarts; the deploy model handles this
+  // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
   // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
