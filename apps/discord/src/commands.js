@@ -604,9 +604,11 @@ const USER_SELECT_PER_PICK_CAP = 25;
 const WARNING_LIST_DISPLAY_MAX = 10;
 const WARNING_NAME_CODEPOINT_CAP = 80;
 
-// Discord's hard cap on select-menu max_values. Both picker call sites
-// clamp against this so we never construct a menu Discord rejects at
-// validation (e.g. if USER_SELECT_PER_PICK_CAP is ever raised above 25).
+// Discord's protocol-level cap on select-menu max_values. Both picker
+// call sites clamp against this so we never construct a menu Discord
+// rejects at validation — defends against any combination of
+// USER_SELECT_PER_PICK_CAP and QURL_SEND_MAX_RECIPIENTS that would
+// otherwise produce a setMaxValues > 25.
 const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
 
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option

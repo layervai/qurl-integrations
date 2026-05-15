@@ -6537,8 +6537,10 @@ describe('renderConfirmCardRows', () => {
   });
 
   test('slash-entry with pre-resolved recipients pre-checks all defaults via addDefaultUsers', async () => {
-    // Discord requires default_values.length ≤ max_values; the picker
-    // opens at the full per-pick cap (25) so any defaults ≤25 fit.
+    // Picker always opens at the full per-pick cap (25) regardless of
+    // defaults.length — the prior fit-to-defaults behavior is gone with
+    // the widen branch removal. All 12 pre-resolved defaults stay
+    // pre-checked because addDefaultUsers honors any list ≤25.
     const { MentionableSelectMenuBuilder } = require('discord.js');
     MentionableSelectMenuBuilder.mockClear();
     const ids = Array.from({ length: 12 }, (_, i) => `1000000000000000${String(i + 10)}`);
@@ -6552,6 +6554,61 @@ describe('renderConfirmCardRows', () => {
     const builder = MentionableSelectMenuBuilder.mock.results[0].value;
     expect(builder.setMaxValues).toHaveBeenCalledWith(25);
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
+  });
+
+  test('renderConfirmCardRows clamps maxValues to QURL_SEND_MAX_RECIPIENTS when env override is tighter than the per-pick cap', async () => {
+    // With a tenant-configured QURL_SEND_MAX_RECIPIENTS below 25, the
+    // three-way Math.min in renderConfirmCardRows must clamp the picker
+    // down so the placeholder and setMaxValues both reflect the system
+    // cap. Without this test the clamp could silently rot — the other
+    // tests run with mocked QSMR=25, where min(25,25,25)=25 makes the
+    // QSMR leg invisible.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 15;
+    try {
+      const { MentionableSelectMenuBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT },  // no recipients → needsPicker
+      });
+      await handleQurlSend(int);
+      const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+      expect(builder.setMaxValues).toHaveBeenCalledWith(15);
+      expect(builder.setPlaceholder).toHaveBeenCalledWith('Pick up to 15 users/roles');
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
+  });
+
+  test('pre-resolved defaults beyond the per-pick cap truncate to the first 25 via addDefaultUsers', async () => {
+    // The slice on `defaults.slice(0, maxValues)` enforces Discord's
+    // default_values.length ≤ max_values invariant when text-resolved
+    // recipientIds overflow the picker's 25-slot cap. Overflow ids stay
+    // in payload.recipientIds and still reach the send — only the
+    // visual pre-check truncates. Mock QSMR=30 to let parseRecipientMentions
+    // surface all 30 ids to the renderer; without the mock parse would
+    // cap at the default 25 and there'd be nothing to slice.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 30;
+    try {
+      const { MentionableSelectMenuBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      const ids = Array.from({ length: 30 }, (_, i) => `1000000000000000${String(i + 10).padStart(2, '0')}`);
+      const mentionList = ids.map((id) => `<@${id}>`).join(' ');
+      const guildMembers = Object.fromEntries(ids.map((id) => [id, {}]));
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: mentionList },
+        guildMembers,
+      });
+      await handleQurlSend(int);
+      const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+      expect(builder.setMaxValues).toHaveBeenCalledWith(25);
+      expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids.slice(0, 25));
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
   });
 
   test('voice button label is the fixed "Everyone on voice" form, independent of channel name', async () => {
