@@ -5520,6 +5520,34 @@ describe('handleConfirmEveryone', () => {
     // Send still proceeds with the valid subset.
     expect(mockTransitionFlow).toHaveBeenCalled();
   });
+
+  test('mid-deploy forward: legacy picker-mode row with pre-filled recipientIds → click @everyone → lands in EVERYONE mode', async () => {
+    // Forward-direction mid-deploy contract. A pre-PR bot would have
+    // auto-filled the picker after an @everyone click and written
+    // `recipientMode: 'picker'` with populated `recipientIds`. When a
+    // post-PR bot processes that row and the user clicks 📢 @everyone
+    // again, the transition MUST overwrite to `'everyone'` so the
+    // re-render hides the picker (rather than spreading the legacy
+    // 'picker' mode forward). Without this contract, the user would
+    // see the auto-fill leak persist post-deploy.
+    const int = makeEveryoneInteraction();
+    // Legacy row shape: picker-mode + a pre-filled subset (the old
+    // auto-fill behavior would have written a truncated set here).
+    const legacyPayload = {
+      ...initialPayload,
+      recipientMode: 'picker',
+      recipientIds: [u1],  // legacy picker-mode auto-fill subset
+      recipientAliases: { [u1]: 'alice' },
+    };
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: legacyPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    // Mode overwrites — not spread-leaked from the legacy row.
+    expect(payload.recipientMode).toBe('everyone');
+    // Recipient set is fresh from cache iteration, not the legacy
+    // truncated subset.
+    expect(payload.recipientIds.sort()).toEqual([u1, u2, SENDER_ID].sort());
+  });
 });
 
 // ──────────────────────────────────────────────────────────────

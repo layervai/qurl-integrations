@@ -3990,9 +3990,18 @@ function renderConfirmCardRows({
     const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
     // Fixed label — no live count, no overcap suffix. The disabled+
     // greyed-out button is the visual signal for the three degraded
-    // states (count unavailable, empty guild, exceeds cap); the click-
-    // time reject in `handleConfirmEveryone` carries the actionable
-    // reason copy when the disable can't fire (cold-cache overcap).
+    // states (count unavailable, empty guild, exceeds cap).
+    //
+    // UX TRADE-OFF: the warm-cache over-cap branch DOES disable here
+    // with no in-card "exceeds N cap" hint anymore. Previously the
+    // label spelled out the reason; now the user sees only a greyed-
+    // out button. Deliberate per product call ("terse labels"); the
+    // disable trigger is structurally rare (guild with > 20k non-bot
+    // members), and the cold-cache over-cap branch still surfaces
+    // the actionable copy via `handleConfirmEveryone`'s click-time
+    // reject (this render-time disable can't fire on cold cache, so
+    // the click goes through). If the warm-cache hint ever needs to
+    // come back, the lever is right here.
     //
     // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
     // components. The current worst-case render is
@@ -4290,10 +4299,24 @@ async function handleQurlSlashSend(interaction, params) {
     // expansion with a truncated subset via handleConfirmUserSelect.
     // Hiding the picker matches the button-click UX.
     //
-    // Gated on `valid.length > 0` because the empty-after-partition
-    // case is already handled above with a "❌ No valid recipients"
-    // banner; landing that in EVERYONE-mode would render a card with
-    // no recipients but no picker either.
+    // MIXED MENTIONS: `recipients: @everyone @alice` lands in
+    // EVERYONE mode too — alice is already in the @everyone set, so
+    // the explicit mention is semantically absorbed (the parser
+    // dedups via `seen`). A user trying to NARROW @everyone by
+    // listing names doesn't get that — they get the full fan-out.
+    // Correct behavior (you can't subtract from "everyone") but
+    // worth knowing if support asks.
+    //
+    // Gated on `valid.length > 0` as defense-in-depth. Structurally
+    // redundant today: the early-return at the top of this function
+    // already rejects `!recipientsOmitted && valid.length === 0`, and
+    // `massMentionExpanded` implies `recipientsOmitted === false`
+    // (no @everyone token without a recipients arg). So the only
+    // arrival shape here has `valid.length > 0`. Keeping the gate
+    // pins the EVERYONE-mode invariant locally — a future refactor
+    // that loosens or moves the upstream early-return can't silently
+    // land us in EVERYONE-mode with an empty recipient set (which
+    // would render a card with no recipients and no picker).
     //
     // ORDERING: this branch deliberately precedes the voice-mode
     // auto-default below. `massMentionExpanded` requires
