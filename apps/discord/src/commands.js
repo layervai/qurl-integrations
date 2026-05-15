@@ -1390,7 +1390,9 @@ async function executeSendPipeline(interaction, {
     });
   }
 
-  // Send DMs (`expiresAt` computed above the DDB write — see #352).
+  // Send DMs. `expiresAt` is Unix seconds, computed above the DDB
+  // write — see the #352 hoist comment near recordQURLSendBatch for
+  // the clock-drift caveat that was previously documented here.
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
@@ -1788,7 +1790,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // (matches handleAddRecipients's error-return contract; the caller
   // renders it on the post-send confirm card).
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
-    logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: sendConfig.expires_in });
+    logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
       msg: 'Cannot add recipients — saved expiry is invalid. Please create a new send.',
       newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],

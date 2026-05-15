@@ -180,6 +180,24 @@ jest.mock('../src/qurl', () => ({
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
 
+// Mock `expiryToMs` as a jest.fn that defaults to the real implementation,
+// so the #352 "hoist throws before recordQURLSendBatch" tests can
+// `mockImplementationOnce(() => { throw ... })` and have the override
+// reach the commands.js call site. CommonJS destructure in commands.js
+// (`const { expiryToMs } = require('./utils/time')`) captures the
+// jest.fn reference at module-load time — without the jest.mock here,
+// post-hoc reassignment of `time.expiryToMs` would NOT replace the
+// local binding inside commands.js, and the throw-tests would pass
+// vacuously (the file-prep code throws first because
+// `mockDownloadAndUpload` returns undefined by default).
+jest.mock('../src/utils/time', () => {
+  const actual = jest.requireActual('../src/utils/time');
+  return {
+    ...actual,
+    expiryToMs: jest.fn(actual.expiryToMs),
+  };
+});
+
 // Stub flow-state so loading commands.js doesn't reach into DDB.
 // These tests target the back-half (monitorLinkStatus, revokeAllLinks,
 // handleAddRecipients) — none of which touch flow_state — but
@@ -1171,39 +1189,37 @@ describe('handleAddRecipients — pre-flight guards', () => {
   // #352 belt-and-suspenders: even if a future expires_in slips
   // through the pre-flight gate, the expiresAt computation is hoisted
   // ABOVE recordQURLSendBatch, so a throw there can't leave orphan
-  // DDB rows. Mock expiryToMs to throw and verify the ordering
-  // invariant directly.
+  // DDB rows. Mock `expiryToMs` to throw — file-prep must succeed
+  // so execution reaches the hoist site (otherwise the test passes
+  // vacuously because file-prep's outer try/catch would return
+  // before recordQURLSendBatch regardless).
   it('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
-    const time = require('../src/utils/time');
-    const original = time.expiryToMs;
-    time.expiryToMs = jest.fn(() => { throw new Error('synthetic expiryToMs throw'); });
-    try {
-      mockDb.getSendConfig.mockResolvedValueOnce({
-        connector_resource_id: 'res-1', expires_in: '30m',  // passes the pre-flight gate
-        attachment_url: 'https://cdn.discordapp.com/x.png',
-        attachment_name: 'x.png', attachment_content_type: 'image/png',
-      });
+    const { expiryToMs } = require('../src/utils/time');
+    expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
 
-      let threw = false;
-      try {
-        await handleAddRecipients(
-          'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-          makeInteraction(), 'apikey',
-        );
-      } catch {
-        threw = true;
-      }
-      // Either the function threw or it bailed via the file/location
-      // outer-catch — either way, recordQURLSendBatch MUST NOT have
-      // been called, which is the load-bearing assertion.
-      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-      // Sanity: at minimum, NO DDB write occurred even if the function
-      // returned gracefully. The throw/no-throw outcome is incidental
-      // to the ordering invariant.
-      void threw;
-    } finally {
-      time.expiryToMs = original;
-    }
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',  // passes the pre-flight gate
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    // File-prep succeeds — so execution proceeds PAST the file/location
+    // outer try/catch and reaches the new hoist site immediately
+    // before recordQURLSendBatch.
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-new' },
+    ]);
+
+    await expect(handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    )).rejects.toThrow(/synthetic expiryToMs throw/);
+
+    // Load-bearing assertion: even though file-prep succeeded and
+    // links were minted upstream, NO DDB rows were written.
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 });
 
@@ -1588,27 +1604,31 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
   // #352: expiresAt is computed BEFORE recordQURLSendBatch so a future
   // `expiryToMs`-throws regression can't leave orphan DDB rows. Today
   // the entry-level failGate above protects, but the hoist makes the
-  // ordering invariant explicit. Mock expiryToMs to throw and verify
-  // recordQURLSendBatch isn't called even though we got past the
-  // allowed-set gate.
+  // ordering invariant explicit. Mock `expiryToMs` to throw — file-
+  // prep must succeed so execution actually reaches the hoist site,
+  // otherwise the test passes vacuously (mintLinks would throw first
+  // with no mock implementation, hitting an upstream code path).
   test('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
-    const time = require('../src/utils/time');
-    const original = time.expiryToMs;
-    time.expiryToMs = jest.fn(() => { throw new Error('synthetic expiryToMs throw'); });
-    try {
-      mockDb.recordQURLSendBatch.mockClear();
-      const interaction = makeInteraction();
-      let threw = false;
-      try {
-        await executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' }));
-      } catch {
-        threw = true;
-      }
-      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-      void threw;
-    } finally {
-      time.expiryToMs = original;
-    }
+    const { expiryToMs } = require('../src/utils/time');
+    expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
+    mockDb.recordQURLSendBatch.mockClear();
+
+    // File-prep succeeds so execution proceeds past mintLinksInBatches
+    // to the new hoist site right above recordQURLSendBatch.
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
+    });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/1', resource_id: 'res-new' },
+    ]);
+
+    const interaction = makeInteraction();
+    await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' })))
+      .rejects.toThrow(/synthetic expiryToMs throw/);
+
+    // Load-bearing assertion: even though file-prep succeeded and
+    // links were minted upstream, NO DDB rows were written.
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
   });
 });
 
