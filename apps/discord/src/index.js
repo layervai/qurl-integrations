@@ -373,6 +373,12 @@ if (isGateway) {
 // entire process on any stray rejection (transient Discord timeouts, network
 // blips) which made the bot fragile. Truly fatal errors surface via
 // uncaughtException below.
+// TODO(PR-10): emit `kind: 'unhandledRejection'` here too so a single
+// CloudWatch query filtering on the structured field finds both this
+// gateway-WS-driven path AND the worker-tier path that absorbs
+// rejections in event-consumer.js's trackDispatch .catch (which
+// already emits the kind field). Until both paths agree on the tag,
+// alarms either grep the message text or miss one of the tiers.
 process.on('unhandledRejection', (error, _promise) => {
   logger.error('Unhandled promise rejection (logged, not fatal)', {
     error: error?.message || error,

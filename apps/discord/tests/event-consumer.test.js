@@ -1046,6 +1046,25 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
+  test('trackDispatch with an already-settled promise still drains the counter', async () => {
+    // A handler that completes synchronously (or returns a resolved
+    // promise from an early short-circuit) lands here. The `.finally`
+    // callback still runs on the microtask boundary, so the
+    // increment-then-decrement holds — but it's worth pinning the
+    // contract so a future refactor that tries to skip registration
+    // for already-settled promises (as a "perf optimization") is
+    // caught.
+    withWorkerDispatch(() => {
+      eventConsumer.trackDispatch(Promise.resolve('already-done'));
+    });
+
+    // Increment was synchronous (inside withWorkerDispatch).
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    // Decrement is deferred to the .finally microtask.
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
   test('trackDispatch logs handler rejections (preserves error visibility)', async () => {
     // Regression for cr feedback on PR #389: attaching `.finally()`
     // in trackDispatch counts as a handler for Node's unhandled-

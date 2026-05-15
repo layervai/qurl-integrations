@@ -102,7 +102,9 @@
 // reach `cap + RECEIVE_MAX_MESSAGES - 1` (≈9% overshoot at the default
 // cap of 100) before the next pollOnce gates. The cap is a backpressure
 // signal — "stop pulling new work" — not a precise upper bound; size
-// memory headroom assuming `cap + 10` simultaneous handler promises.
+// memory headroom assuming `cap + RECEIVE_MAX_MESSAGES` simultaneous
+// handler promises. (Strict ceiling is cap + RECEIVE_MAX_MESSAGES - 1;
+// the .env.example rounds up by 1 for headroom math.)
 //
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
