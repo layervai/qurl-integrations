@@ -660,6 +660,13 @@ async function pollOnce(client) {
     } else {
       logger.debug(AT_CAP_PAUSE_DEBUG_MSG, capPayload);
     }
+    // Clear the previous iteration's controller before sleeping —
+    // there's no in-flight ReceiveMessage during a backpressure
+    // pause, so the invariant "non-null iff a receive is in flight"
+    // holds. A stop() landing during the sleep would otherwise call
+    // .abort() on a settled controller (safe no-op today, but the
+    // null-during-sleep shape is the cleaner contract).
+    receiveAbortController = null;
     await abortableSleep(INFLIGHT_BACKOFF_MS);
     return;
   }

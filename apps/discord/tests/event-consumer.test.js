@@ -917,9 +917,13 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
   // Test helpers. Pulled up here so the tests below stay focused on
   // intent rather than re-stating boilerplate.
 
-  // Flush queued microtasks. `.finally → .catch` in trackDispatch
-  // is two microtask hops; default n=3 leaves a one-tick margin so a
-  // future chain extension doesn't require revisiting every test.
+  // Flush queued microtasks. The trackDispatch chain is exactly
+  // two hops today: `.finally` (decrement) then `.catch` (error log
+  // or pass-through). Default n=3 = 2 hops + 1 margin, so a future
+  // chain extension (e.g., another `.then` between finally and catch)
+  // doesn't require revisiting every test. The +1 margin is the
+  // load-bearing slack — drop it only if you re-derive the chain
+  // depth and confirm no implicit hop sneaks in.
   async function flushMicrotasks(n = 3) {
     for (let i = 0; i < n; i += 1) {
       // eslint-disable-next-line no-await-in-loop -- sequential by design
