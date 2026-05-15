@@ -6861,7 +6861,6 @@ describe('renderConfirmCardRows', () => {
         'qurl_confirm_cancel',
       ]);
     });
-
   });
 
   // ── @everyone button rendering ──
