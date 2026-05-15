@@ -92,7 +92,11 @@ function makeMessage(envelope, { receiptHandle = 'rh-1', messageId = 'm-1' } = {
 // Inject the mocked SQSClient. event-consumer.js holds an internal
 // sqsClient var that start() lazy-constructs; tests that exercise
 // processMessage / pollOnce directly bypass start(), so we wire the
-// mock client via the _setSqsClientForTest DI hook.
+// mock client via the _setSqsClientForTest DI hook. We also seed a
+// stopController (the AbortSignal refactor moved cancellation from a
+// per-iteration controller to a single lifetime one — pollOnce reads
+// `stopController.signal` for the SDK's abortSignal, so tests
+// bypassing start() need an explicit controller).
 function withMockedSqs(fn) {
   // The aws-sdk-client-mock library intercepts at the SDK-command
   // level, so any SQSClient instance routes through the mock. But
@@ -100,6 +104,13 @@ function withMockedSqs(fn) {
   // we construct one explicitly and inject it.
   const realClient = new SQSClient({ region: 'us-east-2' });
   eventConsumer._test._setSqsClientForTest(realClient);
+  // Idempotent: only init if there isn't one already. Tests that
+  // depend on controller IDENTITY across multiple pollOnce calls
+  // (e.g., the "single lifetime controller" assertion) would
+  // otherwise see a fresh controller on every withMockedSqs call.
+  if (!eventConsumer._test.getStopController()) {
+    eventConsumer._test._setStopControllerForTest();
+  }
   return fn();
 }
 
@@ -730,52 +741,94 @@ describe('event-consumer: abort silently exits pollLoop', () => {
       expect.stringContaining('poll iteration failed'),
       expect.anything(),
     );
-    // No abortableSleep call — its 50 ms-tick setInterval count
-    // unchanged from baseline.
-    const finalIntervals = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50).length;
+    // No abortableSleep call — no further setInterval activity from
+    // the consumer beyond the baseline.
+    const finalIntervals = setIntervalSpy.mock.calls.length;
     expect(finalIntervals).toBe(baselineIntervals);
 
     setIntervalSpy.mockRestore();
   });
 });
 
-describe('event-consumer: abortableSleep', () => {
-  test('timeout-wins-race path clears the polling interval (no leak)', async () => {
-    // Pins the fix for the setInterval leak: when setTimeout fires
-    // first (the common case — backoff completes without a stop()),
-    // the polling setInterval MUST be cleared inside the resolve
-    // handler. Without the fix, every error-backoff iteration would
-    // accumulate one orphan interval ticking every 50 ms forever.
-    //
-    // Spy on clearInterval and assert it was called for the handle
-    // that setInterval returned. Real timers (not jest fake) so the
-    // 30 ms sleep completes on its own; smaller than POLL_ERROR_BACKOFF_MS
-    // (1000) to keep the test fast.
+describe('event-consumer: abortableSleep (AbortSignal-driven)', () => {
+  // The pre-refactor (#387 item 1) implementation polled a `stopping`
+  // boolean every 50 ms via setInterval. The refactor replaced that
+  // with `stopController.signal.addEventListener('abort', ...)` so
+  // there is no longer a polling tick to leak. These tests pin the
+  // new contract: timeout-wins path returns on its own; abort-wins
+  // path returns on a microtask after abort() fires; the controller
+  // listener is cleaned up on either path.
+
+  test('timeout-wins-race path resolves without any setInterval polling tick', async () => {
+    // The previous version called setInterval(..., 50) every sleep —
+    // this test pins the absence of that pattern. A 50ms-tick
+    // setInterval re-introduction would regress shutdown latency
+    // (50ms granular wakes) and add per-sleep timer pressure.
     const setIntervalSpy = jest.spyOn(global, 'setInterval');
-    const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
     try {
+      eventConsumer._test._setStopControllerForTest();
       await eventConsumer._test.abortableSleep(30);
-      // Count the abortableSleep-created intervals (50ms polling
-      // tick) and assert each was cleared. Other intervals in the
-      // test runtime may also be present — filter by the 50ms tick.
-      const created = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50);
-      expect(created.length).toBeGreaterThanOrEqual(1);
-      const intervalHandles = setIntervalSpy.mock.results
-        .filter((_r, i) => setIntervalSpy.mock.calls[i][1] === 50)
-        .map((r) => r.value);
-      for (const handle of intervalHandles) {
-        expect(clearIntervalSpy).toHaveBeenCalledWith(handle);
-      }
+      const ticks50ms = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50);
+      expect(ticks50ms).toHaveLength(0);
     } finally {
       setIntervalSpy.mockRestore();
-      clearIntervalSpy.mockRestore();
     }
   });
 
-  // The stopping-wins-race path is exercised end-to-end by the
-  // pollLoop error-backoff test below (which asserts stop() returns
-  // in < 500 ms while a 1 s abortableSleep is in flight). No
-  // separate unit test needed here.
+  test('abort()-wins-race path resolves on a microtask after abort fires', async () => {
+    // The whole point of the refactor: a stop() call during sleep
+    // returns within a microtask, not on the next 50ms polling tick.
+    // Set a long timeout and abort almost-immediately to prove the
+    // sleep didn't wait for the timeout.
+    eventConsumer._test._setStopControllerForTest();
+    const start = Date.now();
+    const sleepPromise = eventConsumer._test.abortableSleep(10_000);
+    // Yield once so the addEventListener call has registered before
+    // we abort (otherwise the abort path racing the listener-
+    // attachment path is implementation-dependent; the
+    // already-aborted fast path in abortableSleep covers that case
+    // separately).
+    await Promise.resolve();
+    eventConsumer._test.getStopController().abort();
+    await sleepPromise;
+    const elapsed = Date.now() - start;
+    // Generous bound: the abort path should resolve well under
+    // 1 second; failing here would mean the listener wasn't wired or
+    // the timeout outran the abort.
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  test('already-aborted signal: abortableSleep resolves immediately (fast path)', async () => {
+    // Defense in depth — if stop() landed before abortableSleep
+    // started (e.g., between iterations of pollLoop), the new sleep
+    // must return immediately rather than parking on a timeout that
+    // outlives the dying loop.
+    eventConsumer._test._setStopControllerForTest();
+    eventConsumer._test.getStopController().abort();
+    const start = Date.now();
+    await eventConsumer._test.abortableSleep(5_000);
+    const elapsed = Date.now() - start;
+    // Should be near-zero. A failure here would mean the fast-path
+    // guard at the top of abortableSleep regressed and the sleep
+    // parked for the full 5 seconds.
+    expect(elapsed).toBeLessThan(100);
+  });
+
+  test('null stopController: abortableSleep degrades to a pure setTimeout (defensive)', async () => {
+    // abortableSleep is also reachable from the at-cap backpressure
+    // pause; if a future caller invokes it before start() ran, we
+    // don't want the missing controller to throw and crash the
+    // loop. Pin the degradation: pure setTimeout, no listener wire.
+    eventConsumer._test._resetStateForTest();
+    expect(eventConsumer._test.getStopController()).toBeNull();
+    const start = Date.now();
+    await eventConsumer._test.abortableSleep(25);
+    const elapsed = Date.now() - start;
+    // Roughly the timeout — proves the sleep didn't throw or
+    // short-circuit. Generous bound.
+    expect(elapsed).toBeGreaterThanOrEqual(20);
+    expect(elapsed).toBeLessThan(500);
+  });
 });
 
 describe('event-consumer: pollLoop error backoff', () => {
@@ -801,8 +854,8 @@ describe('event-consumer: pollLoop error backoff', () => {
     // setImmediate is enough to land in the sleep.
     await new Promise((r) => setImmediate(r));
 
-    // stop() should pre-empt the abortableSleep via the `stopping`
-    // flag check and return promptly.
+    // stop() should pre-empt the abortableSleep via the
+    // stopController.signal abort event and return promptly.
     const startTime = Date.now();
     await eventConsumer.stop();
     const elapsedMs = Date.now() - startTime;
@@ -812,7 +865,7 @@ describe('event-consumer: pollLoop error backoff', () => {
       expect.objectContaining({ error: 'AWS throttling' }),
     );
     // Well under the 1s POLL_ERROR_BACKOFF_MS — confirms
-    // abortableSleep honored the stopping flag.
+    // abortableSleep honored the abort signal.
     expect(elapsedMs).toBeLessThan(500);
   });
 });
@@ -912,7 +965,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(isAbortError(e10)).toBe(false);
   });
 
-  test('pollOnce passes an abortSignal in the SDK send options', async () => {
+  test('pollOnce passes the stopController.signal in the SDK send options', async () => {
     // Pins the contract that the receive call carries an abort signal.
     // aws-sdk-client-mock doesn't propagate HttpHandlerOptions to the
     // mock handler, so we spy on the underlying client.send directly
@@ -920,10 +973,17 @@ describe('event-consumer: start/stop lifecycle', () => {
     // that drops `{ abortSignal: ... }` from `sqsClient.send(cmd, options)`
     // wouldn't fail any test — and the graceful-shutdown latency
     // guarantee would silently regress.
+    //
+    // The AbortSignal refactor (#387 item 1) consolidated the
+    // per-iteration `receiveAbortController` into a single lifetime
+    // `stopController`. The SDK now reads `stopController.signal`
+    // directly; this test pins THAT signal is passed, not a fresh
+    // per-iteration one.
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const realClient = new SQSClient({ region: 'us-east-2' });
     const sendSpy = jest.spyOn(realClient, 'send');
     eventConsumer._test._setSqsClientForTest(realClient);
+    eventConsumer._test._setStopControllerForTest();
 
     await eventConsumer._test.pollOnce(makeStubClient());
 
@@ -940,34 +1000,39 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(options.abortSignal).toBeDefined();
     // The signal must be live (not pre-aborted) at the time of send.
     expect(options.abortSignal.aborted).toBe(false);
+    // The signal MUST be the lifetime stopController's signal — a
+    // future regression that constructs a fresh per-iteration
+    // controller would re-introduce the indirection the refactor
+    // collapsed.
+    expect(options.abortSignal).toBe(eventConsumer._test.getStopController().signal);
 
     sendSpy.mockRestore();
   });
 
-  test('pollOnce installs a fresh receiveAbortController that can be aborted', async () => {
-    // aws-sdk-client-mock doesn't pass HttpHandlerOptions (incl.
-    // abortSignal) through to callsFake handlers, so we can't easily
-    // mock the SDK's abort-aware receive. Test the abort *machinery*
-    // directly instead: pollOnce constructs a controller and stop()
-    // aborts it. The end-to-end integration (SDK actually honors the
-    // abort) is covered by the AWS SDK v3 contract; the worker
-    // boot-test path will exercise it against the sandbox queue.
+  test('stopController persists across pollOnce iterations (single lifetime controller, not per-iteration)', async () => {
+    // The pre-refactor pattern constructed a fresh controller every
+    // pollOnce; the AbortSignal refactor consolidated to one lifetime
+    // controller shared across iterations. Pin that contract — a
+    // regression to per-iteration would lose the abortableSleep wake
+    // semantics the refactor was about.
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    eventConsumer._test._setStopControllerForTest();
 
-    // Run a single pollOnce so receiveAbortController is set.
     await withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient()));
+    const ctrlAfterFirst = eventConsumer._test.getStopController();
+    expect(ctrlAfterFirst).not.toBeNull();
+    expect(ctrlAfterFirst.signal.aborted).toBe(false);
 
-    const controller = eventConsumer._test.getReceiveAbortController();
-    expect(controller).not.toBeNull();
-    expect(controller.signal.aborted).toBe(false);
+    await withMockedSqs(() => eventConsumer._test.pollOnce(makeStubClient()));
+    const ctrlAfterSecond = eventConsumer._test.getStopController();
+    expect(ctrlAfterSecond).toBe(ctrlAfterFirst);
 
-    // Simulate stop()'s abort step. We don't call full stop() here
-    // because the loop isn't running — start() sets running=true
-    // which stop() requires. Direct abort assertion is the focused
-    // unit test.
-    controller.abort();
-    expect(controller.signal.aborted).toBe(true);
+    // Aborting the lifetime controller wakes both the in-flight
+    // receive AND any in-flight abortableSleep (the contract the
+    // refactor pinned).
+    ctrlAfterFirst.abort();
+    expect(ctrlAfterFirst.signal.aborted).toBe(true);
   });
 
   test('start() + stop() round-trip; second start logs warn (idempotent)', async () => {
