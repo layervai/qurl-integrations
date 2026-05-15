@@ -136,7 +136,15 @@ jest.mock('../src/qurl', () => ({
 jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
 
 const { _test } = require('../src/commands');
-const { buildDeliveryPayload, buildRevokedDMPayload, resolveSenderAlias } = _test;
+const {
+  buildDeliveryPayload,
+  buildDeliveryEmbed,
+  buildStepThroughButton,
+  buildTrustButton,
+  packBulkDeliveryComponents,
+  buildRevokedDMPayload,
+  resolveSenderAlias,
+} = _test;
 
 const baseArgs = {
   qurlLink: 'https://qurl.link/#at_test',
@@ -628,6 +636,81 @@ describe('buildDeliveryPayload — footer + trust button', () => {
     expect(args).toHaveLength(2);
     expect(args[0]._label).toBe('Step Through');
     expect(args[1]._label).toBe('What is qURL?');
+  });
+});
+
+describe('packBulkDeliveryComponents — 5-per-row chunking', () => {
+  // mock.calls[0][0] is the array of buttons addComponents received
+  // for the row's one call. Production passes a single array argument
+  // (`addComponents(slice)`), so the row owns one mock.call whose
+  // first arg is the slice itself.
+  const rowButtons = (row) => row.addComponents.mock.calls[0][0];
+
+  it('N=4: packs [s1, s2, s3, s4, trust] into a single ActionRow', () => {
+    const rows = packBulkDeliveryComponents(['u1', 'u2', 'u3', 'u4'].map(t => `https://q.test/${t}`));
+    expect(rows).toHaveLength(1);
+    expect(rowButtons(rows[0]).map(b => b._label))
+      .toEqual(['Step Through', 'Step Through', 'Step Through', 'Step Through', 'What is qURL?']);
+  });
+
+  it('N=5: splits into [s1..s5] + [trust] across two rows', () => {
+    const rows = packBulkDeliveryComponents(['u1', 'u2', 'u3', 'u4', 'u5'].map(t => `https://q.test/${t}`));
+    expect(rows).toHaveLength(2);
+    const row1 = rowButtons(rows[0]);
+    expect(row1).toHaveLength(5);
+    expect(row1.every(b => b._label === 'Step Through')).toBe(true);
+    const row2 = rowButtons(rows[1]);
+    expect(row2).toHaveLength(1);
+    expect(row2[0]._label).toBe('What is qURL?');
+  });
+
+  it('N=10 (Discord embed cap): three rows of [s1..s5], [s6..s10], [trust]', () => {
+    const links = Array.from({ length: 10 }, (_, i) => `https://q.test/u${i}`);
+    const rows = packBulkDeliveryComponents(links);
+    // Discord caps a single message at 5 ActionRows; 3 rows leaves
+    // headroom. A regression flipping the step from 5 to 4 would
+    // produce 4 rows here, still under cap but the assertion would
+    // catch it.
+    expect(rows).toHaveLength(3);
+    expect(rowButtons(rows[0])).toHaveLength(5);
+    expect(rowButtons(rows[1])).toHaveLength(5);
+    const lastRow = rowButtons(rows[2]);
+    expect(lastRow).toHaveLength(1);
+    expect(lastRow[0]._label).toBe('What is qURL?');
+    // Pin the link i → button i mapping so a future shuffle would
+    // surface as wrong-URL deliveries.
+    const stepUrls = [
+      ...rowButtons(rows[0]).map(b => b._url),
+      ...rowButtons(rows[1]).map(b => b._url),
+    ];
+    expect(stepUrls).toEqual(links);
+  });
+
+  it('buildStepThroughButton ships as a Link-style button with the supplied qURL as its URL', () => {
+    buildStepThroughButton('https://qurl.link/#at_step');
+    const stepThrough = capturedButtons[capturedButtons.length - 1];
+    expect(stepThrough._label).toBe('Step Through');
+    expect(stepThrough._emoji).toBe('🚪');
+    expect(stepThrough._style).toBe(5); // ButtonStyle.Link
+    expect(stepThrough._url).toBe('https://qurl.link/#at_step');
+  });
+});
+
+describe('buildDeliveryEmbed — embed-only primitive used by bulk path', () => {
+  // The split exists so the bulk path can compose N embeds without
+  // paying for N discarded button rows. A regression that re-added
+  // button-row construction inside buildDeliveryEmbed would
+  // resurrect the per-link allocation waste this split eliminates.
+  it('returns the embed alone (no button row construction)', () => {
+    const embed = buildDeliveryEmbed({
+      senderAlias: 'Vik',
+      guildName: 'Acme Discord',
+      guildIconUrl: undefined,
+      expiresAt: 1735689600,
+      personalMessage: null,
+    });
+    expect(embed).toBe(capturedEmbeds[0]);
+    expect(capturedButtons).toHaveLength(0);
   });
 });
 

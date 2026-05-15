@@ -477,15 +477,16 @@ function resolveSenderAlias(interaction) {
     ?? DISPLAY_NAME_FALLBACK;
 }
 
-// Author-row provenance fields for the per-recipient DM. `?.` chain
-// defends the edge case where guild is null (commands are guild-only
-// so this shouldn't happen in production). `iconURL()` returns
-// `string | null`; coalesce to `undefined` because some discord.js
-// versions stringify null into the iconURL slot.
+// Author-row provenance fields for the per-recipient DM. The
+// `interaction?.guild?` chain defends the edge case where guild is
+// null (commands are guild-only so this shouldn't happen in
+// production). `iconURL()` returns `string | null`; coalesce to
+// `undefined` because some discord.js versions stringify null into
+// the iconURL slot.
 function resolveGuildProvenance(interaction) {
   return {
     guildName: interaction?.guild?.name,
-    guildIconUrl: interaction?.guild?.iconURL?.() ?? undefined,
+    guildIconUrl: interaction?.guild?.iconURL() ?? undefined,
   };
 }
 
@@ -734,6 +735,27 @@ function buildStepThroughButton(qurlLink) {
     .setEmoji('🚪')
     .setLabel('Step Through')
     .setURL(qurlLink);
+}
+
+// Pack a list of qURL links into the bulk-path component rows:
+// one Step Through button per link plus one trust button at the
+// end, chunked 5-per-ActionRow (Discord's per-row cap). The
+// dispatch caller upstream caps links at 10 (Discord's 10-embed-
+// per-message limit), so the worst case is 11 buttons → 3 rows.
+// Behavior at N=1 produces the same single-row [Step Through,
+// What is qURL?] shape executeSendPipeline emits, so a /qurl send
+// followed by /qurl add-recipients renders identically on the
+// recipient side.
+function packBulkDeliveryComponents(qurlLinks) {
+  const allButtons = [
+    ...qurlLinks.map(buildStepThroughButton),
+    buildTrustButton(),
+  ];
+  const rows = [];
+  for (let i = 0; i < allButtons.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+  }
+  return rows;
 }
 
 // Composes the embed only (no button row). Split out so the bulk-path
@@ -2312,13 +2334,10 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let result = { ok: false };
     try {
-      // Bulk path composes from the primitives: one embed +
-      // one Step Through button per link, plus a single trust button
-      // at the message bottom. Result for links.length === 1 matches
-      // the executeSendPipeline single-row [Step Through, What is qURL?]
-      // layout. links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit; the button-row chunking splits all buttons into
-      // ActionRows of 5 (Discord's per-row cap).
+      // links.slice(0, 10) caps at Discord's 10-embed-per-message
+      // limit; the embed body is identical per-link (sender + guild
+      // + expiry don't vary), so the map only diverges on
+      // qurlLink-bound buttons via packBulkDeliveryComponents.
       const cappedLinks = links.slice(0, 10);
       const allEmbeds = cappedLinks.map(() => buildDeliveryEmbed({
         senderAlias,
@@ -2327,14 +2346,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         expiresAt,
         personalMessage: sendConfig.personal_message,
       }));
-      const allButtons = [
-        ...cappedLinks.map(link => buildStepThroughButton(link.qurlLink)),
-        buildTrustButton(),
-      ];
-      const allComponents = [];
-      for (let i = 0; i < allButtons.length; i += 5) {
-        allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
-      }
+      const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
@@ -7924,6 +7936,7 @@ module.exports = {
       buildDeliveryEmbed,
       buildStepThroughButton,
       buildTrustButton,
+      packBulkDeliveryComponents,
       buildRevokedDMPayload,
       persistDispatchResult,
       resolveSenderAlias,
