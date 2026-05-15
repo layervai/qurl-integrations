@@ -84,13 +84,23 @@
 //                                               // `allowMassMention` opt
 //     massMentionExpanded:  <boolean>,          // true iff @everyone was
 //                                               // allowed AND the walk
-//                                               // actually added at least
-//                                               // one non-bot entry from
-//                                               // `members.cache`. False
-//                                               // when cache was cold,
-//                                               // all-bot, or cap-saturated
-//                                               // before the walk reached
-//                                               // it. Mutually exclusive
+//                                               // iterated at least one
+//                                               // non-bot member from
+//                                               // `members.cache` (the
+//                                               // member may already be
+//                                               // in `ids` via a prior
+//                                               // named mention — dedup
+//                                               // happens inside
+//                                               // `consider()`; the flag
+//                                               // records that the
+//                                               // expansion ran, not
+//                                               // that it added new
+//                                               // entries). False when
+//                                               // cache was cold,
+//                                               // all-bot, or cap-
+//                                               // saturated before the
+//                                               // walk reached it.
+//                                               // Mutually exclusive
 //                                               // with massMentionDenied.
 //   }
 //
@@ -652,11 +662,19 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         consider(memberId);
         // Set inside the walk (rather than deriving from
         // `everyonePresent && allowMassMention` at the bottom) so the
-        // flag means "expansion actually ran and added at least one
-        // non-bot entry," not "expansion was permitted." Keeps the
-        // name honest against future short-circuits — cap exhausted
-        // by named mentions before this loop runs, empty cache, all-
-        // bot cache — that would otherwise leave the flag overstating.
+        // flag means "expansion iterated at least one non-bot member,"
+        // not "expansion was permitted." Robust against future short-
+        // circuits — cap exhausted by named mentions before this loop
+        // runs, empty cache, all-bot cache — that would otherwise
+        // leave the flag overstating.
+        //
+        // NOTE: `consider()` is a silent no-op when `seen.has(id)`, so
+        // a mixed-mentions input like `<@alice> @everyone` where alice
+        // is also in the @everyone set still sets the flag — the walk
+        // iterated alice and dedup'd internally. Documented call-site
+        // behavior (`commands.js`'s MIXED MENTIONS comment) intentionally
+        // treats this as EVERYONE-mode, so the dedup-then-set ordering
+        // matches the intended downstream semantic.
         massMentionExpanded = true;
       }
     }
@@ -740,15 +758,16 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   }
 
   // `massMentionExpanded` was set inside the @everyone walk above
-  // (true iff at least one non-bot entry was actually added). Surfacing
-  // it lets callers route the slash-text "@everyone" path into
-  // RECIPIENT_MODE_EVERYONE without duplicating the regex-match-and-
-  // permission-check (or reaching past the parser to detect the
-  // `<@&{guildId}>` wire form). False when the user typed @everyone
-  // but lacked permission (the denied path lands on `massMentionDenied`
-  // instead) or when the cache was cold / cap-saturated by the time the
-  // walk reached it (caller's `valid.length` check still catches that
-  // downstream).
+  // (true iff the walk iterated at least one non-bot member —
+  // `consider()` dedups internally, so a mixed-mentions input still
+  // sets the flag). Surfacing it lets callers route the slash-text
+  // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
+  // the regex-match-and-permission-check (or reaching past the parser
+  // to detect the `<@&{guildId}>` wire form). False when the user typed
+  // @everyone but lacked permission (the denied path lands on
+  // `massMentionDenied` instead) or when the cache was cold /
+  // cap-saturated by the time the walk reached it (caller's
+  // `valid.length` check still catches that downstream).
   return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 

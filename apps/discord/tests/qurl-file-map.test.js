@@ -204,6 +204,7 @@ const {
   CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
   RECIPIENT_MODE_PICKER,
   RECIPIENT_MODE_VOICE,
+  RECIPIENT_MODE_EVERYONE,
   normalizeRecipientMode,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
@@ -7451,6 +7452,7 @@ describe('constants + exports', () => {
     // and would silently mis-route. Pin the literals here.
     expect(RECIPIENT_MODE_PICKER).toBe('picker');
     expect(RECIPIENT_MODE_VOICE).toBe('voice');
+    expect(RECIPIENT_MODE_EVERYONE).toBe('everyone');
   });
 
   test('normalizeRecipientMode: closed set {voice, everyone, picker}; everything else picker', () => {
