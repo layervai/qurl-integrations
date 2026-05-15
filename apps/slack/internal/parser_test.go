@@ -43,6 +43,12 @@ func TestParse_HappyPaths(t *testing.T) {
 		{name: "channel ref without name", text: "admin allow <#C00001> $alias-name", wantSub: SubcmdAdmin, wantAdmin: AdminAllow, wantAlias: "alias-name", wantChannel: "C00001", wantFlags: map[string]string{}},
 		{name: "setalias with quoted target strips outer quotes", text: `setalias $prod-db "https://internal.example.com"`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: "https://internal.example.com", wantFlags: map[string]string{}},
 		{name: "create with quoted target strips outer quotes", text: `create "https://x.example/with space"`, wantSub: SubcmdCreate, wantTarget: "https://x.example/with space", wantFlags: map[string]string{}},
+		// Unbalanced quotes: tokenize tolerates (does not reject)
+		// odd-count `"` runs. The opening quote stays literal in
+		// Target and downstream URL validation surfaces the error.
+		// Pinned here so a future refactor of tokenize can't
+		// silently change the tolerance contract.
+		{name: "setalias with unbalanced opening quote tolerated", text: `setalias $prod-db "https://x.example`, wantSub: SubcmdSetAlias, wantAlias: "prod-db", wantTarget: `"https://x.example`, wantFlags: map[string]string{}},
 		{name: "uppercase flag key normalized", text: "get $prod-db DM:true", wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"dm": "true"}},
 		{name: "mixed-case flag key normalized, value preserved", text: `get $prod-db Reason:"On Call"`, wantSub: SubcmdGet, wantAlias: "prod-db", wantFlags: map[string]string{"reason": "On Call"}},
 		{name: "single-char alias accepted", text: "get $a", wantSub: SubcmdGet, wantAlias: "a", wantFlags: map[string]string{}},
@@ -139,6 +145,11 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// survive as a single token through [tokenize].
 		{name: "setalias with extra trailing token rejected", text: "setalias $prod-db https://x.example dm:true", wantErr: ErrUnexpectedArgument},
 		{name: "setalias with extra trailing positional rejected", text: "setalias $prod-db https://x.example extra-garbage", wantErr: ErrUnexpectedArgument},
+		// Empty-quoted target would otherwise tokenize to a present-
+		// but-empty Target string and bypass ErrMissingTarget.
+		// tokenize's post-strip empty-token drop ensures the verb
+		// hits the missing-target branch — matches the strict posture.
+		{name: "setalias with empty quoted target rejected", text: `setalias $prod-db ""`, wantErr: ErrMissingTarget},
 	}
 
 	for _, tc := range cases {

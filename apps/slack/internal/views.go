@@ -183,7 +183,7 @@ func AdminClaimModal() ([]byte, error) {
 	payload := map[string]any{
 		"type":        "modal",
 		"callback_id": callbackIDAdminClaim,
-		"title":       plainTextObj("Claim workspace"),
+		"title":       plainTextObj("Claim qURL workspace"),
 		"submit":      plainTextObj("Submit"),
 		"close":       plainTextObj("Cancel"),
 		"blocks": []any{

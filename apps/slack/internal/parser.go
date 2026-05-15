@@ -275,6 +275,17 @@ func tokenize(text string) []string {
 		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 			s = s[1 : len(s)-1]
 		}
+		// Drop tokens that are empty post-strip. A bare `""` would
+		// otherwise produce an empty-string token here (the
+		// cur.Len() == 0 guard above catches only the pre-write
+		// state, not the post-strip state), letting `setalias $a ""`
+		// slip through with Target = "" instead of ErrMissingTarget.
+		// Slack collapses adjacent whitespace before we see the
+		// body, so a non-quoted-pair empty token is unreachable.
+		if s == "" {
+			cur.Reset()
+			return
+		}
 		out = append(out, s)
 		cur.Reset()
 	}
@@ -449,13 +460,17 @@ func parseAdminChannelAlias(cmd *Command, rest []string) (*Command, error) {
 }
 
 // parseCreate keeps the legacy free-form-URL grammar working through
-// PR-3c.3 (the cutover to alias-only mints). The whole tail is treated
-// as the target.
+// PR-3c.3 (the cutover to alias-only mints). Strict-posture like
+// every other verb: exactly one target token. URLs containing spaces
+// must be quoted so [tokenize] keeps them as one token.
 func parseCreate(cmd *Command, rest []string) (*Command, error) {
 	if len(rest) == 0 {
 		return nil, ErrMissingTarget
 	}
-	cmd.Target = strings.Join(rest, " ")
+	if len(rest) > 1 {
+		return nil, fmt.Errorf("%w: %q (quote the target if it contains spaces)", ErrUnexpectedArgument, rest[1])
+	}
+	cmd.Target = rest[0]
 	return cmd, nil
 }
 
