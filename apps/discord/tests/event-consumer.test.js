@@ -372,7 +372,7 @@ describe('event-consumer: processMessage dispatch paths', () => {
     sqsMock.on(DeleteMessageCommand).resolves({});
     const client = makeStubClient();
     const message = {
-      Body: 'x'.repeat(250 * 1024), // 250 KB > 200 KB cap
+      Body: 'x'.repeat(250 * 1024), // 250 KB > 200 KB cap (ASCII: bytes == chars)
       ReceiptHandle: 'rh-oversize',
       MessageId: 'm-oversize',
     };
@@ -385,6 +385,37 @@ describe('event-consumer: processMessage dispatch paths', () => {
       expect.objectContaining({ messageId: 'm-oversize', cap: expect.any(Number) }),
     );
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+  });
+
+  test('multi-byte payload measured in bytes, not chars (caps correctly)', async () => {
+    // Pins the Buffer.byteLength fix vs the previous String.length
+    // measurement. A 110k-char string of 3-byte UTF-8 chars (e.g.
+    // CJK ideographs) is 330k bytes — over the 200 KB cap — but
+    // its String.length is only 110k, well under the previous
+    // char-based cap. The pre-fix code would have let this through
+    // to JSON.parse despite being well over SQS's 256 KB wire cap.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    // '日' is 3 bytes in UTF-8; 110,000 chars = 330,000 bytes.
+    const message = {
+      Body: '日'.repeat(110_000),
+      ReceiptHandle: 'rh-multibyte',
+      MessageId: 'm-multibyte',
+    };
+    expect(message.Body.length).toBeLessThan(200 * 1024); // would have slipped under a char-based cap
+    expect(Buffer.byteLength(message.Body, 'utf8')).toBeGreaterThan(200 * 1024); // but exceeds the byte-based cap
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+
+    expect(client.actions.InteractionCreate.handle).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('message body exceeds size cap'),
+      expect.objectContaining({
+        messageId: 'm-multibyte',
+        // bodyBytes carries the byte-length, NOT the char-length.
+        bodyBytes: 330_000,
+      }),
+    );
   });
 
   test('seenEventIds not populated on malformed body or unknown eventType', async () => {

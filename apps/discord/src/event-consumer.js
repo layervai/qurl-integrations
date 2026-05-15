@@ -294,24 +294,33 @@ async function deleteMessage(receiptHandle) {
  * catches them and logs). Per the module-header rationale, we
  * delete the message regardless of handler outcome.
  */
-// SQS Standard caps message bodies at 256 KB; we cap ours
-// conservatively at ~200 KB (SQS attribute headers eat into the
-// envelope). Anything over this is rejected before JSON.parse —
-// cheap defense if the publisher set ever loosens (today the
-// trust boundary is IAM-locked, see TODO(infra-publisher-set)
-// above). Also the natural place a future envelope-signature
-// check would land.
+// SQS Standard caps message bodies at 256 KB on the wire (bytes,
+// not chars). We cap ours conservatively at ~200 KB to leave SQS
+// attribute-header headroom. Anything over this is rejected before
+// JSON.parse — cheap defense if the publisher set ever loosens
+// (today the trust boundary is IAM-locked, see
+// TODO(infra-publisher-set) above). Also the natural place a
+// future envelope-signature check would land.
+//
+// Measured via Buffer.byteLength(_, 'utf8') rather than
+// `String.length` because String.length is a UTF-16 code-unit
+// count — a multi-byte payload would silently slip under a
+// char-based cap. SQS's wire-format cap is in bytes; ours must be
+// too.
 const MAX_BODY_BYTES = 200 * 1024;
 
 async function processMessage(client, message) {
-  if (message.Body && message.Body.length > MAX_BODY_BYTES) {
-    logger.error('Event consumer: message body exceeds size cap, deleting', {
-      messageId: message.MessageId,
-      bodyBytes: message.Body.length,
-      cap: MAX_BODY_BYTES,
-    });
-    await deleteMessage(message.ReceiptHandle);
-    return;
+  if (message.Body) {
+    const bodyBytes = Buffer.byteLength(message.Body, 'utf8');
+    if (bodyBytes > MAX_BODY_BYTES) {
+      logger.error('Event consumer: message body exceeds size cap, deleting', {
+        messageId: message.MessageId,
+        bodyBytes,
+        cap: MAX_BODY_BYTES,
+      });
+      await deleteMessage(message.ReceiptHandle);
+      return;
+    }
   }
   let parsed;
   try {
