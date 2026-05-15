@@ -785,6 +785,23 @@ function packBulkDeliveryComponents(qurlLinks) {
   return rows;
 }
 
+// Cap a string at `maxUtf16Units` UTF-16 code units (matching how
+// Discord's API measures `embed.author.name` and similar limits),
+// trimming a trailing lone high surrogate if the cap lands mid-pair
+// so the result is never an invalid UTF-16 sequence. Discord renders
+// a lone surrogate as tofu; the trim ensures a clean cut.
+function capUtf16Codepoints(s, maxUtf16Units) {
+  if (s.length <= maxUtf16Units) return s;
+  let truncated = s.slice(0, maxUtf16Units);
+  const lastCharCode = truncated.charCodeAt(truncated.length - 1);
+  // High-surrogate range (U+D800..U+DBFF): if the cap split a pair,
+  // drop the orphan so the result decodes cleanly.
+  if (lastCharCode >= 0xD800 && lastCharCode <= 0xDBFF) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
 // Composes the embed only (no button row). Split out so the bulk-path
 // dispatch in handleAddRecipients can build N embeds + N step-through
 // buttons + 1 trust button without round-tripping through
@@ -819,16 +836,19 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   // hostile input the strip exists to defend.
   //
   // Combined-length budget: 64 (sender cap) + 3 (` · `) + 64 (guild
-  // cap) = 131 codepoints — well under Discord's 256-char
-  // author.name limit. A future bump of the per-half cap past
-  // ~126 codepoints would push the combined value over that limit
-  // and the API would reject the embed; revisit the math here if
-  // the per-half cap changes.
+  // cap) = 131 codepoints. Discord's author.name limit is 256, but
+  // measured in UTF-16 code units (not codepoints), so a worst-case
+  // mix of 64 surrogate-pair emoji on each half is 64×2 + 3 + 64×2
+  // = 259 UTF-16 units — over the cap. Vanishingly rare in practice
+  // (would need both halves attacker-controlled and all-emoji), but
+  // the slice-and-trim below caps the final string at 256 UTF-16
+  // units codepoint-aware so the API never rejects the embed.
   const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
   const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
-  const authorName = safeGuildName
-    ? `${safeSenderPlain} · ${safeGuildName}`
-    : safeSenderPlain;
+  const authorName = capUtf16Codepoints(
+    safeGuildName ? `${safeSenderPlain} · ${safeGuildName}` : safeSenderPlain,
+    256,
+  );
 
   // Discord renders fields BELOW the description, so all lines (optional
   // personal message + expiry) must live in one setDescription block —
@@ -2374,6 +2394,13 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       // entry via .toJSON() — a pure read of internal state — so
       // reference sharing is safe. Saves N-1 EmbedBuilder allocations
       // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
+      // packBulkDeliveryComponents enforces 1 <= len <= 10 with
+      // fail-loud throws; the upstream guard at line 2372 above
+      // (`if (!links || links.length === 0)`) is what keeps us out
+      // of the lower-bound throw. If a future refactor splits this
+      // dispatch loop or drops that guard, the throw will surface
+      // here at the helper boundary — see packBulkDeliveryComponents
+      // docstring for the contract.
       const cappedLinks = links.slice(0, 10);
       const sharedEmbed = buildDeliveryEmbed({
         senderAlias,

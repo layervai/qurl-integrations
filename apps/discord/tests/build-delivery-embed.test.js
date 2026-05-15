@@ -579,6 +579,22 @@ describe('buildDeliveryPayload — author row provenance', () => {
     expect(capturedEmbeds[0]._author.name).toBe('Someone');
   });
 
+  // Worst-case UTF-16 budget: 64 codepoints per half, each a
+  // surrogate-pair emoji, would be 64×2 + 3 + 64×2 = 259 UTF-16
+  // units — over Discord's 256 cap. The capUtf16Codepoints guard
+  // truncates the assembled author.name codepoint-aware so the API
+  // never rejects the embed on this pathological combination.
+  it('caps combined author.name at 256 UTF-16 units (worst-case surrogate-pair emoji on both halves)', () => {
+    const allEmoji = '🎉'.repeat(64);  // 64 codepoints, 128 UTF-16 units
+    buildDeliveryPayload({ ...baseArgs, senderAlias: allEmoji, guildName: allEmoji });
+    const authorName = capturedEmbeds[0]._author.name;
+    // UTF-16 length must fit Discord's author.name cap.
+    expect(authorName.length).toBeLessThanOrEqual(256);
+    // Truncation is codepoint-aware: no lone high surrogate at the
+    // boundary (would render as tofu).
+    expect(authorName).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
+  });
+
   // Mirrors the senderAlias 64-codepoint cap. The same defensive upper
   // bound applies to the guild name — Discord caps guild names at 100
   // chars natively, but a forged interaction / future API shape change

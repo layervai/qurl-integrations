@@ -1839,6 +1839,15 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(payload.embeds).toHaveLength(2);
     // The optimization: same EmbedBuilder reference, not two copies.
     expect(payload.embeds[0]).toBe(payload.embeds[1]);
+    // Belt-and-braces: even if a future discord.js bump introduced a
+    // position-aware toJSON (some library serialize hooks consult
+    // internal counters), the serialized output must remain identical
+    // across the embeds[] entries — otherwise the recipient would see
+    // diverged author/footer/description across embeds that share the
+    // builder reference.
+    if (typeof payload.embeds[0].toJSON === 'function') {
+      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
+    }
   });
 
   // Locks the single-emission contract: a sendConfig with both file

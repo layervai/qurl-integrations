@@ -33,12 +33,13 @@ const RESOURCE_TYPES = {
 // brand page is the correct trust signal regardless of which host
 // served the link.
 //
-// TODO(branded-domain): DESTINATION_DOMAIN is a brand-default literal.
-// qurl-service already supports a `branded_domain` concept (tenant-
-// custom hosts on minted links — see qurl-service api.gen.go). Discord
-// doesn't consume that field today, but the moment it does, the footer
-// "opens qurl.link" becomes factually wrong while Step Through opens
-// e.g. `door.acme.com`. When qurl-integrations starts honoring
+// TODO(branded-domain) — tracked: layervai/qurl-integrations#383
+// DESTINATION_DOMAIN is a brand-default literal. qurl-service already
+// supports a `branded_domain` concept (tenant-custom hosts on minted
+// links — see qurl-service api.gen.go). Discord doesn't consume that
+// field today, but the moment it does, the footer "opens qurl.link"
+// becomes factually wrong while Step Through opens e.g.
+// `door.acme.com`. When qurl-integrations starts honoring
 // branded_domain in the minted-link response, derive the footer text
 // from link.qurlLink's host rather than this literal.
 const TRUST = {
