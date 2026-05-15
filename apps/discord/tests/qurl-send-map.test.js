@@ -6556,6 +6556,29 @@ describe('renderConfirmCardRows', () => {
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
   });
 
+  test('renderConfirmCardRows pluralizes the placeholder text correctly when QURL_SEND_MAX_RECIPIENTS clamps to 1', async () => {
+    // An operator dialing the per-tenant cap to 1 (allowed by the
+    // minPositive validator) would otherwise see "Pick up to 1
+    // users/roles" — wrong English. Singular branch keeps the
+    // placeholder grammatical at the only QSMR value where it matters.
+    const config = require('../src/config');
+    const origCap = config.QURL_SEND_MAX_RECIPIENTS;
+    config.QURL_SEND_MAX_RECIPIENTS = 1;
+    try {
+      const { MentionableSelectMenuBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT },
+      });
+      await handleQurlSend(int);
+      const builder = MentionableSelectMenuBuilder.mock.results[0].value;
+      expect(builder.setMaxValues).toHaveBeenCalledWith(1);
+      expect(builder.setPlaceholder).toHaveBeenCalledWith('Pick up to 1 user/role');
+    } finally {
+      config.QURL_SEND_MAX_RECIPIENTS = origCap;
+    }
+  });
+
   test('renderConfirmCardRows clamps maxValues to QURL_SEND_MAX_RECIPIENTS when env override is tighter than the per-pick cap', async () => {
     // With a tenant-configured QURL_SEND_MAX_RECIPIENTS below 25, the
     // three-way Math.min in renderConfirmCardRows must clamp the picker

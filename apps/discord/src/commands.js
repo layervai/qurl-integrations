@@ -3957,7 +3957,7 @@ function renderConfirmCardRows({
   if (mode === RECIPIENT_MODE_PICKER) {
     const picker = new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick up to ${maxValues} users/roles`)
+      .setPlaceholder(`Pick up to ${maxValues} ${maxValues === 1 ? 'user/role' : 'users/roles'}`)
       .setMinValues(1)
       .setMaxValues(maxValues);
     if (defaults.length > 0) {
