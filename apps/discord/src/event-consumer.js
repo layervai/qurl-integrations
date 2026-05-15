@@ -158,6 +158,14 @@ const SEEN_EVENT_ID_CAP = 100_000;
 // would never be read. delete-then-add is the recency-refresh idiom.
 const seenEventIds = new Set();
 
+// One-shot flag for the missing-event_id warning. The first time
+// the consumer observes an envelope without a valid event_id in a
+// process lifetime, we warn (visible at default log levels). Every
+// subsequent missing event_id is debug-only to keep signal:noise
+// sane — the first warning is the actionable alert; the rest are
+// the diagnostic trail. Reset by _resetStateForTest.
+let loggedMissingEventId = false;
+
 function recordSeen(eventId) {
   // Be precise about the LRU's contract — the producer publishes
   // string event_ids (format `<shardId>:<sequence>`). A non-string
@@ -333,16 +341,26 @@ async function processMessage(client, message) {
   if (typeof eventId !== 'string' || eventId.trim() === '') {
     // Telemetry blind spot: recordSeen short-circuits on a
     // non-string or whitespace-only event_id, so dup-detection
-    // won't see this message. Log at debug so ops can spot a
-    // producer-side regression where the envelope's event_id field
-    // starts arriving empty/whitespace/non-string (the dup-rate
-    // gauge would silently lie until the LRU is fixed at the
-    // producer).
-    logger.debug('Event consumer: envelope missing valid event_id; LRU dedup will not track', {
-      messageId: message.MessageId,
-      eventType,
-      eventIdType: typeof eventId,
-    });
+    // won't see this message. The first observation per process
+    // is logged at WARN so a producer-side regression surfaces at
+    // default log levels (debug-only would be invisible in prod
+    // until ops grepped); subsequent observations are debug-only
+    // to keep signal:noise sane. The first warn is the actionable
+    // alert.
+    if (!loggedMissingEventId) {
+      loggedMissingEventId = true;
+      logger.warn('Event consumer: envelope missing valid event_id; LRU dedup will not track (first observation; subsequent will log at debug)', {
+        messageId: message.MessageId,
+        eventType,
+        eventIdType: typeof eventId,
+      });
+    } else {
+      logger.debug('Event consumer: envelope missing valid event_id; LRU dedup will not track', {
+        messageId: message.MessageId,
+        eventType,
+        eventIdType: typeof eventId,
+      });
+    }
   }
   const isDup = recordSeen(eventId);
 
@@ -680,6 +698,7 @@ function _resetStateForTest() {
   receiveAbortController = null;
   sqsClient = null;
   seenEventIds.clear();
+  loggedMissingEventId = false;
 }
 
 module.exports = {
@@ -689,6 +708,13 @@ module.exports = {
     _setSqsClientForTest,
     _resetStateForTest,
     recordSeen,
+    // Live reference to the module-level Set — tests inspect .size,
+    // .has(), .keys() directly. _resetStateForTest calls .clear()
+    // on this same instance rather than reassigning, so the
+    // captured reference stays valid across resets. If a future
+    // cleanup ever swaps `.clear()` for `seenEventIds = new Set()`,
+    // this export will need to become a getter to avoid the test
+    // indirection silently breaking.
     seenEventIds,
     processMessage,
     pollOnce,

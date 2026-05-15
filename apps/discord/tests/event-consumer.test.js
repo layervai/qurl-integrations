@@ -307,25 +307,44 @@ describe('event-consumer: processMessage dispatch paths', () => {
     );
   });
 
-  test('missing event_id logs debug + still dispatches', async () => {
-    // Pins the contract that an INTERACTION_CREATE arriving without
-    // event_id (a producer-side regression) is dispatched normally
-    // but flagged in debug logs so ops can spot the dup-detection
-    // blind spot before the LRU's gauge silently lies.
+  test('missing event_id: first observation warns, subsequent log at debug', async () => {
+    // The first occurrence per process surfaces at WARN so a
+    // producer-side regression is visible at default log levels
+    // (debug-only would be invisible in prod). Subsequent
+    // observations are debug-only to keep signal:noise sane —
+    // the first warn is the actionable alert.
     sqsMock.on(DeleteMessageCommand).resolves({});
     const client = makeStubClient();
-    const message = makeMessage(
-      { eventType: 'INTERACTION_CREATE', data: { id: 'no-eid' } /* event_id missing */ },
-      { messageId: 'm-no-eid' },
+    const message1 = makeMessage(
+      { eventType: 'INTERACTION_CREATE', data: { id: 'no-eid-1' } /* event_id missing */ },
+      { messageId: 'm-no-eid-1' },
+    );
+    const message2 = makeMessage(
+      { eventType: 'INTERACTION_CREATE', data: { id: 'no-eid-2' } },
+      { messageId: 'm-no-eid-2', receiptHandle: 'rh-2' },
     );
 
-    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+    await withMockedSqs(async () => {
+      await eventConsumer._test.processMessage(client, message1);
+      await eventConsumer._test.processMessage(client, message2);
+    });
 
-    expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(1);
+    expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(2);
+    // First observation: warn.
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('envelope missing valid event_id'),
+      expect.objectContaining({ messageId: 'm-no-eid-1', eventType: 'INTERACTION_CREATE', eventIdType: 'undefined' }),
+    );
+    // Second observation: debug only.
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('envelope missing valid event_id'),
-      expect.objectContaining({ messageId: 'm-no-eid', eventType: 'INTERACTION_CREATE', eventIdType: 'undefined' }),
+      expect.objectContaining({ messageId: 'm-no-eid-2' }),
     );
+    // Warn fires exactly once across both events.
+    const warnCalls = logger.warn.mock.calls.filter(
+      ([msg]) => typeof msg === 'string' && msg.includes('envelope missing valid event_id'),
+    );
+    expect(warnCalls).toHaveLength(1);
   });
 
   test('seenEventIds not populated on malformed body or unknown eventType', async () => {
