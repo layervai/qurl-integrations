@@ -6735,6 +6735,41 @@ describe('renderConfirmCardRows', () => {
       // sender exclusion is inferred from voice-mode semantics.
       expect(lastCall.content).not.toMatch(/you not included/);
     });
+
+    test('forged voice-mode without voiceChannelId still renders the escape hatch (defensive)', () => {
+      // Production never pairs RECIPIENT_MODE_VOICE without voiceChannelId,
+      // but a forged or schema-drifted payload could. Without the
+      // defensive `voiceChannelId`-less branch in renderConfirmCardRows,
+      // such a payload would skip the escape-hatch branch entirely AND
+      // skip the @everyone entry branch (gated on PICKER), leaving the
+      // user with no path back to manual selection. Pin recovery.
+      const { MentionableSelectMenuBuilder, ButtonBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      ButtonBuilder.mockClear();
+      const interaction = {
+        guild: {
+          id: 'g-forged-voice', members: { cache: new Map() }, memberCount: 1,
+          channels: { cache: new Map() },
+        },
+        memberPermissions: { has: jest.fn(() => false) },
+      };
+      const { renderConfirmCardRows } = commands._test;
+      renderConfirmCardRows({
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,  // ← forged/drifted state
+        interaction,
+        recipientIds: ['100000000000000001'],
+        recipientMode: 'voice',
+      });
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
+    });
   });
 
   describe('everyone-mode layout (recipientMode:"everyone")', () => {
@@ -6826,40 +6861,6 @@ describe('renderConfirmCardRows', () => {
       ]);
     });
 
-    test('forged voice-mode without voiceChannelId still renders the escape hatch (defensive)', () => {
-      // Production never pairs RECIPIENT_MODE_VOICE without voiceChannelId,
-      // but a forged or schema-drifted payload could. Without the
-      // defensive `voiceChannelId`-less branch in renderConfirmCardRows,
-      // such a payload would skip the escape-hatch branch entirely AND
-      // skip the @everyone entry branch (gated on PICKER), leaving the
-      // user with no path back to manual selection. Pin recovery.
-      const { MentionableSelectMenuBuilder, ButtonBuilder } = require('discord.js');
-      MentionableSelectMenuBuilder.mockClear();
-      ButtonBuilder.mockClear();
-      const interaction = {
-        guild: {
-          id: 'g-forged-voice', members: { cache: new Map() }, memberCount: 1,
-          channels: { cache: new Map() },
-        },
-        memberPermissions: { has: jest.fn(() => false) },
-      };
-      const { renderConfirmCardRows } = commands._test;
-      renderConfirmCardRows({
-        sendDisabled: false,
-        expiresIn: '24h',
-        selfDestructSeconds: null,
-        personalMessage: null,
-        voiceChannelId: null,  // ← forged/drifted state
-        interaction,
-        recipientIds: ['100000000000000001'],
-        recipientMode: 'voice',
-      });
-      const customIds = ButtonBuilder.mock.results.map(
-        (r) => r.value.setCustomId.mock.calls[0]?.[0]
-      );
-      expect(customIds).toContain('qurl_confirm_pick_manual');
-      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
-    });
   });
 
   // ── @everyone button rendering ──

@@ -82,11 +82,15 @@
 //                                               // appeared but the caller
 //                                               // denied via the
 //                                               // `allowMassMention` opt
-//     massMentionExpanded:  <boolean>,          // true when @everyone
-//                                               // appeared AND was
-//                                               // expanded (allowed +
-//                                               // walked guild members).
-//                                               // Mutually exclusive
+//     massMentionExpanded:  <boolean>,          // true iff @everyone was
+//                                               // allowed AND the walk
+//                                               // actually added at least
+//                                               // one non-bot entry from
+//                                               // `members.cache`. False
+//                                               // when cache was cold,
+//                                               // all-bot, or cap-saturated
+//                                               // before the walk reached
+//                                               // it. Mutually exclusive
 //                                               // with massMentionDenied.
 //   }
 //
@@ -608,6 +612,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
+  let massMentionExpanded = false;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -645,6 +650,14 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         if (ids.size >= cap) break;
         if (isBotMember(member)) continue;
         consider(memberId);
+        // Set inside the walk (rather than deriving from
+        // `everyonePresent && allowMassMention` at the bottom) so the
+        // flag means "expansion actually ran and added at least one
+        // non-bot entry," not "expansion was permitted." Keeps the
+        // name honest against future short-circuits — cap exhausted
+        // by named mentions before this loop runs, empty cache, all-
+        // bot cache — that would otherwise leave the flag overstating.
+        massMentionExpanded = true;
       }
     }
   }
@@ -726,15 +739,16 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     });
   }
 
-  // `massMentionExpanded` mirrors the parser's internal
-  // `everyonePresent && allowMassMention` predicate — the condition
-  // under which the @everyone expansion ran above. Surfacing it lets
-  // callers route the slash-text "@everyone" path into RECIPIENT_MODE_
-  // EVERYONE without duplicating the regex-match-and-permission-check
-  // (or reaching past the parser to detect the `<@&{guildId}>` wire
-  // form). False when the user typed @everyone but lacked permission
-  // (the denied path lands on `massMentionDenied` instead).
-  const massMentionExpanded = everyonePresent && allowMassMention;
+  // `massMentionExpanded` was set inside the @everyone walk above
+  // (true iff at least one non-bot entry was actually added). Surfacing
+  // it lets callers route the slash-text "@everyone" path into
+  // RECIPIENT_MODE_EVERYONE without duplicating the regex-match-and-
+  // permission-check (or reaching past the parser to detect the
+  // `<@&{guildId}>` wire form). False when the user typed @everyone
+  // but lacked permission (the denied path lands on `massMentionDenied`
+  // instead) or when the cache was cold / cap-saturated by the time the
+  // walk reached it (caller's `valid.length` check still catches that
+  // downstream).
   return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
