@@ -4323,6 +4323,19 @@ async function handleQurlSlashSend(interaction, params) {
     // @everyone wins over voice auto-default" as documentation — a
     // future refactor that loosens either guard MUST keep this
     // precedence or the auto-default could shadow an explicit @-text.
+    //
+    // SENDER-PUSH DIVERGENCE: handleConfirmEveryone (the button-click
+    // path) defensively pushes `interaction.user` when the sender's
+    // row is missing from `members.cache` (shard-resume / partial-
+    // chunk race after prewarm). The text path here intentionally
+    // does NOT mirror that — `partitionRecipients` runs on the parser
+    // output upstream, which has already been prewarmed at line 4142.
+    // In the narrow race where the sender is missing post-prewarm,
+    // the text path yields `selfIncluded: false` while a click on the
+    // 📢 @everyone button would yield `selfIncluded: true`. Acceptable
+    // because the user explicitly typed `@everyone` (so they're aware
+    // of the recipient list at Send time), but documented so a future
+    // contributor pursuing strict click/text parity knows the lever.
     if (parsed.massMentionExpanded && valid.length > 0) {
       recipientMode = RECIPIENT_MODE_EVERYONE;
     } else if (recipientsOmitted && voiceChannelId) {
