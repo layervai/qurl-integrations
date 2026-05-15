@@ -1027,6 +1027,36 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
+  test('trackDispatch logs handler rejections (preserves error visibility)', async () => {
+    // Regression for cr feedback on PR #389: attaching `.finally()`
+    // in trackDispatch counts as a handler for Node's unhandled-
+    // rejection bookkeeping, so a rejection that pre-PR would have
+    // surfaced at `process.on('unhandledRejection', ...)` in
+    // src/index.js gets absorbed in the trailing `.catch`. Pin the
+    // contract that the catch logs at error so handler bugs still
+    // produce a CloudWatch signal.
+    const handlerPromise = Promise.reject(new Error('handler boom'));
+    // Pre-attach to absorb the rejection in the test runtime as a
+    // separate chain; trackDispatch's logging path is independent.
+    handlerPromise.catch(() => { /* absorbed */ });
+
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      eventConsumer.trackDispatch(handlerPromise);
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+
+    // Allow the .finally + .catch microtasks to flush.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Event consumer: dispatch handler rejected',
+      expect.objectContaining({ error: 'handler boom' }),
+    );
+  });
+
   test('pollOnce early-returns + backs off when in-flight at cap', async () => {
     // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
     // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let

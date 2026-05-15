@@ -258,6 +258,12 @@ let sqsClient = null;
 // case (10-message batches × ~5-10 batches before slowest
 // handler completes). Operator can override via env when prod
 // volume + slowness data is in hand.
+//
+// Captured at module load, not re-read per-poll: operators retuning
+// QURL_BOT_MAX_INFLIGHT_HANDLERS via SSM/task-def must redeploy for
+// the new value to take effect. Per-poll re-read would let a typo
+// in the env-update path silently change behavior without an audit
+// trail in the deploy log.
 const DEFAULT_MAX_INFLIGHT_HANDLERS = 100;
 const MAX_INFLIGHT_HANDLERS = (() => {
   const raw = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
@@ -520,18 +526,19 @@ function trackDispatch(maybePromise) {
   if (!isWorkerDispatch) return;
   if (!maybePromise || typeof maybePromise.then !== 'function') return;
   inFlightCount += 1;
-  // .finally on the original promise so we don't swallow rejections
-  // — the original chain still rejects, just with the decrement as a
-  // side effect. Wrap the decrement in a try/catch so a malformed
-  // promise can't leave the counter stuck at a high value.
   maybePromise.finally(() => {
     inFlightCount -= 1;
-  }).catch(() => {
-    // The decrement already happened in the finally callback; this
-    // catch is only here to absorb the rejection that flows through
-    // the chain so it doesn't surface as an unhandledRejection
-    // attributed to the consumer. The original .then() chain
-    // registered by the listener's caller still sees the rejection.
+  }).catch((err) => {
+    // Attaching `.finally()` above counts as a handler for Node's
+    // unhandled-rejection bookkeeping, so a rejection that pre-PR
+    // would have surfaced at `process.on('unhandledRejection', ...)`
+    // in src/index.js is now absorbed here. Log it explicitly so a
+    // failing handler still produces an error signal — otherwise the
+    // backpressure tracker would silently mask handler bugs.
+    logger.error('Event consumer: dispatch handler rejected', {
+      error: err?.message,
+      stack: err?.stack,
+    });
   });
 }
 
