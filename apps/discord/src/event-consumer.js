@@ -1084,7 +1084,11 @@ module.exports = {
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
     INFLIGHT_BACKOFF_MS,
-    DRAIN_DEADLINE_MS,
+    // DRAIN_DEADLINE_MS is mutable (so tests can shrink it), so
+    // expose as a getter — a snapshot-at-module-load export would
+    // silently read 3000 even after _setDrainDeadlineForTest(50)
+    // mutated the live value.
+    getDrainDeadlineMs: () => DRAIN_DEADLINE_MS,
     AT_CAP_PAUSE_WARN_MSG,
     AT_CAP_PAUSE_DEBUG_MSG,
     AT_CAP_RELEASED_INFO_MSG,
