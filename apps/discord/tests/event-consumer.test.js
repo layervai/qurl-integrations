@@ -58,10 +58,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   // Full reset of the consumer's module-level singleton state so
   // each test starts from a known shape. seenEventIds, sqsClient,
-  // running/stopping/loopPromise, receiveAbortController — all
-  // cleared. Without this, test ordering would matter (e.g., a
-  // future test before the start/stop round-trip case would
-  // observe whatever `running` was left at).
+  // running, loopPromise, stopController — all cleared. Without
+  // this, test ordering would matter (e.g., a future test before
+  // the start/stop round-trip case would observe whatever `running`
+  // was left at).
   eventConsumer._test._resetStateForTest();
 });
 
@@ -708,10 +708,11 @@ describe('event-consumer: abort silently exits pollLoop', () => {
     // shutdown would mask real failures.
     //
     // Strategy: mock throws AbortError every call; on the SECOND
-    // call we also fire-and-forget call stop() so stopping=true is
-    // set synchronously (stop() flips it before any await). pollLoop's
-    // next while-check exits cleanly. Total: 2 mock calls, 2 catches,
-    // both go through the silent continue branch.
+    // call we also fire-and-forget call stop() so the abort signal
+    // fires synchronously (stop() calls abort() before any await).
+    // pollLoop's next while-check sees signal.aborted and exits
+    // cleanly. Total: 2 mock calls, 2 catches, both go through the
+    // silent continue branch.
     const setIntervalSpy = jest.spyOn(global, 'setInterval');
     const baselineIntervals = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50).length;
 
@@ -719,10 +720,10 @@ describe('event-consumer: abort silently exits pollLoop', () => {
     sqsMock.on(ReceiveMessageCommand).callsFake(() => {
       receiveCount += 1;
       if (receiveCount === 2) {
-        // Fire-and-forget; stop() sets stopping=true synchronously
-        // before any await, so by the time pollLoop's catch handles
-        // this iteration's AbortError and re-checks while, the
-        // loop exits.
+        // Fire-and-forget; stop() calls abort() synchronously before
+        // any await, so by the time pollLoop's catch handles this
+        // iteration's AbortError and re-checks while, signal.aborted
+        // is true and the loop exits.
         eventConsumer.stop();
       }
       const err = new Error('Request aborted');
@@ -1036,7 +1037,7 @@ describe('event-consumer: start/stop lifecycle', () => {
 
   test('start() + stop() round-trip; second start logs warn (idempotent)', async () => {
     // ReceiveMessage returns empty immediately so pollLoop iterates
-    // quickly between the stopping flag flips.
+    // quickly between start() and stop().
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
     const client = makeStubClient();
@@ -1051,11 +1052,11 @@ describe('event-consumer: start/stop lifecycle', () => {
     // No event-loop yield between start() and stop() here on purpose.
     // start() returns the pollLoop's promise synchronously but pollLoop's
     // body doesn't begin executing until the microtask queue runs.
-    // stop() flips stopping=true synchronously, THEN awaits loopPromise.
-    // By the time pollLoop's body finally runs in the microtask queue
-    // after stop()'s await, stopping is already true and the
-    // while-check exits immediately — no pollOnce iteration, no
-    // accumulating commandCalls in the SDK mock. The behavior under
+    // stop() calls stopController.abort() synchronously, THEN awaits
+    // loopPromise. By the time pollLoop's body finally runs in the
+    // microtask queue after stop()'s await, signal.aborted is already
+    // true and the while-check exits immediately — no pollOnce
+    // iteration, no accumulating commandCalls in the SDK mock. The behavior under
     // test is "start + double-start warn + stop idempotent", not the
     // full poll cycle (that's covered by other tests in this file).
     await eventConsumer.stop();

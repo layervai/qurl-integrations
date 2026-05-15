@@ -9,7 +9,7 @@
 // the gateway role uses today.
 //
 // Process-singleton: every piece of state in this module — the poll
-// loop's running/stopping flags, the AbortController, the SQS
+// loop's running flag, the lifetime AbortController, the SQS
 // client, the dedup LRU — lives in module-level scope. There is at
 // most one consumer per process by design.
 // A future caller that tries to `start()` two consumers in one
@@ -337,8 +337,8 @@ validateInflightCap(MAX_INFLIGHT_HANDLERS);
 // Brief pause when at-cap. Short enough that handlers draining
 // quickly resume normal polling; long enough that we don't burn
 // CPU re-checking the cap on every microtask. abortableSleep
-// honors `stopping` so a SIGTERM during a backpressure pause still
-// exits inside the graceful-shutdown budget.
+// honors the abort signal so a SIGTERM during a backpressure pause
+// still exits inside the graceful-shutdown budget.
 const INFLIGHT_BACKOFF_MS = 100;
 
 // Maximum time stop() waits for in-flight handler promises to
@@ -848,9 +848,9 @@ function isAbortError(err) {
 // be partly undone.
 //
 // Event-driven (no polling tick): stopController.signal's 'abort'
-// event fires synchronously on stop()'s abort() call, so a stopping
-// shutdown wakes the sleep within a microtask rather than the 50ms
-// polling interval the previous version used. The setTimeout is
+// event fires synchronously on stop()'s abort() call, so an
+// in-flight shutdown wakes the sleep within a microtask rather than
+// the 50ms polling interval the previous version used. The setTimeout is
 // cleared on the abort path so it doesn't fire spuriously after
 // resolution.
 //
@@ -986,18 +986,20 @@ function start(client) {
  * graceful-shutdown budget in `gracefulShutdown` (index.js).
  */
 async function stop() {
-  // Idempotent guards: two concurrent stop() callers (e.g., SIGTERM
-  // racing an uncaughtException, both routing through
-  // gracefulShutdown) both find !running false and the
-  // already-aborted check true, so each returns without double-
-  // running the drain. Note: this is "abort + early-return is
-  // idempotent," NOT a hard single-stopper lock — if two callers
-  // both pass the gate in the same tick (impossible today since
-  // gracefulShutdown only calls stop() once), both would run drain
-  // and log "drain complete." The `!stopController` check defends
-  // a theoretical state mismatch (running=true with controller=null
-  // is unreachable via start(), but matters under hot-reload or a
-  // _resetStateForTest call mid-run).
+  // Idempotent guards. The first caller through passes all three
+  // checks; the second caller (e.g., SIGTERM racing an
+  // uncaughtException, both routing through gracefulShutdown) hits
+  // either !running (if it arrives after the first cleared running
+  // below) or signal.aborted (if it arrives after abort() fired) and
+  // short-circuits. Either branch is sufficient — the OR is
+  // belt-and-suspenders against ordering across the await below.
+  // This is NOT a hard single-stopper lock: two callers passing the
+  // gate in the same synchronous tick (impossible today since
+  // gracefulShutdown only calls stop() once) would both proceed.
+  // The `!stopController` middle check defends a theoretical state
+  // mismatch (running=true with controller=null is unreachable via
+  // start(), but matters under hot-reload or a _resetStateForTest
+  // call mid-run).
   if (!running || !stopController || stopController.signal.aborted) return;
   // Single abort() call wakes:
   //   1. The in-flight ReceiveMessage long-poll (SDK consumes the
@@ -1195,10 +1197,10 @@ module.exports = {
     // actually crashing the loop. CAVEAT: if the test already
     // called start(), the REAL pollLoop is still running in the
     // background — overwriting the promise reference here doesn't
-    // halt it. Tests relying on this helper should either rely on
-    // `stopping=true` + `abort()` to retire the real loop within
-    // their assertions, or accept that `_resetStateForTest` in
-    // beforeEach is the cleanup point. `_resetStateForTest` itself
+    // halt it. Tests relying on this helper should either call
+    // stop() (which aborts the signal and retires the real loop)
+    // within their assertions, or accept that `_resetStateForTest`
+    // in beforeEach is the cleanup point. `_resetStateForTest` itself
     // sets loopPromise back to null.
     _setLoopPromiseForTest: (p) => { loopPromise = p; },
   },
