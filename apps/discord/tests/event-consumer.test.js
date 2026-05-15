@@ -54,9 +54,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   // Full reset of the consumer's module-level singleton state so
   // each test starts from a known shape. seenEventIds, sqsClient,
-  // running/stopping/loopPromise, receiveAbortController, inflight
-  // — all cleared. Without this, test ordering would matter (e.g.,
-  // a future test before the start/stop round-trip case would
+  // running/stopping/loopPromise, receiveAbortController — all
+  // cleared. Without this, test ordering would matter (e.g., a
+  // future test before the start/stop round-trip case would
   // observe whatever `running` was left at).
   eventConsumer._test._resetStateForTest();
 });
@@ -385,6 +385,45 @@ describe('event-consumer: pollOnce', () => {
   });
 });
 
+describe('event-consumer: pollLoop error backoff', () => {
+  test('pollLoop catches ReceiveMessage errors, logs, sleeps, then continues', async () => {
+    // Make the first ReceiveMessage call throw; the second + onward
+    // resolve empty. pollLoop's catch should log + backoff (with
+    // abortableSleep) + continue. The test asserts the error log
+    // fires and pollLoop doesn't propagate (i.e., loopPromise
+    // resolves cleanly after stop()).
+    let receiveCount = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receiveCount += 1;
+      if (receiveCount === 1) throw new Error('AWS throttling');
+      return { Messages: [] };
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    eventConsumer.start(client);
+    // Yield long enough for at least one iteration past the throw.
+    // The throw is sync (from callsFake), so the catch fires
+    // immediately, then abortableSleep(1000) parks the loop.
+    // setImmediate is enough to land in the sleep.
+    await new Promise((r) => setImmediate(r));
+
+    // stop() should pre-empt the abortableSleep via the `stopping`
+    // flag check and return promptly.
+    const startTime = Date.now();
+    await eventConsumer.stop();
+    const elapsedMs = Date.now() - startTime;
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('poll iteration failed'),
+      expect.objectContaining({ error: 'AWS throttling' }),
+    );
+    // Well under the 1s POLL_ERROR_BACKOFF_MS — confirms
+    // abortableSleep honored the stopping flag.
+    expect(elapsedMs).toBeLessThan(500);
+  });
+});
+
 describe('event-consumer: start/stop lifecycle', () => {
   // The top-level jest.mock('../src/config', ...) returns a literal
   // object that's hoisted into the module cache. Mutating its fields
@@ -418,17 +457,20 @@ describe('event-consumer: start/stop lifecycle', () => {
     await expect(eventConsumer.stop()).resolves.toBeUndefined();
   });
 
-  test('isAbortError recognizes AbortError name + DOMException variants', () => {
+  test('isAbortError recognizes AbortError shapes but NOT TimeoutError', () => {
     const { isAbortError } = eventConsumer._test;
     expect(isAbortError(null)).toBe(false);
     expect(isAbortError(undefined)).toBe(false);
     expect(isAbortError(new Error('boom'))).toBe(false);
     const e1 = new Error('aborted'); e1.name = 'AbortError';
     expect(isAbortError(e1)).toBe(true);
-    const e2 = new Error('timeout'); e2.name = 'TimeoutError';
+    const e2 = new Error('aborted'); e2.code = 'AbortError';
     expect(isAbortError(e2)).toBe(true);
-    const e3 = new Error('aborted'); e3.code = 'AbortError';
-    expect(isAbortError(e3)).toBe(true);
+    // TimeoutError is the SDK's own request-timeout, NOT our abort.
+    // Must land in the error-backoff path so flaky AWS endpoints
+    // surface in logs + backoff instead of spinning silently.
+    const e3 = new Error('timeout'); e3.name = 'TimeoutError';
+    expect(isAbortError(e3)).toBe(false);
   });
 
   test('pollOnce sets receiveAbortController; stop() aborts it', async () => {

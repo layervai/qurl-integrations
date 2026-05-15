@@ -10,8 +10,8 @@
 //
 // Process-singleton: every piece of state in this module — the poll
 // loop's running/stopping flags, the AbortController, the SQS
-// client, the in-flight Set, the dedup LRU — lives in module-level
-// scope. There is at most one consumer per process by design.
+// client, the dedup LRU — lives in module-level scope. There is at
+// most one consumer per process by design.
 // A future caller that tries to `start()` two consumers in one
 // process will hit the second-start warn in `start()` and the
 // duplicate poll won't take. If multi-consumer is ever needed,
@@ -252,7 +252,7 @@ async function processMessage(client, message) {
     return;
   }
 
-  const { eventType, data, event_id: eventId, shardId } = parsed;
+  const { eventType, data, event_id: eventId } = parsed;
 
   if (eventType !== 'INTERACTION_CREATE') {
     // Single-event-type today; PR 12+ may add MESSAGE_CREATE,
@@ -268,14 +268,17 @@ async function processMessage(client, message) {
 
   const isDup = recordSeen(eventId);
   if (isDup) {
-    // Telemetry-only: we still process the message because at-least-
-    // once delivery means a "dup" might actually be the first real
-    // attempt that an earlier worker received but didn't ACK.
-    // Correctness is owned by Discord's interaction-token uniqueness
-    // and OCC at the flow-state layer.
+    // Debug log only — at-least-once delivery means a "dup" might
+    // actually be the first real attempt that an earlier worker
+    // received but didn't ACK, so we still process. Correctness is
+    // owned by Discord's interaction-token uniqueness and OCC at
+    // the flow-state layer. If ops wants an aggregatable dup-rate
+    // metric, add a `qurl_bot_event_dup_total{shardId}` counter
+    // alongside this log (reservation slot for the observability
+    // Phase 1.0 follow-on PR).
     logger.debug('Event consumer: event_id seen recently', {
       eventId,
-      shardId,
+      shardId: parsed.shardId,
     });
   }
 
@@ -349,12 +352,44 @@ async function pollOnce(client) {
 }
 
 // AbortController surfaces aborted requests with err.name === 'AbortError'
-// at the AWS SDK layer. Recognize the family of names the SDK uses
-// (AbortError + the underlying DOMException name) so a stop()-triggered
-// abort doesn't get logged as a real failure or trigger the error backoff.
+// at the AWS SDK layer; some runtimes also expose the same condition
+// via err.code. Recognize both shapes so a stop()-triggered abort
+// doesn't get logged as a real failure or trigger the error backoff.
+// Deliberately does NOT match err.name === 'TimeoutError': that's the
+// SDK's own request-timeout, NOT our abort. A sustained AWS-side
+// flaky endpoint that keeps tripping client-side timeouts MUST land
+// in the error-backoff path so an operator sees the log line and the
+// loop doesn't spin without a backoff.
 function isAbortError(err) {
   if (!err) return false;
-  return err.name === 'AbortError' || err.name === 'TimeoutError' || err.code === 'AbortError';
+  return err.name === 'AbortError' || err.code === 'AbortError';
+}
+
+// Sleep that resolves either when the timeout fires OR when stop()
+// flips `stopping` true. Without the early-out, a stop() call during
+// the error-backoff would block for the full POLL_ERROR_BACKOFF_MS
+// before the while-check exits — on top of the 10s graceful-shutdown
+// budget, the abort-the-receive savings would be partly undone.
+function abortableSleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    // stop() doesn't expose a Promise we can await; poll the
+    // `stopping` flag at a coarse interval so the sleep returns
+    // promptly when shutdown lands. 50 ms is fine — well under the
+    // 1 s POLL_ERROR_BACKOFF_MS and well above the cost of a
+    // setInterval tick.
+    const check = setInterval(() => {
+      if (stopping) {
+        clearTimeout(t);
+        clearInterval(check);
+        resolve();
+      }
+    }, 50);
+    // .unref()ed so a stray timer doesn't pin the event loop if
+    // the loop exits via a different path mid-sleep.
+    t.unref?.();
+    check.unref?.();
+  });
 }
 
 async function pollLoop(client) {
@@ -374,7 +409,7 @@ async function pollLoop(client) {
       // Promise.all wrapper, so reaching here means the *receive*
       // itself failed.
       logger.error('Event consumer: poll iteration failed', { error: err.message });
-      await new Promise(r => setTimeout(r, POLL_ERROR_BACKOFF_MS));
+      await abortableSleep(POLL_ERROR_BACKOFF_MS);
     }
   }
 }
