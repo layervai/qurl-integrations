@@ -314,17 +314,19 @@ describe('discord module', () => {
   });
 
   describe('sendDM', () => {
-    it('sends DM and returns true', async () => {
-      const mockUser = { send: jest.fn().mockResolvedValue(true) };
+    it('sends DM and returns ok with channel + message ids', async () => {
+      const mockUser = {
+        send: jest.fn().mockResolvedValue({ id: 'm-1', channelId: 'c-1' }),
+      };
       mockClient.users.fetch.mockResolvedValue(mockUser);
       const result = await discord.sendDM('u1', 'Hello');
-      expect(result).toBe(true);
+      expect(result).toEqual({ ok: true, channelId: 'c-1', messageId: 'm-1' });
     });
 
-    it('returns false on error', async () => {
+    it('returns { ok: false } on error', async () => {
       mockClient.users.fetch.mockRejectedValue(new Error('fail'));
       const result = await discord.sendDM('u2', 'Hello');
-      expect(result).toBe(false);
+      expect(result).toEqual({ ok: false });
     });
   });
 

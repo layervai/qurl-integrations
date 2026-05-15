@@ -879,16 +879,20 @@ async function postWeeklyDigest() {
   }
 }
 
-// Send DM to user
+// Returns `{ ok, channelId, messageId }`. The refs feed the /qURL
+// revoke path (see buildRevokedDMPayload + editDM in discord-rest.js)
+// so it can edit the recipient's DM in place after a successful
+// revoke. Fire-and-forget callers (welcome DMs, OAuth callbacks)
+// can keep awaiting and discarding the result.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
-    await user.send(message);
+    const sent = await user.send(message);
     logger.debug('Sent DM', { discordId });
-    return true;
+    return { ok: true, channelId: sent.channelId, messageId: sent.id };
   } catch (error) {
     logger.warn(`Failed to DM user ${discordId}`, { error: error.message });
-    return false;
+    return { ok: false };
   }
 }
 

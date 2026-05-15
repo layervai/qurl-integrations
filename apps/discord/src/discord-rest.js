@@ -32,10 +32,6 @@ const { Routes } = require('discord-api-types/v10');
 const { client } = require('./discord');
 const logger = require('./logger');
 
-// Shared instance — same object as `require('./discord').client.rest`.
-// Re-exported below for tests + potential direct use.
-const rest = client.rest;
-
 /**
  * Send a direct message to a Discord user via REST (no Gateway).
  *
@@ -44,10 +40,12 @@ const rest = client.rest;
  *      channel, returns { id }.
  *   2. POST /channels/:id/messages → posts the message body.
  *
- * Returns `{ ok: true, channelId }` on success, `{ ok: false, error }`
- * on failure. Callers log/branch on `.ok` rather than letting
- * exceptions propagate — matches the ergonomics of the legacy
- * gateway-based `sendDM` in `discord.js`.
+ * Returns `{ ok: true, channelId, messageId }` on success,
+ * `{ ok: false, error }` on failure. Callers log/branch on `.ok` rather
+ * than letting exceptions propagate — matches the ergonomics of the
+ * legacy gateway-based `sendDM` in `discord.js`. `messageId` is captured
+ * so the /qURL revoke path can edit the recipient's DM in place after a
+ * successful revoke.
  *
  * @param {string} userId — Discord snowflake.
  * @param {object} message — discord.js-compatible message payload
@@ -62,13 +60,13 @@ const rest = client.rest;
 
 async function sendDM(userId, message) {
   try {
-    const channel = await rest.post(Routes.userChannels(), {
+    const channel = await client.rest.post(Routes.userChannels(), {
       body: { recipient_id: userId },
     });
-    await rest.post(Routes.channelMessages(channel.id), {
+    const sent = await client.rest.post(Routes.channelMessages(channel.id), {
       body: message,
     });
-    return { ok: true, channelId: channel.id };
+    return { ok: true, channelId: channel.id, messageId: sent.id };
   } catch (err) {
     // Discord returns HTTP 403 for several recipient-side reasons:
     // DMs disabled, the bot was blocked, server-level DM restrictions,
@@ -88,6 +86,85 @@ async function sendDM(userId, message) {
   }
 }
 
+// Discord API codes that are operational outcomes for a DM edit —
+// recipient deleted the message, blocked the bot, closed the channel,
+// the bot was kicked from a shared guild. Surface as
+// `{ ok: false, expected: true }` at info level so they don't pollute
+// oncall signal.
+//
+// Gated on the API code (not bare HTTP status) on purpose: a 403 or
+// 404 WITHOUT one of these codes is suspicious — examples include a
+// revoked bot token mid-flight (403 with no JSON body), a routing
+// proxy returning a synthetic 404, or a Discord-side bug. Logging
+// those at warn keeps the unknowns visible. New expected codes belong
+// here, not in the predicate.
+// Codes plus human-readable descriptions. The description lands in the
+// info-level log when it matches, so a future log search for an
+// unexpected spike (e.g., 50007 on PATCH — not observed today) reads
+// the cause directly rather than requiring an external code lookup.
+const DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS = new Map([
+  [10003, 'Unknown Channel — DM channel deleted'],
+  [10008, 'Unknown Message — recipient deleted the DM'],
+  [50001, 'Missing Access — bot kicked / lost shared guild'],
+  // 50007 is observed at POST /messages time (new DM rejected), not
+  // typically at PATCH on an existing message in an already-open DM
+  // channel. Kept defensively — if it ever fires on PATCH it's still
+  // a recipient-side state change, not an oncall surprise. The
+  // description tag in the log makes the spike greppable for #369.
+  [50007, 'Cannot send messages to this user — DMs disabled / blocked'],
+]);
+
+/**
+ * Edit a previously-sent DM via REST (no Gateway). Single PATCH —
+ * no `channels.fetch` + `messages.fetch` preamble that would be 2
+ * extra round-trips on a cold cache.
+ *
+ * CONTRACT: Discord's PATCH /channels/:cid/messages/:mid does NOT
+ * clear unset fields. Callers MUST pass `components: []` explicitly
+ * to strip a previous Link button. See buildRevokedDMPayload in
+ * commands.js for the contract-bearing payload.
+ *
+ * No retry on transient 5xx / 429. `client.rest` handles 429 backoff
+ * automatically, but a 502/503 from Discord during a revoke fan-out
+ * would leave the original Step Through button live in that
+ * recipient's DM after the underlying qURL is already DELETEd. The
+ * link button now 404s — i.e. the same UX that existed before this
+ * feature, just on whatever subset of recipients hit the transient.
+ * Accept as a known limitation; the revoke success/total counts are
+ * not affected (those track the DELETE, not the edit).
+ */
+async function editDM(channelId, messageId, message) {
+  try {
+    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
+    return { ok: true };
+  } catch (error) {
+    // Map.get(undefined) returns undefined, which falls through to the
+    // unexpected (warn-level) branch. Intentional: an error with no
+    // API code (e.g., revoked-token 403 with no JSON body, synthetic
+    // proxy 404) is exactly the kind of surprise oncall should see.
+    const expectedDescription = DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS.get(error.code);
+    const expected = expectedDescription !== undefined;
+    const level = expected ? 'info' : 'warn';
+    logger[level]('Failed to edit DM', {
+      channelId, messageId, status: error.status, code: error.code,
+      errorMessage: error.message,
+      // Present only on the expected branch — names which entry in
+      // DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS matched. Keeps a future
+      // spike in any single expected code (e.g., 50007 on PATCH)
+      // greppable from CloudWatch without an external lookup.
+      ...(expected && { expectedReason: expectedDescription }),
+    });
+    // `code` and `reason` exposed on the return so callers' rolled-up
+    // logs can carry the same diagnostic without re-grepping the per-
+    // edit log line. `code` is undefined for non-Discord-shape errors;
+    // `reason` is undefined unless the code matched the expected set.
+    // Currently unread by the revoke-loop caller (it consumes only
+    // `expected` via the re-thrown error) — landing pad for the
+    // dashboard work tracked in #368 / #370 / #372.
+    return { ok: false, expected, code: error.code, reason: expectedDescription };
+  }
+}
+
 /**
  * Add a role to a guild member via REST (no Gateway).
  * Idempotent on the Discord side — re-adding an existing role is
@@ -95,7 +172,7 @@ async function sendDM(userId, message) {
  */
 async function addRoleToMember(guildId, userId, roleId) {
   try {
-    await rest.put(Routes.guildMemberRole(guildId, userId, roleId));
+    await client.rest.put(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('addRoleToMember via REST failed', {
@@ -110,7 +187,7 @@ async function addRoleToMember(guildId, userId, roleId) {
  */
 async function removeRoleFromMember(guildId, userId, roleId) {
   try {
-    await rest.delete(Routes.guildMemberRole(guildId, userId, roleId));
+    await client.rest.delete(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('removeRoleFromMember via REST failed', {
@@ -122,11 +199,16 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 
 // TODO(pr-4d): migrate routes/oauth.js + routes/webhooks.js to call
 // these helpers instead of the gateway-cache helpers in src/discord.js.
-// Today the helpers below are unused production code — they're the
-// landing pads for the route migration after this PR ships.
+// `editDM` is consumed by commands.js's revoke path; `sendDM` /
+// `addRoleToMember` / `removeRoleFromMember` are landing pads for the
+// route migration.
+// Helpers read `client.rest.X` directly (rather than capturing
+// `client.rest` at module load) so partial test mocks of
+// `../src/discord` don't crash require-time. No production consumer
+// needs a direct `rest` reference today.
 module.exports = {
-  rest,
   sendDM,
+  editDM,
   addRoleToMember,
   removeRoleFromMember,
 };
