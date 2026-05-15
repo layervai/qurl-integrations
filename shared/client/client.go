@@ -185,13 +185,27 @@ type AccessPolicy struct {
 }
 
 // CreateInput is the input for creating a qURL.
+//
+// Either [CreateInput.TargetURL] or [CreateInput.ResourceID] must be
+// set, never both — the qURL API rejects the mutually-exclusive shape
+// with the `mutually_exclusive_fields` error code. `omitempty` on
+// `TargetURL` keeps the wire shape compatible with the server's
+// "treat empty string as absent" accommodation (alias-only mints go
+// out as `{"resource_id":"r_..."}`).
 type CreateInput struct {
-	TargetURL    string        `json:"target_url"`
+	TargetURL    string        `json:"target_url,omitempty"`
+	ResourceID   string        `json:"resource_id,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	ExpiresIn    string        `json:"expires_in,omitempty"`
 	OneTimeUse   bool          `json:"one_time_use,omitempty"`
 	MaxSessions  int           `json:"max_sessions,omitempty"`
 	AccessPolicy *AccessPolicy `json:"access_policy,omitempty"`
+	// Reason is forwarded to the audit log when set (e.g. an
+	// operator-supplied "for incident #123" annotation from the
+	// `/qurl get $alias reason:"…"` slash-command flag). The server
+	// writes this to the audit row only; it is not persisted on the
+	// resulting qURL.
+	Reason string `json:"reason,omitempty"`
 
 	// IdempotencyKey, when non-empty, is sent as the Idempotency-Key
 	// request header so the API dedupes retried writes. See
@@ -413,6 +427,40 @@ func (c *Client) MintLink(ctx context.Context, id string) (*MintOutput, error) {
 
 	var out MintOutput
 	if _, err := c.do(req, &out, "POST /v1/qurls/:id/mint_link"); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// --- Resources (alias-bound infra targets) ---
+
+// Resource is the payload returned by `GET /v1/resources/by-alias/:alias`.
+// A resource is the alias-bound target a qURL points at — either a
+// URL (legacy) or a tunnel resource_id (alias-only world). The Slack
+// `/qurl get $alias` flow resolves the alias to a resource ID before
+// calling Create against the qURL service.
+type Resource struct {
+	ResourceID string    `json:"resource_id"`
+	Alias      string    `json:"alias,omitempty"`
+	OwnerID    string    `json:"owner_id,omitempty"`
+	TargetURL  string    `json:"target_url,omitempty"`
+	Type       string    `json:"type,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+}
+
+// GetResourceByAlias resolves an alias name (no `$` sigil) to its
+// owner-scoped Resource. Returns an [*APIError] with status 404 when
+// the alias is unbound — callers route that to a friendly Slack
+// `:warning:` message rather than a stack-trace. This call uses the
+// customer API key (qurl:read scope).
+func (c *Client) GetResourceByAlias(ctx context.Context, alias string) (*Resource, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/resources/by-alias/"+url.PathEscape(alias), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	var out Resource
+	if _, err := c.do(req, &out, "GET /v1/resources/by-alias/:alias"); err != nil {
 		return nil, err
 	}
 	return &out, nil
