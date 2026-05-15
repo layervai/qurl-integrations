@@ -85,19 +85,24 @@
 // TODO(infra-publisher-set)` from any infra-side change surfaces
 // this requirement.
 //
-// No backpressure between the consumer and detached handlers: the
-// poll loop keeps pulling 10-message batches as long as the queue
-// has work, but `handleCommand` / `handleFlowInteraction` run
-// detached after the synchronous emit. Under a bursty arrival
-// pattern with slow downstream DDB/REST work, in-flight handler
-// promises accumulate without an upper bound — risking memory
-// pressure if a sustained backlog grows faster than handlers
-// drain. Today's volume bounds (invite-only beta, ~thousands of
-// guilds) make this comfortably theoretical; tracked as an
-// operational concern to revisit before flag-flip in PR 10. If
-// in-flight handler count needs to be capped, a semaphore around
-// `pollOnce` (max N concurrent dispatches before the next receive)
-// is the natural shape. See #388 for the follow-up.
+// Backpressure: the poll loop tracks in-flight detached handlers
+// and pauses receives when `inFlightCount >= MAX_INFLIGHT_HANDLERS`
+// (env-overridable; see QURL_BOT_MAX_INFLIGHT_HANDLERS). Without
+// this, under a bursty arrival pattern with slow downstream
+// DDB/REST work, handler promises would accumulate without bound,
+// risking memory pressure if the backlog grows faster than handlers
+// drain. The cap is the safety net before the worker tier flag-flip
+// in PR 10.
+//
+// How tracking works without coupling to handler internals: the
+// consumer sets `isWorkerDispatch = true` synchronously around the
+// `client.actions.InteractionCreate.handle(data)` call. The listener
+// in src/index.js calls `eventConsumer.trackDispatch(result)` on
+// every dispatch; trackDispatch checks the flag and only registers
+// the promise's settle handler when the dispatch is consumer-driven
+// (worker tier), NOT when it's gateway-WS-driven. The increment
+// runs inside the synchronous emit window; the decrement fires
+// whenever the dispatch promise settles, however much later.
 
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
@@ -220,17 +225,18 @@ function recordSeen(eventId) {
 // What stop() does NOT await: the async handlers registered on
 // `interactionCreate` (handleCommand / handleFlowInteraction) run
 // detached after the synchronous `client.actions.InteractionCreate.handle`
-// emit. Their promises aren't captured anywhere we can await. A
-// handler still mid-DDB-write when SIGTERM lands could race
-// gracefulShutdown's eventual `db.close()` — same race the
-// pre-existing in-process gateway path has, since the gateway also
-// emits + runs detached. Not worse here than today.
+// emit. The backpressure tracker (trackDispatch / inFlightCount)
+// CAPTURES those promises for bounding-the-cap purposes but stop()
+// doesn't await them — graceful-shutdown's 10s budget would be
+// blown by a long-running DM-fan-out handler. A handler still
+// mid-DDB-write when SIGTERM lands could race gracefulShutdown's
+// eventual `db.close()` — same race the pre-existing in-process
+// gateway path has, since the gateway also emits + runs detached.
 //
 // If a tighter "drain handlers before db close" guarantee is ever
-// needed, options are: (a) capture handler promises via a WeakMap
-// registry the listener populates and the consumer reads; (b) call
-// the dispatcher functions directly instead of going through the
-// emit path. Both are PR-10-or-later refactors.
+// needed, the trackDispatch registry already has the promises;
+// stop() could `await Promise.allSettled([...inFlightPromises])`
+// with its own deadline cap (e.g. 3s). Deferred until needed.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -244,6 +250,50 @@ let stopping = false;
 let loopPromise = null;
 let receiveAbortController = null;
 let sqsClient = null;
+
+// Backpressure cap (see module header). pollOnce early-returns
+// when inFlightCount >= MAX_INFLIGHT_HANDLERS and waits
+// INFLIGHT_BACKOFF_MS for the count to drain before re-polling.
+// Default of 100 sized for the realistic invite-only-beta worst
+// case (10-message batches × ~5-10 batches before slowest
+// handler completes). Operator can override via env when prod
+// volume + slowness data is in hand.
+const DEFAULT_MAX_INFLIGHT_HANDLERS = 100;
+const MAX_INFLIGHT_HANDLERS = (() => {
+  const raw = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+  if (!raw) return DEFAULT_MAX_INFLIGHT_HANDLERS;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    // logger isn't loaded this early in module init; console.warn
+    // for visibility at boot, then fall back to the default.
+    console.warn(
+      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${JSON.stringify(raw)} rejected ` +
+      `(must be a positive integer); using default ${DEFAULT_MAX_INFLIGHT_HANDLERS}.`,
+    );
+    return DEFAULT_MAX_INFLIGHT_HANDLERS;
+  }
+  return parsed;
+})();
+
+// Brief pause when at-cap. Short enough that handlers draining
+// quickly resume normal polling; long enough that we don't burn
+// CPU re-checking the cap on every microtask. abortableSleep
+// honors `stopping` so a SIGTERM during a backpressure pause still
+// exits inside the graceful-shutdown budget.
+const INFLIGHT_BACKOFF_MS = 100;
+
+// In-flight handler count (incremented in trackDispatch when a
+// consumer-driven dispatch's promise is registered; decremented
+// when that promise settles). isWorkerDispatch is the per-emit
+// gate that distinguishes consumer-driven dispatches (which we
+// want to count) from gateway-WS-driven dispatches in combined
+// mode (which we don't — the gateway tier doesn't backpressure
+// against itself). The flag is set true synchronously around
+// `client.actions.InteractionCreate.handle(data)` in processMessage
+// and cleared in the finally; the listener's emit fires inside that
+// window because EventEmitter.emit is synchronous.
+let inFlightCount = 0;
+let isWorkerDispatch = false;
 
 // Hook for unit tests: lets the test inject a mock SQSClient
 // (aws-sdk-client-mock'd in tests/event-consumer.test.js) without
@@ -409,6 +459,13 @@ async function processMessage(client, message) {
   // The shared listener registered in src/index.js (gated on
   // isGateway || isWorker) handles routing.
   let dispatchOk = true;
+  // Flag for trackDispatch (called by the listener in src/index.js).
+  // EventEmitter.emit is synchronous, so the listener fires while
+  // this flag is still true; trackDispatch reads the flag and only
+  // registers consumer-driven dispatches in the backpressure cap.
+  // Cleared in the finally so a gateway-WS-driven dispatch landing
+  // after this returns is correctly untracked.
+  isWorkerDispatch = true;
   try {
     client.actions.InteractionCreate.handle(data);
   } catch (err) {
@@ -422,6 +479,8 @@ async function processMessage(client, message) {
       eventId,
       messageId: message.MessageId,
     });
+  } finally {
+    isWorkerDispatch = false;
   }
 
   if (isDup) {
@@ -447,7 +506,50 @@ async function processMessage(client, message) {
   await deleteMessage(message.ReceiptHandle);
 }
 
+// Called by the `interactionCreate` listener in src/index.js for
+// every dispatch. Reads the isWorkerDispatch flag set synchronously
+// around the consumer's `handle()` call to distinguish consumer-
+// driven dispatches (which count against the backpressure cap)
+// from gateway-WS-driven dispatches (which don't — gateway tier
+// doesn't backpressure against itself). Increment runs inside the
+// synchronous emit window; decrement registers on the dispatch
+// promise's `.finally()` so both success and rejection bring the
+// counter back down. A non-promise return (older handlers, or
+// nothing returned for unrouted interaction types) is a no-op.
+function trackDispatch(maybePromise) {
+  if (!isWorkerDispatch) return;
+  if (!maybePromise || typeof maybePromise.then !== 'function') return;
+  inFlightCount += 1;
+  // .finally on the original promise so we don't swallow rejections
+  // — the original chain still rejects, just with the decrement as a
+  // side effect. Wrap the decrement in a try/catch so a malformed
+  // promise can't leave the counter stuck at a high value.
+  maybePromise.finally(() => {
+    inFlightCount -= 1;
+  }).catch(() => {
+    // The decrement already happened in the finally callback; this
+    // catch is only here to absorb the rejection that flows through
+    // the chain so it doesn't surface as an unhandledRejection
+    // attributed to the consumer. The original .then() chain
+    // registered by the listener's caller still sees the rejection.
+  });
+}
+
 async function pollOnce(client) {
+  // Backpressure check: if too many handlers are in-flight, pause
+  // receives until they drain. Returns from this iteration without
+  // pulling messages; pollLoop will call us again, and the
+  // `while (!stopping)` check naturally exits if stop() lands during
+  // the pause. abortableSleep also honors stopping so the pause
+  // doesn't blow the graceful-shutdown budget.
+  if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
+    logger.debug('Event consumer: in-flight cap reached, pausing receive', {
+      inFlight: inFlightCount,
+      cap: MAX_INFLIGHT_HANDLERS,
+    });
+    await abortableSleep(INFLIGHT_BACKOFF_MS);
+    return;
+  }
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
     QueueUrl: queueUrl,
@@ -738,11 +840,14 @@ function _resetStateForTest() {
   sqsClient = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
+  inFlightCount = 0;
+  isWorkerDispatch = false;
 }
 
 module.exports = {
   start,
   stop,
+  trackDispatch,
   _test: {
     _setSqsClientForTest,
     _resetStateForTest,
@@ -760,6 +865,16 @@ module.exports = {
     isAbortError,
     abortableSleep,
     SEEN_EVENT_ID_CAP,
+    MAX_INFLIGHT_HANDLERS,
+    INFLIGHT_BACKOFF_MS,
     getReceiveAbortController: () => receiveAbortController,
+    getInFlightCount: () => inFlightCount,
+    isWorkerDispatching: () => isWorkerDispatch,
+    // Test-only setter. trackDispatch reads the module-level
+    // `isWorkerDispatch` directly (not via `isWorkerDispatching()`),
+    // so a jest.spyOn on the introspection helper can't influence it.
+    // Tests that want to simulate the synchronous flag wrap done by
+    // processMessage call this helper instead.
+    _setWorkerDispatchingForTest: (v) => { isWorkerDispatch = !!v; },
   },
 };

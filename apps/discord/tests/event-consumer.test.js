@@ -913,6 +913,176 @@ describe('event-consumer: start/stop lifecycle', () => {
   // ≥ 1), which covers the underlying concern.
 });
 
+describe('event-consumer: backpressure (in-flight handler cap)', () => {
+  test('trackDispatch is a no-op when isWorkerDispatch is false (gateway mode)', () => {
+    // Pins the contract that the gateway-WS-driven path doesn't
+    // count against the worker's cap. The flag stays false unless
+    // the consumer's processMessage explicitly sets it; a stray
+    // call from the listener in gateway-only mode increments
+    // nothing.
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+    eventConsumer.trackDispatch(Promise.resolve('ignored'));
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch handles non-promise inputs without throwing', () => {
+    // The listener returns undefined for unrouted interaction types.
+    // trackDispatch must accept that without throwing or counting.
+    eventConsumer.trackDispatch(undefined);
+    eventConsumer.trackDispatch(null);
+    eventConsumer.trackDispatch('not a promise');
+    eventConsumer.trackDispatch({ then: 'not-a-fn' });
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('processMessage sets isWorkerDispatch true around handle() and clears in finally', async () => {
+    // The flag must be true exactly during the synchronous
+    // client.actions.InteractionCreate.handle(data) call so the
+    // listener's emit fires inside the window. Verified by spying
+    // on handle and asserting the flag's value inside the spy.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    let observedDuringHandle = false;
+    client.actions.InteractionCreate.handle.mockImplementation(() => {
+      observedDuringHandle = eventConsumer._test.isWorkerDispatching();
+    });
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      data: { id: 'i1' },
+      event_id: '0:1',
+    })));
+
+    expect(observedDuringHandle).toBe(true);
+    // After processMessage returns, the flag is back to false.
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+  });
+
+  test('processMessage clears isWorkerDispatch even when handle() throws', async () => {
+    // Pin the finally — without it, a reconstruction throw would
+    // leave the flag stuck at true, and a subsequent gateway-WS
+    // dispatch in combined mode would be incorrectly counted
+    // against the worker cap.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    client.actions.InteractionCreate.handle.mockImplementation(() => {
+      throw new Error('reconstruction failed');
+    });
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      data: { type: 99 },
+      event_id: '0:err',
+    })));
+
+    expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+  });
+
+  test('trackDispatch increments then decrements on promise resolve', async () => {
+    // Simulate a consumer-driven dispatch by manually flipping the
+    // flag (mirrors what processMessage does synchronously around
+    // handle()). Register a pending promise; assert the counter
+    // ticks up. Resolve it; assert the counter ticks back down.
+    let resolveHandler;
+    const handlerPromise = new Promise((r) => { resolveHandler = r; });
+
+    // Mirror processMessage's flag wrap.
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      eventConsumer.trackDispatch(handlerPromise);
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    resolveHandler('done');
+    // Wait for the finally callback to run (microtask boundary).
+    await handlerPromise;
+    await new Promise((r) => setImmediate(r));
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('trackDispatch decrements on promise rejection', async () => {
+    // Same as above but reject the promise; the finally should
+    // still decrement the counter so a failing handler doesn't
+    // leak a slot in the cap.
+    let rejectHandler;
+    const handlerPromise = new Promise((_resolve, reject) => { rejectHandler = reject; });
+    // Pre-attach a catch so the rejection doesn't surface as an
+    // unhandledRejection in the test runtime.
+    handlerPromise.catch(() => { /* absorbed */ });
+
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      eventConsumer.trackDispatch(handlerPromise);
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+    rejectHandler(new Error('handler failed'));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('pollOnce early-returns + backs off when in-flight at cap', async () => {
+    // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
+    // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let
+    // handlers drain. Pins that the cap is enforced + the receive
+    // path is bypassed.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+
+    // Manually crank inFlightCount up to cap via the tracker. Use
+    // pending promises so the count stays elevated for the duration
+    // of the test.
+    const pendingHandlers = [];
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      for (let i = 0; i < cap; i += 1) {
+        const p = new Promise(() => {}); // never resolves
+        eventConsumer.trackDispatch(p);
+        pendingHandlers.push(p);
+      }
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+    expect(eventConsumer._test.getInFlightCount()).toBe(cap);
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [{ Body: '{}', ReceiptHandle: 'x' }] });
+    const client = makeStubClient();
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+
+    // The receive was NOT called (cap blocked it).
+    expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('in-flight cap reached'),
+      expect.objectContaining({ inFlight: cap, cap }),
+    );
+  });
+
+  test('pollOnce proceeds with receive when below cap', async () => {
+    // Sanity-check the other side of the gate — when inFlightCount
+    // is below the cap, pollOnce calls ReceiveMessage normally.
+    expect(eventConsumer._test.getInFlightCount()).toBeLessThan(eventConsumer._test.MAX_INFLIGHT_HANDLERS);
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+
+    expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(1);
+  });
+
+  test('MAX_INFLIGHT_HANDLERS defaults to 100', () => {
+    // Pins the default — operators reading the .env.example see
+    // this number and may rely on it for their soak headroom math.
+    expect(eventConsumer._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+  });
+});
+
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {
   test('package.json pins discord.js to a single exact version', () => {
     const pkg = require('../package.json');

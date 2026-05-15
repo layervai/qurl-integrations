@@ -312,20 +312,28 @@ if (isGateway || isWorker) {
   // mix two state machines (slash dispatch vs. flow-resume) under
   // one error-handling envelope; cleaner to wire them separately.
   client.on('interactionCreate', (interaction) => {
+    let result;
     if (interaction.isChatInputCommand() || interaction.isAutocomplete()) {
-      return handleCommand(interaction);
+      result = handleCommand(interaction);
+    } else if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
+      result = handleFlowInteraction(interaction);
+    } else {
+      // Future Discord interaction types we don't ship today fall
+      // through here. Log at debug so an operator triaging "why isn't
+      // my new component routing" sees the unrouted type rather than
+      // the silent-drop black box the pre-conversion code provided.
+      logger.debug('interactionCreate: unrouted interaction type', {
+        type: interaction.type,
+      });
+      return undefined;
     }
-    if (interaction.isMessageComponent() || interaction.isModalSubmit()) {
-      return handleFlowInteraction(interaction);
-    }
-    // Future Discord interaction types we don't ship today fall
-    // through here. Log at debug so an operator triaging "why isn't
-    // my new component routing" sees the unrouted type rather than
-    // the silent-drop black box the pre-conversion code provided.
-    logger.debug('interactionCreate: unrouted interaction type', {
-      type: interaction.type,
-    });
-    return undefined;
+    // Register the dispatch promise with the consumer's backpressure
+    // tracker. No-op for gateway-WS-driven dispatches (the consumer's
+    // isWorkerDispatch flag is only true during its synchronous emit
+    // call); during a consumer-driven emit, the increment runs here
+    // and the decrement fires when the handler settles.
+    eventConsumer.trackDispatch(result);
+    return result;
   });
 }
 
