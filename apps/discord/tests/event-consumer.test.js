@@ -619,6 +619,18 @@ describe('event-consumer: pollLoop error backoff', () => {
 });
 
 describe('event-consumer: start/stop lifecycle', () => {
+  test('start() throws when client.actions.InteractionCreate.handle is missing', () => {
+    // Pins the pre-flight check that turns a class of silent runtime
+    // failures (discord.js internal-API drift, stub client passed
+    // in) into a loud boot error. Without this, every dispatch
+    // would throw inside the try/catch in processMessage, drain the
+    // queue, and do nothing — invisible in standard monitoring.
+    expect(() => eventConsumer.start({})).toThrow('discord.js internal-API drift');
+    expect(() => eventConsumer.start({ actions: {} })).toThrow('discord.js internal-API drift');
+    expect(() => eventConsumer.start({ actions: { InteractionCreate: {} } })).toThrow('discord.js internal-API drift');
+    expect(() => eventConsumer.start(null)).toThrow('discord.js internal-API drift');
+  });
+
   // The top-level jest.mock('../src/config', ...) returns a literal
   // object that's hoisted into the module cache. Mutating its fields
   // is the simplest way to test config-gated branches without
@@ -630,7 +642,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     const orig = config.ENABLE_EVENT_SHIPPER;
     config.ENABLE_EVENT_SHIPPER = false;
     try {
-      expect(() => eventConsumer.start({})).toThrow('ENABLE_EVENT_SHIPPER=false');
+      expect(() => eventConsumer.start(makeStubClient())).toThrow('ENABLE_EVENT_SHIPPER=false');
     } finally {
       config.ENABLE_EVENT_SHIPPER = orig;
     }
@@ -641,7 +653,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     const orig = config.QURL_BOT_EVENTS_QUEUE_URL;
     config.QURL_BOT_EVENTS_QUEUE_URL = undefined;
     try {
-      expect(() => eventConsumer.start({})).toThrow('QURL_BOT_EVENTS_QUEUE_URL');
+      expect(() => eventConsumer.start(makeStubClient())).toThrow('QURL_BOT_EVENTS_QUEUE_URL');
     } finally {
       config.QURL_BOT_EVENTS_QUEUE_URL = orig;
     }
@@ -708,7 +720,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     sendSpy.mockRestore();
   });
 
-  test('pollOnce sets receiveAbortController; stop() aborts it', async () => {
+  test('pollOnce installs a fresh receiveAbortController that can be aborted', async () => {
     // aws-sdk-client-mock doesn't pass HttpHandlerOptions (incl.
     // abortSignal) through to callsFake handlers, so we can't easily
     // mock the SDK's abort-aware receive. Test the abort *machinery*

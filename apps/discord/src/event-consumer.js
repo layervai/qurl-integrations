@@ -383,11 +383,19 @@ async function pollOnce(client) {
   // DeleteMessage throw — every other error path is internally
   // caught + delete-eager. So this log is specifically the
   // SQS-delete-failed signal: the message will redrive after the
-  // visibility timeout and re-dispatch the interaction. OCC at
-  // flow-state + Discord token-uniqueness guard the post-handler
-  // side effects; counts of this log line are the operational
-  // signal for "how often do we redrive a successfully-dispatched
-  // interaction." Worth alerting on if it climbs.
+  // visibility timeout and re-dispatch.
+  //
+  // Operational interpretation depends on the upstream code path:
+  // - INTERACTION_CREATE that dispatched successfully → OCC at
+  //   flow-state + Discord token-uniqueness guard the post-handler
+  //   side effects on redelivery. Counts here = "how often do we
+  //   redrive a successfully-dispatched interaction." Worth
+  //   alerting on if it climbs.
+  // - Poison-pill paths (malformed body, unknown eventType,
+  //   non-object envelope) → no post-handler side effects to
+  //   guard; the message just keeps redelivering until
+  //   maxReceiveCount fires and SQS moves it to the DLQ. Normal
+  //   redrive policy is the bound.
   //
   // `Promise.allSettled` (rather than `Promise.all`) makes the
   // per-message isolation a hard contract: even if a future change
@@ -501,6 +509,16 @@ function start(client) {
   if (running) {
     logger.warn('Event consumer: start() called while already running — no-op');
     return;
+  }
+  // Pre-flight the internal-API surface we depend on. If a future
+  // discord.js update relocates `client.actions.InteractionCreate.handle`
+  // (or a future caller passes a stub without it), every dispatch
+  // would silently throw inside the try/catch in processMessage,
+  // drain the queue, and do nothing — a class of failure that's
+  // hard to catch in monitoring because everything "works" except
+  // the actual side effects. Turn this into a loud boot failure.
+  if (typeof client?.actions?.InteractionCreate?.handle !== 'function') {
+    throw new Error('Event consumer: client.actions.InteractionCreate.handle is not a function — discord.js internal-API drift?');
   }
   if (!config.ENABLE_EVENT_SHIPPER) {
     // Defense in depth — caller in index.js already gates on
