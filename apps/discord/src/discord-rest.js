@@ -158,6 +158,9 @@ async function editDM(channelId, messageId, message) {
     // logs can carry the same diagnostic without re-grepping the per-
     // edit log line. `code` is undefined for non-Discord-shape errors;
     // `reason` is undefined unless the code matched the expected set.
+    // Currently unread by the revoke-loop caller (it consumes only
+    // `expected` via the re-thrown error) — landing pad for the
+    // dashboard work tracked in #368 / #370 / #372.
     return { ok: false, expected, code: error.code, reason: expectedDescription };
   }
 }

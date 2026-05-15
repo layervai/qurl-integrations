@@ -727,8 +727,16 @@ const dbModule = {
   // leading-underscore convention is exempted by the project's eslint
   // argsIgnorePattern), so /qURL revoke skips the recipient-side DM
   // edit when running against SQLite.
+  //
+  // Debug log surfaces the divergence at WRITE time (not just at
+  // revoke time when the missing-refs guard finally fires) so a
+  // local dev sees the silent-skip the moment a DM dispatch lands.
+  // See #365 for the full SQLite getSendItems projection wire-up.
   markSendDMDelivered(sendId, recipientDiscordId, _channelId, _messageId) {
     this.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
+    logger.debug('SqliteStore.markSendDMDelivered: dm_channel_id / dm_message_id intentionally not persisted (see #365)', {
+      sendId, recipientDiscordId,
+    });
   },
 
   getRecentSends(senderDiscordId, limit = 10) {

@@ -51,19 +51,12 @@ beforeEach(() => {
   restMock.patch.mockReset();
 });
 
-describe('shared rate-limit bucket invariant', () => {
-  it('reads client.rest directly (not a new REST instance) so the bucket state is shared', () => {
-    // Tests below implicitly pin this via `restMock.post/patch/.mock.calls`
-    // assertions — but a future refactor that swaps `client.rest.post(...)`
-    // for `new REST(...).post(...)` would still pass those (the
-    // interception is on `require('../src/discord').client.rest`, not
-    // on the REST constructor). This explicit toBe check fails loudly
-    // on that drift, matching the assertion the removed module-wiring
-    // test previously carried.
-    const { client } = require('../src/discord');
-    expect(client.rest).toBe(restMock);
-  });
-});
+// Shared-rate-limit-bucket invariant: every helper reads `client.rest.X`
+// directly (vs. `new REST(...)`) so the bucket state is shared with the
+// gateway-cache helpers in discord.js. The helper-level tests below
+// pin this behaviorally via `restMock.{post,put,delete,patch}.mock.calls`
+// — a future refactor that swapped to `new REST(...)` would not hit the
+// `restMock` interception and the call-count assertions would break.
 
 describe('sendDM via REST', () => {
   it('creates DM channel then posts message, returns ok:true with channel + message ids', async () => {
