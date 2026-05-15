@@ -4674,7 +4674,11 @@ describe('handleConfirmVoiceEveryone', () => {
       await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
       expect(mockTransitionFlow).not.toHaveBeenCalled();
       const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-      expect(lastCall.content).toMatch(/Voice channel has 2 connected \(max 1\)/i);
+      // "eligible recipients" wording is shared with the slash-entry
+      // over-cap banner — both counts are post-partition (sender +
+      // bots filtered), so "connected" would diverge from Discord's
+      // voice panel.
+      expect(lastCall.content).toMatch(/Voice channel has 2 eligible recipients \(max 1\)/i);
       expect(lastCall.content).toMatch(/picker or @mentions/i);
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = origCap;
@@ -5972,6 +5976,48 @@ describe('renderConfirmCardRows', () => {
       expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
       expect(lastCall.content).not.toContain('**inject**');
       expect(lastCall.content).not.toContain('||hide||');
+    });
+
+    test('voice-mode survives an unrelated menu interaction (expiry change) without decaying to picker', async () => {
+      // Belt-and-braces: after the slash-entry voice-mode auto-default
+      // commits, an expiry-change re-renders the card through
+      // rerenderConfirmCard. If the rerender path defaulted to
+      // picker-mode (instead of reading payload.recipientMode), the
+      // card would silently snap layout mid-flow. The dedicated
+      // voice-mode-with-empty-recipients test covers the degenerate
+      // case; this pins the happy path round-trip.
+      const { MentionableSelectMenuBuilder, ButtonBuilder } = require('discord.js');
+      // Construct a post-slash-entry voice-mode payload (what
+      // handleQurlSlashSend would have written to flow_state).
+      const payload = {
+        resourceType: 'file',
+        resourceLabel: 'x.png',
+        recipientIds: [u1],
+        recipientAliases: { [u1]: 'alice' },
+        recipientMode: 'voice',
+        voiceChannelId: VOICE_CH,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        warningsBlock: '',
+      };
+      MentionableSelectMenuBuilder.mockClear();
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({ guildMembers: { [u1]: {} } });
+      int.values = ['7d'];  // change expiry from 24h → 7d
+      await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+      // Layout pin: picker still hidden, pick-manual still rendered,
+      // voice-everyone still NOT rendered. The "To:" line still uses
+      // the channel mention.
+      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+      expect(customIds).not.toContain('qurl_confirm_voice_everyone');
+      const lastCall = int.editReply.mock.calls.slice(-1)[0][0];
+      expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
+      expect(lastCall.content).toMatch(/you not included/);
     });
   });
 });

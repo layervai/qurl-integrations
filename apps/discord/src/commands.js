@@ -3957,6 +3957,17 @@ async function handleQurlSlashSend(interaction, params) {
     // degraded states the user can't otherwise diagnose. The picker +
     // bottom voice button remain available throughout so the user can
     // recover when voice state changes (someone joins, bots kicked).
+    //
+    // SNAPSHOT vs. CLICK-TIME asymmetry: this slash-entry path freezes
+    // `recipientIds` at command receipt — someone joining the channel
+    // between `/qurl file` and the Send click is NOT added. The "🔊
+    // Everyone in #voice" button (handleConfirmVoiceEveryone) goes the
+    // other way: re-resolves `channel.members` at click time. The two
+    // shapes are reachable from the same UI but produce different
+    // recipient sets; that's a deliberate UX call (the auto-default
+    // card shows "N users in #voice" and Send must mean that set,
+    // not whoever happens to be in voice at click time). Documented
+    // here so a future contributor doesn't "fix" the asymmetry.
     let recipientMode = RECIPIENT_MODE_PICKER;
     let finalValid = valid;
     let finalSelfIncluded = selfIncluded;
@@ -4974,7 +4985,12 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
   // Tracked in #339 if a future product decision needs to align
   // these surfaces (e.g., button truncates with confirm-card warning).
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
-    return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} connected (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+    // "eligible recipients" (NOT "connected") — `valid.length` is the
+    // post-partition count (sender + bots already filtered out).
+    // Discord's voice panel shows raw connections, so phrasing this as
+    // "connected" would diverge from what the user sees there. Stays
+    // in lockstep with the slash-entry over-cap banner.
+    return rejectVoice(`⚠\u{FE0F} Voice channel has ${valid.length} eligible recipients (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
   }
 
   const newWarningsBlock = renderRecipientWarnings({
