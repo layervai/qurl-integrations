@@ -5298,6 +5298,46 @@ describe('handleConfirmEveryone', () => {
     expect(payload.selfIncluded).toBe(true);
   });
 
+  test('sender missing + warm cache with degraded .user-less row + other non-bots → defensive push fires, partial-cache drops counted', async () => {
+    // Positive coverage for the combination of: warm cache with at
+    // least one valid non-bot AND at least one degraded row (`.user`
+    // missing — partial GUILD_MEMBERS_CHUNK shape) AND sender's own
+    // row absent. The defensive push fires (other non-bots present),
+    // the degraded row is counted as partialCacheDrops, and the
+    // success log captures the right shape.
+    const otherUser = '100000000000000088';
+    const int = makeEveryoneInteraction({
+      // Sender absent; one other non-bot present.
+      guildMembers: { [otherUser]: {} },
+      memberCount: 3,  // sender + otherUser + the degraded row below
+    });
+    // Inject a degraded row (no .user) into the warm cache.
+    int.guild.members.cache.set('degraded-1', { /* no .user */ });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    // Sender (defensive push) + otherUser (cache) — degraded row
+    // filtered.
+    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.selfIncluded).toBe(true);
+    const logger = require('../src/logger');
+    // partialCacheDrops debug log fires with `dropped: 1`.
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('partial-cache rows dropped'),
+      expect.objectContaining({ dropped: 1 }),
+    );
+    // Success log carries the cache shape.
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('@everyone expansion succeeded'),
+      expect.objectContaining({
+        valid_count: 2,
+        partial_cache_drops: 1,
+        cache_size: 2,  // otherUser + degraded-1 = 2 entries
+        member_count: 3,
+      }),
+    );
+  });
+
   test('sender row missing + bots-only cache → still rejects (defensive push gated)', async () => {
     // Counter-test: the defensive push should NOT fire on a bots-only
     // cache. Silently expanding @everyone to "send to just me" would

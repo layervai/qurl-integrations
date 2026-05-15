@@ -5525,6 +5525,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const selectedUsers = [];
   let partialCacheDrops = 0;
   let senderInCache = false;
+  let hasOtherNonBotInCache = false;
   const cache = interaction.guild.members?.cache;
   // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
   // which both `Map` and discord.js `Collection` provide. Truthy-check
@@ -5534,6 +5535,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
       if (member?.user) {
         selectedUsers.push(member.user);
         if (member.user.id === interaction.user.id) senderInCache = true;
+        else if (!member.user.bot) hasOtherNonBotInCache = true;
       } else {
         partialCacheDrops++;
       }
@@ -5571,16 +5573,13 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   // (contract at commands.js:~3077), so the `senderInCache` check is
   // load-bearing — pushing unconditionally would land the sender
   // twice in `valid`.
-  if (!senderInCache) {
-    const hasOtherNonBotInCache = selectedUsers.some(
-      (u) => u && !u.bot && u.id !== interaction.user.id,
-    );
+  if (!senderInCache && hasOtherNonBotInCache) {
     // `interaction.user.bot` may be undefined depending on interaction
     // shape (slash commands can't come from bots in production, so
     // `partitionRecipients`'s `if (u.bot)` is a no-op here regardless).
     // Falsy `.bot` → kept; the invariant holds across context-menu /
     // future interaction types too.
-    if (hasOtherNonBotInCache) selectedUsers.push(interaction.user);
+    selectedUsers.push(interaction.user);
   }
   // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
   // the sender (voice-mode semantic is "everyone else in this voice
@@ -5661,6 +5660,10 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
     valid_count: valid.length, dropped_bots: droppedBots,
     partial_cache_drops: partialCacheDrops, self_included: selfIncluded,
+    // Cache shape for "@everyone underresolved on guild X" forensics —
+    // makes the success line self-contained (no need to cross-reference
+    // the partial-cache debug log to know the cache state at click time).
+    cache_size: cache?.size, member_count: interaction.guild.memberCount,
   });
 
   return rerenderConfirmCard(interaction, newPayload);
