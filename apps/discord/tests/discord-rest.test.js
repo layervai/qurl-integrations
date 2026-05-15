@@ -127,32 +127,42 @@ describe('editDM via REST', () => {
     expect(restMock.patch.mock.calls[0][1]).toEqual({ body: payload });
   });
 
-  it('marks 10008 (Unknown Message — recipient deleted the DM) as expected', async () => {
+  it('marks 10008 (Unknown Message — recipient deleted the DM) as expected and exposes code+reason', async () => {
     restMock.patch.mockRejectedValueOnce(
       Object.assign(new Error('Unknown Message'), { status: 404, code: 10008 }),
     );
     const result = await editDM('c', 'm', { embeds: [], components: [] });
-    expect(result).toEqual({ ok: false, expected: true });
+    expect(result).toEqual({
+      ok: false,
+      expected: true,
+      code: 10008,
+      reason: expect.stringContaining('Unknown Message'),
+    });
   });
 
   it.each([
-    ['10003', 10003, 404],  // Unknown Channel
-    ['50001', 50001, 403],  // Missing Access
-    ['50007', 50007, 403],  // Cannot send messages to this user
-  ])('marks %s as expected', async (_name, code, status) => {
+    ['10003', 10003, 404, 'Unknown Channel'],
+    ['50001', 50001, 403, 'Missing Access'],
+    ['50007', 50007, 403, 'Cannot send messages to this user'],
+  ])('marks %s as expected and surfaces code+reason on the return', async (_name, code, status, descriptionFragment) => {
     restMock.patch.mockRejectedValueOnce(
       Object.assign(new Error('expected'), { status, code }),
     );
     const result = await editDM('c', 'm', { embeds: [], components: [] });
-    expect(result).toEqual({ ok: false, expected: true });
+    expect(result).toEqual({
+      ok: false,
+      expected: true,
+      code,
+      reason: expect.stringContaining(descriptionFragment),
+    });
   });
 
-  it('marks unrecognized errors as unexpected (logged at warn)', async () => {
+  it('marks unrecognized errors as unexpected (logged at warn) — code passes through, reason is undefined', async () => {
     restMock.patch.mockRejectedValueOnce(
       Object.assign(new Error('boom'), { status: 500, code: 0 }),
     );
     const result = await editDM('c', 'm', { embeds: [], components: [] });
-    expect(result).toEqual({ ok: false, expected: false });
+    expect(result).toEqual({ ok: false, expected: false, code: 0, reason: undefined });
   });
 
   it('marks bare 403 / 404 without a known API code as UNEXPECTED', async () => {
@@ -164,13 +174,13 @@ describe('editDM via REST', () => {
       Object.assign(new Error('Forbidden'), { status: 403, code: undefined }),
     );
     const r403 = await editDM('c', 'm', { embeds: [], components: [] });
-    expect(r403).toEqual({ ok: false, expected: false });
+    expect(r403).toEqual({ ok: false, expected: false, code: undefined, reason: undefined });
 
     restMock.patch.mockRejectedValueOnce(
       Object.assign(new Error('Not Found'), { status: 404, code: undefined }),
     );
     const r404 = await editDM('c', 'm', { embeds: [], components: [] });
-    expect(r404).toEqual({ ok: false, expected: false });
+    expect(r404).toEqual({ ok: false, expected: false, code: undefined, reason: undefined });
   });
 
   it('tags the expected log line with expectedReason for greppability', async () => {

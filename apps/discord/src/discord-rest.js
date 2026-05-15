@@ -154,7 +154,11 @@ async function editDM(channelId, messageId, message) {
       // greppable from CloudWatch without an external lookup.
       ...(expected && { expectedReason: expectedDescription }),
     });
-    return { ok: false, expected };
+    // `code` and `reason` exposed on the return so callers' rolled-up
+    // logs can carry the same diagnostic without re-grepping the per-
+    // edit log line. `code` is undefined for non-Discord-shape errors;
+    // `reason` is undefined unless the code matched the expected set.
+    return { ok: false, expected, code: error.code, reason: expectedDescription };
   }
 }
 
