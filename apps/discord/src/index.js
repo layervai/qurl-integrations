@@ -322,6 +322,9 @@ if (isGateway || isWorker) {
       // through here. Log at debug so an operator triaging "why isn't
       // my new component routing" sees the unrouted type rather than
       // the silent-drop black box the pre-conversion code provided.
+      // No trackDispatch call: there's no handler promise to register,
+      // and the consumer's at-cap accounting should not count the
+      // unrouted no-op against its in-flight budget.
       logger.debug('interactionCreate: unrouted interaction type', {
         type: interaction.type,
       });

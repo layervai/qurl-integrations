@@ -268,8 +268,13 @@ const DEFAULT_MAX_INFLIGHT_HANDLERS = 100;
 const MAX_INFLIGHT_HANDLERS = (() => {
   const raw = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
   if (!raw) return DEFAULT_MAX_INFLIGHT_HANDLERS;
-  const parsed = parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  // Use Number() + Number.isInteger() rather than parseInt — parseInt
+  // is lenient ('100abc' → 100), and the .env.example promises "must
+  // be a positive integer." Trailing garbage in the env value is more
+  // likely a templating typo than intent; rejecting it surfaces the
+  // bug at boot instead of silently truncating.
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
     // logger isn't loaded this early in module init; console.warn
     // for visibility at boot, then fall back to the default.
     console.warn(
@@ -300,6 +305,22 @@ const INFLIGHT_BACKOFF_MS = 100;
 // window because EventEmitter.emit is synchronous.
 let inFlightCount = 0;
 let isWorkerDispatch = false;
+
+// State-machine rate-limit on the at-cap log. Sustained at-cap
+// (slow downstream + bursty arrivals) wakes pollOnce every
+// INFLIGHT_BACKOFF_MS, so without throttling a single backlog
+// produces ~10 lines/sec/worker. Pattern matches
+// `lastMissingEventIdWarnMs`: the *transition* into at-cap is the
+// loud signal (warn), steady-state at-cap is debug, and the
+// transition back to below-cap is info. atCapPauseLogged is the
+// "we've already logged the warn for this streak" gate; cleared
+// when pollOnce next observes a below-cap state. Log messages
+// pulled into constants so monitoring alerts that grep for them
+// stay in sync with the call site even if the wording drifts.
+let atCapPauseLogged = false;
+const AT_CAP_PAUSE_WARN_MSG = 'Event consumer: in-flight cap reached, pausing receive until handlers drain';
+const AT_CAP_PAUSE_DEBUG_MSG = 'Event consumer: still at in-flight cap, continuing pause';
+const AT_CAP_RELEASED_INFO_MSG = 'Event consumer: in-flight cap released, resuming receive';
 
 // Hook for unit tests: lets the test inject a mock SQSClient
 // (aws-sdk-client-mock'd in tests/event-consumer.test.js) without
@@ -471,6 +492,16 @@ async function processMessage(client, message) {
   // registers consumer-driven dispatches in the backpressure cap.
   // Cleared in the finally so a gateway-WS-driven dispatch landing
   // after this returns is correctly untracked.
+  //
+  // CRITICAL INVARIANT — DO NOT add `await` inside this try/finally.
+  // The flag-wrap is correct only because there is no yield between
+  // `isWorkerDispatch = true` and `isWorkerDispatch = false`. A
+  // pre-emit `await logger.x()` or an `await` on handle() would let
+  // a concurrent processMessage (under Promise.allSettled in
+  // pollOnce) observe a leaked true flag, silently miscounting
+  // gateway-WS-driven dispatches against the worker cap in combined
+  // mode. If you need async work, do it BEFORE this block or AFTER
+  // the finally clears the flag.
   isWorkerDispatch = true;
   try {
     client.actions.InteractionCreate.handle(data);
@@ -549,13 +580,38 @@ async function pollOnce(client) {
   // `while (!stopping)` check naturally exits if stop() lands during
   // the pause. abortableSleep also honors stopping so the pause
   // doesn't blow the graceful-shutdown budget.
+  //
+  // Log throttling: only the transition into at-cap is loud (warn);
+  // subsequent at-cap polls in the same streak are debug. The
+  // transition back to below-cap (handled after this branch) logs
+  // at info. This matches the `lastMissingEventIdWarnMs` pattern
+  // already in this file — transition-loud, steady-state-quiet.
   if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
-    logger.debug('Event consumer: in-flight cap reached, pausing receive', {
+    if (!atCapPauseLogged) {
+      logger.warn(AT_CAP_PAUSE_WARN_MSG, {
+        inFlight: inFlightCount,
+        cap: MAX_INFLIGHT_HANDLERS,
+      });
+      atCapPauseLogged = true;
+    } else {
+      logger.debug(AT_CAP_PAUSE_DEBUG_MSG, {
+        inFlight: inFlightCount,
+        cap: MAX_INFLIGHT_HANDLERS,
+      });
+    }
+    await abortableSleep(INFLIGHT_BACKOFF_MS);
+    return;
+  }
+  // Below-cap path: if we just transitioned out of at-cap, log the
+  // release so operators can match "pause started" with "pause ended"
+  // pairs in CloudWatch. Reset the gate so the next at-cap entry
+  // re-fires the warn (each streak gets exactly one warn).
+  if (atCapPauseLogged) {
+    logger.info(AT_CAP_RELEASED_INFO_MSG, {
       inFlight: inFlightCount,
       cap: MAX_INFLIGHT_HANDLERS,
     });
-    await abortableSleep(INFLIGHT_BACKOFF_MS);
-    return;
+    atCapPauseLogged = false;
   }
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
@@ -849,6 +905,7 @@ function _resetStateForTest() {
   lastMissingEventIdWarnMs = 0;
   inFlightCount = 0;
   isWorkerDispatch = false;
+  atCapPauseLogged = false;
 }
 
 module.exports = {
@@ -874,9 +931,13 @@ module.exports = {
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
     INFLIGHT_BACKOFF_MS,
+    AT_CAP_PAUSE_WARN_MSG,
+    AT_CAP_PAUSE_DEBUG_MSG,
+    AT_CAP_RELEASED_INFO_MSG,
     getReceiveAbortController: () => receiveAbortController,
     getInFlightCount: () => inFlightCount,
     isWorkerDispatching: () => isWorkerDispatch,
+    isAtCapPauseLogged: () => atCapPauseLogged,
     // Test-only setter. trackDispatch reads the module-level
     // `isWorkerDispatch` directly (not via `isWorkerDispatching()`),
     // so a jest.spyOn on the introspection helper can't influence it.

@@ -1087,10 +1087,95 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     // The receive was NOT called (cap blocked it).
     expect(sqsMock.commandCalls(ReceiveMessageCommand)).toHaveLength(0);
-    expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringContaining('in-flight cap reached'),
+    // First at-cap poll in the streak warns (transition signal),
+    // not debug — see the state-machine throttle in pollOnce.
+    // Assert against the module-level constant so a wording drift
+    // in event-consumer.js fails the test instead of silently
+    // breaking CloudWatch alarms that grep the literal string.
+    expect(logger.warn).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_WARN_MSG,
       expect.objectContaining({ inFlight: cap, cap }),
     );
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+  });
+
+  test('pollOnce only warns once per at-cap streak (debug for subsequent polls)', async () => {
+    // Pins the throttle: a sustained at-cap condition produces one
+    // warn at the entry transition and debug lines for the rest of
+    // the streak. Without this, a slow downstream wedge would spam
+    // logger.warn ~10x/s per worker.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      for (let i = 0; i < cap; i += 1) {
+        eventConsumer.trackDispatch(new Promise(() => {})); // never resolves
+      }
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // First poll: warn fires.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.debug).not.toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
+      expect.anything(),
+    );
+
+    // Subsequent polls in the same streak: debug only, no extra warn.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.warn).toHaveBeenCalledTimes(1); // still 1
+    expect(logger.debug).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
+      expect.objectContaining({ inFlight: cap, cap }),
+    );
+  });
+
+  test('pollOnce logs cap-released info on transition back to below-cap', async () => {
+    // Pins the recovery path: after an at-cap streak, dropping
+    // below cap fires the release-info log so operators can pair
+    // pause-start with pause-end events in CloudWatch. Uses
+    // resolvable promises so the drain runs through trackDispatch's
+    // real .finally decrement path — no test-only setter shortcut.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    const resolvers = [];
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      for (let i = 0; i < cap; i += 1) {
+        let resolve;
+        const p = new Promise((r) => { resolve = r; });
+        resolvers.push(resolve);
+        eventConsumer.trackDispatch(p);
+      }
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // Enter at-cap state (warn fires, gate is set).
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+
+    // Drain all handlers: resolve every tracked promise, then let
+    // the .finally microtask chain flush so inFlightCount drops to 0.
+    resolvers.forEach((r) => r('done'));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+    // Below-cap poll: release-info fires, gate clears.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(logger.info).toHaveBeenCalledWith(
+      eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
+      expect.objectContaining({ cap }),
+    );
+    expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
   });
 
   test('pollOnce proceeds with receive when below cap', async () => {
