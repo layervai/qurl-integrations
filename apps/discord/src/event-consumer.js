@@ -27,15 +27,22 @@
 // against the methods our handlers depend on (deferReply, editReply,
 // options.getString, customId, isChatInputCommand, etc.).
 //
-// Envelope contract — PR 10's producer must publish JSON in this
-// shape (string body, single message attribute optional):
+// Envelope contract — src/event-publisher.js publishes JSON in this
+// shape:
 //
 //   {
-//     "eventType": "INTERACTION_CREATE",  // only type today
-//     "shardId":   "0:1",                  // for future sharding LRU keys
-//     "data":      { ...raw Discord INTERACTION_CREATE `d` payload... },
-//     "event_id":  "0:1234567"             // <shardId>:<sequence>, dedup hint
+//     "eventType":        "INTERACTION_CREATE", // only type today
+//     "shardId":          "0",                   // shard index; reserves k:n for sharding PR
+//     "data":             { ...raw Discord INTERACTION_CREATE `d` payload... },
+//     "event_id":         "0:1234567",           // <shardId>:<sequence>, dedup hint
+//     "published_at_ms":  1739462812345          // Date.now() at envelope build
 //   }
+//
+// `published_at_ms` is wall clock on the gateway host; e2e latency
+// is `Date.now() - published_at_ms` on the worker host, so NTP
+// drift between the two is the noise floor (bounded by the fleet
+// clock-skew SLO — tens of ms in practice on ECS Fargate). hrtime
+// would be process-local and meaningless cross-process.
 //
 // At-least-once delivery: SQS Standard guarantees at-least-once, so
 // the consumer is idempotency-tolerant. For interactions specifically:
@@ -129,6 +136,7 @@
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
 const logger = require('./logger');
+const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 
 // AWS_REGION is required (matches src/flow-state.js + src/store/ddb-store.js
 // patterns — no `|| 'us-east-2'` fallback because a missing AWS_REGION
@@ -284,47 +292,39 @@ let sqsClient = null;
 // handler completes). Operator can override via env when prod
 // volume + slowness data is in hand.
 //
-// Captured at module load, not re-read per-poll: operators retuning
-// QURL_BOT_MAX_INFLIGHT_HANDLERS via SSM/task-def must redeploy for
-// the new value to take effect. Per-poll re-read would let a typo
-// in the env-update path silently change behavior without an audit
-// trail in the deploy log.
-const DEFAULT_MAX_INFLIGHT_HANDLERS = 100;
-const MAX_INFLIGHT_HANDLERS = (() => {
-  const raw = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
-  if (!raw) return DEFAULT_MAX_INFLIGHT_HANDLERS;
-  // Use Number() + Number.isInteger() rather than parseInt — parseInt
-  // is lenient ('100abc' → 100), and the .env.example promises "must
-  // be a positive integer." Trailing garbage in the env value is more
-  // likely a templating typo than intent; rejecting it surfaces the
-  // bug at boot instead of silently truncating.
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    // Intentional console.warn (not logger.warn) for boot-time
-    // visibility before any logger transports attach to a structured
-    // sink. A misconfigured env-var should be obvious on container
-    // stdout regardless of LOG_LEVEL or transport state.
+// Captured at module load via config.QURL_BOT_MAX_INFLIGHT_HANDLERS
+// (which routes through config.intEnv for shared rejection +
+// fallback semantics — strict integer, must be positive). Per-poll
+// re-read would let a typo in the env-update path silently change
+// behavior without an audit trail in the deploy log.
+const MAX_INFLIGHT_HANDLERS = config.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+
+// Defense-in-depth: values below RECEIVE_MAX_MESSAGES produce
+// degenerate overshoot ratios (cap=1 can transiently reach 10
+// in-flight, 10x the configured value). Accept the value — an
+// operator who wants cap=1 to rate-limit hard may have a reason —
+// but warn so the booted ceiling matches their mental model.
+//
+// Extracted as a function so the warning emission is unit-testable
+// without re-requiring the whole module under a doMock'd config.
+// Called at module-load below with the boot-time cap; tests can
+// call it directly with any cap value via `_test.validateInflightCap`.
+//
+// Intentional console.warn (not logger.warn) for boot-time
+// visibility before any logger transports attach to a structured
+// sink. A misconfigured env-var should be obvious on container
+// stdout regardless of LOG_LEVEL or transport state.
+function validateInflightCap(cap) {
+  if (cap < RECEIVE_MAX_MESSAGES) {
     console.warn(
-      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${JSON.stringify(raw)} rejected ` +
-      `(must be a positive integer); using default ${DEFAULT_MAX_INFLIGHT_HANDLERS}.`,
-    );
-    return DEFAULT_MAX_INFLIGHT_HANDLERS;
-  }
-  // Defense-in-depth: values below RECEIVE_MAX_MESSAGES produce
-  // degenerate overshoot ratios (cap=1 can transiently reach 10
-  // in-flight, 10x the configured value). Accept the value — an
-  // operator who wants cap=1 to rate-limit hard may have a reason —
-  // but warn so the booted ceiling matches their mental model.
-  if (parsed < RECEIVE_MAX_MESSAGES) {
-    console.warn(
-      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${parsed} is below ` +
+      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${cap} is below ` +
       `RECEIVE_MAX_MESSAGES (${RECEIVE_MAX_MESSAGES}); effective in-flight ceiling ` +
-      `is ${parsed + RECEIVE_MAX_MESSAGES - 1} due to batch overshoot. ` +
+      `is ${cap + RECEIVE_MAX_MESSAGES - 1} due to batch overshoot. ` +
       `Pick ${RECEIVE_MAX_MESSAGES}+ for the overshoot ratio to match the cap value.`,
     );
   }
-  return parsed;
-})();
+}
+validateInflightCap(MAX_INFLIGHT_HANDLERS);
 
 // Brief pause when at-cap. Short enough that handlers draining
 // quickly resume normal polling; long enough that we don't burn
@@ -340,43 +340,18 @@ const INFLIGHT_BACKOFF_MS = 100;
 // then race db.close() the same way they did pre-#391, but the
 // drain reduces the race window meaningfully for typical workloads.
 //
-// Mutable (not const) so tests can shrink the deadline to keep the
-// suite fast. _resetStateForTest restores the env-resolved default;
-// production code never mutates this — only `_setDrainDeadlineForTest`
-// does.
+// Resolved via config.QURL_BOT_DRAIN_DEADLINE_MS (which routes
+// through config.intEnv's strict-integer + range checks; see the
+// config-side comment for the [100, 8000] envelope).
 //
-// Env-overridable via QURL_BOT_DRAIN_DEADLINE_MS. Sanity-clamped to
-// [100, MAX_DRAIN_DEADLINE_MS] so a typo can't accidentally:
-//   - block stop() indefinitely (upper bound stays under
-//     gracefulShutdown's 10s budget)
-//   - drop to a value too tight to give any handler a real chance
-//     (lower bound is 100ms — anything shorter is operationally a
-//     "drain disabled" knob, which the env-unset path already
-//     provides via setting a value that just always fires).
-const DEFAULT_DRAIN_DEADLINE_MS = 3000;
-const MAX_DRAIN_DEADLINE_MS = 8000;
-const MIN_DRAIN_DEADLINE_MS = 100;
-let DRAIN_DEADLINE_MS = (() => {
-  const raw = process.env.QURL_BOT_DRAIN_DEADLINE_MS;
-  if (!raw) return DEFAULT_DRAIN_DEADLINE_MS;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    console.warn(
-      `[event-consumer] QURL_BOT_DRAIN_DEADLINE_MS=${JSON.stringify(raw)} rejected ` +
-      `(must be a positive integer); using default ${DEFAULT_DRAIN_DEADLINE_MS}.`,
-    );
-    return DEFAULT_DRAIN_DEADLINE_MS;
-  }
-  if (parsed < MIN_DRAIN_DEADLINE_MS || parsed > MAX_DRAIN_DEADLINE_MS) {
-    console.warn(
-      `[event-consumer] QURL_BOT_DRAIN_DEADLINE_MS=${parsed} out of range ` +
-      `[${MIN_DRAIN_DEADLINE_MS}, ${MAX_DRAIN_DEADLINE_MS}]; using default ` +
-      `${DEFAULT_DRAIN_DEADLINE_MS} (upper bound preserves gracefulShutdown headroom).`,
-    );
-    return DEFAULT_DRAIN_DEADLINE_MS;
-  }
-  return parsed;
-})();
+// Mutable (not const) so tests can shrink the deadline to keep the
+// suite fast. INITIAL captures the boot-time value so
+// `_resetStateForTest` restores the config-resolved baseline rather
+// than a hardcoded 3000 — important when CI runs with an env-override.
+// Production code never mutates DRAIN_DEADLINE_MS — only
+// `_setDrainDeadlineForTest` does.
+const INITIAL_DRAIN_DEADLINE_MS = config.QURL_BOT_DRAIN_DEADLINE_MS;
+let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 
 // In-flight handler promises (added in trackDispatch when a
 // consumer-driven dispatch is registered; deleted when that
@@ -527,9 +502,9 @@ async function processMessage(client, message) {
     return;
   }
 
-  const { eventType, data, event_id: eventId } = parsed;
+  const { eventType, data, event_id: eventId, published_at_ms: publishedAtMs } = parsed;
 
-  if (eventType !== 'INTERACTION_CREATE') {
+  if (eventType !== GATEWAY_DISPATCH_TYPES.INTERACTION_CREATE) {
     // Single-event-type today; PR 12+ may add MESSAGE_CREATE,
     // GUILD_CREATE, etc. An unknown type from a future producer
     // shouldn't block the queue — log + delete + move on.
@@ -566,6 +541,37 @@ async function processMessage(client, message) {
     }
   }
   const isDup = recordSeen(eventId);
+
+  // End-to-end latency: gateway-host wall clock at envelope build
+  // → worker-host wall clock at receive. Cross-host comparison, so
+  // NTP drift between gateway and worker is the noise floor (bounded
+  // by the fleet's ECS Fargate clock-skew SLO, ~tens of ms). The
+  // structured `qurl_bot_event_e2e_ms` field is the metric handle —
+  // log-based metrics / CloudWatch alarms pivot on it without
+  // grepping the message text. Skip when the producer didn't supply
+  // `published_at_ms` (older envelopes, malformed publisher) — a
+  // missing field is debug, not warn, because the e2e signal is
+  // observability, not correctness.
+  if (typeof publishedAtMs === 'number' && Number.isFinite(publishedAtMs)) {
+    const e2eMs = Date.now() - publishedAtMs;
+    // Log fires AT RECEIVE TIME, not after dispatch — see the
+    // `client.actions.InteractionCreate.handle(data)` call further
+    // down (around the FLAG-WRAP-START sentinel). The metric is
+    // gateway-host wall-clock-publish → worker-host wall-clock-receive,
+    // i.e., a receive-latency SLI. Don't rename to 'dispatched' /
+    // 'handled' — those framings imply the handler ran, which we
+    // can't yet attest from this code path.
+    logger.info('Event consumer: received', {
+      qurl_bot_event_e2e_ms: e2eMs,
+      eventId,
+      shardId: parsed.shardId,
+    });
+  } else {
+    logger.debug('Event consumer: envelope missing published_at_ms; e2e latency not measured', {
+      eventId,
+      publishedAtMsType: typeof publishedAtMs,
+    });
+  }
 
   // Reconstruct + emit via discord.js's internal dispatch path.
   // client.actions.InteractionCreate.handle is the same function the
@@ -684,7 +690,7 @@ function trackDispatch(maybePromise) {
     // `err?.message || String(err)` fallback mirrors the gateway
     // handler's shape for non-Error rejections.
     logger.error('Event consumer: dispatch handler rejected', {
-      kind: 'unhandledRejection',
+      kind: LOG_KINDS.UNHANDLED_REJECTION,
       error: err?.message || String(err),
       stack: err?.stack,
     });
@@ -1108,7 +1114,7 @@ function _resetStateForTest() {
   inFlightPromises.clear();
   isWorkerDispatch = false;
   atCapPauseLogged = false;
-  DRAIN_DEADLINE_MS = DEFAULT_DRAIN_DEADLINE_MS;
+  DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {
@@ -1133,6 +1139,7 @@ module.exports = {
     abortableSleep,
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
+    validateInflightCap,
     INFLIGHT_BACKOFF_MS,
     // DRAIN_DEADLINE_MS is mutable (so tests can shrink it), so
     // expose as a getter — a snapshot-at-module-load export would

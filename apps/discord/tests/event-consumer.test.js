@@ -27,6 +27,10 @@
 jest.mock('../src/config', () => ({
   ENABLE_EVENT_SHIPPER: true,
   QURL_BOT_EVENTS_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
+  // event-consumer reads these at module-top; intEnv validation
+  // itself is tested separately in tests/config-int-env.test.js.
+  QURL_BOT_MAX_INFLIGHT_HANDLERS: 100,
+  QURL_BOT_DRAIN_DEADLINE_MS: 3000,
 }));
 
 jest.mock('../src/logger', () => ({
@@ -376,6 +380,84 @@ describe('event-consumer: processMessage dispatch paths', () => {
     } finally {
       dateSpy.mockRestore();
     }
+  });
+
+  test('envelope with published_at_ms → logs qurl_bot_event_e2e_ms', async () => {
+    // The e2e latency log is the publish→dispatch metric: wall-clock
+    // delta from gateway-host envelope-build to worker-host receive.
+    // Pin the structured field name (qurl_bot_event_e2e_ms) since
+    // CloudWatch log-based-metrics + alarms pivot on it.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    // Pin "now" so the delta is deterministic. Date.now() inside
+    // the consumer reads this mocked value.
+    const fixedNow = 1_000_000_000;
+    const dateSpy = jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    try {
+      const message = makeMessage({
+        eventType: 'INTERACTION_CREATE',
+        shardId: '0',
+        data: { type: 2, data: { name: 'qurl' }, id: 'i-e2e' },
+        event_id: '0:42',
+        published_at_ms: fixedNow - 25,
+      });
+      await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('received'),
+        expect.objectContaining({
+          qurl_bot_event_e2e_ms: 25,
+          eventId: '0:42',
+          shardId: '0',
+        }),
+      );
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  test('envelope missing published_at_ms → logs debug + skips e2e metric', async () => {
+    // Forward-compat with envelopes that predate PR 10 (or a future
+    // producer regression that drops the field). Missing the field
+    // is observability-only, not correctness — so debug, not warn.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const message = makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      shardId: '0',
+      data: { type: 2, data: { name: 'qurl' }, id: 'i-no-ts' },
+      event_id: '0:43',
+      // no published_at_ms
+    });
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('missing published_at_ms'),
+      expect.objectContaining({ publishedAtMsType: 'undefined' }),
+    );
+    // The info "dispatched" path must NOT fire when the field is absent.
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('received'),
+      expect.objectContaining({ qurl_bot_event_e2e_ms: expect.anything() }),
+    );
+  });
+
+  test.each([
+    ['string', '1700000000000'],
+    ['null', null],
+  ])('envelope with non-number published_at_ms (%s) → debug skip, no e2e log', async (label, value) => {
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const message = makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      shardId: '0',
+      data: { type: 2, data: { name: 'qurl' }, id: `i-${label}` },
+      event_id: `0:${label}`,
+      published_at_ms: value,
+    });
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('received'),
+      expect.objectContaining({ qurl_bot_event_e2e_ms: expect.anything() }),
+    );
   });
 
   test('oversized message body short-circuits before JSON.parse + still deletes', async () => {
@@ -1455,167 +1537,46 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(stripped).not.toMatch(/\bawait\b/);
   });
 
-  describe('MAX_INFLIGHT_HANDLERS env validation (module-load IIFE)', () => {
-    // The IIFE that parses QURL_BOT_MAX_INFLIGHT_HANDLERS runs at
-    // module-load. To exercise it under varying env values we
-    // re-require the module inside jest.isolateModules with the env
-    // var stubbed, capture console.warn output, and assert the
-    // resolved value + warning content. Pins the validation branch
-    // that production depends on for fail-loud-on-typo behavior.
-    function withIsolatedEnv(envValue, run) {
-      jest.isolateModules(() => {
-        const prev = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
-        const origConsoleWarn = console.warn;
-        const warns = [];
-        console.warn = (...args) => warns.push(args.join(' '));
-        try {
-          if (envValue === undefined) {
-            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
-          } else {
-            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = envValue;
-          }
-          const fresh = require('../src/event-consumer');
-          run(fresh, warns);
-        } finally {
-          console.warn = origConsoleWarn;
-          if (prev === undefined) {
-            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
-          } else {
-            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = prev;
-          }
-        }
-      });
+  describe('validateInflightCap (soft-floor warning)', () => {
+    // The env-int-parsing IIFEs that used to live here moved to
+    // config.intEnv (validated in tests/config-int-env.test.js).
+    // What remains in event-consumer.js is the consumer-specific
+    // soft-floor warning that fires when the cap is below
+    // RECEIVE_MAX_MESSAGES — the cap is accepted (operators may
+    // want it for hard-rate-limit testing) but the warn helps the
+    // booted ceiling match operator intent.
+    //
+    // Extracted as a function so we can call it directly with any
+    // value rather than fighting the module-load mock plumbing.
+    function withCapturedWarns(run) {
+      const origConsoleWarn = console.warn;
+      const warns = [];
+      console.warn = (...args) => warns.push(args.join(' '));
+      try {
+        run(warns);
+      } finally {
+        console.warn = origConsoleWarn;
+      }
     }
 
-    test.each([
-      ['100abc', 'trailing garbage'],
-      ['-5', 'negative integer'],
-      ['0', 'zero'],
-      ['1.5', 'non-integer'],
-      ['Infinity', 'infinity literal'],
-      ['NaN', 'NaN literal'],
-      ['abc', 'non-numeric'],
-      [' ', 'whitespace'],
-    ])('rejects %p (%s) and falls back to default', (envValue) => {
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
-        expect(warns.some((w) => w.includes('QURL_BOT_MAX_INFLIGHT_HANDLERS') && w.includes('rejected'))).toBe(true);
+    test.each([1, 5, 9])('cap=%i (below RECEIVE_MAX_MESSAGES=10) emits soft-floor warn', (cap) => {
+      withCapturedWarns((warns) => {
+        eventConsumer._test.validateInflightCap(cap);
+        expect(warns.some((w) => w.includes('below') && w.includes('RECEIVE_MAX_MESSAGES'))).toBe(true);
       });
     });
 
-    test.each([
-      ['50', 50],
-      ['200', 200],
-      ['10', 10], // exactly RECEIVE_MAX_MESSAGES — no soft-floor warning
-    ])('accepts %p as %i without warning', (envValue, expected) => {
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
-        // No rejection AND no soft-floor warning for cap >= 10.
-        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+    test.each([10, 50, 100, 200])('cap=%i (>= RECEIVE_MAX_MESSAGES) does NOT emit soft-floor warn', (cap) => {
+      withCapturedWarns((warns) => {
+        eventConsumer._test.validateInflightCap(cap);
         expect(warns.some((w) => w.includes('below'))).toBe(false);
       });
     });
 
-    test.each([
-      ['1', 1],
-      ['5', 5],
-      ['9', 9],
-    ])('accepts %p as %i but warns about degenerate overshoot ratio', (envValue, expected) => {
-      // Defense-in-depth: cap < RECEIVE_MAX_MESSAGES is accepted (the
-      // operator may want it for rate-limit testing) but warned about
-      // because the effective ceiling overshoots the configured value
-      // by a wide margin (cap=1 → 10 in-flight ceiling = 10x overshoot).
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
-        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
-        expect(
-          warns.some((w) => w.includes('below') && w.includes('RECEIVE_MAX_MESSAGES'))
-        ).toBe(true);
-      });
-    });
-
-    test('unset env var resolves to default without warning', () => {
-      withIsolatedEnv(undefined, (fresh, warns) => {
-        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
-        expect(warns).toHaveLength(0);
-      });
-    });
-  });
-
-  describe('DRAIN_DEADLINE_MS env validation (module-load IIFE)', () => {
-    // Mirrors the MAX_INFLIGHT_HANDLERS validation block. The
-    // drain deadline is range-clamped (not just positive-integer)
-    // because a too-large value would push past gracefulShutdown's
-    // 10s budget and a too-small value would be operationally a
-    // disabled-drain knob.
-    function withIsolatedEnv(envValue, run) {
-      jest.isolateModules(() => {
-        const prev = process.env.QURL_BOT_DRAIN_DEADLINE_MS;
-        const origConsoleWarn = console.warn;
-        const warns = [];
-        console.warn = (...args) => warns.push(args.join(' '));
-        try {
-          if (envValue === undefined) {
-            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
-          } else {
-            process.env.QURL_BOT_DRAIN_DEADLINE_MS = envValue;
-          }
-          const fresh = require('../src/event-consumer');
-          run(fresh, warns);
-        } finally {
-          console.warn = origConsoleWarn;
-          if (prev === undefined) {
-            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
-          } else {
-            process.env.QURL_BOT_DRAIN_DEADLINE_MS = prev;
-          }
-        }
-      });
-    }
-
-    test.each([
-      ['100abc', 'trailing garbage'],
-      ['-5', 'negative integer'],
-      ['0', 'zero'],
-      ['1.5', 'non-integer'],
-      ['abc', 'non-numeric'],
-    ])('rejects %p (%s) and falls back to default', (envValue) => {
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
-        expect(
-          warns.some((w) => w.includes('QURL_BOT_DRAIN_DEADLINE_MS') && w.includes('rejected'))
-        ).toBe(true);
-      });
-    });
-
-    test.each([
-      ['99', 'just below the floor'],
-      ['8001', 'just above the ceiling'],
-      ['50000', 'order of magnitude over'],
-    ])('clamps out-of-range %p (%s) to default', (envValue) => {
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
-        expect(
-          warns.some((w) => w.includes('out of range'))
-        ).toBe(true);
-      });
-    });
-
-    test.each([
-      ['100', 100], // exact floor
-      ['1500', 1500],
-      ['8000', 8000], // exact ceiling
-    ])('accepts in-range %p as %i', (envValue, expected) => {
-      withIsolatedEnv(envValue, (fresh, warns) => {
-        expect(fresh._test.getDrainDeadlineMs()).toBe(expected);
-        expect(warns).toHaveLength(0);
-      });
-    });
-
-    test('unset env var resolves to default without warning', () => {
-      withIsolatedEnv(undefined, (fresh, warns) => {
-        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
-        expect(warns).toHaveLength(0);
+    test('warn message names the env-var so an operator can correlate boot logs to SSM/task-def', () => {
+      withCapturedWarns((warns) => {
+        eventConsumer._test.validateInflightCap(5);
+        expect(warns.some((w) => w.includes('QURL_BOT_MAX_INFLIGHT_HANDLERS'))).toBe(true);
       });
     });
   });

@@ -414,6 +414,41 @@ const AUDIT_EVENTS = {
 // only one whose mutation is undetectable by tests.
 Object.freeze(AUDIT_EVENTS);
 
+// Discord gateway dispatch event names (the `t` field on op=0 frames).
+// Today only INTERACTION_CREATE is published to the worker tier;
+// MESSAGE_CREATE etc. are reserved for future event-class expansion.
+// Centralized here so the publisher (event-publisher.js, filters on
+// publish) and the consumer (event-consumer.js, validates the
+// envelope's eventType) can't drift — Discord's wire-protocol string
+// is the only value either side ever uses, and a typo on one side
+// would silently drop every dispatch.
+//
+// Frozen for the same reason AUDIT_EVENTS is: a runtime mutation
+// would leave the literal string in transit unaffected but break
+// the other tier's check.
+const GATEWAY_DISPATCH_TYPES = Object.freeze({
+  INTERACTION_CREATE: 'INTERACTION_CREATE',
+});
+
+// Structured-log `kind` tags used to correlate failures across the
+// async-boundary trio: the gateway-WS-driven unhandledRejection
+// handler in index.js, the worker-tier dispatch handler rejection
+// path in event-consumer.js (trackDispatch's .catch), and the
+// publish-failure path in event-publisher.js. All three emit the
+// same `kind: 'unhandledRejection'` tag so a single CloudWatch
+// query — filtering on the structured field — finds every site
+// without grepping message text or maintaining per-site filter
+// rules. Centralizing the literal here makes the contract
+// explicit and lets a future tag addition (LOG_KIND_AUDIT, etc.)
+// follow the same pattern.
+//
+// Frozen — see AUDIT_EVENTS for the rationale. A mutation here
+// would silently make one site stop matching the CloudWatch
+// alarm filter the other two sites still emit.
+const LOG_KINDS = Object.freeze({
+  UNHANDLED_REJECTION: 'unhandledRejection',
+});
+
 module.exports = {
   COLORS,
   RESOURCE_TYPES,
@@ -427,4 +462,6 @@ module.exports = {
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
   TRUST,
+  GATEWAY_DISPATCH_TYPES,
+  LOG_KINDS,
 };

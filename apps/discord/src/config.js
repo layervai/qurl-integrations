@@ -1,14 +1,47 @@
 const path = require('path');
 
-// Safe int parser: handles NaN and falsy-zero correctly. If minPositive
-// is set (the common case for cooldowns + caps), reject non-positive
-// values — an env of "0" would otherwise silently disable a cooldown or
-// block every send.
-function intEnv(key, defaultVal, { minPositive = false } = {}) {
-  const v = parseInt(process.env[key], 10);
-  if (isNaN(v)) return defaultVal;
+// Safe int parser: handles NaN and falsy-zero correctly.
+//
+// Options:
+//   minPositive: reject values <= 0 (common case for cooldowns + caps —
+//     an env of "0" would otherwise silently disable a cooldown).
+//   strictInteger: reject non-integer or trailing-garbage values like
+//     "100abc". Use Number() + Number.isInteger() instead of parseInt's
+//     lenient parse. Pair with minPositive for "must be a positive
+//     integer" semantics. Required when the value's range is bounded
+//     and a typo would silently truncate to a different valid value.
+//   min, max: inclusive range. Out-of-range values warn + fall back
+//     to the default (NOT clamp — clamping would silently mask a typo
+//     past the boundary). When both are set, the warn quotes the
+//     range so an operator can fix the env without diffing the source.
+//
+// Returns defaultVal on any rejection, with a console.warn for every
+// rejected path (visible at boot regardless of LOG_LEVEL or logger
+// transport state — logger isn't loaded this early in config import).
+function intEnv(key, defaultVal, opts = {}) {
+  const { minPositive = false, strictInteger = false, min, max } = opts;
+  const raw = process.env[key];
+  if (raw === undefined || raw === '') return defaultVal;
+  let v;
+  if (strictInteger) {
+    v = Number(raw);
+    if (!Number.isInteger(v)) {
+      console.warn(`[config] ${key}=${JSON.stringify(raw)} rejected (must be an integer); using default ${defaultVal}`);
+      return defaultVal;
+    }
+  } else {
+    v = parseInt(raw, 10);
+    if (isNaN(v)) return defaultVal;
+  }
   if (minPositive && v <= 0) {
     console.warn(`[config] ${key}=${v} rejected (must be > 0); using default ${defaultVal}`);
+    return defaultVal;
+  }
+  if ((min !== undefined && v < min) || (max !== undefined && v > max)) {
+    const rangeLabel = min !== undefined && max !== undefined
+      ? `[${min}, ${max}]`
+      : min !== undefined ? `>= ${min}` : `<= ${max}`;
+    console.warn(`[config] ${key}=${v} out of range ${rangeLabel}; using default ${defaultVal}`);
     return defaultVal;
   }
   return v;
@@ -350,4 +383,27 @@ module.exports = {
   // silently no-op'ing the consumer or dropping every dispatch on
   // the producer side.
   QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
+
+  // Backpressure cap for the event consumer's in-flight handler
+  // tracker (see src/event-consumer.js module header). Read here
+  // instead of in event-consumer.js so the value goes through the
+  // single intEnv validation path — strictInteger rejects trailing
+  // garbage like "100abc" the same way as the prior IIFE.
+  QURL_BOT_MAX_INFLIGHT_HANDLERS: intEnv('QURL_BOT_MAX_INFLIGHT_HANDLERS', 100, {
+    minPositive: true,
+    strictInteger: true,
+  }),
+
+  // Graceful-shutdown drain deadline (ms). Consumed by both
+  // event-consumer.js and event-publisher.js — see each module's
+  // stop() comment for the contract. Range bound is the upper limit
+  // of gracefulShutdown's 10s budget minus headroom for db.close()
+  // + Discord teardown. Values outside [100, 8000] fall back to the
+  // default with a warn — clamping would silently mask a typo past
+  // the boundary.
+  QURL_BOT_DRAIN_DEADLINE_MS: intEnv('QURL_BOT_DRAIN_DEADLINE_MS', 3000, {
+    strictInteger: true,
+    min: 100,
+    max: 8000,
+  }),
 };
