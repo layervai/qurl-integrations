@@ -1705,6 +1705,13 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
   // 3.1s of real-time sleep per iteration sequence. setImmediate +
   // queueMicrotask are excluded from fake-timer wrapping so the
   // existing flushMicrotasks() + Promise scheduling stay unaffected.
+  //
+  // Invariant: pollOnce's at-cap branch awaits exactly one timer
+  // (abortableSleep's setTimeout). runOnlyPendingTimersAsync fires
+  // that timer + drains microtasks. If a future change adds a
+  // second `await abortableSleep` in this branch (e.g., a separate
+  // metrics-flush sleep), this helper would silently advance only
+  // the first and the second would hang — convert to a loop then.
   async function pollOnceFast(client) {
     const p = withMockedSqs(() => eventConsumer._test.pollOnce(client));
     await jest.runOnlyPendingTimersAsync();
@@ -1853,6 +1860,48 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     );
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+  });
+
+  test('pollOnce: MAX → BASE reset via production below-cap path (not just one doubling)', async () => {
+    // Companion to the cap-released test, which only exercises the
+    // single-doubling case (200 → 100). This drives currentBackoffMs
+    // to the ceiling first, then triggers the real below-cap
+    // transition, locking in that the reset works from any step on
+    // the doubling ladder — not just the first.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      const resolvers = [];
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          let resolve;
+          const p = new Promise((r) => { resolve = r; });
+          resolvers.push(resolve);
+          eventConsumer.trackDispatch(p);
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      // Drive to MAX (4 doublings: 100 → 200 → 400 → 800 → 1600).
+      for (let i = 0; i < 4; i += 1) {
+        await pollOnceFast(client);
+      }
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+
+      // Drain all handlers, then take the production below-cap path.
+      resolvers.forEach((r) => r('done'));
+      // flushMicrotasks uses setImmediate which is excluded from
+      // fake timers, so the .finally chain flushes normally.
+      await flushMicrotasks();
+      expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+      expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('pollOnce proceeds with receive when below cap', async () => {

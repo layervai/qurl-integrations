@@ -763,12 +763,6 @@ async function pollOnce(client) {
     // across workers aren't possible. The downstream wedge isn't
     // sensitive to wake-time alignment either, so plain doubling is
     // the right shape.
-    //
-    // stop()-during-sleep race: if signal.abort() fires while we're
-    // parked here, abortableSleep resolves, this line still doubles
-    // currentBackoffMs (one wasted increment), then pollOnce returns,
-    // pollLoop's while-check sees signal.aborted, and stop()'s
-    // finally resets currentBackoffMs to BASE. End state correct.
     currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
     return;
   }
