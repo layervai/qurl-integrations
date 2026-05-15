@@ -896,6 +896,28 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-clean', 'm-clean']);
     });
 
+    it('does NOT call editDM when every DELETE threw (success === 0)', async () => {
+      // Pins the `if (success > 0)` guard at the top of the post-
+      // revoke edit block. When every per-resource DELETE fails (e.g.,
+      // the qURL service is fully down), successUserIds is empty and
+      // no recipient has had their link revoked. Editing their DM to
+      // "closed the door" would be a lie.
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent', dm_channel_id: 'c-a', dm_message_id: 'm-a' },
+        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent', dm_channel_id: 'c-b', dm_message_id: 'm-b' },
+      ]);
+      mockDeleteLink.mockRejectedValue(new Error('qURL service down'));
+
+      const result = await revokeAllLinks('send-all-fail', 'sender-1', 'apikey', 'Alice');
+
+      expect(result.success).toBe(0);
+      expect(mockEditDM).not.toHaveBeenCalled();
+      // Also no debug skip-log: the `if (success > 0)` guard short-
+      // circuits before we even try to build editTargets.
+      const skipLog = logger.debug.mock.calls.find(c => c[0] === 'Revoke succeeded but no editable DM targets');
+      expect(skipLog).toBeUndefined();
+    });
+
     it('emits debug silent-skip log + no info edit log when every strict-success row is legacy', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent' }, // legacy, no refs

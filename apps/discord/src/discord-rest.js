@@ -138,6 +138,10 @@ async function editDM(channelId, messageId, message) {
     await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
     return { ok: true };
   } catch (error) {
+    // Map.get(undefined) returns undefined, which falls through to the
+    // unexpected (warn-level) branch. Intentional: an error with no
+    // API code (e.g., revoked-token 403 with no JSON body, synthetic
+    // proxy 404) is exactly the kind of surprise oncall should see.
     const expectedDescription = DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS.get(error.code);
     const expected = expectedDescription !== undefined;
     const level = expected ? 'info' : 'warn';
