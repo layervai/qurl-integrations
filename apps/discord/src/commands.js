@@ -3627,10 +3627,26 @@ function formatPersonalMessagePreview(message) {
 // re-render on every picker change / expiry select / note add+edit; in
 // a single flow the cache typically doesn't change between re-renders,
 // so iterating it on every render is wasted work. The WeakMap is keyed
-// by `guild` and entries auto-evict when the Guild is GC'd. A future
-// member-join/leave that changes `cache.size` or `memberCount` busts
-// the memo automatically — the key tuple (`cache.size:memberCount`) is
-// the freshness fingerprint.
+// by `guild` and entries auto-evict when the Guild is GC'd.
+//
+// FRESHNESS FINGERPRINT: `cache.size:memberCount` busts the memo when
+// either changes (the common case for member join/leave). KNOWN GAP:
+// a swap event — one human leaves and one bot joins near-simultaneously
+// — keeps both values stable but flips the non-bot count by 1. The
+// memo would return the stale count until the next non-swap churn.
+// Acceptable because (a) the label is documented as a hint, not
+// authoritative, and (b) the click-time `partitionRecipients` is the
+// source of truth. Folding a churn signal into the fingerprint would
+// be cheap if this ever needs tightening.
+//
+// Returns `{ count, accurate }`:
+//   - `accurate: true` when the warm-cache branch fired (cache fully
+//     populated AND bots filtered) — safe to gate render-time disables
+//     on the count
+//   - `accurate: false` for the cold-cache fallback (`memberCount`
+//     includes bots — over-counts by bot population, so a guild near
+//     the cap could false-positive on over-cap disable)
+//   - `count: null` when neither branch can produce a number
 const everyoneCountMemo = new WeakMap();
 function computeEveryoneDisplayCount(guild) {
   const cache = guild?.members?.cache;
@@ -3638,16 +3654,16 @@ function computeEveryoneDisplayCount(guild) {
   if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
     const fingerprint = `${cache.size}:${memberCount}`;
     const cached = everyoneCountMemo.get(guild);
-    if (cached && cached.fingerprint === fingerprint) return cached.count;
+    if (cached && cached.fingerprint === fingerprint) return { count: cached.count, accurate: true };
     let n = 0;
     for (const [, m] of cache) {
       if (!isBotMember(m)) n++;
     }
     everyoneCountMemo.set(guild, { fingerprint, count: n });
-    return n;
+    return { count: n, accurate: true };
   }
-  if (typeof memberCount === 'number') return memberCount;
-  return null;
+  if (typeof memberCount === 'number') return { count: memberCount, accurate: false };
+  return { count: null, accurate: false };
 }
 
 function renderConfirmCardRows({
@@ -3879,20 +3895,24 @@ function renderConfirmCardRows({
     && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
   ) {
     const guild = interaction.guild;
-    const displayCount = computeEveryoneDisplayCount(guild);
-    // Disable on two conditions:
+    const { count: displayCount, accurate: countIsAccurate } = computeEveryoneDisplayCount(guild);
+    // Disable on three conditions:
     //  - `null` (memberCount unavailable + cache cold) → `(?)` label
     //    so the user sees the button can't act vs. silent no-op
-    //  - `> QURL_SEND_MAX_RECIPIENTS` (cap-exceeded) → surface the
-    //    constraint at render time with an explicit suffix in the
-    //    label so the user sees why before clicking, rather than
-    //    getting the click-time hard-reject warning. Cap-reject in
-    //    handleConfirmEveryone is still the authoritative gate
-    //    (defense against memberCount-vs-actual-cache drift).
-    // (`=== 0` is structurally unreachable — a guild with zero members
-    // can't host the slash command in the first place — so it's not
-    // worth a defensive branch.)
-    const overCap = displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
+    //  - `0` reachable in degraded cache states (all-bots guild with
+    //    sender's row temporarily missing). The bots-only click-time
+    //    reject still surfaces the right copy, but disabling at render
+    //    avoids the dead-click round trip
+    //  - `> QURL_SEND_MAX_RECIPIENTS` ONLY when `countIsAccurate` —
+    //    the cold-cache fallback returns `memberCount` (over-counts
+    //    by bot population), so disabling on it would false-positive
+    //    on a near-cap guild whose actual non-bot count is under cap
+    //    (e.g., 20100 members with 200 bots → 19900 non-bots, well
+    //    under default 20000 cap, but raw memberCount = 20100). Cold-
+    //    cache over-cap defers to click-time hard-reject in
+    //    handleConfirmEveryone (authoritative — partition runs against
+    //    the prewarmed cache).
+    const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
     const labelCount = displayCount == null ? '?' : String(displayCount);
     const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
     //
@@ -3907,7 +3927,7 @@ function renderConfirmCardRows({
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
         .setLabel(`\u{1F4E2} @everyone (${labelCount})${labelSuffix}`)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(displayCount == null || overCap),
+        .setDisabled(displayCount == null || displayCount === 0 || overCap),
     );
   }
   bottomRow.addComponents(
@@ -5517,6 +5537,14 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     // shared copy is acceptable.
     return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
   }
+  // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
+  // the sender (voice-mode semantic is "everyone else in this voice
+  // channel"). The @everyone button intentionally INCLUDES the sender
+  // — it's the dropdown's "select all" shortcut, not a separate "all
+  // others" affordance. A future contributor aligning the two handlers
+  // would silently flip the self-inclusion behavior; the `selfIncluded`
+  // flag flows through to the card's "Send includes you." notice so
+  // the user sees they're in the recipient list.
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
   if (valid.length === 0) {
     const reasons = [];
@@ -7954,6 +7982,13 @@ module.exports = {
       // composition directly (e.g., the DM-context @everyone-gate
       // assertion) without driving through handleQurlFile's entry path.
       renderConfirmCardRows,
+      // Memo for the @everyone non-bot count is module-scoped. Tests
+      // that reuse a guild reference across cases could otherwise get
+      // surprising memo hits; exposing the WeakMap lets a beforeEach
+      // hook clear specific entries. Production callers never need
+      // this — the memo busts on cache.size/memberCount changes.
+      _everyoneCountMemo: everyoneCountMemo,
+      computeEveryoneDisplayCount,
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,

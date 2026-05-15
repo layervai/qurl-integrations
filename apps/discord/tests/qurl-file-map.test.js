@@ -6646,24 +6646,42 @@ describe('renderConfirmCardRows', () => {
       // Confirm cards re-render on every picker change / expiry select /
       // note edit. For a large guild the per-render O(N) bot filter
       // would compound; the memo keyed on `cache.size:memberCount` lets
-      // a single flow's re-renders share one count computation. Pin by
-      // observing that `isBotMember` is called O(N) on the FIRST render
-      // and zero times on subsequent renders against the same guild.
-      const { ButtonBuilder } = require('discord.js');
+      // a single flow's re-renders share one count computation. Pin
+      // memoization by counting cache iterations directly — without a
+      // memo, every render would iterate; with the memo, only the
+      // first render does. Behavioral label assertion alone passes
+      // under both implementations, so the iteration counter is
+      // load-bearing.
       const commands = require('../src/commands');
-      const { renderConfirmCardRows } = commands._test;
-      ButtonBuilder.mockClear();
-      // Shared guild reference + warm cache so the warm-path branch fires.
-      const memberCache = new Map();
-      memberCache.set('u1', { user: { id: 'u1', bot: false } });
-      memberCache.set('u2', { user: { id: 'u2', bot: false } });
-      memberCache.set('b1', { user: { id: 'b1', bot: true } });
+      const { renderConfirmCardRows, _everyoneCountMemo } = commands._test;
+      const guildId = 'guild-memo-iter';
+      // Wrap the cache Map to count `[Symbol.iterator]` invocations.
+      // discord.js's `Collection` and a plain `Map` both delegate the
+      // `for ... of` to `[Symbol.iterator]`, so this captures every
+      // full-pass enumeration.
+      const memberCache = new Map([
+        ['u1', { user: { id: 'u1', bot: false } }],
+        ['u2', { user: { id: 'u2', bot: false } }],
+        ['b1', { user: { id: 'b1', bot: true } }],
+      ]);
+      let iterations = 0;
+      const iterCountingCache = new Proxy(memberCache, {
+        get(target, prop) {
+          if (prop === Symbol.iterator) {
+            iterations++;
+            return target[Symbol.iterator].bind(target);
+          }
+          return Reflect.get(target, prop);
+        },
+      });
       const guild = {
-        id: 'guild-memo',
-        members: { cache: memberCache },
+        id: guildId,
+        members: { cache: iterCountingCache },
         memberCount: 3,
         channels: { cache: new Map() },
       };
+      // Defensive: clear any stale memo entry from previous tests.
+      _everyoneCountMemo.delete(guild);
       const interaction = {
         guild,
         memberPermissions: { has: jest.fn(() => true) },
@@ -6678,23 +6696,96 @@ describe('renderConfirmCardRows', () => {
         recipientIds: [],
         recipientMode: 'picker',
       };
-      // Render 5x; observe the @everyone button label stays consistent.
       for (let i = 0; i < 5; i++) renderConfirmCardRows(args);
-      const everyoneLabels = ButtonBuilder.mock.results
-        .filter((r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone')
-        .map((r) => r.value.setLabel.mock.calls[0]?.[0]);
-      // 5 renders → 5 button instances, each labeled `(2)` (3 cached,
-      // 1 bot). The memo invariant is correctness-equivalent to the
-      // non-memoized path; the cost saving is internal.
-      expect(everyoneLabels.length).toBe(5);
-      everyoneLabels.forEach((l) => expect(l).toContain('(2)'));
+      // First render walks the cache to compute non-bot count → 1
+      // iteration. Subsequent renders hit the memo → 0 additional
+      // iterations. Total across 5 renders: 1.
+      expect(iterations).toBe(1);
     });
 
-    test('disabled with "exceeds cap" suffix when memberCount > QURL_SEND_MAX_RECIPIENTS', async () => {
-      // Render-time disable for the over-cap case so the user sees the
-      // constraint BEFORE clicking, rather than getting the click-time
-      // hard-reject warning. The click-time cap-reject in
-      // handleConfirmEveryone is still the authoritative gate.
+    test('memo busts on cache.size change', async () => {
+      // Member join/leave changes `cache.size` (or `memberCount`),
+      // which fingerprints the memo entry and forces re-computation.
+      const commands = require('../src/commands');
+      const { renderConfirmCardRows, _everyoneCountMemo } = commands._test;
+      const memberCache = new Map([
+        ['u1', { user: { id: 'u1', bot: false } }],
+        ['u2', { user: { id: 'u2', bot: false } }],
+      ]);
+      const guild = {
+        id: 'guild-memo-bust',
+        members: { cache: memberCache },
+        memberCount: 2,
+        channels: { cache: new Map() },
+      };
+      _everyoneCountMemo.delete(guild);
+      const args = {
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction: { guild, memberPermissions: { has: jest.fn(() => true) } },
+        recipientIds: [],
+        recipientMode: 'picker',
+      };
+      renderConfirmCardRows(args);  // memo populated with count=2
+      // Member joins → cache grows + memberCount grows. Fingerprint
+      // flips, memo busts on next render.
+      memberCache.set('u3', { user: { id: 'u3', bot: false } });
+      guild.memberCount = 3;
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      renderConfirmCardRows(args);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      // Post-bust label reflects the new count (3 non-bots), not the
+      // memoized 2.
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(3)'));
+    });
+
+    test('disabled with "exceeds cap" suffix when warm-cache non-bot count > cap', async () => {
+      // Render-time over-cap disable fires ONLY when the count is
+      // accurate (warm cache + bot-filtered). Cold-cache over-cap
+      // defers to click-time hard-reject — see counter-test below.
+      const config = require('../src/config');
+      const { ButtonBuilder } = require('discord.js');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      try {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 2, configurable: true, writable: true });
+        ButtonBuilder.mockClear();
+        const int = makeInteraction({
+          options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+          guildMembers: {  // 4 cached, all non-bot → count=4 > cap=2
+            '100000000000000001': {},
+            '100000000000000002': {},
+            '100000000000000003': {},
+            '100000000000000004': {},
+          },
+        });
+        int.memberPermissions = { has: jest.fn(() => true) };
+        int.guild.memberCount = 4;  // matches cache.size → warm + accurate
+        await handleQurlFile(int);
+        const everyoneBtn = ButtonBuilder.mock.results.find(
+          (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+        );
+        expect(everyoneBtn).toBeDefined();
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('exceeds 2 cap'));
+        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+      } finally {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+      }
+    });
+
+    test('cold-cache memberCount > cap does NOT disable (avoid bot-overcount false-positive)', async () => {
+      // Counter-test: a guild with `memberCount = 500` but only 1
+      // cached member is cold; `displayCount = memberCount` is an
+      // over-count by bot population. Disabling on it would false-
+      // positive on a near-cap guild whose actual non-bot count is
+      // under cap. Defer to click-time hard-reject (which runs against
+      // the prewarmed cache).
       const config = require('../src/config');
       const { ButtonBuilder } = require('discord.js');
       const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
@@ -6703,17 +6794,20 @@ describe('renderConfirmCardRows', () => {
         ButtonBuilder.mockClear();
         const int = makeInteraction({
           options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
-          guildMembers: { '100000000000000001': {} },
+          guildMembers: { '100000000000000001': {} },  // cache.size=1
         });
         int.memberPermissions = { has: jest.fn(() => true) };
-        int.guild.memberCount = 500;  // way over cap=100
+        int.guild.memberCount = 500;  // cache.size < memberCount → cold
         await handleQurlFile(int);
         const everyoneBtn = ButtonBuilder.mock.results.find(
           (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
         );
         expect(everyoneBtn).toBeDefined();
-        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('exceeds 100 cap'));
-        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+        // Label shows raw count without "exceeds" suffix; button is
+        // enabled because we don't trust the cold-path number for
+        // disable decisions.
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.not.stringContaining('exceeds'));
+        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(false);
       } finally {
         Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
       }
