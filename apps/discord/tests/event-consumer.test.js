@@ -295,6 +295,27 @@ describe('event-consumer: processMessage dispatch paths', () => {
     );
   });
 
+  test('missing event_id logs debug + still dispatches', async () => {
+    // Pins the contract that an INTERACTION_CREATE arriving without
+    // event_id (a producer-side regression) is dispatched normally
+    // but flagged in debug logs so ops can spot the dup-detection
+    // blind spot before the LRU's gauge silently lies.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const message = makeMessage(
+      { eventType: 'INTERACTION_CREATE', data: { id: 'no-eid' } /* event_id missing */ },
+      { messageId: 'm-no-eid' },
+    );
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+
+    expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('envelope missing event_id'),
+      expect.objectContaining({ messageId: 'm-no-eid', eventType: 'INTERACTION_CREATE' }),
+    );
+  });
+
   test('seenEventIds not populated on malformed body or unknown eventType', async () => {
     // recordSeen sits AFTER the eventType gate, so envelope-shape
     // failures (malformed JSON, non-object, unknown eventType) must
@@ -639,11 +660,20 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(isAbortError(e1)).toBe(true);
     const e2 = new Error('aborted'); e2.code = 'AbortError';
     expect(isAbortError(e2)).toBe(true);
+    // Node's standard AbortError uses code = 'ABORT_ERR' (DOMException-
+    // style). The @aws-sdk versions we use have been observed
+    // emitting this shape; matching it keeps stop()-triggered aborts
+    // silent across SDK refreshes.
+    const e3 = new Error('aborted'); e3.code = 'ABORT_ERR';
+    expect(isAbortError(e3)).toBe(true);
+    // @smithy CanceledError shape.
+    const e4 = new Error('canceled'); e4.name = 'CanceledError';
+    expect(isAbortError(e4)).toBe(true);
     // TimeoutError is the SDK's own request-timeout, NOT our abort.
     // Must land in the error-backoff path so flaky AWS endpoints
     // surface in logs + backoff instead of spinning silently.
-    const e3 = new Error('timeout'); e3.name = 'TimeoutError';
-    expect(isAbortError(e3)).toBe(false);
+    const e5 = new Error('timeout'); e5.name = 'TimeoutError';
+    expect(isAbortError(e5)).toBe(false);
   });
 
   test('pollOnce passes an abortSignal in the SDK send options', async () => {

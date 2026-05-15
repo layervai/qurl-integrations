@@ -224,6 +224,16 @@ async function deleteMessage(receiptHandle) {
   }));
 }
 
+// TODO(infra-publisher-set): the consumer trusts every field in
+// the envelope (including data.user.id and data.member.permissions)
+// because the SQS queue policy locks sqs:SendMessage to the gateway
+// task role's principal. If the infra-side `qurl-bot-events` module
+// ever grants publish rights to a sibling service, this trust shape
+// MUST be replaced with envelope schema validation + signature
+// verification before that publisher's first message lands. See
+// docs/zero-downtime-design.md → "Trust boundary — SQS queue
+// policy + envelope authenticity" for the full contract.
+
 /**
  * Process one SQS message: parse the envelope, dispatch via
  * client.actions.InteractionCreate.handle, delete on success.
@@ -285,6 +295,18 @@ async function processMessage(client, message) {
     return;
   }
 
+  if (!eventId) {
+    // Telemetry blind spot: recordSeen short-circuits on a falsy
+    // event_id, so dup-detection won't see this message. Log at
+    // debug so ops can spot a producer-side regression where the
+    // envelope's event_id field starts arriving empty/missing (the
+    // dup-rate gauge would silently lie until the LRU is fixed at
+    // the producer).
+    logger.debug('Event consumer: envelope missing event_id; LRU dedup will not track', {
+      messageId: message.MessageId,
+      eventType,
+    });
+  }
   const isDup = recordSeen(eventId);
 
   // Reconstruct + emit via discord.js's internal dispatch path.
@@ -356,8 +378,8 @@ async function pollOnce(client) {
   if (Messages.length === 0) return;
 
   // Process messages in parallel. Each wrapper catches its own
-  // failures so one rejection doesn't collapse the Promise.all and
-  // strand siblings. The only escape from `processMessage` is a
+  // failures so one rejection doesn't collapse the batch and strand
+  // siblings. The only escape from `processMessage` is a
   // DeleteMessage throw — every other error path is internally
   // caught + delete-eager. So this log is specifically the
   // SQS-delete-failed signal: the message will redrive after the
@@ -366,7 +388,14 @@ async function pollOnce(client) {
   // side effects; counts of this log line are the operational
   // signal for "how often do we redrive a successfully-dispatched
   // interaction." Worth alerting on if it climbs.
-  await Promise.all(Messages.map(async (message) => {
+  //
+  // `Promise.allSettled` (rather than `Promise.all`) makes the
+  // per-message isolation a hard contract: even if a future change
+  // adds work outside the inner try/catch and lets a rejection
+  // escape, allSettled still awaits the remaining promises before
+  // returning. With Promise.all, an uncaught rejection would
+  // collapse the batch and orphan in-flight receipts.
+  await Promise.allSettled(Messages.map(async (message) => {
     try {
       await processMessage(client, message);
     } catch (err) {
@@ -394,7 +423,8 @@ function isAbortError(err) {
   if (!err) return false;
   return err.name === 'AbortError'
     || err.name === 'CanceledError'
-    || err.code === 'AbortError';
+    || err.code === 'AbortError'
+    || err.code === 'ABORT_ERR'; // Node's standard AbortError shape (DOMException-style code).
 }
 
 // Sleep that resolves either when the timeout fires OR when stop()
@@ -552,6 +582,15 @@ async function stop() {
     // start() (no-op today via the running guard) wouldn't abort a
     // stale controller.
     receiveAbortController = null;
+    // Intentionally do NOT null `sqsClient`. Production never calls
+    // start() after stop() — gracefulShutdown runs once at SIGTERM,
+    // then process.exit. Reusing the client across a hypothetical
+    // future stop+start pair is cheaper than re-resolving region +
+    // re-constructing the credential chain. If a future caller
+    // mutates AWS_REGION between stop+start and expects the new
+    // value to take effect, that caller MUST also call
+    // _resetStateForTest (or null sqsClient explicitly) — this is
+    // the asymmetry with the test helper, which DOES clear it.
   }
 }
 
