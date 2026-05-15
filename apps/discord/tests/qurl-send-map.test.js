@@ -5088,10 +5088,16 @@ describe('handleConfirmVoiceEveryone', () => {
   });
 
   test('success-path emits info-level audit log with counts', async () => {
-    // Mirror handleConfirmEveryone's success-log test (#376) — a
-    // successful voice-channel fan-out is a load-bearing audit signal
-    // ("did someone fan to N members of #voice-channel?") and should
-    // be findable in logs without a DDB scan of qurl_send_configs.
+    // Mirror handleConfirmEveryone's success-log test — a successful
+    // voice-channel fan-out is a load-bearing audit signal ("did
+    // someone fan to N members of #voice-channel?") and should be
+    // findable in logs without a DDB scan of qurl_send_configs.
+    //
+    // Exact-value asserts (vs expect.any) catch regressions where
+    // the bot filter double-counts, partial-cache rows leak into the
+    // valid set, or voice_member_count drifts away from
+    // channel.members.size. guild_id + user_id pinned so a future
+    // forensics consumer that greps by them is protected by the spec.
     const int = makeVoiceInteraction({ members: [u1, u2] });
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     const logger = require('../src/logger');
@@ -5099,12 +5105,14 @@ describe('handleConfirmVoiceEveryone', () => {
       expect.stringContaining('voice @everyone expansion succeeded'),
       expect.objectContaining({
         flow_id: 'fid',
+        guild_id: int.guildId,
+        user_id: int.user.id,
         voice_channel_id: VOICE_CH,
         valid_count: 2,
-        dropped_bots: expect.any(Number),
-        partial_cache_drops: expect.any(Number),
+        dropped_bots: 0,
+        partial_cache_drops: 0,
         self_included: false,
-        voice_member_count: expect.any(Number),
+        voice_member_count: 2,
       }),
     );
   });
