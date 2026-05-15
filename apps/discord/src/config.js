@@ -41,7 +41,6 @@ function intEnv(key, defaultVal, opts = {}) {
     const rangeLabel = min !== undefined && max !== undefined
       ? `[${min}, ${max}]`
       : min !== undefined ? `>= ${min}` : `<= ${max}`;
-  // (intEnv's range warn fires only on out-of-range hits.)
     console.warn(`[config] ${key}=${v} out of range ${rangeLabel}; using default ${defaultVal}`);
     return defaultVal;
   }

@@ -403,7 +403,7 @@ describe('event-consumer: processMessage dispatch paths', () => {
       });
       await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
       expect(logger.info).toHaveBeenCalledWith(
-        expect.stringContaining('dispatched'),
+        expect.stringContaining('received'),
         expect.objectContaining({
           qurl_bot_event_e2e_ms: 25,
           eventId: '0:42',
@@ -435,7 +435,7 @@ describe('event-consumer: processMessage dispatch paths', () => {
     );
     // The info "dispatched" path must NOT fire when the field is absent.
     expect(logger.info).not.toHaveBeenCalledWith(
-      expect.stringContaining('dispatched'),
+      expect.stringContaining('received'),
       expect.objectContaining({ qurl_bot_event_e2e_ms: expect.anything() }),
     );
   });
@@ -455,7 +455,7 @@ describe('event-consumer: processMessage dispatch paths', () => {
     });
     await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
     expect(logger.info).not.toHaveBeenCalledWith(
-      expect.stringContaining('dispatched'),
+      expect.stringContaining('received'),
       expect.objectContaining({ qurl_bot_event_e2e_ms: expect.anything() }),
     );
   });

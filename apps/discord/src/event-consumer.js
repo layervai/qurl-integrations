@@ -554,7 +554,14 @@ async function processMessage(client, message) {
   // observability, not correctness.
   if (typeof publishedAtMs === 'number' && Number.isFinite(publishedAtMs)) {
     const e2eMs = Date.now() - publishedAtMs;
-    logger.info('Event consumer: dispatched', {
+    // Log fires AT RECEIVE TIME, not after dispatch — see the
+    // `client.actions.InteractionCreate.handle(data)` call further
+    // down (around the FLAG-WRAP-START sentinel). The metric is
+    // gateway-host wall-clock-publish → worker-host wall-clock-receive,
+    // i.e., a receive-latency SLI. Don't rename to 'dispatched' /
+    // 'handled' — those framings imply the handler ran, which we
+    // can't yet attest from this code path.
+    logger.info('Event consumer: received', {
       qurl_bot_event_e2e_ms: e2eMs,
       eventId,
       shardId: parsed.shardId,

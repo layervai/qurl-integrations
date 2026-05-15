@@ -232,7 +232,7 @@ describe('producer → consumer envelope round-trip', () => {
 
       const logger = require('../src/logger');
       expect(logger.info).toHaveBeenCalledWith(
-        expect.stringContaining('dispatched'),
+        expect.stringContaining('received'),
         expect.objectContaining({
           qurl_bot_event_e2e_ms: 42,
           eventId: '0:99',
