@@ -74,14 +74,34 @@
 //
 // Output shape:
 //   {
-//     ids:                [<user_id>, ...],   // deduped, cap-applied
-//     invalidTokens:      [<raw_token>, ...], // pre-escaped (see above)
-//     cappedCount:        <number>,           // 0 if not capped; else
-//                                             // `total_pre_cap - cap`
-//     massMentionDenied:  <boolean>,          // true when @everyone
-//                                             // appeared but the caller
-//                                             // denied via the
-//                                             // `allowMassMention` opt
+//     ids:                  [<user_id>, ...],   // deduped, cap-applied
+//     invalidTokens:        [<raw_token>, ...], // pre-escaped (see above)
+//     cappedCount:          <number>,           // 0 if not capped; else
+//                                               // `total_pre_cap - cap`
+//     massMentionDenied:    <boolean>,          // true when @everyone
+//                                               // appeared but the caller
+//                                               // denied via the
+//                                               // `allowMassMention` opt
+//     massMentionExpanded:  <boolean>,          // true iff @everyone was
+//                                               // allowed AND the walk
+//                                               // iterated at least one
+//                                               // non-bot member from
+//                                               // `members.cache` (the
+//                                               // member may already be
+//                                               // in `ids` via a prior
+//                                               // named mention — dedup
+//                                               // happens inside
+//                                               // `consider()`; the flag
+//                                               // records that the
+//                                               // expansion ran, not
+//                                               // that it added new
+//                                               // entries). False when
+//                                               // cache was cold,
+//                                               // all-bot, or cap-
+//                                               // saturated before the
+//                                               // walk reached it.
+//                                               // Mutually exclusive
+//                                               // with massMentionDenied.
 //   }
 //
 // `ids` is deduped, capped at `config.QURL_SEND_MAX_RECIPIENTS` (the
@@ -263,7 +283,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // an empty result rather than throwing. Caller branches on
   // `ids.length === 0` to decide whether to render the recipient picker.
   if (raw == null || typeof raw !== 'string') {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Mirror the `raw` guard for `interaction` so a null/undefined
   // caller-bug surfaces as an empty result instead of a TypeError
@@ -271,7 +291,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // a clearer crash site for "no caller context"; the parser
   // doesn't gain anything by failing here.
   if (interaction == null) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
   // Length-cap BEFORE regex matching to keep the global-flag iteration
   // bounded under adversarial input. The /g flag scans linearly but
@@ -301,7 +321,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     }
   }
   if (input.length === 0) {
-    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, roleMentionsDenied: [] };
+    return { ids: [], invalidTokens: [], cappedCount: 0, massMentionDenied: false, massMentionExpanded: false, roleMentionsDenied: [] };
   }
 
   // `seen` is the canonical post-filter unique-candidate set (every
@@ -602,6 +622,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
   // `@everyone <@uncachedUser>`, the direct mention claims a cap slot
   // first, and @everyone fills the remainder. Reversing this order
   // silently drops explicit mentions when the cache is partial.
+  let massMentionExpanded = false;
   if (everyonePresent && allowMassMention) {
     const everyoneMembers = guild?.members?.cache;
     if (everyoneMembers) {
@@ -639,6 +660,22 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
         if (ids.size >= cap) break;
         if (isBotMember(member)) continue;
         consider(memberId);
+        // Set inside the walk (rather than deriving from
+        // `everyonePresent && allowMassMention` at the bottom) so the
+        // flag means "expansion iterated at least one non-bot member,"
+        // not "expansion was permitted." Robust against future short-
+        // circuits — cap exhausted by named mentions before this loop
+        // runs, empty cache, all-bot cache — that would otherwise
+        // leave the flag overstating.
+        //
+        // NOTE: `consider()` is a silent no-op when `seen.has(id)`, so
+        // a mixed-mentions input like `<@alice> @everyone` where alice
+        // is also in the @everyone set still sets the flag — the walk
+        // iterated alice and dedup'd internally. Documented call-site
+        // behavior (`commands.js`'s MIXED MENTIONS comment) intentionally
+        // treats this as EVERYONE-mode, so the dedup-then-set ordering
+        // matches the intended downstream semantic.
+        massMentionExpanded = true;
       }
     }
   }
@@ -720,7 +757,18 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     });
   }
 
-  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied };
+  // `massMentionExpanded` was set inside the @everyone walk above
+  // (true iff the walk iterated at least one non-bot member —
+  // `consider()` dedups internally, so a mixed-mentions input still
+  // sets the flag). Surfacing it lets callers route the slash-text
+  // "@everyone" path into RECIPIENT_MODE_EVERYONE without duplicating
+  // the regex-match-and-permission-check (or reaching past the parser
+  // to detect the `<@&{guildId}>` wire form). False when the user typed
+  // @everyone but lacked permission (the denied path lands on
+  // `massMentionDenied` instead) or when the cache was cold /
+  // cap-saturated by the time the walk reached it (caller's
+  // `valid.length` check still catches that downstream).
+  return { ids: finalIds, invalidTokens, cappedCount, massMentionDenied, massMentionExpanded, roleMentionsDenied };
 }
 
 // `isVoiceChannelType` is the same voice/stage-voice predicate the
