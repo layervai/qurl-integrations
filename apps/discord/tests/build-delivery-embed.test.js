@@ -134,7 +134,7 @@ jest.mock('../src/qurl', () => ({
 jest.mock('../src/connector', () => ({ uploadJsonToConnector: jest.fn() }));
 
 const { _test } = require('../src/commands');
-const { buildDeliveryPayload, resolveSenderAlias } = _test;
+const { buildDeliveryPayload, buildRevokedDMPayload, resolveSenderAlias } = _test;
 
 const baseArgs = {
   qurlLink: 'https://qurl.link/#at_test',
@@ -514,5 +514,29 @@ describe('resolveSenderAlias — fallback chain', () => {
     expect(resolveSenderAlias({ member: null, user: null })).toBe('Someone');
     expect(resolveSenderAlias(null)).toBe('Someone');
     expect(resolveSenderAlias(undefined)).toBe('Someone');
+  });
+});
+
+describe('buildRevokedDMPayload — post-revoke recipient-side render', () => {
+  it('renders the "closed the door" embed with the sender alias bolded', () => {
+    capturedEmbeds.length = 0;
+    buildRevokedDMPayload({ senderAlias: 'Vik' });
+    expect(capturedEmbeds[0]._description).toContain('**Vik** closed the door.');
+    expect(capturedEmbeds[0]._description).toContain('This link is no longer active.');
+  });
+
+  it('passes components: [] explicitly so the Step Through button is cleared on edit', () => {
+    // Discord PATCH /messages does NOT clear unset fields. If this assertion
+    // ever flips to `undefined`, the original Step Through button would
+    // remain live in the recipient's DM after revoke — pointing at a
+    // dead qurl resource.
+    const payload = buildRevokedDMPayload({ senderAlias: 'Vik' });
+    expect(payload.components).toEqual([]);
+  });
+
+  it('strips bidi / zero-width spoof chars from the alias before rendering', () => {
+    capturedEmbeds.length = 0;
+    buildRevokedDMPayload({ senderAlias: '‮Admin' });
+    expect(capturedEmbeds[0]._description).not.toContain('‮');
   });
 });

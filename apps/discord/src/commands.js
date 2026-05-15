@@ -79,7 +79,7 @@ function largeSendThreshold() {
 // Extracted to deduplicate ~13 identical `.catch(err => logger.warn(...))`
 // one-liners across this file.
 const logIgnoredDiscordErr = (err) => logger.warn('Discord API op failed (ignored)', { error: err.message });
-const { sendDM } = require('./discord');
+const { sendDM, editDM } = require('./discord');
 
 
 // Generate an OAuth state token bound to the initiating Discord user.
@@ -731,6 +731,23 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   const components = [new ActionRowBuilder().addComponents(stepThrough)];
 
   return { embeds: [embed], components };
+}
+
+// Payload for editing a recipient's DM after the sender successfully
+// revokes the qurl. Replaces "Alice opened a door" + Step Through with
+// "Alice closed the door — this link is no longer active." and strips
+// the link button.
+//
+// CONTRACT: `components: []` MUST be passed explicitly. Discord's
+// message edit endpoint does NOT clear fields that aren't supplied —
+// omitting components would leave the original Step Through button
+// live in the recipient's DM, pointing at a now-dead qurl resource.
+function buildRevokedDMPayload({ senderAlias }) {
+  const safeSender = sanitizeDisplayName(senderAlias);
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.QURL_BRAND)
+    .setDescription(`🚪 **${safeSender}** closed the door.\nThis link is no longer active.`);
+  return { embeds: [embed], components: [] };
 }
 
 // --- Link status monitor ---
@@ -1456,7 +1473,7 @@ async function executeSendPipeline(interaction, {
     // it either — that's the failure mode the audit metric exists to
     // measure. Coverage spans the entire dispatch attempt, not just the
     // network leg.
-    let sent = false;
+    let result = { ok: false };
     try {
       const dmPayload = buildDeliveryPayload({
         senderAlias,
@@ -1464,11 +1481,18 @@ async function executeSendPipeline(interaction, {
         expiresAt,
         personalMessage,
       });
-      sent = await sendDM(link.recipientId, dmPayload);
+      result = await sendDM(link.recipientId, dmPayload);
     } finally {
-      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
+    const sent = result.ok === true;
     await db.updateSendDMStatus(sendId, link.recipientId, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    // Persist DM refs so /qurl revoke can edit the recipient's DM in
+    // place ("Alice closed the door") after a successful revoke. No-op
+    // when the send failed — there's no message to edit.
+    if (sent && result.channelId && result.messageId) {
+      await db.updateSendDMRefs(sendId, link.recipientId, result.channelId, result.messageId);
+    }
     return { recipientId: link.recipientId, username: recipient?.username, sent };
   }, 5);
 
@@ -1653,7 +1677,7 @@ async function executeSendPipeline(interaction, {
         await btnInteraction.deferUpdate().catch(logIgnoredDiscordErr);
         await interaction.editReply({ content: 'Revoking links...', components: [] }).catch(logIgnoredDiscordErr);
         try {
-          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+          const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
           // Iterate `recipients` (canonical send-confirmation order)
           // and filter by membership — `successUserIds` walks Set
           // insertion order from resource-grouped iteration, which
@@ -2097,7 +2121,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // packing, network call — so a malformed sendConfig (e.g. pathological
     // personalMessage that throws inside buildDeliveryPayload) still
     // counts as dispatch_failed instead of disappearing from CloudWatch.
-    let sent = false;
+    let result = { ok: false };
     try {
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
         senderAlias,
@@ -2125,15 +2149,19 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
         allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
       }
 
-      sent = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
+      result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
-      logger.audit(sent === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
+      logger.audit(result.ok === true ? AUDIT_EVENTS.DISPATCH_SENT : AUDIT_EVENTS.DISPATCH_FAILED, { send_id: sendId });
     }
+    const sent = result.ok === true;
     // updateSendDMStatus updates every qurl_sends row matching (sendId,
     // recipient.id), so a single call covers all links for this recipient.
     // The previous `for (let i = 0; i < links.length; i++)` loop wrote the
     // same update links.length times.
     await db.updateSendDMStatus(sendId, recipient.id, sent ? DM_STATUS.SENT : DM_STATUS.FAILED);
+    if (sent && result.channelId && result.messageId) {
+      await db.updateSendDMRefs(sendId, recipient.id, result.channelId, result.messageId);
+    }
     return { sent, username: recipient.username };
   }, 5);
 
@@ -2382,7 +2410,7 @@ async function handleRevokeSelect(interaction, { flow_id }) {
   }
 
   const sendId = interaction.values[0];
-  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey);
+  const revoked = await revokeAllLinks(sendId, interaction.user.id, apiKey, resolveSenderAlias(interaction));
 
   // Slash-command path lacks the in-scope `recipients` array needed
   // to resolve names → no "Revoked for: …" line here. Operators
@@ -6004,10 +6032,16 @@ function renderSendConfirm({
   return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
-async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
+async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias) {
   // Pull per-recipient items so per-link success can be mapped back to
   // a Discord user id for display. Caller resolves IDs → usernames
   // against its in-scope `recipients` array.
+  //
+  // Items also carry `dm_channel_id` / `dm_message_id` / `dm_status`
+  // (populated by sendDM's ref-capture in executeSendPipeline +
+  // handleAddRecipients) so this function can edit each strict-success
+  // recipient's DM in place after revoke. Rows predating that wire-up
+  // have the refs unset — the edit step skips them.
   const items = await db.getSendItems(sendId, senderDiscordId);
 
   // deleteLink deletes the whole resource; one DELETE per unique
@@ -6077,6 +6111,51 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey) {
     total: auditTotal,
     users: { success, total },
   });
+
+  // Edit each strict-success recipient's DM to "Alice closed the door"
+  // so they see immediately that the link is dead rather than tapping a
+  // Step Through button that now 404s. Per-recipient (one DM per
+  // recipient, even if multiple resources fanned out to them) — collapse
+  // items to the first delivered row per recipient_discord_id.
+  //
+  // Skips:
+  //   - recipients not in successUserIds (failed revoke = link was
+  //     already opened, so the recipient already passed through the
+  //     door — nothing to edit)
+  //   - rows with dm_status !== 'sent' (DM never made it; no message
+  //     exists to edit)
+  //   - rows lacking dm_channel_id / dm_message_id (legacy, pre-
+  //     ref-capture rows)
+  //
+  // Errors are swallowed (logged inside editDM at info/warn) — a 404 /
+  // 403 / unknown-message is operational, not a bug, and must not
+  // skew the revoke success counts the caller reports to the operator.
+  if (success > 0 && senderAlias) {
+    const successSet = new Set(successUserIds);
+    const editTargets = new Map(); // recipient_id → {channelId, messageId}
+    for (const it of items) {
+      if (!successSet.has(it.recipient_discord_id)) continue;
+      if (editTargets.has(it.recipient_discord_id)) continue;
+      if (it.dm_status !== DM_STATUS.SENT) continue;
+      if (!it.dm_channel_id || !it.dm_message_id) continue;
+      editTargets.set(it.recipient_discord_id, {
+        channelId: it.dm_channel_id, messageId: it.dm_message_id,
+      });
+    }
+    if (editTargets.size > 0) {
+      const editPayload = buildRevokedDMPayload({ senderAlias });
+      // Same fan-out width as the DELETE batch above — Discord PATCHes
+      // share the same channel-bucket rate limit so 5-wide is plenty.
+      const entries = [...editTargets.entries()];
+      await batchSettled(entries, async ([, refs]) => {
+        await editDM(refs.channelId, refs.messageId, editPayload);
+      }, 5);
+      logger.info('Edited DMs after revoke', {
+        sendId, edited_targets: editTargets.size, revoke_success: success,
+      });
+    }
+  }
+
   // failureUserIds is computed but not yet rendered — the "Note:
   // already-opened links cannot be revoked" disclaimer covers the
   // common cause. Returned for callers that want to surface partial-
@@ -7576,6 +7655,7 @@ module.exports = {
       sendCooldowns,
       handleAddRecipients,
       buildDeliveryPayload,
+      buildRevokedDMPayload,
       resolveSenderAlias,
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these

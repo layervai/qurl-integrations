@@ -879,16 +879,60 @@ async function postWeeklyDigest() {
   }
 }
 
-// Send DM to user
+// Send DM to user.
+//
+// Returns `{ ok: true, channelId, messageId }` on success — channel +
+// message ids are captured so the /qurl revoke path can edit the
+// recipient's DM in place ("Alice closed the door") after a successful
+// revoke instead of leaving a stale Step Through button behind. The
+// returned `Message` from discord.js exposes both via `message.channelId`
+// and `message.id`.
+//
+// On failure returns `{ ok: false }`. Existing fire-and-forget callers
+// (welcome DMs, OAuth callbacks) `await sendDM(...)` and discard the
+// result; only the qURL send path branches on `.ok`.
 async function sendDM(discordId, message) {
   try {
     const user = await client.users.fetch(discordId);
-    await user.send(message);
+    const sent = await user.send(message);
     logger.debug('Sent DM', { discordId });
-    return true;
+    return { ok: true, channelId: sent.channelId, messageId: sent.id };
   } catch (error) {
     logger.warn(`Failed to DM user ${discordId}`, { error: error.message });
-    return false;
+    return { ok: false };
+  }
+}
+
+// Edit a previously-sent DM. Used by /qurl revoke to replace the
+// "Alice opened a door" embed + Step Through button with a "closed the
+// door" embed once revocation succeeds for that recipient. Returns
+// `{ ok: true }` on success.
+//
+// 404 / 403 / 10008 (Unknown Message) / 50001 (Missing Access) are
+// expected operational outcomes — recipient deleted the DM, blocked
+// the bot, or removed the channel — and surface as `{ ok: false,
+// expected: true }` at info level. Other errors log at warn.
+//
+// Discord's PATCH /channels/:cid/messages/:mid does NOT clear unset
+// fields; callers MUST pass `components: []` explicitly to strip the
+// Step Through button, otherwise the live link button persists in the
+// recipient's DM after the qurl resource has been revoked. The
+// `buildRevokedDMPayload` helper in commands.js bakes that in.
+async function editDM(channelId, messageId, message) {
+  try {
+    const channel = await client.channels.fetch(channelId);
+    const msg = await channel.messages.fetch(messageId);
+    await msg.edit(message);
+    return { ok: true };
+  } catch (error) {
+    const expected = error.status === 403 || error.status === 404
+      || error.code === 10008 || error.code === 50001;
+    const level = expected ? 'info' : 'warn';
+    logger[level]('Failed to edit DM', {
+      channelId, messageId, status: error.status, code: error.code,
+      errorMessage: error.message,
+    });
+    return { ok: false, expected };
   }
 }
 
@@ -919,6 +963,7 @@ module.exports = {
   postToGitHubFeed,
   postWeeklyDigest,
   sendDM,
+  editDM,
   refreshCache,
   shutdown,
   // Exported only for unit tests to verify the boot canaries throw

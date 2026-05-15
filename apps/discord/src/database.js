@@ -719,6 +719,14 @@ const dbModule = {
     stmt.run(status, sendId, recipientDiscordId);
   },
 
+  // No-op stub. The DDB backend persists the DM channel + message ids so
+  // /qurl revoke can edit recipients' DMs in place; the SQLite backend
+  // is local-dev only (production sets STORE_TYPE=ddb) and intentionally
+  // does not carry that schema. Local revokes still succeed — they just
+  // skip the "Alice closed the door" edit on the recipient side.
+  // eslint-disable-next-line no-unused-vars
+  updateSendDMRefs(_sendId, _recipientDiscordId, _channelId, _messageId) {},
+
   getRecentSends(senderDiscordId, limit = 10) {
     // LEFT JOIN on qurl_send_configs so we can:
     // 1. Filter out already-revoked sends. With LEFT JOIN, rows that

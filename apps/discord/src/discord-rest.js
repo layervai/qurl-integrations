@@ -44,10 +44,12 @@ const rest = client.rest;
  *      channel, returns { id }.
  *   2. POST /channels/:id/messages → posts the message body.
  *
- * Returns `{ ok: true, channelId }` on success, `{ ok: false, error }`
- * on failure. Callers log/branch on `.ok` rather than letting
- * exceptions propagate — matches the ergonomics of the legacy
- * gateway-based `sendDM` in `discord.js`.
+ * Returns `{ ok: true, channelId, messageId }` on success,
+ * `{ ok: false, error }` on failure. Callers log/branch on `.ok` rather
+ * than letting exceptions propagate — matches the ergonomics of the
+ * legacy gateway-based `sendDM` in `discord.js`. `messageId` is captured
+ * so the /qurl revoke path can edit the recipient's DM in place after a
+ * successful revoke.
  *
  * @param {string} userId — Discord snowflake.
  * @param {object} message — discord.js-compatible message payload
@@ -65,10 +67,10 @@ async function sendDM(userId, message) {
     const channel = await rest.post(Routes.userChannels(), {
       body: { recipient_id: userId },
     });
-    await rest.post(Routes.channelMessages(channel.id), {
+    const sent = await rest.post(Routes.channelMessages(channel.id), {
       body: message,
     });
-    return { ok: true, channelId: channel.id };
+    return { ok: true, channelId: channel.id, messageId: sent.id };
   } catch (err) {
     // Discord returns HTTP 403 for several recipient-side reasons:
     // DMs disabled, the bot was blocked, server-level DM restrictions,

@@ -132,6 +132,7 @@ jest.mock('discord.js', () => {
 const mockDb = {
   recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
+  updateSendDMRefs: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -141,7 +142,8 @@ const mockDb = {
 };
 jest.mock('../src/database', () => mockDb);
 
-const mockSendDM = jest.fn().mockResolvedValue(true);
+const mockSendDM = jest.fn().mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+const mockEditDM = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../src/discord', () => ({
   assignContributorRole: jest.fn(),
   notifyPRMerge: jest.fn(),
@@ -151,6 +153,7 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
+  editDM: mockEditDM,
 }));
 
 jest.mock('../src/utils/admin', () => ({
@@ -801,6 +804,116 @@ describe('revokeAllLinks', () => {
     expect(result.successUserIds).toEqual(['bob']);
     expect(result.failureUserIds).toEqual(['alice']);
   });
+
+  describe('post-revoke DM edit', () => {
+    beforeEach(() => {
+      mockEditDM.mockClear();
+      mockEditDM.mockResolvedValue({ ok: true });
+    });
+
+    it('edits the DM of every strict-success recipient with stored channel + message ids', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-2', dm_status: 'sent', dm_channel_id: 'c-2', dm_message_id: 'm-2' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-edit', 'sender-1', 'apikey', 'Alice');
+
+      expect(mockEditDM).toHaveBeenCalledTimes(2);
+      const calls = mockEditDM.mock.calls.map(c => [c[0], c[1]]).sort();
+      expect(calls).toEqual([['c-1', 'm-1'], ['c-2', 'm-2']]);
+      // Edit payload MUST include components: [] so the original Step
+      // Through button is cleared — Discord doesn't drop unset fields
+      // on PATCH /messages, so omitting this would leave the live link
+      // button in the recipient's DM after revoke. Embed copy is
+      // exercised by build-delivery-embed.test.js's buildRevokedDMPayload
+      // suite (where the mock captures setDescription).
+      const payload = mockEditDM.mock.calls[0][2];
+      expect(payload.components).toEqual([]);
+      expect(payload.embeds).toHaveLength(1);
+    });
+
+    it('skips recipients whose revoke failed (link was already opened)', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-ok',   recipient_discord_id: 'u-ok',   dm_status: 'sent', dm_channel_id: 'c-ok',   dm_message_id: 'm-ok' },
+        { resource_id: 'res-fail', recipient_discord_id: 'u-fail', dm_status: 'sent', dm_channel_id: 'c-fail', dm_message_id: 'm-fail' },
+      ]);
+      mockDeleteLink
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('already opened'));
+
+      await revokeAllLinks('send-partial', 'sender-1', 'apikey', 'Alice');
+
+      // Only the strict-success recipient gets the DM edit.
+      expect(mockEditDM).toHaveBeenCalledTimes(1);
+      expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-ok', 'm-ok']);
+    });
+
+    it('skips rows with no stored DM refs (legacy sends predating the wire-up)', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-new',    recipient_discord_id: 'u-new',    dm_status: 'sent', dm_channel_id: 'c-new', dm_message_id: 'm-new' },
+        { resource_id: 'res-legacy', recipient_discord_id: 'u-legacy', dm_status: 'sent' }, // no channel / message id
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-legacy', 'sender-1', 'apikey', 'Alice');
+
+      expect(mockEditDM).toHaveBeenCalledTimes(1);
+      expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-new', 'm-new']);
+    });
+
+    it('skips rows where the DM never delivered (dm_status !== sent)', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-failed', recipient_discord_id: 'u-failed', dm_status: 'failed', dm_channel_id: 'c-x', dm_message_id: 'm-x' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-nodm', 'sender-1', 'apikey', 'Alice');
+
+      expect(mockEditDM).not.toHaveBeenCalled();
+    });
+
+    it('does not edit any DM when senderAlias is omitted (back-compat — legacy callers)', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-noalias', 'sender-1', 'apikey'); // no senderAlias
+
+      expect(mockEditDM).not.toHaveBeenCalled();
+    });
+
+    it('does not affect revoke success/total even when every DM edit fails', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+      // Both shapes of edit failure: rejection AND ok:false return.
+      mockEditDM.mockRejectedValueOnce(new Error('boom'));
+
+      const result = await revokeAllLinks('send-edit-fail', 'sender-1', 'apikey', 'Alice');
+
+      expect(result.success).toBe(1);
+      expect(result.total).toBe(1);
+    });
+
+    it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
+      // SQLite has no UNIQUE constraint on (send_id, recipient_discord_id);
+      // a hypothetical multi-resource fan-out to one recipient would yield
+      // multiple rows. The DM edit should fire ONCE per recipient.
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-dup', 'sender-1', 'apikey', 'Alice');
+
+      expect(mockEditDM).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe('renderSendConfirm — post-send confirmation overflow', () => {
@@ -1388,7 +1501,7 @@ describe('handleAddRecipients — happy path (location)', () => {
       { qurl_link: 'https://q.test/1', resource_id: 'res-loc-new' },
       { qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
     ]);
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
     const result = await handleAddRecipients(
@@ -1438,7 +1551,7 @@ describe('handleAddRecipients — happy path (location)', () => {
       .mockResolvedValueOnce([{ qurl_link: 'https://q.test/loc', resource_id: 'res-loc-new' }]);
     // Location path succeeds.
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
-    mockSendDM.mockResolvedValue(true);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
 
     await handleAddRecipients(
       'send-mixed', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
@@ -1461,7 +1574,8 @@ describe('handleAddRecipients — happy path (location)', () => {
       { qurl_link: 'https://q.test/2', resource_id: 'res-loc-new' },
     ]);
     // First DM fails, second succeeds.
-    mockSendDM.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mockSendDM.mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: true, channelId: 'dm-c-2', messageId: 'dm-m-2' });
     mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
 
     const result = await handleAddRecipients(

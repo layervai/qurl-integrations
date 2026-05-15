@@ -1026,6 +1026,19 @@ async function updateSendDMStatus(sendId, recipientDiscordId, status) {
   }));
 }
 
+// Persist the DM channel + message ids for a delivered send. Required so
+// /qurl revoke can edit the recipient's DM in place ("Alice closed the
+// door") instead of leaving a stale Step Through button pointing at a
+// dead link.
+async function updateSendDMRefs(sendId, recipientDiscordId, channelId, messageId) {
+  await ddb.send(new UpdateCommand({
+    TableName: TABLES.qurl_sends,
+    Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
+    UpdateExpression: 'SET dm_channel_id = :c, dm_message_id = :m',
+    ExpressionAttributeValues: { ':c': channelId, ':m': messageId },
+  }));
+}
+
 async function getRecentSends(senderDiscordId, limit = 10) {
   // SQL did a LEFT JOIN on qurl_send_configs + GROUP BY send_id to
   // produce one row per send with per-send metadata. DDB: query the
@@ -1305,6 +1318,13 @@ async function getSendItems(sendId, senderDiscordId) {
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
+    // dm_channel_id / dm_message_id are set by updateSendDMRefs after a
+    // successful sendDM; legacy rows predating that wire-up have them
+    // unset, in which case the revoke path skips the DM edit. dm_status
+    // gates the same skip — failed deliveries have nothing to edit.
+    dm_channel_id: item.dm_channel_id,
+    dm_message_id: item.dm_message_id,
+    dm_status: item.dm_status,
   }));
 }
 
@@ -1515,7 +1535,8 @@ module.exports = {
   // Weekly digest
   getWeeklyDigestData,
   // QURL sends
-  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, getRecentSends, markSendRevoked,
+  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, updateSendDMRefs,
+  getRecentSends, markSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   // Guild configs
   getGuildApiKey, setGuildApiKey, removeGuildApiKey, getGuildConfig, getGuildConfigWithApiKey,
