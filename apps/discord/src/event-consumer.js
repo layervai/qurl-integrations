@@ -989,11 +989,23 @@ async function pollLoop(client) {
           error: err.message, code: permanentCode,
         });
         if (onFatalCb) {
+          // gracefulShutdown is async, so both sync throws AND async
+          // rejections must route to the fallback exit. try/catch
+          // catches only sync; Promise.resolve(...).catch() covers
+          // the async leg by normalizing the return value first.
+          // We do NOT await here — the return below must stay
+          // synchronous so the loop exits before the next iteration
+          // (under test mocks, an await would let pollLoop iterate).
+          // The fallback exit fires later via the .catch().
           try {
-            onFatalCb();
+            Promise.resolve(onFatalCb()).catch((cbErr) => {
+              logger.error('Event consumer: onFatal rejected, falling back to process.exit', {
+                error: cbErr?.message,
+              });
+              process.exit(1);
+            });
           } catch (cbErr) {
-            // If gracefulShutdown itself throws, fall through to
-            // direct exit so a misconfig still terminates the task.
+            // Sync throw from onFatal — same fallback shape.
             logger.error('Event consumer: onFatal threw, falling back to process.exit', {
               error: cbErr?.message,
             });
@@ -1027,14 +1039,21 @@ async function pollLoop(client) {
  *   .actions.InteractionCreate.handle available (i.e., a real
  *   discord.js Client, not a stub).
  * @param {object} [opts]
- * @param {() => void} [opts.onFatal] - Invoked when pollLoop hits a
- *   permanent AWS error. index.js wires `() => gracefulShutdown(1)`
- *   so in-flight handlers, WAL checkpoints, and WebSocket sessions
- *   get torn down before exit. Default (no callback) crashes via
- *   `process.exit(1)` directly — keeps the standalone-test contract.
+ * @param {() => void | Promise<void>} [opts.onFatal] - Invoked when
+ *   pollLoop hits a permanent AWS error. index.js wires
+ *   `() => gracefulShutdown(1)` so in-flight handlers, WAL checkpoints,
+ *   and WebSocket sessions get torn down before exit. May return a
+ *   Promise — both sync throws and async rejections fall back to
+ *   `process.exit(1)`. Default (no callback) crashes directly via
+ *   `process.exit(1)`, preserving the standalone-test contract.
  */
 function start(client, { onFatal } = {}) {
   if (running) {
+    // Double-start no-op preserves the existing onFatalCb (the
+    // assignment below is unreachable on this path), so the callback
+    // wired by the first start() stays in effect. Intentional — a
+    // racing caller shouldn't be able to silently swap the fatal
+    // route by calling start() again.
     logger.warn('Event consumer: start() called while already running — no-op');
     return;
   }

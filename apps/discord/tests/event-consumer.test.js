@@ -870,7 +870,7 @@ describe('event-consumer: pollLoop error backoff', () => {
     expect(elapsedMs).toBeLessThan(100);
   });
 
-  test('pollLoop exits on permanent AWS error (NonExistentQueue) — fatal log + process.exit(1)', async () => {
+  test('pollLoop exits on permanent AWS error (QueueDoesNotExist) — fatal log + process.exit(1)', async () => {
     // Misconfigured-but-set queue URL (typo, wrong region, etc.) was
     // the gap the boot check couldn't catch. Retrying forever would
     // spam logs without resolving anything; fail-fast surfaces the
@@ -1003,6 +1003,42 @@ describe('event-consumer: pollLoop error backoff', () => {
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('onFatal threw, falling back to process.exit'),
         expect.objectContaining({ error: 'shutdown failed' }),
+      );
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal async rejection falls back to process.exit(1)', async () => {
+    // Sister to the sync-throw test. The wired callback in production
+    // is `() => gracefulShutdown(1)` which returns a Promise — a
+    // sync try/catch alone would miss an async rejection from inside
+    // gracefulShutdown. The .catch() on Promise.resolve(onFatalCb())
+    // covers that leg.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn(() => Promise.reject(new Error('async shutdown failed')));
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      // Two setImmediate yields: first for pollOnce to throw + catch
+      // to call onFatal, second for the rejection's microtask to land
+      // on the .catch() and trigger the fallback exit.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('onFatal rejected, falling back to process.exit'),
+        expect.objectContaining({ error: 'async shutdown failed' }),
       );
       await eventConsumer.stop();
     } finally {
