@@ -152,5 +152,4 @@ module.exports = {
   sanitizeDisplayNamePlain,
   sanitizeContentLabel,
   stripBidiAndControls,
-  stripControlAndBidi,
 };

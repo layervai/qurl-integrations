@@ -630,7 +630,11 @@ describe('buildDeliveryPayload — footer + trust button', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
     const trust = capturedButtons.find(b => b._label === 'What is qURL?');
     expect(trust).toBeDefined();
-    expect(trust._emoji).toBe('🛡');
+    // U+1F6E1 + U+FE0F variation selector — forces emoji-style
+    // rendering on clients that would otherwise show the bare
+    // shield codepoint as a text glyph. A regression dropping the
+    // selector would silently degrade cross-platform appearance.
+    expect(trust._emoji).toBe('🛡️');
     expect(trust._style).toBe(5); // ButtonStyle.Link
     expect(trust._url).toBe('https://layerv.ai/qurl/');
   });
@@ -675,6 +679,31 @@ describe('packBulkDeliveryComponents — 5-per-row chunking', () => {
     const row2 = rowButtons(rows[1]);
     expect(row2).toHaveLength(1);
     expect(row2[0]._label).toBe('What is qURL?');
+  });
+
+  // N=9 is the only configuration where the trust button shares an
+  // ActionRow with multiple unique-URL step-throughs (5 step-throughs
+  // in row 1, 4 step-throughs + 1 trust in row 2). N=4 covers the
+  // shared-row case with a smaller fill; N=9 stresses the boundary.
+  it('N=9: trust button shares the second row with 4 step-throughs', () => {
+    const links = Array.from({ length: 9 }, (_, i) => `https://q.test/u${i}`);
+    const rows = packBulkDeliveryComponents(links);
+    expect(rows).toHaveLength(2);
+    expect(rowButtons(rows[0])).toHaveLength(5);
+    const row2 = rowButtons(rows[1]);
+    expect(row2).toHaveLength(5);
+    expect(row2.slice(0, 4).every(b => b._label === 'Step Through')).toBe(true);
+    expect(row2[4]._label).toBe('What is qURL?');
+  });
+
+  it('throws on empty links — Discord rejects components-only payloads', () => {
+    // Pinned because the precondition is a documented contract, not
+    // just upstream convention. A future caller that bypasses the
+    // `links.length === 0` early return in handleAddRecipients must
+    // fail loud rather than silently produce a malformed payload.
+    expect(() => packBulkDeliveryComponents([])).toThrow(/non-empty array/);
+    expect(() => packBulkDeliveryComponents(null)).toThrow(/non-empty array/);
+    expect(() => packBulkDeliveryComponents(undefined)).toThrow(/non-empty array/);
   });
 
   it('N=10 (Discord embed cap): three rows of [s1..s5], [s6..s10], [trust]', () => {

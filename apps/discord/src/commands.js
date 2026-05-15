@@ -716,7 +716,11 @@ async function resolveLocation(parsed) {
 function buildTrustButton() {
   return new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setEmoji('🛡')
+    // U+1F6E1 + U+FE0F. The FE0F variation selector forces emoji-
+    // presentation rendering — without it some clients (older Linux,
+    // some web fallbacks) render the bare shield codepoint as a
+    // text-style glyph rather than the colored emoji.
+    .setEmoji('🛡️')
     .setLabel('What is qURL?')
     .setURL(TRUST.LANDING_URL);
 }
@@ -751,9 +755,13 @@ function buildStepThroughButton(qurlLink) {
 // a single row containing only the trust button — Discord rejects
 // a component-only payload with no embeds. The caller in
 // handleAddRecipients guards via the `if (!links || links.length
-// === 0)` early return at the batchSettled callback; new callers
-// must guarantee the same.
+// === 0)` early return at the batchSettled callback; the throw
+// below pins the same contract for any future caller that misses
+// the docstring.
 function packBulkDeliveryComponents(qurlLinks) {
+  if (!Array.isArray(qurlLinks) || qurlLinks.length === 0) {
+    throw new Error('packBulkDeliveryComponents: qurlLinks must be a non-empty array');
+  }
   const allButtons = [
     ...qurlLinks.map(buildStepThroughButton),
     buildTrustButton(),
