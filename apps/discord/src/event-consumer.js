@@ -145,7 +145,12 @@ const SEEN_EVENT_ID_CAP = 100_000;
 const seenEventIds = new Set();
 
 function recordSeen(eventId) {
-  if (!eventId) return false;
+  // Be precise about the LRU's contract — the producer publishes
+  // string event_ids (format `<shardId>:<sequence>`). A non-string
+  // (number, object, missing) is treated as "no id" so the LRU
+  // doesn't accidentally key on `0` or `''` or `{}`. The earlier
+  // missing-event_id branch in processMessage logs separately.
+  if (typeof eventId !== 'string' || !eventId) return false;
   if (seenEventIds.has(eventId)) {
     // Refresh recency: move to the tail of insertion order so it
     // isn't first to evict if traffic spikes.
@@ -295,16 +300,17 @@ async function processMessage(client, message) {
     return;
   }
 
-  if (!eventId) {
-    // Telemetry blind spot: recordSeen short-circuits on a falsy
-    // event_id, so dup-detection won't see this message. Log at
-    // debug so ops can spot a producer-side regression where the
-    // envelope's event_id field starts arriving empty/missing (the
-    // dup-rate gauge would silently lie until the LRU is fixed at
-    // the producer).
-    logger.debug('Event consumer: envelope missing event_id; LRU dedup will not track', {
+  if (typeof eventId !== 'string' || !eventId) {
+    // Telemetry blind spot: recordSeen short-circuits on a
+    // non-string or empty event_id, so dup-detection won't see this
+    // message. Log at debug so ops can spot a producer-side
+    // regression where the envelope's event_id field starts
+    // arriving empty/missing/non-string (the dup-rate gauge would
+    // silently lie until the LRU is fixed at the producer).
+    logger.debug('Event consumer: envelope missing valid event_id; LRU dedup will not track', {
       messageId: message.MessageId,
       eventType,
+      eventIdType: typeof eventId,
     });
   }
   const isDup = recordSeen(eventId);
@@ -429,10 +435,17 @@ async function pollOnce(client) {
 // loop doesn't spin without a backoff.
 function isAbortError(err) {
   if (!err) return false;
-  return err.name === 'AbortError'
+  if (err.name === 'AbortError'
     || err.name === 'CanceledError'
     || err.code === 'AbortError'
-    || err.code === 'ABORT_ERR'; // Node's standard AbortError shape (DOMException-style code).
+    || err.code === 'ABORT_ERR') return true; // Node's standard AbortError shape (DOMException-style code).
+  // Defense against future @aws-sdk wrappers that nest the abort
+  // shape under err.cause. If an SDK refresh ever does this, the
+  // unwrapped check below keeps stop()-triggered aborts silent
+  // during graceful shutdown instead of logging as failures and
+  // hitting the error-backoff.
+  if (err.cause && (err.cause.name === 'AbortError' || err.cause.name === 'CanceledError')) return true;
+  return false;
 }
 
 // Sleep that resolves either when the timeout fires OR when stop()
@@ -540,7 +553,17 @@ function start(client) {
     waitSeconds: RECEIVE_WAIT_SECONDS,
     visibilitySeconds: RECEIVE_VISIBILITY_SECONDS,
   });
-  loopPromise = pollLoop(client);
+  // Localized catch on the loop promise so a crash inside pollLoop
+  // (e.g., logger.error itself throwing, an unforeseen sync throw
+  // outside the try/catch) doesn't propagate as an unhandled
+  // rejection. pollLoop's own try/catch should catch everything
+  // routine; this is defense-in-depth against the truly unexpected.
+  // The error is logged here so the failure mode is local to the
+  // consumer's module rather than relying on the global
+  // unhandledRejection handler in index.js.
+  loopPromise = pollLoop(client).catch((err) => {
+    logger.error('Event consumer: poll loop crashed', { error: err?.message });
+  });
 }
 
 /**

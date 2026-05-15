@@ -311,8 +311,8 @@ describe('event-consumer: processMessage dispatch paths', () => {
 
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(1);
     expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringContaining('envelope missing event_id'),
-      expect.objectContaining({ messageId: 'm-no-eid', eventType: 'INTERACTION_CREATE' }),
+      expect.stringContaining('envelope missing valid event_id'),
+      expect.objectContaining({ messageId: 'm-no-eid', eventType: 'INTERACTION_CREATE', eventIdType: 'undefined' }),
     );
   });
 
@@ -681,11 +681,19 @@ describe('event-consumer: start/stop lifecycle', () => {
     // @smithy CanceledError shape.
     const e4 = new Error('canceled'); e4.name = 'CanceledError';
     expect(isAbortError(e4)).toBe(true);
+    // Future @aws-sdk wrapper that nests the abort under err.cause.
+    const e5 = new Error('Request failed'); e5.cause = { name: 'AbortError' };
+    expect(isAbortError(e5)).toBe(true);
+    const e6 = new Error('Request failed'); e6.cause = { name: 'CanceledError' };
+    expect(isAbortError(e6)).toBe(true);
     // TimeoutError is the SDK's own request-timeout, NOT our abort.
     // Must land in the error-backoff path so flaky AWS endpoints
     // surface in logs + backoff instead of spinning silently.
-    const e5 = new Error('timeout'); e5.name = 'TimeoutError';
-    expect(isAbortError(e5)).toBe(false);
+    const e7 = new Error('timeout'); e7.name = 'TimeoutError';
+    expect(isAbortError(e7)).toBe(false);
+    // cause without an abort-shape name doesn't match either.
+    const e8 = new Error('Request failed'); e8.cause = { name: 'TimeoutError' };
+    expect(isAbortError(e8)).toBe(false);
   });
 
   test('pollOnce passes an abortSignal in the SDK send options', async () => {
@@ -774,6 +782,16 @@ describe('event-consumer: start/stop lifecycle', () => {
     // Stop is idempotent.
     await eventConsumer.stop();
   });
+
+  // A "start() actually registers pollOnce" companion test was
+  // considered but skipped: the SDK mock pattern that lets the
+  // abort-silent test bound its iterations (throw AbortError so
+  // pollLoop catches and the next while-check exits) doesn't
+  // translate to a Messages-resolved path — the test either races
+  // microtask ordering or accumulates unbounded mock.commandCalls.
+  // The "abort silently exits pollLoop" test above already pins
+  // that pollLoop's loop body actually runs (asserts receiveCount
+  // ≥ 1), which covers the underlying concern.
 });
 
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {
