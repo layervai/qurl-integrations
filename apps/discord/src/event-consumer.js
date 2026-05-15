@@ -341,10 +341,42 @@ const INFLIGHT_BACKOFF_MS = 100;
 // drain reduces the race window meaningfully for typical workloads.
 //
 // Mutable (not const) so tests can shrink the deadline to keep the
-// suite fast. _resetStateForTest restores the default; production
-// code never mutates this — only `_setDrainDeadlineForTest` does.
+// suite fast. _resetStateForTest restores the env-resolved default;
+// production code never mutates this — only `_setDrainDeadlineForTest`
+// does.
+//
+// Env-overridable via QURL_BOT_DRAIN_DEADLINE_MS. Sanity-clamped to
+// [100, MAX_DRAIN_DEADLINE_MS] so a typo can't accidentally:
+//   - block stop() indefinitely (upper bound stays under
+//     gracefulShutdown's 10s budget)
+//   - drop to a value too tight to give any handler a real chance
+//     (lower bound is 100ms — anything shorter is operationally a
+//     "drain disabled" knob, which the env-unset path already
+//     provides via setting a value that just always fires).
 const DEFAULT_DRAIN_DEADLINE_MS = 3000;
-let DRAIN_DEADLINE_MS = DEFAULT_DRAIN_DEADLINE_MS;
+const MAX_DRAIN_DEADLINE_MS = 8000;
+const MIN_DRAIN_DEADLINE_MS = 100;
+let DRAIN_DEADLINE_MS = (() => {
+  const raw = process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+  if (!raw) return DEFAULT_DRAIN_DEADLINE_MS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    console.warn(
+      `[event-consumer] QURL_BOT_DRAIN_DEADLINE_MS=${JSON.stringify(raw)} rejected ` +
+      `(must be a positive integer); using default ${DEFAULT_DRAIN_DEADLINE_MS}.`,
+    );
+    return DEFAULT_DRAIN_DEADLINE_MS;
+  }
+  if (parsed < MIN_DRAIN_DEADLINE_MS || parsed > MAX_DRAIN_DEADLINE_MS) {
+    console.warn(
+      `[event-consumer] QURL_BOT_DRAIN_DEADLINE_MS=${parsed} out of range ` +
+      `[${MIN_DRAIN_DEADLINE_MS}, ${MAX_DRAIN_DEADLINE_MS}]; using default ` +
+      `${DEFAULT_DRAIN_DEADLINE_MS} (upper bound preserves gracefulShutdown headroom).`,
+    );
+    return DEFAULT_DRAIN_DEADLINE_MS;
+  }
+  return parsed;
+})();
 
 // In-flight handler promises (added in trackDispatch when a
 // consumer-driven dispatch is registered; deleted when that
@@ -936,16 +968,9 @@ async function stop() {
   // both routing through gracefulShutdown) would otherwise both
   // pass !running, both abort, both await loopPromise. Harmless but
   // racy on the running=false reset; the stopping check makes the
-  // single-stopper invariant explicit.
-  //
-  // Caveat for a hypothetical second caller: the early-return DOES
-  // NOT wait for the first caller's drain to complete. A second
-  // stop() that lands during drain returns immediately. In practice
-  // gracefulShutdown only calls stop() once, so this is theoretical
-  // — but if a future refactor opens the door to concurrent stops,
-  // the second caller would need to await the first's loopPromise
-  // (or a shared "drainPromise" handle) to get "drain complete"
-  // semantics, not just "stop is already in progress."
+  // single-stopper invariant explicit. A second caller during drain
+  // returns immediately (without awaiting drain completion) —
+  // theoretical today since gracefulShutdown only calls stop() once.
   if (!running || stopping) return;
   stopping = true;
   // Cancel the in-flight long-poll so stop() returns within tens of
@@ -989,9 +1014,7 @@ async function stop() {
     // 10s force-exit fires regardless, so we cap our wait at 3s to
     // leave room for db.close() and any other shutdown work.
     //
-    // Spread for readability — passing the Set directly would behave
-    // identically (allSettled materializes synchronously) but `[...]`
-    // reads more directly as "await each of these promises."
+    // Spread is cosmetic — allSettled also accepts a Set directly.
     if (inFlightPromises.size > 0) {
       const drainCount = inFlightPromises.size;
       // hrtime.bigint() is monotonic — Date.now() is wall-clock and
@@ -1140,8 +1163,13 @@ module.exports = {
     _setDrainDeadlineForTest: (ms) => { DRAIN_DEADLINE_MS = ms; },
     // Test-only setter for `loopPromise`. Lets tests inject a
     // rejected promise to simulate a pollLoop crash without
-    // actually crashing the loop — the "drain runs even when
-    // loopPromise rejects" test uses this. `_resetStateForTest`
+    // actually crashing the loop. CAVEAT: if the test already
+    // called start(), the REAL pollLoop is still running in the
+    // background — overwriting the promise reference here doesn't
+    // halt it. Tests relying on this helper should either rely on
+    // `stopping=true` + `abort()` to retire the real loop within
+    // their assertions, or accept that `_resetStateForTest` in
+    // beforeEach is the cleanup point. `_resetStateForTest` itself
     // sets loopPromise back to null.
     _setLoopPromiseForTest: (p) => { loopPromise = p; },
   },

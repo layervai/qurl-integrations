@@ -1541,6 +1541,84 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       });
     });
   });
+
+  describe('DRAIN_DEADLINE_MS env validation (module-load IIFE)', () => {
+    // Mirrors the MAX_INFLIGHT_HANDLERS validation block. The
+    // drain deadline is range-clamped (not just positive-integer)
+    // because a too-large value would push past gracefulShutdown's
+    // 10s budget and a too-small value would be operationally a
+    // disabled-drain knob.
+    function withIsolatedEnv(envValue, run) {
+      jest.isolateModules(() => {
+        const prev = process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+        const origConsoleWarn = console.warn;
+        const warns = [];
+        console.warn = (...args) => warns.push(args.join(' '));
+        try {
+          if (envValue === undefined) {
+            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+          } else {
+            process.env.QURL_BOT_DRAIN_DEADLINE_MS = envValue;
+          }
+          const fresh = require('../src/event-consumer');
+          run(fresh, warns);
+        } finally {
+          console.warn = origConsoleWarn;
+          if (prev === undefined) {
+            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+          } else {
+            process.env.QURL_BOT_DRAIN_DEADLINE_MS = prev;
+          }
+        }
+      });
+    }
+
+    test.each([
+      ['100abc', 'trailing garbage'],
+      ['-5', 'negative integer'],
+      ['0', 'zero'],
+      ['1.5', 'non-integer'],
+      ['abc', 'non-numeric'],
+    ])('rejects %p (%s) and falls back to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
+        expect(
+          warns.some((w) => w.includes('QURL_BOT_DRAIN_DEADLINE_MS') && w.includes('rejected'))
+        ).toBe(true);
+      });
+    });
+
+    test.each([
+      ['99', 'just below the floor'],
+      ['8001', 'just above the ceiling'],
+      ['50000', 'order of magnitude over'],
+    ])('clamps out-of-range %p (%s) to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
+        expect(
+          warns.some((w) => w.includes('out of range'))
+        ).toBe(true);
+      });
+    });
+
+    test.each([
+      ['100', 100], // exact floor
+      ['1500', 1500],
+      ['8000', 8000], // exact ceiling
+    ])('accepts in-range %p as %i', (envValue, expected) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(expected);
+        expect(warns).toHaveLength(0);
+      });
+    });
+
+    test('unset env var resolves to default without warning', () => {
+      withIsolatedEnv(undefined, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
+        expect(warns).toHaveLength(0);
+      });
+    });
+  });
 });
 
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {
