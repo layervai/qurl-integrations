@@ -3859,12 +3859,24 @@ function renderConfirmCardRows({
       displayCount = memberCount;
     }
     const labelCount = displayCount == null ? '?' : String(displayCount);
+    // Disable on both `0` (empty guild — degenerate) AND `null`
+    // (memberCount unavailable + cache cold). The `(?)` label
+    // accompanies the disabled state so the user sees the button can't
+    // act right now rather than getting a silent-no-op click on a
+    // count-less label.
+    //
+    // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
+    // components. The current worst-case render is
+    // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = 5, exactly
+    // at the limit. Adding another button below would silently throw
+    // at discord.js builder time. Re-evaluate the layout (e.g., a
+    // second row for affordances vs. fixed buttons) before adding.
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
         .setLabel(`\u{1F4E2} @everyone (${labelCount})`)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(displayCount === 0),
+        .setDisabled(displayCount == null || displayCount === 0),
     );
   }
   bottomRow.addComponents(
@@ -5433,12 +5445,34 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   // the bots-only case would surface as "cache not ready" (misleading)
   // instead of "all recipients are bots" (accurate); droppedBots count
   // is also load-bearing for the warning copy.
+  //
+  // NO early break on `selectedUsers.length > cap` (rejected). Such a
+  // break is unsound under bot-clustered iteration order: a 20001-human
+  // guild with bots iterated around the cap boundary would early-exit
+  // before the (cap+1)th HUMAN, producing `valid.length === cap` and
+  // silently bypassing the cap-reject below — the send would proceed
+  // at exactly the cap with the over-cap members invisibly dropped.
+  // Full-cache iteration costs O(cache_size) (~10ms even at 100k),
+  // which is acceptable post-deferUpdate; correctness wins.
+  //
+  // partial-cache rows (member without `.user` — degraded shape from
+  // a partially-loaded `GUILD_MEMBERS_CHUNK`) are silently filtered
+  // and counted for forensics, matching `handleConfirmVoiceEveryone`'s
+  // `partialCacheDrops` telemetry so a future "@everyone under-
+  // resolved on guild X" report has a debug hook.
   const selectedUsers = [];
+  let partialCacheDrops = 0;
   const cache = interaction.guild.members?.cache;
   if (cache && typeof cache.entries === 'function') {
     for (const [, member] of cache) {
       if (member?.user) selectedUsers.push(member.user);
+      else partialCacheDrops++;
     }
+  }
+  if (partialCacheDrops > 0) {
+    logger.debug('handleConfirmEveryone: partial-cache rows dropped from @everyone resolution', {
+      flow_id, dropped: partialCacheDrops, cache_size: cache?.size,
+    });
   }
   if (selectedUsers.length === 0) {
     return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');

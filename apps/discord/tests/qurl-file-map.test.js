@@ -5241,6 +5241,60 @@ describe('handleConfirmEveryone', () => {
     await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(deferAckedBeforeTransition).toBe(true);
   });
+
+  test('transitionFlow returns conflict → "Send was superseded" copy, no followup', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/superseded/i);
+    expect(reply.components).toEqual([]);
+    expect(int.followUp).not.toHaveBeenCalled();
+  });
+
+  test('transitionFlow returns not_found → "send expired" copy, no followup', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/expired/i);
+    expect(reply.components).toEqual([]);
+    expect(int.followUp).not.toHaveBeenCalled();
+  });
+
+  test('transitionFlow throws → ephemeral followUp with retry copy', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockRejectedValueOnce(new Error('ddb blip'));
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save.*Try again/i),
+      ephemeral: true,
+    }));
+    const logger = require('../src/logger');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('handleConfirmEveryone: transitionFlow threw'),
+      expect.any(Object),
+    );
+  });
+
+  test('partial-cache rows (member without .user) → counted in debug log + filtered from selection', async () => {
+    // Mirror handleConfirmVoiceEveryone's partialCacheDrops telemetry.
+    // Degraded GuildMembersChunk shapes occasionally land entries with
+    // no .user — they're filtered silently, but the count is logged so
+    // a future "@everyone underresolved" report has a forensic hook.
+    const int = makeEveryoneInteraction();
+    // Inject one degraded row alongside the valid ones.
+    int.guild.members.cache.set('degraded-1', { /* no .user */ });
+    int.guild.memberCount = 5;
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('partial-cache rows dropped'),
+      expect.objectContaining({ dropped: 1 }),
+    );
+    // Send still proceeds with the valid subset.
+    expect(mockTransitionFlow).toHaveBeenCalled();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -6530,6 +6584,87 @@ describe('renderConfirmCardRows', () => {
       expect(everyoneBtn).toBeDefined();
       // 3 cached, 1 is a bot → label shows (2).
       expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(2)'));
+    });
+
+    test('disabled when memberCount unavailable AND cache cold (displayCount null)', async () => {
+      // Edge case: cold cache + missing memberCount → can't compute a
+      // count → button shows `(?)` label and stays disabled so the
+      // user sees the button can't act rather than getting a silent
+      // no-op click against a count-less label.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      // Leave memberCount unset → undefined.
+      delete int.guild.memberCount;
+      await handleQurlFile(int);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(?)'));
+      expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+    });
+
+    test('does NOT render in DM context (interaction.guild === null)', async () => {
+      // @everyone has no semantics in DM; the gate `interaction.guild`
+      // must skip rendering even with MENTION_EVERYONE set (defense-in-
+      // depth — handleQurlSlashSend rejects DM at entry, but the
+      // renderer is reused on re-renders that could in principle see
+      // a degraded shape).
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      // handleQurlFile rejects DM at entry, so test the renderer via
+      // a fresh slash-entry that DOES have a guild but then exercise
+      // the render-only branch by mocking interaction.guild = null on
+      // a later render path. Cleaner: invoke directly via handleQurlFile
+      // on a guild-less interaction and assert no button construction
+      // happens at all (because the handler returns before render).
+      const int = makeInteraction({
+        guildId: null,  // → guild = null in makeInteraction
+        options: { attachment: VALID_ATTACHMENT },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+    });
+
+    test('does NOT render in voice-mode (recipientMode === RECIPIENT_MODE_VOICE)', async () => {
+      // Voice-mode already targets the voice-channel population. The
+      // @everyone button there would confuse "everyone" semantics —
+      // does it mean voice or guild? Gate stays at picker-mode only.
+      // Render-only test: drive via rerenderConfirmCard with
+      // recipientMode: 'voice' and verify the button is absent.
+      const { ButtonBuilder } = require('discord.js');
+      const { handleConfirmExpirySelect } = require('../src/commands');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 5;
+      // Drive a re-render via expiry select with recipientMode=voice.
+      int.values = ['7d'];
+      const voicePayload = {
+        resourceType: 'file',
+        resourceLabel: 'x.png',
+        recipientIds: ['100000000000000001'],
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        recipientMode: 'voice',
+        voiceChannelId: 'voice-ch-1',
+      };
+      mockTransitionFlow.mockResolvedValueOnce({ result: 'ok', version: 2 });
+      await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+      // sanity check: voice-mode renders the "Pick people instead" button.
+      expect(customIds).toContain('qurl_confirm_pick_manual');
     });
   });
 });
