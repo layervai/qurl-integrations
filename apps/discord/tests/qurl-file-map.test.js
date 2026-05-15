@@ -7420,18 +7420,21 @@ describe('constants + exports', () => {
     expect(RECIPIENT_MODE_VOICE).toBe('voice');
   });
 
-  test('normalizeRecipientMode: only "voice" maps to voice; everything else picker', () => {
+  test('normalizeRecipientMode: closed set {voice, everyone, picker}; everything else picker', () => {
     // Stale flow_state rows (created before this field existed) read
     // as undefined. Off-set values (forged interaction, schema drift,
     // typo in a future refactor) also fall back to picker. Pin the
-    // table so a future refactor that flips the default can't slip
+    // table so a future refactor that flips the default — or
+    // accidentally collapses 'everyone' back to 'picker' — can't slip
     // through.
     expect(normalizeRecipientMode('voice')).toBe('voice');
+    expect(normalizeRecipientMode('everyone')).toBe('everyone');
     expect(normalizeRecipientMode('picker')).toBe('picker');
     expect(normalizeRecipientMode(undefined)).toBe('picker');
     expect(normalizeRecipientMode(null)).toBe('picker');
     expect(normalizeRecipientMode('')).toBe('picker');
     expect(normalizeRecipientMode('VOICE')).toBe('picker'); // case-sensitive
+    expect(normalizeRecipientMode('EVERYONE')).toBe('picker'); // case-sensitive
     expect(normalizeRecipientMode('unknown')).toBe('picker');
   });
 
