@@ -2026,6 +2026,27 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/Send includes/);
   });
 
+  test('voice-mode + selfIncluded=true → notice suppressed (forged/drifted payload defense)', () => {
+    // Every production voice-mode write path sets selfIncluded:false,
+    // so this state is structurally unreachable. The renderer guard
+    // exists for a forged or schema-drifted payload that would
+    // otherwise stack a contradictory "Send includes you." notice on
+    // top of the voice-mode "(you not included)" copy on the "To:"
+    // line. Pin the guard so a future refactor can't silently let the
+    // two messages coexist.
+    const u1 = { id: '100000000000000001', username: 'alice' };
+    const out = renderConfirmCardContent({
+      ...baseProps,
+      validRecipients: [u1],
+      selfIncluded: true,
+      recipientMode: 'voice',
+      voiceChannelId: 'voice-ch',
+    });
+    expect(out).not.toMatch(/Send includes you/);
+    // Voice-mode "To:" still renders correctly.
+    expect(out).toMatch(/you not included/);
+  });
+
   test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
     const long = 'x'.repeat(120);
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: long });

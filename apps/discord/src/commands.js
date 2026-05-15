@@ -3364,10 +3364,16 @@ function renderConfirmCardContent({
   // Neutral notice (NOT a warning) when the sender is in the recipient
   // list. Self-send is supported as a first-class flow; surface it on
   // the confirm card so the user can verify they meant to include
-  // themselves before clicking Send. Unreachable in voice-mode —
-  // partitionRecipients drops the sender pre-validity when the path
-  // calls it with `excludeSender: true`.
-  if (selfIncluded) {
+  // themselves before clicking Send.
+  //
+  // Mode guard: every voice-mode write path explicitly sets
+  // `selfIncluded: false` (slash-entry override + handleConfirmVoiceEveryone
+  // + handleConfirmPickManual), so `selfIncluded === true` is
+  // structurally unreachable in voice-mode. The guard is defense
+  // against a forged or schema-drifted payload that would otherwise
+  // produce contradictory copy: "Send includes you." stacked on top
+  // of "(you not included)" in the voice-mode "To:" line.
+  if (selfIncluded && mode !== RECIPIENT_MODE_VOICE) {
     content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
   if (needsPicker) {
