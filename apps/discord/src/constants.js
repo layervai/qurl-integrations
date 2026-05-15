@@ -39,6 +39,10 @@ const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
+  // Bound for `guild.members.fetch()` pre-warm before @everyone / role
+  // expansion. discord.js returns a partial result on timeout, which is
+  // acceptable — degraded expansion beats a stuck slash command.
+  MEMBER_PREFETCH: 8000,
 };
 
 // Limits
