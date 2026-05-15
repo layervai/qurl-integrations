@@ -2349,17 +2349,21 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     let result = { ok: false };
     try {
       // links.slice(0, 10) caps at Discord's 10-embed-per-message
-      // limit; the embed body is identical per-link (sender + guild
-      // + expiry don't vary), so the map only diverges on
-      // qurlLink-bound buttons via packBulkDeliveryComponents.
+      // limit. The embed body is identical per-link (sender + guild +
+      // expiry don't vary), so build the EmbedBuilder once and repeat
+      // the reference N times. discord.js serializes each embeds[]
+      // entry via .toJSON() — a pure read of internal state — so
+      // reference sharing is safe. Saves N-1 EmbedBuilder allocations
+      // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
       const cappedLinks = links.slice(0, 10);
-      const allEmbeds = cappedLinks.map(() => buildDeliveryEmbed({
+      const sharedEmbed = buildDeliveryEmbed({
         senderAlias,
         guildName,
         guildIconUrl,
         expiresAt,
         personalMessage: sendConfig.personal_message,
-      }));
+      });
+      const allEmbeds = Array(cappedLinks.length).fill(sharedEmbed);
       const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });

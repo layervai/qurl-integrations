@@ -26,6 +26,13 @@ const RESOURCE_TYPES = {
 // public brand page first-time recipients can hit to verify qURL is a
 // real service before clicking Step Through.
 //
+// LANDING_URL is intentionally brand-canonical — it stays pinned to
+// the layerv.ai/qurl page even when a tenant brands their minted-link
+// host via `branded_domain`. The verify path is "is qURL itself
+// real?", not "is this tenant real?"; routing through the canonical
+// brand page is the correct trust signal regardless of which host
+// served the link.
+//
 // TODO(branded-domain): DESTINATION_DOMAIN is a brand-default literal.
 // qurl-service already supports a `branded_domain` concept (tenant-
 // custom hosts on minted links — see qurl-service api.gen.go). Discord
