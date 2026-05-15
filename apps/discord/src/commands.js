@@ -3874,20 +3874,16 @@ function renderConfirmCardRows({
   // (only when the slash was invoked from voice); voice-mode and
   // everyone-mode show the "Pick people instead" escape hatch.
   const bottomRow = new ActionRowBuilder();
-  if (mode === RECIPIENT_MODE_VOICE && voiceChannelId) {
-    // Voice-mode escape hatch. The handler clears recipientIds and
-    // flips recipientMode back to 'picker'. Style as Secondary so it
-    // doesn't compete visually with Send (Success).
-    bottomRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
-        .setLabel('\u{1F465} Pick people instead')
-        .setStyle(ButtonStyle.Secondary),
-    );
-  } else if (mode === RECIPIENT_MODE_EVERYONE) {
-    // Everyone-mode escape hatch — same handler as voice-mode. Picker
-    // row is hidden above; this is the only path back to manual
-    // selection without re-running the slash command.
+  // Voice-mode and everyone-mode share the same escape hatch: picker
+  // row is hidden above, so this button is the only path back to
+  // manual selection without re-running the slash command. The
+  // voice-mode branch additionally requires `voiceChannelId` (the
+  // button only renders for the slash-entry voice-auto-default path
+  // that snapshotted a channel id); everyone-mode has no such
+  // dependency. Style as Secondary so it doesn't compete visually
+  // with Send (Success). Handler is shared (handleConfirmPickManual)
+  // and resets recipientMode → 'picker'.
+  if ((mode === RECIPIENT_MODE_VOICE && voiceChannelId) || mode === RECIPIENT_MODE_EVERYONE) {
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
