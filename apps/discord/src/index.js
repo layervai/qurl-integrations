@@ -8,9 +8,19 @@ const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, missingEventShipperKeys, resolveProcessRole } = require('./boot-requirements');
+const {
+  missingBootKeys,
+  missingProdKeys,
+  missingKekRequiredKeys,
+  missingEventShipperKeys,
+  unsupportedRoleShipperCombo,
+  shouldRegisterInteractionListener,
+  resolveProcessRole,
+} = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
+const eventPublisher = require('./event-publisher');
+const { LOG_KINDS } = require('./constants');
 
 // Process role — selects which subset of the bot runs in this
 // container. Three modes:
@@ -263,6 +273,17 @@ if (eventShipperMissing.length > 0) {
   process.exit(1);
 }
 
+// Reject combined + flag-on. In combined mode the gateway-side
+// publish hook AND the worker-side consumer would both arm in one
+// process, double-dispatching every interaction (gateway WS frame
+// + SQS round-trip). See unsupportedRoleShipperCombo for the full
+// rationale and operator-facing remediation.
+const roleShipperConflict = unsupportedRoleShipperCombo(PROCESS_ROLE, config.ENABLE_EVENT_SHIPPER);
+if (roleShipperConflict) {
+  logger.error(roleShipperConflict);
+  process.exit(1);
+}
+
 // Worker role: the SQS-driven dispatch path. Distinct from `isHttp`
 // because the http role today serves OAuth callbacks + webhooks
 // regardless of the flag; only when ENABLE_EVENT_SHIPPER is on does
@@ -276,32 +297,29 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // `isWorker=true` lands directly.
 logger.info('Worker tier configured', { isWorker, eventShipperEnabled: config.ENABLE_EVENT_SHIPPER });
 
-// Interaction routing. Same dispatcher whether the source is the
-// Gateway WS (isGateway) or an SQS message reconstructed via
-// client.actions.InteractionCreate.handle (isWorker, see
-// src/event-consumer.js). Registered once, gated on either flag, so
-// combined-mode + flag-on doesn't double-register.
+// Interaction routing. Three disjoint shapes:
 //
-// **PR 10 PRE-MERGE REQUIREMENT** — the gate below MUST be updated
-// to `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker` (or
-// the gateway-side listener replaced with a publish-to-SQS shim) in
-// THE SAME PR that introduces the producer. Without that change,
-// combined-mode + flag-on after PR 10 ships will dispatch every
-// interaction twice — once via the gateway WS frame, once via the
-// SQS roundtrip — silently doubling DM fan-outs, side-effecting
-// every flow-state transition twice, and corrupting telemetry.
-// PR 11 alone is safe (producer doesn't exist → queue stays empty
-// → consumer is a no-op); the hazard activates the instant the
-// producer side starts publishing.
+//   * Gateway tier + flag-on: discord.js emits `interactionCreate`
+//     on the gateway WS frame, but we do NOT subscribe — the raw
+//     publish hook (registered in the isGateway block below) forwards
+//     the payload to SQS instead. The worker tier picks it up.
+//   * Worker tier + flag-on: the SQS consumer reconstructs the
+//     interaction via `client.actions.InteractionCreate.handle(data)`,
+//     which emits `interactionCreate` locally. We DO subscribe so
+//     handleCommand / handleFlowInteraction run.
+//   * Combined or split + flag-off: legacy in-process path. The
+//     gateway WS emit lands on the local listener directly.
 //
-// Today (PR 11 only), the producer side doesn't exist yet, so
-// combined-mode + flag-on still runs the gateway dispatch path
-// in-process and the worker tier's consumer sits on an empty queue.
-// TODO(PR-10): change the gate to `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker`
-// (or replace the gateway-side path with a publish-to-SQS shim) per the
-// PR 10 PRE-MERGE REQUIREMENT comment above. `git grep TODO(PR-10)` from
-// the PR 10 branch surfaces every gate that needs flipping.
-if (isGateway || isWorker) {
+// The shouldRegisterInteractionListener predicate (in
+// boot-requirements.js) collapses every role × flag permutation
+// into a single boolean. Combined + flag-on is rejected at boot by
+// unsupportedRoleShipperCombo before reaching here — see that
+// helper's comment for the double-dispatch hazard.
+if (shouldRegisterInteractionListener({
+  isGateway,
+  isHttp,
+  eventShipperEnabled: config.ENABLE_EVENT_SHIPPER,
+})) {
   // Handle interactions. Split-dispatch by interaction kind:
   // ChatInputCommand + Autocomplete go through the slash-command
   // path (handleCommand); MessageComponent + ModalSubmit go through
@@ -368,6 +386,26 @@ if (isGateway) {
   // avoids per-frame closure allocation.
   client.on('raw', noteGatewayActivity);
 
+  // Publish-to-SQS hook for the worker tier (zero-downtime Pillar 1).
+  // Fires on every gateway dispatch; `publish` filters internally to
+  // `INTERACTION_CREATE` (single string-eq) before any allocation,
+  // so non-interaction dispatches pay only the comparison cost.
+  // Listener registered here at module-top because discord.js's raw
+  // event fires inside the WebSocketShard's onPacket — by the time
+  // login() resolves, frames are already arriving. publisher.start()
+  // (called in start() below before client.login()) constructs the
+  // SQS client; publish() drops at debug if a frame somehow arrives
+  // pre-start.
+  //
+  // Gated on `config.ENABLE_EVENT_SHIPPER` — when the flag is off,
+  // the legacy in-process listener (registered above) handles
+  // dispatch and no SQS round-trip is needed. Function-reference
+  // (not closure) to keep v8's hidden-class shape stable across
+  // every WS frame, matching the noteGatewayActivity pattern.
+  if (config.ENABLE_EVENT_SHIPPER) {
+    client.on('raw', eventPublisher.publish);
+  }
+
   // Error handling
   client.on('error', error => {
     logger.error('Discord client error', { error: error.message });
@@ -386,7 +424,7 @@ if (isGateway) {
 // message text or miss one of the tiers.
 process.on('unhandledRejection', (error, _promise) => {
   logger.error('Unhandled promise rejection (logged, not fatal)', {
-    kind: 'unhandledRejection',
+    kind: LOG_KINDS.UNHANDLED_REJECTION,
     error: error?.message || error,
     stack: error?.stack,
   });
@@ -435,6 +473,13 @@ async function gracefulShutdown(code = 0) {
     // ACK'ing the interaction. Idempotent + a no-op when the
     // consumer was never started, so unconditional here.
     await eventConsumer.stop();
+    // SQS publisher drain. Same shape as the consumer above:
+    // idempotent + no-op when never started, so unconditional.
+    // Runs AFTER eventConsumer.stop() but both are bounded by their
+    // own DRAIN_DEADLINE_MS; in the split shape only one of them is
+    // actually running per process (combined + flag-on is rejected
+    // at boot), so the sequencing matters only as documentation.
+    await eventPublisher.stop();
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
     // wouldn't block exit on its own, but clearing explicitly keeps
     // shutdown symmetric with the other intervals (server.js, oauth.js
@@ -570,15 +615,27 @@ async function start() {
   // can accept probes during the consumer's first poll. Gated on
   // `isWorker` (which already requires ENABLE_EVENT_SHIPPER=true)
   // so the legacy in-process dispatch path stays untouched when
-  // the flag is off. In combined mode + flag on, the same process
-  // runs both producer (gateway role) and consumer — useful for
-  // local dev and the initial flag-on soak.
+  // the flag is off. Combined + flag-on is rejected at boot
+  // (unsupportedRoleShipperCombo), so this and the publisher.start()
+  // below are necessarily disjoint per-process.
   //
   // Shutdown-race guard: mirrors the timer guards above. If SIGTERM
   // landed during the awaits before this point, gracefulShutdown
   // has already run; skip starting a consumer that no one will stop.
   if (isWorker && !isShuttingDown) {
     eventConsumer.start(client);
+  }
+
+  // SQS publisher for the gateway tier (zero-downtime Pillar 1).
+  // Started BEFORE client.login() so the SQS client exists by the
+  // time the first gateway frame arrives — the `client.on('raw',
+  // eventPublisher.publish)` registration at module-top fires
+  // synchronously inside discord.js's WebSocketShard.onPacket as
+  // soon as login resolves, and a frame that arrived pre-start()
+  // would otherwise drop at debug (defense-in-depth in publish()).
+  // Same shutdown-race guard as the consumer above.
+  if (isGateway && config.ENABLE_EVENT_SHIPPER && !isShuttingDown) {
+    eventPublisher.start();
   }
 
   // Login to Discord with a 30s deadline. client.login() doesn't

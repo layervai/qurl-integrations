@@ -17,6 +17,8 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  unsupportedRoleShipperCombo,
+  shouldRegisterInteractionListener,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -164,6 +166,64 @@ describe('missingEventShipperKeys', () => {
         QURL_BOT_EVENTS_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
       }),
     ).toEqual([]);
+  });
+});
+
+describe('unsupportedRoleShipperCombo', () => {
+  it('rejects combined + flag-on with operator-facing remediation', () => {
+    const msg = unsupportedRoleShipperCombo('combined', true);
+    expect(msg).not.toBeNull();
+    // Pin the message contract so a wording drift can't silently
+    // strip the remediation hint operators rely on to fix the deploy.
+    expect(msg).toMatch(/PROCESS_ROLE=combined/);
+    expect(msg).toMatch(/ENABLE_EVENT_SHIPPER=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).toMatch(/PROCESS_ROLE=http/);
+  });
+
+  it.each([
+    ['gateway', true],
+    ['http', true],
+    ['combined', false],
+    ['gateway', false],
+    ['http', false],
+  ])('returns null for supported combination role=%s shipper=%s', (role, shipperEnabled) => {
+    expect(unsupportedRoleShipperCombo(role, shipperEnabled)).toBeNull();
+  });
+});
+
+describe('shouldRegisterInteractionListener', () => {
+  // The full 3 roles × 2 flag states truth table. Combined + flag-on
+  // is rejected at boot (unsupportedRoleShipperCombo), so its
+  // intended-behavior is "unreachable in production." We still pin
+  // the predicate's output for that input so a future caller that
+  // bypasses the boot guard sees a coherent value.
+  //
+  // The mapping is derived via resolveProcessRole semantics:
+  //   combined → isGateway=true, isHttp=true
+  //   gateway  → isGateway=true, isHttp=false
+  //   http     → isGateway=false, isHttp=true
+  test.each([
+    // [role,       flag,  expected, rationale]
+    ['combined',   false, true,  'legacy in-process; local listener handles dispatch'],
+    ['combined',   true,  true,  'unreachable in prod (boot reject); predicate output coherent'],
+    ['gateway',    false, true,  'legacy in-process gateway tier (single-process deploy)'],
+    ['gateway',    true,  false, 'gateway tier publishes to SQS; local listener disconnected'],
+    ['http',       false, false, 'no gateway WS + no SQS consumer; listener would never fire'],
+    ['http',       true,  true,  'worker tier; SQS consumer re-emits, listener routes'],
+  ])('role=%s flag=%s → %s (%s)', (role, eventShipperEnabled, expected) => {
+    const { isGateway, isHttp } = resolveProcessRole(role);
+    expect(shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnabled })).toBe(expected);
+  });
+
+  it('is a pure function (no side effects, same input → same output)', () => {
+    // Predicate must be referentially transparent — a side effect
+    // would couple boot to non-determinism and undermine the
+    // unit-testability that motivated the lift.
+    const args = { isGateway: true, isHttp: false, eventShipperEnabled: true };
+    const first = shouldRegisterInteractionListener(args);
+    const second = shouldRegisterInteractionListener(args);
+    expect(first).toBe(second);
   });
 });
 

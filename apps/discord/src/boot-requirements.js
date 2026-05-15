@@ -84,6 +84,44 @@ function missingEventShipperKeys(cfg) {
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
+// PROCESS_ROLE=combined paired with ENABLE_EVENT_SHIPPER=true is
+// unsupported and rejected at boot. In combined mode both `isGateway`
+// and `isHttp` evaluate true, which derives `isWorker=true`, which
+// would arm both the gateway-side publish hook AND the worker-side
+// consumer in one process. Every interaction would land twice: once
+// via the in-process gateway WS frame, once via the SQS round-trip.
+// Side effects (DM fan-out, flow-state writes) double; telemetry
+// reports two dispatches per real interaction. The listener gate
+// alone can't close this — discord.js's InteractionCreate action
+// fires synchronously on the gateway WS frame regardless of whether
+// the local listener is registered, so even gating the worker-side
+// dispatcher leaves the gateway publish path firing alongside the
+// consumer.
+//
+// The supported flag-on shape is the two-process split: a separate
+// PROCESS_ROLE=gateway (singleton) publishing to SQS, and one or
+// more PROCESS_ROLE=http replicas consuming. Combined mode stays
+// supported for sandbox / local-dev / pre-split deployments —
+// just with the flag off, running the legacy in-process path.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Kept as a string-or-null rather than throwing so the
+// caller in index.js logs the message + exits via the same pattern
+// as missingBootKeys (one log + process.exit) rather than handling
+// a thrown error specially.
+function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
+  if (role === 'combined' && eventShipperEnabled) {
+    return (
+      'PROCESS_ROLE=combined with ENABLE_EVENT_SHIPPER=true is not supported ' +
+      '(would dispatch every interaction twice — once via the in-process gateway ' +
+      'WS frame, once via the SQS round-trip). Run two processes: ' +
+      'PROCESS_ROLE=gateway (singleton, publishes) + PROCESS_ROLE=http (consumes). ' +
+      'For local dev / sandbox in one process, leave ENABLE_EVENT_SHIPPER unset.'
+    );
+  }
+  return null;
+}
+
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -119,6 +157,38 @@ function resolveProcessRole(rawValue) {
   };
 }
 
+// Whether the local `interactionCreate` listener should be registered
+// in this process. Lifted out of index.js so the gate logic is pure +
+// unit-testable across every role × flag permutation (combined + flag-on
+// is unreachable here — `unsupportedRoleShipperCombo` rejects it at
+// boot — but the predicate must remain coherent for any caller that
+// somehow reaches it post-bypass, so it's defined for all inputs).
+//
+// Three intended shapes:
+//   - Gateway tier + flag-off  → register (legacy in-process dispatch)
+//   - Gateway tier + flag-on   → DO NOT register (publishes to SQS;
+//                                local listener would dispatch the
+//                                same payload a second time after the
+//                                worker tier's consumer re-emits)
+//   - Worker tier (HTTP + flag-on) → register (SQS consumer
+//                                reconstructs the interaction and
+//                                re-emits locally; the listener
+//                                routes via handleCommand /
+//                                handleFlowInteraction)
+//   - HTTP-only + flag-off     → DO NOT register (no gateway WS,
+//                                no SQS consumer, so the listener
+//                                would never fire and registering it
+//                                would just leak handler references)
+//
+// The predicate `(isGateway && !flag) || (isHttp && flag)` collapses
+// these four cases. Combined mode (isGateway=true, isHttp=true) with
+// flag-off reduces to the first disjunct (register); with flag-on it
+// would reduce to "register" via BOTH disjuncts (the false-positive
+// the boot rejection guards against — see unsupportedRoleShipperCombo).
+function shouldRegisterInteractionListener({ isGateway, isHttp, eventShipperEnabled }) {
+  return (isGateway && !eventShipperEnabled) || (isHttp && eventShipperEnabled);
+}
+
 module.exports = {
   bootRequired,
   prodRequired,
@@ -126,6 +196,8 @@ module.exports = {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  unsupportedRoleShipperCombo,
+  shouldRegisterInteractionListener,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };

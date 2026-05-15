@@ -659,22 +659,35 @@ Each phase has an independent rollback path:
 | Phase | Rollback |
 |---|---|
 | Flow state | Revert command-file PRs. DDB flow rows expire on their TTL. |
-| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. **Valid only through PR 10** — see cliff note below. |
+| Event shipper | App-side feature flag `ENABLE_EVENT_SHIPPER=false` falls back to in-process dispatch on the gateway role. **Valid through the gated phase** — see cliff note below. |
 | Cross-process RESUME | App-side feature flag `ENABLE_GATEWAY_RESUME=false` falls back to in-memory session state (Discord IDENTIFY-only every boot). |
 | Hot-standby | Set `gateway_desired_count = 1` in tfvars. The standby-discovery path sees no peer and the active becomes a single-replica gateway. |
 
-**Rollback cliff: `ENABLE_EVENT_SHIPPER`.** The flag-based rollback works
-only while PR 10 (gateway strip-down) is gated — i.e., the gateway role
-still has in-process command handlers wired to fall back to. The moment
-PR 10 lands without the flag (the dual-path scaffolding is removed),
-flipping `ENABLE_EVENT_SHIPPER=false` has nothing to fall back to and
-the gateway boots into a partially-wired state. After that point,
-rollback is `git revert` on PR 10 + emergency redeploy, not a flag flip.
-The cliff is a deliberate trade-off: keeping the dual-path scaffolding
-forever bloats the gateway image and obscures whose code path is live.
-PR 10's description must explicitly call out the soak window before
-removing the flag (recommendation: 1 week of clean prod traffic on the
-event-shipper path before deleting the in-process fallback).
+**Rollback cliff: `ENABLE_EVENT_SHIPPER`.** PR 10 ships the producer +
+worker-side dispatch path under the `ENABLE_EVENT_SHIPPER` flag,
+keeping the legacy in-process gateway dispatch as fall-back. While
+both code paths coexist, `ENABLE_EVENT_SHIPPER=false` is a valid
+flag-flip rollback. A later cleanup PR will delete the legacy
+in-process gateway listener gate `(isGateway && !config.ENABLE_EVENT_SHIPPER)`
+and make the producer unconditional. After that cleanup lands,
+flipping the flag false has nothing to fall back to and rollback is
+`git revert` + emergency redeploy. The cliff is a deliberate trade-off:
+keeping the dual-path scaffolding forever bloats the gateway image
+and obscures whose code path is live. The cleanup PR's description
+must explicitly call out the soak window before removing the flag
+(recommendation: 1 week of clean prod traffic on the event-shipper
+path before deleting the in-process fallback).
+
+**Unsupported combination:** `PROCESS_ROLE=combined` paired with
+`ENABLE_EVENT_SHIPPER=true` is rejected at boot
+(`unsupportedRoleShipperCombo` in `src/boot-requirements.js`). In
+combined mode the gateway publish hook AND the worker consumer
+would arm in one process, double-dispatching every interaction
+(in-process WS frame + SQS round-trip). The supported flag-on
+shape is the two-process split: `PROCESS_ROLE=gateway` (singleton,
+publishes) + `PROCESS_ROLE=http` (consumes, can scale horizontally).
+For local dev / sandbox in one process, leave `ENABLE_EVENT_SHIPPER`
+unset.
 
 ## SLI / SLO definitions
 
