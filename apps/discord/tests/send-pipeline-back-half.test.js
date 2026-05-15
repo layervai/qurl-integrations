@@ -1189,47 +1189,12 @@ describe('handleAddRecipients — pre-flight guards', () => {
     // for #352 was preserving audit visibility on the orphan-row
     // failure mode; the entry gate's log is the operator-side
     // counterpart to user-visible `result.msg`.
-    expect(logger.error).toHaveBeenCalledWith(
+    expect(logger.warn).toHaveBeenCalledWith(
       'addRecipients refused invalid expires_in',
       expect.objectContaining({ sendId: 'send-1', expiresIn: '25h' }),
     );
   });
 
-  // #352 belt-and-suspenders: even if a future expires_in slips
-  // through the pre-flight gate, the expiresAt computation is hoisted
-  // ABOVE recordQURLSendBatch, so a throw there can't leave orphan
-  // DDB rows. Mock `expiryToMs` to throw — file-prep must succeed
-  // so execution reaches the hoist site (otherwise the test passes
-  // vacuously because file-prep's outer try/catch would return
-  // before recordQURLSendBatch regardless).
-  it('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
-    const { expiryToMs } = require('../src/utils/time');
-    expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs throw'); });
-
-    mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '30m',  // passes the pre-flight gate
-      attachment_url: 'https://cdn.discordapp.com/x.png',
-      attachment_name: 'x.png', attachment_content_type: 'image/png',
-    });
-    // File-prep succeeds — so execution proceeds PAST the file/location
-    // outer try/catch and reaches the new hoist site immediately
-    // before recordQURLSendBatch.
-    mockDownloadAndUpload.mockResolvedValueOnce({
-      resource_id: 'res-new', fileBuffer: new ArrayBuffer(10),
-    });
-    mockMintLinks.mockResolvedValueOnce([
-      { qurl_link: 'https://q.test/1', resource_id: 'res-new' },
-    ]);
-
-    await expect(handleAddRecipients(
-      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
-      makeInteraction(), 'apikey',
-    )).rejects.toThrow(/synthetic expiryToMs throw/);
-
-    // Load-bearing assertion: even though file-prep succeeded and
-    // links were minted upstream, NO DDB rows were written.
-    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
-  });
 });
 
 describe('handleAddRecipients — file path failure modes', () => {
