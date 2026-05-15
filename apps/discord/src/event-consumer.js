@@ -968,10 +968,12 @@ async function stop() {
     // force-exit fires regardless, so we cap our wait at 3s to
     // leave room for db.close() and any other shutdown work.
     //
-    // Snapshot the set into an array before allSettled: pending
-    // .finally callbacks mutate inFlightPromises during the await,
-    // and Set iteration is fine with concurrent mutation but the
-    // explicit copy makes intent obvious.
+    // Explicit copy `[...inFlightPromises]` rather than passing the
+    // Set directly: Promise.allSettled materializes its input
+    // synchronously at call time, so a Set arg would behave the same.
+    // The spread is for readability — "snapshot of the set as of this
+    // moment, then await every one of those" reads more directly than
+    // letting allSettled iterate the live set.
     if (inFlightPromises.size > 0) {
       const drainCount = inFlightPromises.size;
       const drainStart = Date.now();

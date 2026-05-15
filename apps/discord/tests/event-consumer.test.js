@@ -998,6 +998,17 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(elapsed).toBeLessThan(50 * 20);
   });
 
+  test('getDrainDeadlineMs reflects live value after _setDrainDeadlineForTest', () => {
+    // The deadline is mutable so tests can shrink it without
+    // polluting prod with a config knob. The `_test` export is a
+    // getter (not a value-snapshot) so introspection reflects the
+    // live variable — pin that contract so a future refactor back
+    // to a value-export trips this test.
+    expect(eventConsumer._test.getDrainDeadlineMs()).toBe(3000);
+    eventConsumer._test._setDrainDeadlineForTest(50);
+    expect(eventConsumer._test.getDrainDeadlineMs()).toBe(50);
+  });
+
   test('stop() skips drain branch when no handlers are in-flight (no spurious logs)', async () => {
     // Pins the no-op path: an idle worker stop()s without firing the
     // drain logs (drainCount > 0 gate). Common case in production —
