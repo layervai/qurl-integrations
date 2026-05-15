@@ -853,6 +853,31 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-ok', 'm-ok']);
     });
 
+    it('does NOT edit the DM of a mixed-outcome recipient (one of their resources failed to revoke)', async () => {
+      // Within one recipient: two resources, one DELETE succeeds + one
+      // DELETE fails. Pins that the mixed-outcome recipient lands in
+      // failureUserIds (not successUserIds) AND that editDM is NOT
+      // called for them — the door isn't fully closed, so the
+      // "closed the door" copy would be misleading. Companion to the
+      // bucket-level `failure-wins` test above.
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-a', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
+        { resource_id: 'res-b', recipient_discord_id: 'mixed', dm_status: 'sent', dm_channel_id: 'c-mixed', dm_message_id: 'm-mixed' },
+        { resource_id: 'res-c', recipient_discord_id: 'clean', dm_status: 'sent', dm_channel_id: 'c-clean', dm_message_id: 'm-clean' },
+      ]);
+      mockDeleteLink
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('already opened'))
+        .mockResolvedValueOnce(undefined);
+
+      const result = await revokeAllLinks('send-mixed-within', 'sender-1', 'apikey', 'Alice');
+
+      expect(result.successUserIds).toEqual(['clean']);
+      expect(result.failureUserIds).toEqual(['mixed']);
+      expect(mockEditDM).toHaveBeenCalledTimes(1);
+      expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-clean', 'm-clean']);
+    });
+
     it('emits no edit log when every strict-success row is legacy (no editable targets)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent' }, // legacy, no refs
@@ -978,6 +1003,7 @@ describe('persistDispatchResult — divergence guard', () => {
     mockDb.markSendDMDelivered.mockClear();
     mockDb.updateSendDMStatus.mockClear();
     logger.warn.mockClear();
+    logger.audit.mockClear();
   });
 
   it('happy path: writes markSendDMDelivered with both refs', async () => {
@@ -985,20 +1011,23 @@ describe('persistDispatchResult — divergence guard', () => {
     expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith('s', 'r', 'c', 'm');
     expect(mockDb.updateSendDMStatus).not.toHaveBeenCalled();
     expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith('dispatch_sent_no_refs', expect.anything());
   });
 
-  it('plain failure: writes FAILED without warning', async () => {
+  it('plain failure: writes FAILED without warning or divergence audit', async () => {
     await persistDispatchResult('s', 'r', { ok: false });
     expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'failed');
     expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.audit).not.toHaveBeenCalledWith('dispatch_sent_no_refs', expect.anything());
   });
 
-  it('warns + records FAILED when sendDM resolves ok but refs are missing (future regression catch)', async () => {
+  it('emits DISPATCH_SENT_NO_REFS + warns + records FAILED on ok-but-missing-refs divergence', async () => {
     // discord.js's user.send() resolves to a Message with channelId/id;
-    // if that contract ever drifts we'd silently fire DISPATCH_SENT
-    // while DDB records `failed`. The warn here surfaces the divergence
-    // for log-based alerting without changing recorded state.
+    // if that contract drifts, DISPATCH_SENT would fire while DDB
+    // records `failed`. The dedicated dispatch_sent_no_refs audit event
+    // makes the divergence queryable from CloudWatch so dashboards can
+    // reconcile against DDB without a mystery gap.
     await persistDispatchResult('s', 'r', { ok: true });
     expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'failed');
@@ -1006,6 +1035,7 @@ describe('persistDispatchResult — divergence guard', () => {
       expect.stringContaining('missing channelId/messageId'),
       expect.objectContaining({ sendId: 's', recipientDiscordId: 'r' }),
     );
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
   });
 });
 

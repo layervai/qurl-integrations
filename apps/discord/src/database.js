@@ -722,10 +722,12 @@ const dbModule = {
 
   // SQLite is local-dev only — STORE_TYPE=ddb in prod. We still write
   // dm_status='sent' so local delivery-count rollups stay consistent;
-  // the DM refs (channelId, messageId — passed by the caller but
-  // dropped here) are intentionally not persisted, so /qURL revoke
-  // skips the recipient-side DM edit when running against SQLite.
-  markSendDMDelivered(sendId, recipientDiscordId) {
+  // the DM refs are intentionally not persisted (signature mirrors the
+  // DDB contract; `_channelId` / `_messageId` are swallowed here), so
+  // /qURL revoke skips the recipient-side DM edit when running against
+  // SQLite.
+  // eslint-disable-next-line no-unused-vars
+  markSendDMDelivered(sendId, recipientDiscordId, _channelId, _messageId) {
     this.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
   },
 

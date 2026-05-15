@@ -114,6 +114,15 @@ const DM_EDIT_EXPECTED_API_CODES = new Set([
  * clear unset fields. Callers MUST pass `components: []` explicitly
  * to strip a previous Link button. See buildRevokedDMPayload in
  * commands.js for the contract-bearing payload.
+ *
+ * No retry on transient 5xx / 429. `client.rest` handles 429 backoff
+ * automatically, but a 502/503 from Discord during a revoke fan-out
+ * would leave the original Step Through button live in that
+ * recipient's DM after the underlying qURL is already DELETEd. The
+ * link button now 404s — i.e. the same UX that existed before this
+ * feature, just on whatever subset of recipients hit the transient.
+ * Accept as a known limitation; the revoke success/total counts are
+ * not affected (those track the DELETE, not the edit).
  */
 async function editDM(channelId, messageId, message) {
   try {

@@ -128,6 +128,14 @@ const AUDIT_EVENTS = {
   UPLOAD_SUCCESS: 'upload_success',
   DISPATCH_SENT: 'dispatch_sent',
   DISPATCH_FAILED: 'dispatch_failed',
+  // DISPATCH_SENT_NO_REFS fires when sendDM resolved ok:true but the
+  // channelId / messageId came back missing — the audit-vs-DDB
+  // divergence persistDispatchResult records as `failed`. Distinct
+  // from DISPATCH_SENT so the dashboard can reconcile CloudWatch
+  // `dispatch_sent` count with DDB `count(dm_status='sent')` without
+  // a mystery gap. Should always read zero — if it lights up, the
+  // discord.js user.send() response shape has changed.
+  DISPATCH_SENT_NO_REFS: 'dispatch_sent_no_refs',
   // REVOKE_SUCCESS fires when at least one per-link delete succeeded;
   // REVOKE_FAILED fires when every per-link delete threw (success === 0
   // && total > 0). When total === 0 (nothing to revoke — already-revoked

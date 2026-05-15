@@ -755,11 +755,12 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     await db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId);
     return;
   }
-  // Defensive: ok:true but missing refs would diverge the audit metric
-  // (DISPATCH_SENT) from the DDB record (failed). Surface the gap loudly
-  // and record as failed — keeps DDB honest if discord.js ever changes
-  // the user.send() response shape.
+  // Defensive: ok:true but missing refs would diverge DISPATCH_SENT
+  // from the DDB record (failed). Emit DISPATCH_SENT_NO_REFS so the
+  // dashboard can reconcile the gap without a mystery, plus a warn
+  // log for grep-ability. Record as failed for DDB safety.
   if (result.ok === true) {
+    logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
     logger.warn('sendDM resolved ok but missing channelId/messageId — recording as failed', {
       sendId, recipientDiscordId,
       hasChannelId: Boolean(result.channelId),
@@ -6120,8 +6121,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // Edit each strict-success recipient's DM to "Alice closed the door"
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
-  // recipient, even if multiple resources fanned out to them) — collapse
-  // items to the first delivered row per recipient_discord_id.
+  // recipient, even if multiple resources fanned out to them) — keep
+  // the first VALID row per recipient_discord_id (passes all the skip
+  // guards below). The de-dup check fires before the validity checks
+  // intentionally: if the first row for a recipient is invalid the
+  // de-dup misses, the validity guards correctly skip it, and the
+  // next valid row for the same recipient is still considered.
   //
   // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
   // Reversing the order would create a window where the recipient sees
