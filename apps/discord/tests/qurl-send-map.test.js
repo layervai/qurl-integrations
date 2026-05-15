@@ -6604,14 +6604,14 @@ describe('renderConfirmCardRows', () => {
     }
   });
 
-  test('pre-resolved defaults beyond the per-pick cap truncate to the first 25 via addDefaultUsers', async () => {
+  test('pre-resolved defaults beyond the per-pick cap truncate to the first 25 via addDefaultUsers, but the full set persists in payload.recipientIds', async () => {
     // The slice on `defaults.slice(0, maxValues)` enforces Discord's
     // default_values.length ≤ max_values invariant when text-resolved
     // recipientIds overflow the picker's 25-slot cap. Overflow ids stay
-    // in payload.recipientIds and still reach the send — only the
-    // visual pre-check truncates. Mock QSMR=30 to let parseRecipientMentions
-    // surface all 30 ids to the renderer; without the mock parse would
-    // cap at the default 25 and there'd be nothing to slice.
+    // in payload.recipientIds and still reach the send — pin both halves
+    // so a future refactor can't silently drop the overflow. Mock QSMR=30
+    // to let parseRecipientMentions surface all 30 ids; without the mock
+    // parse would cap at the default 25 and there'd be nothing to slice.
     const config = require('../src/config');
     const origCap = config.QURL_SEND_MAX_RECIPIENTS;
     config.QURL_SEND_MAX_RECIPIENTS = 30;
@@ -6629,6 +6629,8 @@ describe('renderConfirmCardRows', () => {
       const builder = MentionableSelectMenuBuilder.mock.results[0].value;
       expect(builder.setMaxValues).toHaveBeenCalledWith(25);
       expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids.slice(0, 25));
+      const persistedPayload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(persistedPayload.recipientIds.sort()).toEqual([...ids].sort());
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = origCap;
     }
