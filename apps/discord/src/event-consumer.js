@@ -296,6 +296,19 @@ const MAX_INFLIGHT_HANDLERS = (() => {
     );
     return DEFAULT_MAX_INFLIGHT_HANDLERS;
   }
+  // Defense-in-depth: values below RECEIVE_MAX_MESSAGES produce
+  // degenerate overshoot ratios (cap=1 can transiently reach 10
+  // in-flight, 10x the configured value). Accept the value — an
+  // operator who wants cap=1 to rate-limit hard may have a reason —
+  // but warn so the booted ceiling matches their mental model.
+  if (parsed < RECEIVE_MAX_MESSAGES) {
+    console.warn(
+      `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${parsed} is below ` +
+      `RECEIVE_MAX_MESSAGES (${RECEIVE_MAX_MESSAGES}); effective in-flight ceiling ` +
+      `is ${parsed + RECEIVE_MAX_MESSAGES - 1} due to batch overshoot. ` +
+      `Pick ${RECEIVE_MAX_MESSAGES}+ for the overshoot ratio to match the cap value.`,
+    );
+  }
   return parsed;
 })();
 
@@ -515,6 +528,12 @@ async function processMessage(client, message) {
   // gateway-WS-driven dispatches against the worker cap in combined
   // mode. If you need async work, do it BEFORE this block or AFTER
   // the finally clears the flag.
+  //
+  // The FLAG-WRAP-START / FLAG-WRAP-END sentinels below bracket the
+  // block; the static invariant test in tests/event-consumer.test.js
+  // slices between them and asserts no `await` appears. Do NOT rename
+  // or relocate the sentinels without updating the test.
+  // FLAG-WRAP-START
   isWorkerDispatch = true;
   try {
     client.actions.InteractionCreate.handle(data);
@@ -532,6 +551,7 @@ async function processMessage(client, message) {
   } finally {
     isWorkerDispatch = false;
   }
+  // FLAG-WRAP-END
 
   if (isDup) {
     // Debug log only — at-least-once delivery means a "dup" might
@@ -591,8 +611,18 @@ function trackDispatch(maybePromise) {
     // in src/index.js is now absorbed here. Log it explicitly so a
     // failing handler still produces an error signal — otherwise the
     // backpressure tracker would silently mask handler bugs.
+    //
+    // `kind: 'unhandledRejection'` tags the log so a single CloudWatch
+    // query (filtering on the structured field) can find both this
+    // consumer-driven path AND the gateway-WS-driven path that still
+    // routes through `process.on('unhandledRejection', ...)`. The
+    // gateway handler in src/index.js will be updated in PR 10 to
+    // emit the same field so dashboards see a unified signal. The
+    // `err?.message || String(err)` fallback mirrors the gateway
+    // handler's shape for non-Error rejections.
     logger.error('Event consumer: dispatch handler rejected', {
-      error: err?.message,
+      kind: 'unhandledRejection',
+      error: err?.message || String(err),
       stack: err?.stack,
     });
   });
@@ -612,6 +642,10 @@ async function pollOnce(client) {
   // at info. This matches the `lastMissingEventIdWarnMs` pattern
   // already in this file — transition-loud, steady-state-quiet.
   const capPayload = { inFlight: inFlightCount, cap: MAX_INFLIGHT_HANDLERS };
+  // `>=` (not `>`): the cap is the first paused value, so cap=100
+  // means we pause AT 100 in-flight, not at 101. Steady-state ceiling
+  // is therefore (cap - 1) + RECEIVE_MAX_MESSAGES overshoot. Off-by-
+  // one is intentional and matches the .env.example math.
   if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
     if (!atCapPauseLogged) {
       logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
@@ -894,6 +928,12 @@ async function stop() {
     // start() (no-op today via the running guard) wouldn't abort a
     // stale controller.
     receiveAbortController = null;
+    // Reset the at-cap log gate so a `start → at-cap → stop → start`
+    // round-trip doesn't inherit a stale `true` and miss the next
+    // streak's transition warn. Production never restarts after stop,
+    // but integration tests that exercise the lifecycle would
+    // otherwise see a phantom suppressed warn.
+    atCapPauseLogged = false;
     // Intentionally do NOT null `sqsClient`. Production never calls
     // start() after stop() — gracefulShutdown runs once at SIGTERM,
     // then process.exit. Reusing the client across a hypothetical

@@ -1062,7 +1062,10 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     expect(logger.error).toHaveBeenCalledWith(
       'Event consumer: dispatch handler rejected',
-      expect.objectContaining({ error: 'handler boom' }),
+      expect.objectContaining({
+        kind: 'unhandledRejection',
+        error: 'handler boom',
+      }),
     );
   });
 
@@ -1208,19 +1211,29 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // worker-driven in combined mode.
     //
     // Test by reading the source: scan the slice of event-consumer.js
-    // between the `isWorkerDispatch = true` assignment and the
-    // `isWorkerDispatch = false` in the matching finally and assert
-    // no `await` token appears. Approximate (no JS parse), but pins
-    // the constraint better than a comment alone — a future editor
-    // who adds `await logger.x()` inside the block trips this test.
+    // between `// FLAG-WRAP-START` and `// FLAG-WRAP-END` sentinels
+    // bracketing the wrap, and assert no `await` token appears.
+    // Approximate (no JS parse), but pins the constraint better than
+    // a comment alone — a future editor who adds `await logger.x()`
+    // inside the block trips this test. Sentinel-based bracketing
+    // survives file reordering or future additional flag assignments
+    // elsewhere in the module.
     const src = require('fs').readFileSync(
       require('path').resolve(__dirname, '../src/event-consumer.js'),
       'utf8',
     );
-    const startIdx = src.indexOf('isWorkerDispatch = true');
-    const endIdx = src.indexOf('isWorkerDispatch = false', startIdx);
+    const startMarker = '// FLAG-WRAP-START';
+    const endMarker = '// FLAG-WRAP-END';
+    const startIdx = src.indexOf(startMarker);
+    const endIdx = src.indexOf(endMarker, startIdx);
     expect(startIdx).toBeGreaterThan(0);
     expect(endIdx).toBeGreaterThan(startIdx);
+    // Also pin uniqueness — if the sentinels appear more than once,
+    // a future refactor may have copied the block and the slice no
+    // longer represents a single contiguous wrap.
+    expect(src.indexOf(startMarker, startIdx + startMarker.length)).toBe(-1);
+    expect(src.indexOf(endMarker, endIdx + endMarker.length)).toBe(-1);
+
     const block = src.slice(startIdx, endIdx);
     // Strip line comments so a documenting reference to `await` in a
     // comment doesn't false-positive. Block-comments inside the
@@ -1280,12 +1293,31 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     test.each([
       ['50', 50],
       ['200', 200],
-      ['1', 1],
-    ])('accepts %p as %i', (envValue, expected) => {
+      ['10', 10], // exactly RECEIVE_MAX_MESSAGES — no soft-floor warning
+    ])('accepts %p as %i without warning', (envValue, expected) => {
       withIsolatedEnv(envValue, (fresh, warns) => {
         expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
-        // No warning for valid values.
+        // No rejection AND no soft-floor warning for cap >= 10.
         expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+        expect(warns.some((w) => w.includes('below'))).toBe(false);
+      });
+    });
+
+    test.each([
+      ['1', 1],
+      ['5', 5],
+      ['9', 9],
+    ])('accepts %p as %i but warns about degenerate overshoot ratio', (envValue, expected) => {
+      // Defense-in-depth: cap < RECEIVE_MAX_MESSAGES is accepted (the
+      // operator may want it for rate-limit testing) but warned about
+      // because the effective ceiling overshoots the configured value
+      // by a wide margin (cap=1 → 10 in-flight ceiling = 10x overshoot).
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
+        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+        expect(
+          warns.some((w) => w.includes('below') && w.includes('RECEIVE_MAX_MESSAGES'))
+        ).toBe(true);
       });
     });
 
