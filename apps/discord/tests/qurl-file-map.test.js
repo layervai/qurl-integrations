@@ -204,6 +204,7 @@ const {
   CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
   RECIPIENT_MODE_PICKER,
   RECIPIENT_MODE_VOICE,
+  normalizeRecipientMode,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -438,6 +439,39 @@ describe('partitionRecipients', () => {
     const dup = makeUser('100000000000000001');
     const r = partitionRecipients([dup, dup, makeUser('100000000000000002')], SENDER_ID);
     expect(r.valid.length).toBe(3);
+  });
+
+  test('excludeSender:true drops the sender pre-validity (selfIncluded stays false)', () => {
+    // Voice-everyone semantics. The sender is dropped silently — no
+    // droppedBots-style accounting, and `selfIncluded` cannot be true
+    // on this path. The user-visible "you not included" copy is
+    // rendered from recipientMode, not from this partition return.
+    const users = [
+      makeUser('100000000000000001'),
+      makeUser(SENDER_ID),
+      makeUser('100000000000000002'),
+    ];
+    const r = partitionRecipients(users, SENDER_ID, { excludeSender: true });
+    expect(r.valid.map((u) => u.id))
+      .toEqual(['100000000000000001', '100000000000000002']);
+    expect(r.droppedBots).toBe(0);
+    expect(r.selfIncluded).toBe(false);
+  });
+
+  test('excludeSender:true + sender-only input → valid=[] (caller handles fallback copy)', () => {
+    const r = partitionRecipients([makeUser(SENDER_ID)], SENDER_ID, { excludeSender: true });
+    expect(r.valid).toEqual([]);
+    expect(r.droppedBots).toBe(0);
+    expect(r.selfIncluded).toBe(false);
+  });
+
+  test('excludeSender default (false) preserves legacy self-send behavior', () => {
+    // Picker / text paths call without the option and rely on the
+    // sender appearing in `valid` with `selfIncluded:true`. Pin that
+    // omitting the option doesn't accidentally activate exclusion.
+    const r = partitionRecipients([makeUser(SENDER_ID)], SENDER_ID);
+    expect(r.valid.map((u) => u.id)).toEqual([SENDER_ID]);
+    expect(r.selfIncluded).toBe(true);
   });
 });
 
@@ -2837,6 +2871,45 @@ describe('handleQurlFile — slash entry', () => {
       expect(payload.recipientIds).toEqual([]);
     });
 
+    test('over-cap voice → falls back to picker-mode WITH banner explaining why', async () => {
+      // Unreachable under default config (20k cap vs Discord's 99-member
+      // voice cap), but a shrunk env override would trip this. Silent
+      // fallback would leave the user wondering why voice-mode didn't
+      // take. Banner + info log document the degraded state. Mirrors
+      // the button-handler's hard-reject copy at handleConfirmVoiceEveryone.
+      const config = require('../src/config');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      config.QURL_SEND_MAX_RECIPIENTS = 1;  // force over-cap with 2 members
+      try {
+        const int = makeVoiceEntryInteraction({ members: [u1, u2] });
+        await handleQurlFile(int);
+        const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+        expect(payload.recipientMode).toBe('picker');
+        expect(payload.recipientIds).toEqual([]);
+        // User sees the "why" rather than a silent voice→picker switch.
+        expect(payload.warningsBlock).toMatch(/Voice channel has 2 connected/);
+        expect(payload.warningsBlock).toMatch(/max 1/);
+      } finally {
+        config.QURL_SEND_MAX_RECIPIENTS = originalCap;
+      }
+    });
+
+    test('voice channel cache miss → picker-mode with "Couldn\'t read voice channel" banner', async () => {
+      // Cache miss simulates the GuildVoiceStates intent dropping or
+      // the channel being evicted between command receipt and our
+      // lookup. Banner surfaces the degraded state instead of silently
+      // landing in picker-mode.
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      int.channel = { id: VOICE_CH, type: 2 };
+      // Inject the channel id WITHOUT registering it in the cache —
+      // makes guild.channels.cache.get(id) return undefined, the cache-
+      // miss shape.
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.warningsBlock).toMatch(/Couldn't read voice channel members/);
+    });
+
     test('explicit `recipients:` overrides voice-mode default (manual selection wins)', async () => {
       // A user who typed `recipients:` clearly meant THOSE people, not
       // "everyone in voice." Voice-mode auto-default only fires when
@@ -4710,6 +4783,24 @@ describe('handleConfirmPickManual', () => {
     expect(lastCall.content).toMatch(/expired/);
     expect(lastCall.components).toEqual([]);
   });
+
+  test('transitionFlow synchronous throw → ephemeral retry followUp (DDB blip recovery)', async () => {
+    // Symmetric with the expiry / self-destruct handler throw tests.
+    // A DDB outage during the mode-toggle write would otherwise bubble
+    // through the dispatcher's generic "superseded" copy — wrong, since
+    // nothing was actually superseded. The targeted followUp keeps the
+    // user's interaction acked and surfaces actionable retry copy.
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeInteraction();
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not switch to manual picker/i),
+      ephemeral: true,
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -5455,6 +5546,48 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     expect(defaultedExpiryOptions).toHaveLength(1);
     expect(defaultedExpiryOptions[0].value).toBe('24h');
   });
+
+  test('voice-mode + empty recipientIds → "0 users in #voice" + Send disabled (no auto-revert to picker)', async () => {
+    // Reachable when a voice channel empties out between renders (every
+    // non-sender member leaves voice). Voice-mode is sticky: rather
+    // than silently snapping back to picker-mode mid-flow, the card
+    // shows the honest empty state and the user clicks "Pick people
+    // instead" to recover. Send stays disabled (recipientIds=[]) so a
+    // wayward click can't fan out to zero recipients.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [],
+      recipientAliases: {},
+      recipientMode: 'voice',
+      voiceChannelId: 'voice-empty',
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    const int = makeInteraction();
+    int.values = ['7d'];
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    // Voice-mode rendering still applies — content shows the channel
+    // mention + "(you not included)" notice even with zero recipients.
+    expect(lastEdit.content).toMatch(/0 users in <#voice-empty>/);
+    expect(lastEdit.content).toMatch(/you not included/);
+    // The picker prompt MUST NOT appear (we're in voice-mode).
+    expect(lastEdit.content).not.toMatch(/Pick recipients below/);
+    // Send is disabled (no recipients), pick-manual is rendered as
+    // the recovery path.
+    const sendBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_send'
+    );
+    expect(sendBtn.value.setDisabled).toHaveBeenCalledWith(true);
+    const customIds = ButtonBuilder.mock.results.map(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0]
+    );
+    expect(customIds).toContain('qurl_confirm_pick_manual');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -5964,6 +6097,21 @@ describe('constants + exports', () => {
     // and would silently mis-route. Pin the literals here.
     expect(RECIPIENT_MODE_PICKER).toBe('picker');
     expect(RECIPIENT_MODE_VOICE).toBe('voice');
+  });
+
+  test('normalizeRecipientMode: only "voice" maps to voice; everything else picker', () => {
+    // Stale flow_state rows (created before this field existed) read
+    // as undefined. Off-set values (forged interaction, schema drift,
+    // typo in a future refactor) also fall back to picker. Pin the
+    // table so a future refactor that flips the default can't slip
+    // through.
+    expect(normalizeRecipientMode('voice')).toBe('voice');
+    expect(normalizeRecipientMode('picker')).toBe('picker');
+    expect(normalizeRecipientMode(undefined)).toBe('picker');
+    expect(normalizeRecipientMode(null)).toBe('picker');
+    expect(normalizeRecipientMode('')).toBe('picker');
+    expect(normalizeRecipientMode('VOICE')).toBe('picker'); // case-sensitive
+    expect(normalizeRecipientMode('unknown')).toBe('picker');
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {

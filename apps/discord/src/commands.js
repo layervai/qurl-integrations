@@ -2779,10 +2779,22 @@ const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
 //     the picker row is hidden. Bottom row swaps in "👥 Pick people
 //     instead" so the user can fall back to manual selection.
 // Stale flow_state rows (created before this field existed) read as
-// undefined — every consumer normalizes via `?? RECIPIENT_MODE_PICKER`
-// so they keep the legacy picker shape until they expire.
+// undefined — `normalizeRecipientMode` below maps undefined / any
+// off-set value to RECIPIENT_MODE_PICKER so they keep the legacy
+// picker shape until they expire.
 const RECIPIENT_MODE_PICKER = 'picker';
 const RECIPIENT_MODE_VOICE = 'voice';
+
+// Single source of truth for "this token is voice; everything else
+// reads as picker." Three render sites (renderConfirmCardContent,
+// renderConfirmCardRows, rerenderConfirmCard) previously open-coded
+// `mode === RECIPIENT_MODE_VOICE ? VOICE : PICKER` — if any of those
+// drifted (e.g. someone tested `mode === 'voice'` against a typo'd
+// constant), the layout would split between branches. The helper
+// pins the stale-row default in one place.
+function normalizeRecipientMode(mode) {
+  return mode === RECIPIENT_MODE_VOICE ? RECIPIENT_MODE_VOICE : RECIPIENT_MODE_PICKER;
+}
 
 // Recipient-rejection reason strings shared by every handler that
 // can drop a selection to empty (picker, voice-everyone). Hoisted
@@ -2964,15 +2976,13 @@ function partitionRecipients(users, senderId, { excludeSender = false } = {}) {
   let selfIncluded = false;
   for (const u of users) {
     if (u.bot) { droppedBots++; continue; }
-    if (u.id === senderId) {
-      // Voice-everyone path drops the sender silently — they pressed
-      // the "Everyone in #voice" affordance, which semantically means
-      // "everyone else." No droppedBots-style accounting because the
-      // user-visible message ("you not included") is rendered from
-      // the recipientMode, not from a partition counter.
-      if (excludeSender) continue;
-      selfIncluded = true;
-    }
+    // Voice-everyone path drops the sender silently — they pressed
+    // the "Everyone in #voice" affordance, which semantically means
+    // "everyone else." No droppedBots-style accounting because the
+    // user-visible message ("you not included") is rendered from
+    // the recipientMode, not from a partition counter.
+    if (u.id === senderId && excludeSender) continue;
+    if (u.id === senderId) selfIncluded = true;
     valid.push(u);
   }
   return { valid, droppedBots, selfIncluded };
@@ -3338,7 +3348,7 @@ function renderConfirmCardContent({
   recipientMode, voiceChannelId,
 }) {
   let content = warningsBlock || '';
-  const mode = recipientMode === RECIPIENT_MODE_VOICE ? RECIPIENT_MODE_VOICE : RECIPIENT_MODE_PICKER;
+  const mode = normalizeRecipientMode(recipientMode);
   // Explicit branch per RESOURCE_TYPES value — a future resource
   // type (audio, contact card, etc.) MUST add its own branch here.
   // Throwing on unknown beats silently rendering the new type as a
@@ -3501,7 +3511,7 @@ function renderConfirmCardRows({
   voiceChannelId, interaction, recipientIds, recipientMode,
 }) {
   const rows = [];
-  const mode = recipientMode === RECIPIENT_MODE_VOICE ? RECIPIENT_MODE_VOICE : RECIPIENT_MODE_PICKER;
+  const mode = normalizeRecipientMode(recipientMode);
   const baseCap = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
   // When text-resolved recipients are already present, widen max_values
   // so we can pre-check them via addDefaultUsers (Discord requires
@@ -3940,14 +3950,13 @@ async function handleQurlSlashSend(interaction, params) {
     // `excludeSender` option; the "Everyone in #voice" affordance
     // semantically means "everyone else," not "and CC myself."
     //
-    // Fall back to picker-mode (no override) when the voice channel:
-    //   - has no connected non-bot members other than the sender
-    //   - exceeds QURL_SEND_MAX_RECIPIENTS (mirrors the button-handler
-    //     hard-reject at handleConfirmVoiceEveryone)
-    //   - is missing channel.members (cache miss / intent issue)
-    // The picker stays rendered AND the bottom "🔊 Everyone in #voice"
-    // button remains available, so the user can recover if the voice
-    // channel state changes (someone joins, bots get kicked).
+    // Banner asymmetry on the picker-mode fallback: sender-only /
+    // bots-only / truly-empty falls back QUIETLY (the user didn't ask
+    // for voice-everyone — surfacing "voice is empty" would be noise),
+    // while over-cap and cache-miss surface a banner because they're
+    // degraded states the user can't otherwise diagnose. The picker +
+    // bottom voice button remain available throughout so the user can
+    // recover when voice state changes (someone joins, bots kicked).
     let recipientMode = RECIPIENT_MODE_PICKER;
     let finalValid = valid;
     let finalSelfIncluded = selfIncluded;
@@ -3961,27 +3970,55 @@ async function handleQurlSlashSend(interaction, params) {
       // -outside-guild path; the cache lookup is the established
       // contract for "voice members at this channel id."
       const voiceChannel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
-      const voiceMembers = [];
-      if (voiceChannel?.members) {
+      if (!voiceChannel?.members) {
+        // Cache miss: voice channel evicted or `GuildVoiceStates`
+        // intent dropped mid-flight. Surface a banner + log so a
+        // degraded environment doesn't silently lose voice-mode.
+        logger.info('handleQurlSlashSend: voice-mode skipped — channel members cache missing', {
+          user_id: interaction.user.id, voice_channel_id: voiceChannelId,
+        });
+        finalWarningsBlock = warningsBlock
+          + `⚠\u{FE0F} Couldn't read voice channel members — pick recipients below.\n\n`;
+      } else {
+        const voiceMembers = [];
         for (const [, m] of voiceChannel.members) {
           if (m?.user) voiceMembers.push(m.user);
         }
-      }
-      const voicePart = partitionRecipients(
-        voiceMembers, interaction.user.id, { excludeSender: true }
-      );
-      if (voicePart.valid.length > 0
-          && voicePart.valid.length <= config.QURL_SEND_MAX_RECIPIENTS) {
-        recipientMode = RECIPIENT_MODE_VOICE;
-        finalValid = voicePart.valid;
-        finalSelfIncluded = false;
-        // Voice path produces its own warnings — only droppedBots is
-        // relevant when `recipients:` was omitted (no text-parsing
-        // warnings apply). Surface bot drops so the user knows why the
-        // count is lower than the channel's connected total.
-        finalWarningsBlock = renderRecipientWarnings({
-          droppedBots: voicePart.droppedBots,
-        });
+        const voicePart = partitionRecipients(
+          voiceMembers, interaction.user.id, { excludeSender: true }
+        );
+        // Inverted shape: commit voice-mode iff the resolved set fits
+        // the cap; otherwise branch by reason. Avoids an empty
+        // "if (length === 0) {}" no-op for the sender-only / bots-only
+        // / truly-empty case — those simply drop through to the
+        // picker-mode default (set above) with no banner.
+        if (voicePart.valid.length > 0
+            && voicePart.valid.length <= config.QURL_SEND_MAX_RECIPIENTS) {
+          recipientMode = RECIPIENT_MODE_VOICE;
+          finalValid = voicePart.valid;
+          finalSelfIncluded = false;
+          // Voice path produces its own warnings — only droppedBots is
+          // relevant when `recipients:` was omitted (no text-parsing
+          // warnings apply). Surface bot drops so the user knows why the
+          // count is lower than the channel's connected total.
+          finalWarningsBlock = renderRecipientWarnings({
+            droppedBots: voicePart.droppedBots,
+          });
+        } else if (voicePart.valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+          // Over-cap (mirrors button-handler hard-reject). Under default
+          // config (20k cap vs 99-member voice cap) unreachable, but a
+          // shrunk env override could trip this — silent fallback would
+          // leave the user wondering why voice-mode didn't take.
+          logger.info('handleQurlSlashSend: voice-mode skipped — exceeds QURL_SEND_MAX_RECIPIENTS', {
+            user_id: interaction.user.id,
+            voice_channel_id: voiceChannelId,
+            connected: voicePart.valid.length,
+            cap: config.QURL_SEND_MAX_RECIPIENTS,
+          });
+          finalWarningsBlock = warningsBlock
+            + `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} connected `
+            + `(max ${config.QURL_SEND_MAX_RECIPIENTS}) — pick recipients below.\n\n`;
+        }
       }
     }
     const needsPicker = recipientMode === RECIPIENT_MODE_PICKER && recipientsOmitted;
@@ -5148,9 +5185,7 @@ async function rerenderConfirmCard(interaction, newPayload) {
   // recipientMode drives both row layout AND content prefix. Default
   // 'picker' for stale flow_state rows that pre-date the field (they
   // keep the legacy picker shape until they TTL out).
-  const recipientMode = newPayload.recipientMode === RECIPIENT_MODE_VOICE
-    ? RECIPIENT_MODE_VOICE
-    : RECIPIENT_MODE_PICKER;
+  const recipientMode = normalizeRecipientMode(newPayload.recipientMode);
   // `needsPicker` (the "Pick recipients below" prompt) is only shown
   // in picker-mode with no recipients yet. In voice-mode with an empty
   // recipientIds (e.g., voice channel emptied after switch), the card
@@ -7543,6 +7578,7 @@ module.exports = {
       CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
       RECIPIENT_MODE_PICKER,
       RECIPIENT_MODE_VOICE,
+      normalizeRecipientMode,
       SEND_FLOW_TTL_SECONDS,
       SELF_DESTRUCT_NO_TIMER_CHOICE,
     },
