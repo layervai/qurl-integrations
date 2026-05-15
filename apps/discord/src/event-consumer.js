@@ -94,6 +94,16 @@
 // drain. The cap is the safety net before the worker tier flag-flip
 // in PR 10.
 //
+// SCOPE: this is a receive-gate mechanism only. It pauses new work
+// when capacity is exhausted; it does NOT help with graceful
+// shutdown. trackDispatch retains a count, not promise references,
+// so stop() cannot drain in-flight handlers — a SIGTERM during a
+// detached DDB write races gracefulShutdown's db.close() (same race
+// the pre-PR gateway path has, since the gateway also runs handlers
+// detached). For drain-on-shutdown support, see #391: the refactor
+// would also capture promises in a Set so stop() can `await
+// Promise.allSettled([...inFlightPromises])` with a deadline cap.
+//
 // This is a soft cap, not a hard semaphore. pollOnce checks
 // `inFlightCount >= cap` BEFORE issuing a ReceiveMessage, but a
 // receive that passes the check can return up to RECEIVE_MAX_MESSAGES
@@ -596,16 +606,22 @@ function trackDispatch(maybePromise) {
   // always lands first — the .catch below sees the rejection AFTER
   // the counter has dropped.
   //
-  // Math.max guards against negative drift if a stale promise
-  // resolves after `_resetStateForTest` cleared the count, or
-  // (under `jest --watch` / hot-reload) a stale promise resolves
-  // into the freshly-required module's clean counter. Tests that
-  // don't await their resolvable promises before resetting would
-  // otherwise leak a decrement into the next test's starting
-  // state. Production can't reach this — every increment is paired
-  // with exactly one decrement on the same promise.
+  // Underflow guard: every increment is paired with exactly one
+  // decrement on the same promise, so production cannot reach
+  // inFlightCount <= 0 here. If we do, a test resolved its
+  // resolvable promise after `_resetStateForTest` cleared the count
+  // (or jest --watch hot-reloaded the module between the increment
+  // and decrement). Log loud and skip the decrement: the previous
+  // Math.max(0, ...) clamp silently absorbed this, hiding any future
+  // double-decrement regression behind a test-pollution disguise.
   maybePromise.finally(() => {
-    inFlightCount = Math.max(0, inFlightCount - 1);
+    if (inFlightCount <= 0) {
+      logger.error('Event consumer: trackDispatch decrement would underflow inFlightCount (internal invariant violation)', {
+        inFlightCount,
+      });
+      return;
+    }
+    inFlightCount -= 1;
   }).catch((err) => {
     // Attaching `.finally()` above counts as a handler for Node's
     // unhandled-rejection bookkeeping, so a rejection that pre-PR
@@ -616,10 +632,11 @@ function trackDispatch(maybePromise) {
     //
     // `kind: 'unhandledRejection'` tags the log so a single CloudWatch
     // query (filtering on the structured field) can find both this
-    // consumer-driven path AND the gateway-WS-driven path that still
-    // routes through `process.on('unhandledRejection', ...)`. The
-    // gateway handler in src/index.js will be updated in PR 10 to
-    // emit the same field so dashboards see a unified signal. The
+    // consumer-driven path AND the gateway-WS-driven path through
+    // `process.on('unhandledRejection', ...)` in src/index.js, which
+    // already emits the same field. The two call sites agree on the
+    // tag today; an alarm rule pivoting on `kind=unhandledRejection`
+    // covers both tiers without per-tier rules. The
     // `err?.message || String(err)` fallback mirrors the gateway
     // handler's shape for non-Error rejections.
     logger.error('Event consumer: dispatch handler rejected', {
