@@ -7632,23 +7632,28 @@ const commands = [
             )
         );
       }
-      return builder
-        .addSubcommand(sub =>
-          sub.setName('revoke')
-            .setDescription('Revoke links from a previous send')
-        )
-        .addSubcommand(sub =>
-          sub.setName('help')
-            .setDescription('Show qURL bot help')
-        )
-        .addSubcommand(sub =>
-          sub.setName('setup')
-            .setDescription('Configure your qURL API key for this server (admin only)')
-        )
-        .addSubcommand(sub =>
-          sub.setName('status')
-            .setDescription('Check if qURL is configured (admin only)')
-        );
+      // Imperative addSubcommand calls to match the style used for
+      // `file` and the conditional `map` block above — uniform shape
+      // makes the order-matters property of slash registration
+      // visually obvious. `addSubcommand` returns `this`, but we
+      // rely on the side effect.
+      builder.addSubcommand(sub =>
+        sub.setName('revoke')
+          .setDescription('Revoke links from a previous send')
+      );
+      builder.addSubcommand(sub =>
+        sub.setName('help')
+          .setDescription('Show qURL bot help')
+      );
+      builder.addSubcommand(sub =>
+        sub.setName('setup')
+          .setDescription('Configure your qURL API key for this server (admin only)')
+      );
+      builder.addSubcommand(sub =>
+        sub.setName('status')
+          .setDescription('Check if qURL is configured (admin only)')
+      );
+      return builder;
     })(),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();

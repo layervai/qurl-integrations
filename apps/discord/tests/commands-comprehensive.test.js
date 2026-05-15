@@ -2264,6 +2264,12 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     // entire help branch goes silent.
     expect(replyArg.content).toContain('/qurl file');
     expect(replyArg.content).toContain('qURL Bot — Help');
+    // Pin the flag-off `sectionVerb` swap — a regression that drops
+    // the conditional verb would render "Share resources" against a
+    // map-disabled deploy. Catches the swap in isolation from the
+    // overall mapCopy structure.
+    expect(replyArg.content).toContain('Share files securely');
+    expect(replyArg.content).not.toContain('Share resources securely');
   });
 
   it('dispatcher replies with QURL_MAP_DISABLED_REPLY for /qurl map (stale-client safety net)', async () => {
