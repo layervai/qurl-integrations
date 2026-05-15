@@ -883,7 +883,9 @@ function abortableSleep(ms) {
       };
       // Timeout-wins branch (above) removes the listener explicitly;
       // { once: true } here is defensive — AbortSignal fires 'abort'
-      // at most once per spec.
+      // at most once per spec. If timeout and abort fire near-
+      // simultaneously, both resolve() calls may run; the second is
+      // a Promise no-op (resolve is idempotent).
       ctrl.signal.addEventListener('abort', onAbort, { once: true });
     }
   });

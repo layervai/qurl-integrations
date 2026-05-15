@@ -863,9 +863,11 @@ describe('event-consumer: pollLoop error backoff', () => {
       expect.stringContaining('poll iteration failed'),
       expect.objectContaining({ error: 'AWS throttling' }),
     );
-    // Well under the 1s POLL_ERROR_BACKOFF_MS — confirms
-    // abortableSleep honored the abort signal.
-    expect(elapsedMs).toBeLessThan(500);
+    // Tight bound: abort-wakes-sleep is microtask-level, so a stop()
+    // during the 1s POLL_ERROR_BACKOFF_MS should resolve well under
+    // 100ms. A regression to ANY synchronous polling would push this
+    // toward the 1s budget and surface here.
+    expect(elapsedMs).toBeLessThan(100);
   });
 });
 
