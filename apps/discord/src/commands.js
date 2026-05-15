@@ -7937,7 +7937,10 @@ const commands = [
         // single token keeps them in lockstep. `sectionVerb` makes
         // the "Getting started" header track what's actually
         // registered ("Share files" reads more accurately than
-        // "Share resources" when /qurl map is off).
+        // "Share resources" when /qurl map is off). `runLine` uses
+        // the same parenthetical-instruction phrasing in both
+        // branches so flipping the toggle doesn't reshape the
+        // step-1 sentence style.
         const mapCopy = config.MAP_COMMAND_ENABLED
           ? {
             sectionVerb: 'Share resources',
@@ -7949,7 +7952,7 @@ const commands = [
           : {
             sectionVerb: 'Share files',
             bullet: '',
-            runLine: '\t1. Run `/qurl file` and attach the file you want to share\n',
+            runLine: '\t1. Run `/qurl file` (attach a file)\n',
             resource: 'the file',
             cmd: '`/qurl file`',
           };

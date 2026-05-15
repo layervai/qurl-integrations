@@ -89,6 +89,15 @@ function missingEventShipperKeys(cfg) {
 // parameter ships with that literal sentinel value — the
 // remediation ("seed a real key") is identical to the
 // missing-key case.
+//
+// TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
+// the seed value for `aws_ssm_parameter.bot` in
+// qurl-integrations-infra/qurl-bot-discord/terraform/main.tf
+// (search that repo for `value = "PLACEHOLDER"`). If infra ever
+// renames the sentinel (e.g., "REPLACE_ME"), update here in
+// lockstep — otherwise the boot check silently regresses to
+// "non-empty value passes" and the original incident class
+// returns. `git grep TODO(infra-sentinel-sync)` finds the marker.
 const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
 function missingMapCommandKeys(cfg) {
   if (!cfg.MAP_COMMAND_ENABLED) return [];

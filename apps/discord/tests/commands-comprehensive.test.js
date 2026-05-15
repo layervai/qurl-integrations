@@ -2207,29 +2207,14 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 });
 
-describe('handleCommand — autocomplete', () => {
-  it('responds empty for /qurl map location autocomplete (flag-off short-circuit)', async () => {
-    // This file's config mock leaves MAP_COMMAND_ENABLED unset — the
-    // bot's production default. handleAutocomplete's flag-off guard
-    // short-circuits to respond([]) before searchPlaces. The contract
-    // here is that respond() IS called (with []), where pre-flag this
-    // path would have invoked Places.
-    const interaction = makeInteraction({
-      commandName: 'qurl',
-      isAutocomplete: jest.fn(() => true),
-      isChatInputCommand: jest.fn(() => false),
-      options: {
-        ...makeInteraction().options,
-        getSubcommand: jest.fn(() => 'map'),
-        getFocused: jest.fn(() => ({ name: 'location', value: 'Eif' })),
-      },
-    });
-
-    await handleCommand(interaction);
-
-    expect(interaction.respond).toHaveBeenCalledWith([]);
-  });
-});
+// The pre-flag "responds empty for short focused-location values
+// (below min-length)" test once lived here; under MAP_COMMAND_ENABLED=false
+// its respond([]) assertion was strictly weaker than the flag-off block
+// below (which also asserts mockSearchPlaces was never called). Min-length
+// gate coverage moved entirely to qurl-file-map.test.js's "skips Places
+// call for partial queries below the min-length cap" test, which runs
+// under MAP_COMMAND_ENABLED=true and exercises the path the gate
+// actually guards.
 
 // Flag-off coverage. The config mock at the top of this file does NOT
 // set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
