@@ -1235,10 +1235,15 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(src.indexOf(endMarker, endIdx + endMarker.length)).toBe(-1);
 
     const block = src.slice(startIdx, endIdx);
-    // Strip line comments so a documenting reference to `await` in a
-    // comment doesn't false-positive. Block-comments inside the
-    // wrap aren't expected; we keep the regex simple.
-    const stripped = block.replace(/\/\/[^\n]*/g, '');
+    // Strip BOTH line comments and block comments so a documenting
+    // reference to `await` in either form doesn't false-positive.
+    // Template literals containing the word `await` aren't expected
+    // in the wrap (we'd notice during code review of a tight 25-line
+    // block), so we don't try to strip those — defense-in-depth has
+    // diminishing returns past comments.
+    const stripped = block
+      .replace(/\/\*[\s\S]*?\*\//g, '') // block comments first (multi-line)
+      .replace(/\/\/[^\n]*/g, ''); // then line comments
     expect(stripped).not.toMatch(/\bawait\b/);
   });
 

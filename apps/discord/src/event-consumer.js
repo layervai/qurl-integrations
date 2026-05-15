@@ -641,6 +641,13 @@ async function pollOnce(client) {
   // transition back to below-cap (handled after this branch) logs
   // at info. This matches the `lastMissingEventIdWarnMs` pattern
   // already in this file — transition-loud, steady-state-quiet.
+  // Snapshot capPayload at pollOnce entry. Shared across at-cap
+  // warn/debug AND the release-info branch — so the release log's
+  // `inFlight` field is the value that *triggered* the release
+  // (necessarily below cap), not "drained to N" at the moment of
+  // logging. That's the right framing for pairing pause-start
+  // (entry-snapshot at cap) with pause-end (entry-snapshot below
+  // cap) in CloudWatch.
   const capPayload = { inFlight: inFlightCount, cap: MAX_INFLIGHT_HANDLERS };
   // `>=` (not `>`): the cap is the first paused value, so cap=100
   // means we pause AT 100 in-flight, not at 101. Steady-state ceiling
