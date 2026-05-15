@@ -34,12 +34,25 @@ const {
 const logger = require('../src/logger');
 
 // Build a synthetic interaction with the cache shape the parser reads.
-// Pass `users` as { id → { bot } } and `roles` as
-// { id → [member_id, member_id, ...] }. Sender defaults to '900000000000000001'.
+// Pass `users` as { id → { bot } }. Sender defaults to '900000000000000001'.
+//
+// `roles` accepts two shapes per entry:
+//   array form  → `{ '7000': ['101', '102'] }` (members; defaults to
+//                 `mentionable: true` so the #326 gate doesn't reject
+//                 the existing test corpus — prod-side roles MUST set
+//                 `mentionable: true` to bypass the gate without
+//                 MENTION_EVERYONE).
+//   object form → `{ '7000': { members: [...], mentionable: false } }`
+//                 (opt in to non-mentionable for #326-gate tests).
+//
+// `guildId` is the guild's snowflake (defaults to undefined to match
+// existing tests' shape). Set to make `<@&{guildId}>` route through
+// the @everyone-role wire-form guard.
+//
 // IDs are all-numeric to match real Discord snowflakes — the parser's
 // regex is `/<@!?(\d+)>/` so letter-prefixed test fixtures would silently
 // drop every mention, masking real coverage.
-function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {}, channels = {} } = {}) {
+function makeInteraction({ senderId = '900000000000000001', users = {}, roles = {}, channels = {}, guildId } = {}) {
   const memberCache = new Map();
   for (const [id, attrs] of Object.entries(users)) {
     memberCache.set(id, { user: { id, bot: !!attrs.bot } });
@@ -49,14 +62,17 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
   // honor. Add the member to the cache when it's listed under a role
   // so the bot filter has something to look up.
   const roleCache = new Map();
-  for (const [roleId, memberIds] of Object.entries(roles)) {
+  for (const [roleId, spec] of Object.entries(roles)) {
+    const isObjectSpec = spec && typeof spec === 'object' && !Array.isArray(spec);
+    const memberIds = isObjectSpec ? (spec.members || []) : spec;
+    const mentionable = isObjectSpec ? spec.mentionable !== false : true;
     const roleMembers = new Map();
     for (const mid of memberIds) {
       const existing = memberCache.get(mid) ?? { user: { id: mid, bot: false } };
       memberCache.set(mid, existing);
       roleMembers.set(mid, existing);
     }
-    roleCache.set(roleId, { members: roleMembers });
+    roleCache.set(roleId, { id: roleId, name: `role-${roleId}`, members: roleMembers, mentionable });
   }
   // Channel shape: { id → { type, members: [id, ...], viewable? } }
   //   type     numeric ChannelType (2 = GuildVoice, 13 = GuildStageVoice;
@@ -96,6 +112,7 @@ function makeInteraction({ senderId = '900000000000000001', users = {}, roles = 
     user: { id: senderId },
     member: { id: senderId },
     guild: {
+      id: guildId,
       members: { cache: memberCache },
       roles: { cache: roleCache },
       channels: { cache: channelCache },
@@ -370,6 +387,172 @@ describe('parseRecipientMentions — role mentions', () => {
     const res = parseRecipientMentions('<@&7000> <@&7000> <@&7000>', int);
     expect(res.ids.sort()).toEqual(['101', '102']);
     expect(res.invalidTokens).toEqual([]);
+  });
+});
+
+describe('parseRecipientMentions — role-mention permission gate (#326)', () => {
+  // Issue #326 parity: <@&roleId> for a non-mentionable role requires
+  // MENTION_EVERYONE (allowMassMention). Mirrors Discord's in-chat
+  // gate; closes the privilege-escalation surface where a non-admin
+  // could `/qurl file recipients:<@&adminRoleId>` to fan-out to an
+  // admin-only role.
+
+  test('mentionable: false WITHOUT allowMassMention → roleMentionsDenied entry, NOT expanded', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+      roles: { '7000': { members: ['101', '102'], mentionable: false } },
+    });
+    const res = parseRecipientMentions('<@&7000>', int, { allowMassMention: false });
+    expect(res.ids).toEqual([]);
+    expect(res.roleMentionsDenied).toEqual(['7000']);
+    // NOT in invalidTokens — distinct surface lets the caller emit
+    // permission-specific copy instead of "couldn't parse."
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('mentionable: false WITH allowMassMention → expands normally, no deny', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+      roles: { '7000': { members: ['101', '102'], mentionable: false } },
+    });
+    const res = parseRecipientMentions('<@&7000>', int, { allowMassMention: true });
+    expect(res.ids.sort()).toEqual(['101', '102']);
+    expect(res.roleMentionsDenied).toEqual([]);
+  });
+
+  test('mentionable: true WITHOUT allowMassMention → expands normally (per-role bypass)', () => {
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+      roles: { '7000': { members: ['101', '102'], mentionable: true } },
+    });
+    const res = parseRecipientMentions('<@&7000>', int, { allowMassMention: false });
+    expect(res.ids.sort()).toEqual(['101', '102']);
+    expect(res.roleMentionsDenied).toEqual([]);
+  });
+
+  test('multiple denied roles surface independently (array, not boolean)', () => {
+    // Per issue spec: a single send can attempt MULTIPLE denied roles —
+    // surface each ID so the caller renders per-role copy with the name.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '201': {}, '202': {} },
+      roles: {
+        '7000': { members: ['101', '102'], mentionable: false },
+        '7001': { members: ['201', '202'], mentionable: false },
+      },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7001>', int, { allowMassMention: false });
+    expect(res.roleMentionsDenied.sort()).toEqual(['7000', '7001']);
+    expect(res.ids).toEqual([]);
+  });
+
+  test('repeated denied role mention dedupes (one entry, not three)', () => {
+    // Same dedupe pattern as invalidRoleIds (`<@&999> <@&999>` →
+    // one invalidTokens entry). A naive matchAll loop would push the
+    // raw ID per occurrence; the parallel Set guards against that.
+    const int = makeInteraction({
+      users: { '101': {} },
+      roles: { '7000': { members: ['101'], mentionable: false } },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7000> <@&7000>', int, { allowMassMention: false });
+    expect(res.roleMentionsDenied).toEqual(['7000']);
+  });
+
+  test('mix of denied + allowed roles in one input → only denied lands in roleMentionsDenied', () => {
+    // Cohabitation: a mentionable role still expands while the
+    // non-mentionable peer surfaces as denied. Without per-role
+    // gating, a single denied role would either zero out the whole
+    // send or silently expand alongside the allowed role.
+    const int = makeInteraction({
+      users: { '101': {}, '201': {} },
+      roles: {
+        '7000': { members: ['101'], mentionable: true },     // allowed
+        '7001': { members: ['201'], mentionable: false },    // denied
+      },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7001>', int, { allowMassMention: false });
+    expect(res.ids).toEqual(['101']);
+    expect(res.roleMentionsDenied).toEqual(['7001']);
+  });
+
+  test('<@&{guildId}> wire form routes to massMentionDenied (NOT roleMentionsDenied)', () => {
+    // The @everyone role's ID equals guild.id. The wire form should
+    // land in massMentionDenied so the caller emits "@everyone
+    // requires Mention Everyone" copy, NOT the per-role copy. This
+    // matches the picker path's `isEveryoneRole` short-circuit.
+    const int = makeInteraction({
+      guildId: '999',
+      users: { '101': {} },
+      roles: { '7000': { members: ['101'], mentionable: true } },
+    });
+    const res = parseRecipientMentions('<@&999>', int, { allowMassMention: false });
+    expect(res.massMentionDenied).toBe(true);
+    expect(res.roleMentionsDenied).toEqual([]);
+    // NOT in invalidTokens either — explicit-route to the @everyone
+    // channel means no "couldn't parse" leak.
+    expect(res.invalidTokens).toEqual([]);
+  });
+
+  test('`@everyone` text token + <@&{guildId}> wire form together → idempotent (single semantic action, no double-count)', () => {
+    // Both forms map to the same @everyone semantic. Pin that they
+    // converge on a single state — `everyonePresent: true` (allowed
+    // path) and `massMentionDenied: true` (denied path) — without
+    // double-counting or splitting copy across surfaces. A regression
+    // that routed one form through a different channel would surface
+    // here. Allowed-path: @everyone expansion fires ONCE (members
+    // appear once in ids); denied-path: massMentionDenied is just a
+    // boolean so set-once is the natural shape, but the per-occurrence
+    // member expansion still must not happen.
+    const allowedInt = makeInteraction({
+      guildId: '999',
+      users: { '101': {}, '102': {} },
+    });
+    const allowedRes = parseRecipientMentions('@everyone <@&999>', allowedInt, { allowMassMention: true });
+    expect(allowedRes.ids.sort()).toEqual(['101', '102']);
+    expect(allowedRes.massMentionDenied).toBe(false);
+    expect(allowedRes.roleMentionsDenied).toEqual([]);
+
+    const deniedInt = makeInteraction({
+      guildId: '999',
+      users: { '101': {}, '102': {} },
+    });
+    const deniedRes = parseRecipientMentions('@everyone <@&999>', deniedInt, { allowMassMention: false });
+    expect(deniedRes.ids).toEqual([]);
+    expect(deniedRes.massMentionDenied).toBe(true);
+    expect(deniedRes.roleMentionsDenied).toEqual([]);
+    // Neither form should land in invalidTokens — the dedicated
+    // @everyone channel handles both, and neither leaks to the
+    // "couldn't parse" residue path.
+    expect(deniedRes.invalidTokens).toEqual([]);
+  });
+
+  test('<@&{guildId}> with allowMassMention → triggers @everyone expansion via guild.members.cache', () => {
+    // Parity with the picker path: when allowed, the @everyone-role
+    // wire form expands through guild.members.cache (NOT role.members)
+    // because discord.js's @everyone role.members is unreliable. Pin
+    // the routing: `everyonePresent` flag fires, dedicated expansion
+    // pass walks the member cache.
+    const int = makeInteraction({
+      guildId: '999',
+      users: { '101': {}, '102': {}, '801': { bot: true } },
+    });
+    const res = parseRecipientMentions('<@&999>', int, { allowMassMention: true });
+    expect(res.massMentionDenied).toBe(false);
+    expect(res.roleMentionsDenied).toEqual([]);
+    expect(res.ids.sort()).toEqual(['101', '102']);
+  });
+
+  test('denied-role does NOT contaminate cappedCount (skipped before consider())', () => {
+    // The gate fires BEFORE the role-loop's `consider()` calls, so
+    // a denied role's members never enter `seen`. A regression that
+    // hoisted the dedupe-add above the gate would inflate cappedCount
+    // by the denied role's size — caller would surface a misleading
+    // "you typed 50, we kept 25" warning.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {} },
+      roles: { '7000': { members: ['101', '102'], mentionable: false } },
+    });
+    const res = parseRecipientMentions('<@&7000>', int, { allowMassMention: false });
+    expect(res.cappedCount).toBe(0);
   });
 });
 
@@ -890,11 +1073,11 @@ describe('parseRecipientMentions — @everyone (allowMassMention)', () => {
 });
 
 describe('parseRecipientMentions — result-shape contract', () => {
-  test('result shape pins exactly four keys (ids, invalidTokens, cappedCount, massMentionDenied)', () => {
+  test('result shape pins exactly five keys (ids, invalidTokens, cappedCount, massMentionDenied, roleMentionsDenied)', () => {
     // Empire of `.toMatchObject` in other tests admits new fields by
     // design (the result shape is allowed to grow), but the closed
     // set of CURRENT keys is load-bearing — callers destructure these
-    // names. Pin the closed set so a future PR that adds a 5th field
+    // names. Pin the closed set so a future PR that adds a 6th field
     // surfaces here intentionally rather than slipping past
     // partial-match assertions.
     const int = makeInteraction({ users: { '111': {} } });
@@ -904,7 +1087,44 @@ describe('parseRecipientMentions — result-shape contract', () => {
       'ids',
       'invalidTokens',
       'massMentionDenied',
+      'roleMentionsDenied',
     ]);
+  });
+
+  test('invariant: ids and roleMentionsDenied are always disjoint (gate fires before consider())', () => {
+    // Cross-cutting invariant pin: members of a denied role never
+    // contribute to `ids` because the `role.mentionable !== true &&
+    // !allowMassMention` gate short-circuits BEFORE the `consider()`
+    // calls on role members. A regression that hoisted role-member
+    // iteration above the gate (or swapped the order of the per-
+    // role gate and the `for (const [memberId, ...])` loop) would
+    // surface here.
+    //
+    // Mixed scenario: one allowed role + one denied role sharing a
+    // common-id member. The shared member appears in `ids` via the
+    // allowed role; the denied role still surfaces in
+    // `roleMentionsDenied`. Crucially, the denied role's
+    // exclusive member (101) must NOT appear in `ids`.
+    const int = makeInteraction({
+      users: { '101': {}, '102': {}, '103': {} },
+      roles: {
+        '7000': { members: ['102', '103'], mentionable: true },   // allowed
+        '7001': { members: ['101', '103'], mentionable: false },  // denied; 103 also in allowed role
+      },
+    });
+    const res = parseRecipientMentions('<@&7000> <@&7001>', int, { allowMassMention: false });
+    expect(res.roleMentionsDenied).toEqual(['7001']);
+    // 101 (denied-role-exclusive) must NOT leak into ids.
+    expect(res.ids).not.toContain('101');
+    // Disjointness: no member-ID from the denied-role leaks into ids
+    // (even if the denied-role's IDs were Set member ids, they're
+    // distinct identifier semantics — denied list holds role ids,
+    // ids holds user ids — but we pin the structural invariant: no
+    // overlap between denied-role-EXCLUSIVE members and ids).
+    const deniedExclusive = ['101'];  // 103 is in both roles
+    for (const id of deniedExclusive) {
+      expect(res.ids).not.toContain(id);
+    }
   });
 });
 
