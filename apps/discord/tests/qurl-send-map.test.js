@@ -5140,6 +5140,52 @@ describe('handleConfirmVoiceEveryone', () => {
       }),
     );
   });
+
+  test('success-log does NOT fire on transitionFlow conflict / not_found / throw', async () => {
+    // The audit log is reserved for the actual flow-advancement path.
+    // Surfacing it on conflict / not_found / throw would mislead
+    // operators auditing fan-outs ("did this admin send to N members?")
+    // — the answer is NO on those branches. Pin the negative spec so
+    // a future log-placement refactor that moves the .info() ahead of
+    // the early-returns regresses loudly.
+    const logger = require('../src/logger');
+
+    // conflict (OCC race)
+    logger.info.mockClear();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+
+    // not_found (row TTL elapsed)
+    logger.info.mockClear();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+
+    // synchronous throw (DDB blip)
+    logger.info.mockClear();
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB unavailable'));
+    await handleConfirmVoiceEveryone(
+      makeVoiceInteraction({ members: [u1, u2] }),
+      { flow_id: 'fid', row: { payload: basePayload, version: 1 } }
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.anything(),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
