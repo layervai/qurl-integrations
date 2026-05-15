@@ -134,6 +134,18 @@ describe('event-consumer: recordSeen LRU', () => {
     expect(recordSeen(undefined)).toBe(false);
     expect(seenEventIds.size).toBe(0);
   });
+
+  test('whitespace-only event_id is rejected (does NOT pollute LRU)', () => {
+    // Pins the subtle case where a producer regression that emits
+    // `event_id: ' '` would otherwise key every message under the
+    // same id and falsely report 100% dup rate. Strict trim-check
+    // rejects empty/whitespace strings before they enter the LRU.
+    expect(recordSeen(' ')).toBe(false);
+    expect(recordSeen('   ')).toBe(false);
+    expect(recordSeen('\t')).toBe(false);
+    expect(recordSeen('')).toBe(false);
+    expect(seenEventIds.size).toBe(0);
+  });
 });
 
 describe('event-consumer: processMessage dispatch paths', () => {
@@ -637,6 +649,14 @@ describe('event-consumer: start/stop lifecycle', () => {
   // wrestling with jest.isolateModules + jest.doMock interactions
   // (which require the original mock to be a factory, not a literal,
   // to take effect within the isolated scope).
+  // try/finally save+restore pattern for mutating the mocked config.
+  // jest.replaceProperty would be terser, but only auto-restores when
+  // `restoreMocks: true` is set globally — and this repo's
+  // jest.config.js intentionally leaves restoreMocks off so several
+  // specs can rely on jest.spyOn results persisting across tests
+  // (see the comment in jest.config.js). The explicit save/restore
+  // here is fully scoped to this test and survives an assertion
+  // throw because finally always runs.
   test('start() throws when ENABLE_EVENT_SHIPPER=false', () => {
     const config = require('../src/config');
     const orig = config.ENABLE_EVENT_SHIPPER;
@@ -686,14 +706,23 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(isAbortError(e5)).toBe(true);
     const e6 = new Error('Request failed'); e6.cause = { name: 'CanceledError' };
     expect(isAbortError(e6)).toBe(true);
+    // Doubly-nested cause chain — should still match via the
+    // recursive walk capped at 5 hops.
+    const e7 = new Error('outer');
+    e7.cause = { name: 'Wrapper', cause: { name: 'AbortError' } };
+    expect(isAbortError(e7)).toBe(true);
     // TimeoutError is the SDK's own request-timeout, NOT our abort.
     // Must land in the error-backoff path so flaky AWS endpoints
     // surface in logs + backoff instead of spinning silently.
-    const e7 = new Error('timeout'); e7.name = 'TimeoutError';
-    expect(isAbortError(e7)).toBe(false);
-    // cause without an abort-shape name doesn't match either.
-    const e8 = new Error('Request failed'); e8.cause = { name: 'TimeoutError' };
+    const e8 = new Error('timeout'); e8.name = 'TimeoutError';
     expect(isAbortError(e8)).toBe(false);
+    // cause without an abort-shape name doesn't match either.
+    const e9 = new Error('Request failed'); e9.cause = { name: 'TimeoutError' };
+    expect(isAbortError(e9)).toBe(false);
+    // Cyclic cause chain — recursion is depth-capped, doesn't hang.
+    const e10 = new Error('cyclic');
+    e10.cause = e10;
+    expect(isAbortError(e10)).toBe(false);
   });
 
   test('pollOnce passes an abortSignal in the SDK send options', async () => {

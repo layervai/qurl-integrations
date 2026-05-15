@@ -72,6 +72,20 @@
 // narrow class of failures where the consumer process crashes between
 // `handle()` and `DeleteMessage` — those are bounded by maxReceiveCount
 // and end up in the DLQ for operator triage.
+//
+// No backpressure between the consumer and detached handlers: the
+// poll loop keeps pulling 10-message batches as long as the queue
+// has work, but `handleCommand` / `handleFlowInteraction` run
+// detached after the synchronous emit. Under a bursty arrival
+// pattern with slow downstream DDB/REST work, in-flight handler
+// promises accumulate without an upper bound — risking memory
+// pressure if a sustained backlog grows faster than handlers
+// drain. Today's volume bounds (invite-only beta, ~thousands of
+// guilds) make this comfortably theoretical; tracked as an
+// operational concern to revisit before flag-flip in PR 10. If
+// in-flight handler count needs to be capped, a semaphore around
+// `pollOnce` (max N concurrent dispatches before the next receive)
+// is the natural shape. See #388 for the follow-up.
 
 const { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } = require('@aws-sdk/client-sqs');
 const config = require('./config');
@@ -147,10 +161,14 @@ const seenEventIds = new Set();
 function recordSeen(eventId) {
   // Be precise about the LRU's contract — the producer publishes
   // string event_ids (format `<shardId>:<sequence>`). A non-string
-  // (number, object, missing) is treated as "no id" so the LRU
-  // doesn't accidentally key on `0` or `''` or `{}`. The earlier
+  // (number, object, missing) OR a whitespace-only string is
+  // treated as "no id" so the LRU doesn't accidentally key on `0`,
+  // `''`, `{}`, or `' '`. The whitespace-only case is the subtle
+  // one: a producer regression that emits `event_id: ' '` would
+  // make every message look like a dup under the same key and the
+  // dup-rate gauge would falsely report 100%. The earlier
   // missing-event_id branch in processMessage logs separately.
-  if (typeof eventId !== 'string' || !eventId) return false;
+  if (typeof eventId !== 'string' || eventId.trim() === '') return false;
   if (seenEventIds.has(eventId)) {
     // Refresh recency: move to the tail of insertion order so it
     // isn't first to evict if traffic spikes.
@@ -211,6 +229,18 @@ function _setSqsClientForTest(client) {
 }
 
 function createSqsClient() {
+  // Note: AWS credential resolution (IAM task role, env vars,
+  // credential-chain) happens lazily on first `.send()`, NOT at
+  // SQSClient construction. A missing/invalid task role will
+  // surface as a ReceiveMessageCommand failure inside pollLoop —
+  // landing in the error-backoff path rather than as a boot
+  // failure. Treated as acceptable because (a) the bot's task
+  // execution role is required for the rest of the AWS surface
+  // (DDB flow-state, etc.) and would fail those too, and (b) ops
+  // monitoring on the pollLoop error log catches the case. If we
+  // ever need explicit boot-time credential resolution, the
+  // pattern is `await sqsClient.config.credentials()` inside
+  // start() and propagate any throw.
   const region = (process.env.AWS_REGION ?? '').trim();
   if (!region) {
     throw new Error('AWS_REGION is required to use the event consumer. Set it in the deployment template (e.g. `us-east-2`).');
@@ -300,13 +330,14 @@ async function processMessage(client, message) {
     return;
   }
 
-  if (typeof eventId !== 'string' || !eventId) {
+  if (typeof eventId !== 'string' || eventId.trim() === '') {
     // Telemetry blind spot: recordSeen short-circuits on a
-    // non-string or empty event_id, so dup-detection won't see this
-    // message. Log at debug so ops can spot a producer-side
-    // regression where the envelope's event_id field starts
-    // arriving empty/missing/non-string (the dup-rate gauge would
-    // silently lie until the LRU is fixed at the producer).
+    // non-string or whitespace-only event_id, so dup-detection
+    // won't see this message. Log at debug so ops can spot a
+    // producer-side regression where the envelope's event_id field
+    // starts arriving empty/whitespace/non-string (the dup-rate
+    // gauge would silently lie until the LRU is fixed at the
+    // producer).
     logger.debug('Event consumer: envelope missing valid event_id; LRU dedup will not track', {
       messageId: message.MessageId,
       eventType,
@@ -434,17 +465,18 @@ async function pollOnce(client) {
 // in the error-backoff path so an operator sees the log line and the
 // loop doesn't spin without a backoff.
 function isAbortError(err) {
-  if (!err) return false;
-  if (err.name === 'AbortError'
-    || err.name === 'CanceledError'
-    || err.code === 'AbortError'
-    || err.code === 'ABORT_ERR') return true; // Node's standard AbortError shape (DOMException-style code).
-  // Defense against future @aws-sdk wrappers that nest the abort
-  // shape under err.cause. If an SDK refresh ever does this, the
-  // unwrapped check below keeps stop()-triggered aborts silent
-  // during graceful shutdown instead of logging as failures and
-  // hitting the error-backoff.
-  if (err.cause && (err.cause.name === 'AbortError' || err.cause.name === 'CanceledError')) return true;
+  // Walk err.cause recursively (capped at 5 hops to bound the
+  // worst-case cyclic structure). Future @aws-sdk releases may
+  // wrap aborts in one or more layers of cause chain; recursing
+  // keeps the silent-shutdown property regardless of nesting depth.
+  let current = err;
+  for (let i = 0; i < 5 && current; i += 1) {
+    if (current.name === 'AbortError'
+      || current.name === 'CanceledError'
+      || current.code === 'AbortError'
+      || current.code === 'ABORT_ERR') return true; // Node's standard AbortError shape (DOMException-style code).
+    current = current.cause;
+  }
   return false;
 }
 
