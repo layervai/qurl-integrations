@@ -244,9 +244,10 @@ function recordSeen(eventId) {
 // gateway path has, since the gateway also emits + runs detached.
 //
 // If a tighter "drain handlers before db close" guarantee is ever
-// needed, the trackDispatch registry already has the promises;
-// stop() could `await Promise.allSettled([...inFlightPromises])`
-// with its own deadline cap (e.g. 3s). Deferred until needed.
+// needed, trackDispatch would have to additionally capture each
+// promise in a Set (it currently only retains the count) so stop()
+// could `await Promise.allSettled([...inFlightPromises])` with its
+// own deadline cap (e.g. 3s). Deferred until needed.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -574,11 +575,13 @@ function trackDispatch(maybePromise) {
   // the counter has dropped.
   //
   // Math.max guards against negative drift if a stale promise
-  // resolves after `_resetStateForTest` cleared the count. Tests
-  // that never await their resolvable promises before resetting
-  // would otherwise leak a decrement into the next test's
-  // starting state. Production can't reach this — every increment
-  // is paired with exactly one decrement on the same promise.
+  // resolves after `_resetStateForTest` cleared the count, or
+  // (under `jest --watch` / hot-reload) a stale promise resolves
+  // into the freshly-required module's clean counter. Tests that
+  // don't await their resolvable promises before resetting would
+  // otherwise leak a decrement into the next test's starting
+  // state. Production can't reach this — every increment is paired
+  // with exactly one decrement on the same promise.
   maybePromise.finally(() => {
     inFlightCount = Math.max(0, inFlightCount - 1);
   }).catch((err) => {

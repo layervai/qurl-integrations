@@ -914,6 +914,32 @@ describe('event-consumer: start/stop lifecycle', () => {
 });
 
 describe('event-consumer: backpressure (in-flight handler cap)', () => {
+  // Test helpers. Pulled up here so the tests below stay focused on
+  // intent rather than re-stating boilerplate.
+
+  // Flush queued microtasks. `.finally → .catch` in trackDispatch
+  // is two microtask hops; default n=3 leaves a one-tick margin so a
+  // future chain extension doesn't require revisiting every test.
+  async function flushMicrotasks(n = 3) {
+    for (let i = 0; i < n; i += 1) {
+      // eslint-disable-next-line no-await-in-loop -- sequential by design
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+
+  // Run `fn` with isWorkerDispatch flipped true (matches the
+  // synchronous flag-wrap processMessage performs around handle()),
+  // then restore. Six tests repeat this pattern; helper keeps the
+  // setup intent visible and the flag flip impossible to miss.
+  function withWorkerDispatch(fn) {
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      return fn();
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+  }
+
   test('trackDispatch is a no-op when isWorkerDispatch is false (gateway mode)', () => {
     // Pins the contract that the gateway-WS-driven path doesn't
     // count against the worker's cap. The flag stays false unless
@@ -988,18 +1014,13 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     const handlerPromise = new Promise((r) => { resolveHandler = r; });
 
     // Mirror processMessage's flag wrap.
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      eventConsumer.trackDispatch(handlerPromise);
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
 
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
     resolveHandler('done');
     // Wait for the finally callback to run (microtask boundary).
     await handlerPromise;
-    await new Promise((r) => setImmediate(r));
+    await flushMicrotasks();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
@@ -1013,17 +1034,11 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // unhandledRejection in the test runtime.
     handlerPromise.catch(() => { /* absorbed */ });
 
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      eventConsumer.trackDispatch(handlerPromise);
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
 
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
     rejectHandler(new Error('handler failed'));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    await flushMicrotasks();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
@@ -1040,16 +1055,10 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // separate chain; trackDispatch's logging path is independent.
     handlerPromise.catch(() => { /* absorbed */ });
 
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      eventConsumer.trackDispatch(handlerPromise);
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
 
     // Allow the .finally + .catch microtasks to flush.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    await flushMicrotasks();
 
     expect(logger.error).toHaveBeenCalledWith(
       'Event consumer: dispatch handler rejected',
@@ -1068,16 +1077,13 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // pending promises so the count stays elevated for the duration
     // of the test.
     const pendingHandlers = [];
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
+    withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         const p = new Promise(() => {}); // never resolves
         eventConsumer.trackDispatch(p);
         pendingHandlers.push(p);
       }
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    });
     expect(eventConsumer._test.getInFlightCount()).toBe(cap);
 
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [{ Body: '{}', ReceiptHandle: 'x' }] });
@@ -1105,14 +1111,11 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // the streak. Without this, a slow downstream wedge would spam
     // logger.warn ~10x/s per worker.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
+    withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         eventConsumer.trackDispatch(new Promise(() => {})); // never resolves
       }
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    });
 
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const client = makeStubClient();
@@ -1143,17 +1146,14 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // real .finally decrement path — no test-only setter shortcut.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     const resolvers = [];
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
+    withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
         let resolve;
         const p = new Promise((r) => { resolve = r; });
         resolvers.push(resolve);
         eventConsumer.trackDispatch(p);
       }
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
+    });
 
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const client = makeStubClient();
@@ -1165,8 +1165,7 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // Drain all handlers: resolve every tracked promise, then let
     // the .finally microtask chain flush so inFlightCount drops to 0.
     resolvers.forEach((r) => r('done'));
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    await flushMicrotasks();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
 
     // Below-cap poll: release-info fires, gate clears.
@@ -1195,6 +1194,39 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // Pins the default — operators reading the .env.example see
     // this number and may rely on it for their soak headroom math.
     expect(eventConsumer._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+  });
+
+  test('processMessage flag-wrap has no `await` between isWorkerDispatch toggles (static invariant)', () => {
+    // Load-bearing invariant: the synchronous flag-wrap around
+    // `client.actions.InteractionCreate.handle(data)` in
+    // processMessage is correct ONLY because there's no `await`
+    // between `isWorkerDispatch = true` and the matching
+    // `isWorkerDispatch = false` in the finally. An `await` inside
+    // the try/finally would let a concurrent processMessage (running
+    // under Promise.allSettled in pollOnce) observe a leaked-true
+    // flag and silently miscount a gateway-WS-driven dispatch as
+    // worker-driven in combined mode.
+    //
+    // Test by reading the source: scan the slice of event-consumer.js
+    // between the `isWorkerDispatch = true` assignment and the
+    // `isWorkerDispatch = false` in the matching finally and assert
+    // no `await` token appears. Approximate (no JS parse), but pins
+    // the constraint better than a comment alone — a future editor
+    // who adds `await logger.x()` inside the block trips this test.
+    const src = require('fs').readFileSync(
+      require('path').resolve(__dirname, '../src/event-consumer.js'),
+      'utf8',
+    );
+    const startIdx = src.indexOf('isWorkerDispatch = true');
+    const endIdx = src.indexOf('isWorkerDispatch = false', startIdx);
+    expect(startIdx).toBeGreaterThan(0);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const block = src.slice(startIdx, endIdx);
+    // Strip line comments so a documenting reference to `await` in a
+    // comment doesn't false-positive. Block-comments inside the
+    // wrap aren't expected; we keep the regex simple.
+    const stripped = block.replace(/\/\/[^\n]*/g, '');
+    expect(stripped).not.toMatch(/\bawait\b/);
   });
 
   describe('MAX_INFLIGHT_HANDLERS env validation (module-load IIFE)', () => {
