@@ -155,14 +155,14 @@ describe('Discord command registration (smoke)', () => {
       // eslint-disable-next-line no-console
       console.log(`smoke: MAP_COMMAND_ENABLED resolved to "${rawMapFlag}" (mapEnabled=${mapEnabled})`);
       const expectedSubcommands = mapEnabled
-        ? ['file', 'help', 'map', 'revoke', 'setup', 'status']
-        : ['file', 'help', 'revoke', 'setup', 'status'];
+        ? ['help', 'map', 'revoke', 'send', 'setup', 'status']
+        : ['help', 'revoke', 'send', 'setup', 'status'];
       expect({ scope: qurl._scope, subcommands })
         .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
     }
   });
 
-  it('has no ghost subcommands from the Python-bot era or the pre-/qurl-file flow', () => {
+  it('has no ghost subcommands from the Python-bot era or the pre-rename flow', () => {
     // Intentional overlap with the exact-set assertion above: that
     // test is the correctness invariant, this one is living
     // documentation for subcommands that USED to exist and must
@@ -170,11 +170,19 @@ describe('Discord command registration (smoke)', () => {
     //
     // - `list`, `clear`: Python bot's catalog-era commands, removed
     //   when the bot was rewritten in Node.js.
-    // - `send`: legacy multi-step "Send File / Send Location" wizard,
-    //   replaced by `/qurl file` + `/qurl map` which provide the same
-    //   capabilities with explicit slash options + inline confirm-card
-    //   menus. Removed in PR 7b.3 (no grace period — file/map ship
-    //   the same UX).
+    // - `file`: the post-7b.3 subcommand name for "share a file" before
+    //   it was renamed to `/qurl send`. The dispatcher's stale-client
+    //   arm in commands.js intentionally handles `sub === 'file'`
+    //   submissions to surface a rename hint to clients with cached
+    //   command defs (~1h global cache TTL); that's a runtime path,
+    //   not a registration. The Discord registration must NEVER carry
+    //   `file` again — Discord would route to a real arm and bypass
+    //   the rename hint entirely.
+    //
+    // NOTE on `send`: there was an older legacy multi-step wizard
+    // named `/qurl send` (removed in PR 7b.3). The CURRENT `/qurl send`
+    // is the renamed `/qurl file` and is the expected active
+    // registration — it's in the positive-set assertion above, not here.
     for (const qurl of registrations) {
       const subcommandNames = (qurl.options ?? [])
         .filter((o) => o.type === SUBCOMMAND_OPTION_TYPE)
@@ -188,7 +196,7 @@ describe('Discord command registration (smoke)', () => {
       // regression that also changes the full set.
       expect(subcommandNames).not.toContain('list');
       expect(subcommandNames).not.toContain('clear');
-      expect(subcommandNames).not.toContain('send');
+      expect(subcommandNames).not.toContain('file');
     }
   });
 });

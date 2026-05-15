@@ -37,8 +37,8 @@ function assertIntent(intentsList, bit, requiredFor) {
   }
 }
 assertIntent(intents, GatewayIntentBits.Guilds, 'guild bootstrap (caches guilds the bot is in)');
-assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
-assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl file + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)');
+assertIntent(intents, GatewayIntentBits.GuildMembers, '/qurl send + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)');
+assertIntent(intents, GatewayIntentBits.GuildVoiceStates, '/qurl send + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)');
 
 // Negative-intent canaries — pin that the bot has NOT silently
 // re-broadened gateway scope. Every intent listed here is either:

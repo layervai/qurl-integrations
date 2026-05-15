@@ -1,7 +1,7 @@
 // recipient-parser — extracts user/role mentions from the `recipients:`
 // slash-command option string and resolves them to a flat user-ID list.
 //
-// `/qurl file` and `/qurl map` expose `recipients:` as a STRING option
+// `/qurl send` and `/qurl map` expose `recipients:` as a STRING option
 // rather than a list of mentionables because Discord's slash-command
 // `mentionable` option type is single-value — a power-user one-shot
 // path needs a free-form text that can carry many mentions, role
@@ -198,7 +198,7 @@ const VIEW_CHANNEL_PERMISSION = 1n << 10n;
 // pasted formatting without ever hitting the parser cap.
 const MAX_INPUT_LENGTH = 4000;
 
-// Max length applied to `/qurl file` / `/qurl map` `recipients:`
+// Max length applied to `/qurl send` / `/qurl map` `recipients:`
 // slash options. Discord enforces this server-side, so anything past
 // it never reaches the parser — the parser's MAX_INPUT_LENGTH cap
 // (above) is genuine defense-in-depth, only reachable via a forged
@@ -207,7 +207,7 @@ const MAX_INPUT_LENGTH = 4000;
 // Picked at half of MAX_INPUT_LENGTH so the headroom relationship is
 // load-bearing: a future bump to MAX_INPUT_LENGTH (e.g. for a larger
 // guild's role-expansion needs) preserves the 2× gap automatically.
-// Both /qurl file and /qurl map builders read this; 7b.3+ should
+// Both /qurl send and /qurl map builders read this; 7b.3+ should
 // continue to honor the gap.
 const SLASH_OPTION_HEADROOM_DIVISOR = 2;
 const MAX_SLASH_OPTION_LENGTH = Math.floor(MAX_INPUT_LENGTH / SLASH_OPTION_HEADROOM_DIVISOR);
@@ -454,7 +454,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // Permission gate (issue #326): non-mentionable roles require
     // MENTION_EVERYONE — same rule Discord enforces for in-chat role
     // mentions. Without this gate, a non-admin sender could
-    // `/qurl file recipients:<@&adminRoleId>` to fan a send to admin-
+    // `/qurl send recipients:<@&adminRoleId>` to fan a send to admin-
     // role members, bypassing the same protection the @everyone path
     // got in #323. `role.mentionable === true` is the per-role bypass
     // (set explicitly by a role owner). Lands in `roleMentionsDenied`
@@ -546,7 +546,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
     // it has visibility into, so without this check a user who
     // discovers a private voice channel's snowflake (audit logs,
     // mod-tool exports, leaked URLs) could DM-blast its connected
-    // members via `/qurl file recipients:<#hidden-voice-id>` even
+    // members via `/qurl send recipients:<#hidden-voice-id>` even
     // when they themselves can't see the channel in the client.
     // Fail-closed: a missing `interaction.member` (DM context the
     // outer guild check already eliminated; defense-in-depth here

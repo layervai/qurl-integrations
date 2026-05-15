@@ -291,7 +291,7 @@ module.exports = {
   // (ECS rolls fresh tasks on every task-def revision).
   MAP_COMMAND_ENABLED: process.env.MAP_COMMAND_ENABLED === 'true',
 
-  // qURL send limits (/qurl file + /qurl map) — both must be > 0. A
+  // qURL send limits (/qurl send + /qurl map) — both must be > 0. A
   // cooldown of 0 would silently disable the rate limit; a recipients
   // cap of 0 would reject every send.
   //

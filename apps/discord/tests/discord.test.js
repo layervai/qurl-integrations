@@ -105,7 +105,7 @@ const mockClient = {
 jest.mock('discord.js', () => ({
   Client: jest.fn(() => mockClient),
   // GuildVoiceStates (=128 in production discord.js) is load-bearing
-  // for the /qurl file + /qurl map voice-channel-everyone path —
+  // for the /qurl send + /qurl map voice-channel-everyone path —
   // channel.members for voice channels reads the voice-state cache
   // which is only populated when the intent is declared. The discord.js
   // module's assertIntent at boot would throw if this bit is missing
@@ -638,9 +638,8 @@ describe('discord module', () => {
     // Pins the actual production canary description strings so a future
     // refactor of the `assertIntent(..., '<feature>')` arg at discord.js:
     // 38–39 fails this test instead of silently shipping a stale error
-    // message at boot. The prior version of this spec pinned a `/qurl send`
-    // description; this version tracks the live `/qurl file + /qurl map`
-    // wording.
+    // message at boot. Tracks the live `/qurl send + /qurl map` wording
+    // (the subcommand was renamed from `/qurl file` to `/qurl send`).
     it('production assertIntent invocations surface the live recipient-resolution feature label', () => {
       // Construct the same intentsList shape src/discord.js declares (the
       // numeric values are mocked at the top of this file — see the
@@ -648,8 +647,8 @@ describe('discord module', () => {
       // canary; the throw message MUST embed the production label so an
       // oncall engineer reading boot logs gets the actionable feature.
       expect(() => discord.assertIntent([1 /* Guilds */], 2 /* GuildMembers */,
-        '/qurl file + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)'))
-        .toThrow(/\/qurl file \+ \/qurl map recipient resolution/);
+        '/qurl send + /qurl map recipient resolution (members.cache for role-mention expansion + members.fetch for selected-user backfill)'))
+        .toThrow(/\/qurl send \+ \/qurl map recipient resolution/);
     });
 
     // GuildVoiceStates is the second load-bearing intent: its boot
@@ -659,7 +658,7 @@ describe('discord module', () => {
     // must trip this assertion at module load.
     it('production assertIntent for GuildVoiceStates surfaces the voice-everyone resolution feature label', () => {
       expect(() => discord.assertIntent([1 /* Guilds */, 2 /* GuildMembers */], 128 /* GuildVoiceStates */,
-        '/qurl file + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)'))
+        '/qurl send + /qurl map voice-channel-everyone resolution (channel.members for voice-connected snapshot in the confirm card button + <#voice> mention expansion in the recipients string)'))
         .toThrow(/voice-channel-everyone resolution/);
     });
   });

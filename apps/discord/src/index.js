@@ -125,7 +125,7 @@ if (isMultiTenant) {
 // workflows stay convenient. Keep this list in sync with the production
 // comments in .env.example.
 if (process.env.NODE_ENV === 'production') {
-  // QURL_API_KEY is the global-fallback key for /qurl file + /qurl map.
+  // QURL_API_KEY is the global-fallback key for /qurl send + /qurl map.
   // Only the OpenNHP community server demands it at boot; single-guild-
   // plain and multi-tenant deployments rely on per-guild /qurl setup.
   // List is in boot-requirements.js for testability.

@@ -269,7 +269,7 @@ const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 // gateway event delivery causes drift.
 //
 // In-flight de-duplication via the `prewarmInFlight` map below: two
-// concurrent `/qurl file @everyone` invocations in the same guild from
+// concurrent `/qurl send @everyone` invocations in the same guild from
 // a cold cache share the same underlying `members.fetch()` promise.
 // Without coalescing, abuse via concurrent invocations could burn
 // chunk-request budget linearly. discord.js may also coalesce the
@@ -429,7 +429,7 @@ function clearCooldown(userId) {
 // Soften an existing cooldown so `residualMs` remain. Monotonic SHRINK
 // — only reduces remaining time, never extends. Used by Cancel paths
 // so a legitimate "I changed my mind" doesn't lock the full window
-// out, but rapid /qurl file → Cancel → /qurl file → Cancel spam still
+// out, but rapid /qurl send → Cancel → /qurl send → Cancel spam still
 // pays a small throttle on each iteration (preventing supersedeOrCreate
 // + interaction-reply abuse).
 function softenCooldown(userId, residualMs) {
@@ -864,7 +864,7 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
   // and "1 hour ago" once expired. No bot-side editing needed.
   //
-  // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file`
+  // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl send`
   // and `/qurl map` pipe raw input through `sanitizeMessage`
   // (markdown escape + @-mention strip) before constructing this
   // payload, and the addRecipients path reads from
@@ -1022,7 +1022,7 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
 }
 
 // --- Link status monitor ---
-// Track live monitors so a burst of `/qurl file` + `/qurl map` commands
+// Track live monitors so a burst of `/qurl send` + `/qurl map` commands
 // can't stack more than MAX_CONCURRENT_MONITORS setIntervals. When we
 // cross the cap, the oldest monitor is stopped to make room (the user
 // can still `/qurl revoke`; they just stop seeing live status updates in
@@ -1248,7 +1248,7 @@ function monitorLinkStatus(sendId, interactionArg, qurlLinksArg, recipientsArg, 
   return control;
 }
 
-// --- qurl send pipeline (back-half shared by /qurl file + /qurl map) ---
+// --- qurl send pipeline (back-half shared by /qurl send + /qurl map) ---
 // TODO(#55): Split commands.js into focused modules — see https://github.com/layervai/qurl-integrations/issues/55
 //
 // REVIEW NOTE: The size of commands.js is tracked as a follow-up in
@@ -1296,7 +1296,7 @@ async function mintLinksInBatches({ initialResourceId, reuploadFn, expiresAt, re
 }
 
 // executeSendPipeline — back-half of the qurl send lifecycle, shared
-// by `/qurl file` and `/qurl map` after the user clicks the Send
+// by `/qurl send` and `/qurl map` after the user clicks the Send
 // button on the confirm card. The destructure signature is the
 // authoritative param surface; the notes below capture only non-obvious
 // contract guarantees that a reader couldn't infer from the call sites
@@ -1417,7 +1417,7 @@ async function executeSendPipeline(interaction, {
     throw new ErrorCtor(msg);
   }
 
-  // Defense-in-depth SSRF re-check. `/qurl file`'s front-half
+  // Defense-in-depth SSRF re-check. `/qurl send`'s front-half
   // validates attachment.url against isAllowedSourceUrl BEFORE
   // calling the pipeline; this gate catches a future caller that
   // forgets.
@@ -1458,7 +1458,7 @@ async function executeSendPipeline(interaction, {
   }
 
   // `recipients` shape + cap gates. The docstring's "non-empty,
-  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl file`
+  // ≤ QURL_SEND_MAX_RECIPIENTS" contract is enforced by the `/qurl send`
   // + `/qurl map` front-half today; this is defense-in-depth for a
   // future caller (deserialized payload, programmatic retry, admin tool)
   // that skips those checks. Trips here would otherwise surface deep
@@ -1689,10 +1689,10 @@ async function executeSendPipeline(interaction, {
       resourceId: link.resourceId, resourceType, qurlLink: link.qurlLink,
       // CONTRACT: targetType is always 'user' for new rows post-PR
       // #313 (the only caller is executeSendPipeline via the confirm
-      // card on /qurl file + /qurl map, both of which DM individual
+      // card on /qurl send + /qurl map, both of which DM individual
       // recipients). The column is kept because the revoke-list
       // renderer's branch on `s.target_type` still has to handle
-      // historical /qurl send rows ('channel') during the TTL drain
+      // historical legacy /qurl send wizard rows ('channel') during the TTL drain
       // window. #318 drops the formatRevokeLabel non-'user' branch
       // once no revoke-visible row has `target_type !== 'user'` — the
       // drain happens naturally as the revoke renderer filters on
@@ -2734,8 +2734,8 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
   + (config.MAP_COMMAND_ENABLED
-    ? 'Your team can use `/qurl file` and `/qurl map` to share files and locations securely.\n'
-    : 'Your team can use `/qurl file` to share files securely.\n')
+    ? 'Your team can use `/qurl send` and `/qurl map` to share files and locations securely.\n'
+    : 'Your team can use `/qurl send` to share files securely.\n')
   + 'All qURL usage will be billed to your API key.';
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -3003,12 +3003,12 @@ async function handleSetupModal(interaction, { flow_id }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// /qurl file + /qurl map — slash-driven sends.
+// /qurl send + /qurl map — slash-driven sends.
 //
 // All-options-up-front slash commands that render an in-channel
 // ephemeral confirm card. The flow:
 //
-//   /qurl file recipients:<text> attachment:<file> [expires-in]
+//   /qurl send recipients:<text> attachment:<file> [expires-in]
 //                                                  [self-destruct]
 //                                                  [personal-message]
 //   /qurl map  recipients:<text> location:<text>   [location-name]
@@ -3054,7 +3054,7 @@ const SEND_STAGE_AWAITING_CONFIRM = 'awaiting_send_confirm';
 const CONFIRM_USER_SELECT_CUSTOM_ID = 'qurl_confirm_user_select';
 const CONFIRM_SEND_CUSTOM_ID = 'qurl_confirm_send';
 const CONFIRM_CANCEL_CUSTOM_ID = 'qurl_confirm_cancel';
-// Confirm-card menus / button — slash options on /qurl file + /qurl map
+// Confirm-card menus / button — slash options on /qurl send + /qurl map
 // remain as initial defaults (one-shot for power users), but a user who
 // didn't fill them in can still adjust expiry, self-destruct, and note
 // inline on the card.
@@ -3069,14 +3069,16 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // non-bot members via `channel.members` AT CLICK TIME, not render time,
 // so a 30s-old member snapshot doesn't silently send to people who
 // left. PR #174's "voice-connected only" semantics are restored here
-// (replacing the legacy `/qurl send`'s wizard option deleted in
-// PR #313 alongside `getChannelMembers`).
+// (replacing the legacy multi-step `/qurl send` wizard's option,
+// deleted in PR #313 alongside `getChannelMembers`. Note: the
+// current `/qurl send` is the renamed `/qurl file` subcommand,
+// NOT the deleted wizard — the name was reused after rename).
 //
 // STAGE-CHANNEL SEMANTICS: discord.js's `channel.members` for stage
 // channels includes BOTH speakers and audience (everyone currently
 // connected to the voice gateway in that stage). This is the
 // "voice-connected" contract carried over from PR #174 and matches
-// the legacy `/qurl send` behavior. A future stage-specific UX
+// the legacy multi-step `/qurl send` wizard's behavior. A future stage-specific UX
 // might want speakers-only (filter by `member.voice.suppress ===
 // false`) — that's a separate affordance, not a regression in this
 // path. Today the live `(N)` count on the button label is the user's
@@ -3163,11 +3165,11 @@ const SEND_NOTE_MODAL_FIELD_ID = 'message_value';
 
 // 3-minute confirm-card window — the time-to-finish budget a user has
 // to review the confirm card and click Send/Cancel after invoking
-// /qurl file or /qurl map.
+// /qurl send or /qurl map.
 const SEND_FLOW_TTL_SECONDS = 180;
 
 // On a successful Cancel, soften (don't clear) the cooldown so 5s of
-// throttle remain — defuses the rapid /qurl file → Cancel → /qurl file
+// throttle remain — defuses the rapid /qurl send → Cancel → /qurl send
 // → Cancel spam vector (which would otherwise rack up supersedeOrCreate
 // DDB writes with zero throttle).
 const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
@@ -3183,7 +3185,7 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // would hit "qURL is not configured for this server" instead of
 // QURL_MAP_DISABLED_REPLY.
 const API_KEY_GATED_SUBCOMMANDS = new Set(
-  config.MAP_COMMAND_ENABLED ? ['file', 'map', 'revoke'] : ['file', 'revoke'],
+  config.MAP_COMMAND_ENABLED ? ['send', 'map', 'revoke'] : ['send', 'revoke'],
 );
 
 // User-facing reply for stale /qurl map submissions when the toggle
@@ -3191,7 +3193,7 @@ const API_KEY_GATED_SUBCOMMANDS = new Set(
 // submission after the registration has dropped it. Copy mirrors
 // the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
 // the same remaining capability.
-const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl file` to share files securely.';
+const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl send` to share files securely.';
 
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
@@ -4182,7 +4184,7 @@ function renderConfirmCardRows({
   return rows;
 }
 
-// Shared entry point — both `/qurl file` and `/qurl map` route here
+// Shared entry point — both `/qurl send` and `/qurl map` route here
 // after collecting their resource-specific options. `params` carries:
 //   resourceType: RESOURCE_TYPES.FILE | RESOURCE_TYPES.MAPS
 //   attachment:   {url, name, contentType, size} | null  (file path)
@@ -4203,7 +4205,7 @@ async function handleQurlSlashSend(interaction, params) {
       ephemeral: true,
     });
   }
-  // Cooldown gate is owned by the front-half handlers (handleQurlFile /
+  // Cooldown gate is owned by the front-half handlers (handleQurlSend /
   // handleQurlMap) so invalid inputs are throttled too. By the time we
   // get here the cooldown is already set; legitimate clearCooldown calls
   // on individual error branches below still unlock retry.
@@ -4297,7 +4299,7 @@ async function handleQurlSlashSend(interaction, params) {
         resolved = await resolveRecipientUsers(interaction, parsed.ids);
       } catch (err) {
         clearCooldown(interaction.user.id);
-        logger.error('qurl file/map: resolveRecipientUsers threw', {
+        logger.error('qurl send/map: resolveRecipientUsers threw', {
           user_id: interaction.user.id, error: err && err.message,
         });
         return interaction.editReply({
@@ -4393,7 +4395,7 @@ async function handleQurlSlashSend(interaction, params) {
     //     ephemeral message lives in, which DOES match invocation
     //     channel in practice — but pinning via payload is the durable
     //     contract and matches the rest of the flow-state pattern.
-    //   - A user who opens /qurl file from a voice channel, then
+    //   - A user who opens /qurl send from a voice channel, then
     //     drags themselves into a different channel mid-confirm,
     //     should still see "Everyone on voice" target
     //     the channel they invoked from, not the channel they're now
@@ -4407,7 +4409,7 @@ async function handleQurlSlashSend(interaction, params) {
     // Voice-everyone auto-default. When the slash command was invoked
     // from a voice channel AND `recipients:` was omitted, resolve to
     // voice-connected members (excluding sender + bots) and render the
-    // card in voice-mode. This makes "/qurl file" from inside #voice
+    // card in voice-mode. This makes "/qurl send" from inside #voice
     // behave the way users naturally expect — the room is the audience.
     //
     // Sender is filtered pre-validity via partitionRecipients's
@@ -4424,7 +4426,7 @@ async function handleQurlSlashSend(interaction, params) {
     //
     // SNAPSHOT vs. CLICK-TIME asymmetry: this slash-entry path freezes
     // `recipientIds` at command receipt — someone joining the channel
-    // between `/qurl file` and the Send click is NOT added. The "🔊
+    // between `/qurl send` and the Send click is NOT added. The "🔊
     // Everyone on voice" button (handleConfirmVoiceEveryone) goes the
     // other way: re-resolves `channel.members` at click time. The two
     // shapes are reachable from the same UI but produce different
@@ -4574,7 +4576,7 @@ async function handleQurlSlashSend(interaction, params) {
     const needsPicker = recipientMode === RECIPIENT_MODE_PICKER && recipientsOmitted;
     const recipientIds = finalValid.map((u) => u.id);
 
-    // supersedeOrCreate handles the "another /qurl file/map is open"
+    // supersedeOrCreate handles the "another /qurl send/map is open"
     // case — sibling-flow disambig surfaces a stage-specific message;
     // same-stage rerun atomically claims the slot. Mirrors /qurl
     // revoke's pattern.
@@ -4731,7 +4733,7 @@ async function handleQurlSlashSend(interaction, params) {
   }
 }
 
-async function handleQurlFile(interaction) {
+async function handleQurlSend(interaction) {
   // DM rejection first — no cooldown burned on a guild-only invocation
   // attempted from DMs.
   if (!interaction.guildId || !interaction.guild) {
@@ -4748,7 +4750,7 @@ async function handleQurlFile(interaction) {
     // Log at INFO so capacity-tuning has a trend signal — a sudden
     // burst of these would indicate either MAX_CONCURRENT_FILE_SENDS
     // is undersized or a downstream pipeline is stuck holding slots.
-    logger.info('handleQurlFile: capacity backpressure', {
+    logger.info('handleQurlSend: capacity backpressure', {
       user_id: interaction.user.id,
       active_file_sends: activeFileSends,
       max_concurrent: MAX_CONCURRENT_FILE_SENDS,
@@ -4785,7 +4787,7 @@ async function handleQurlFile(interaction) {
   try {
     attachment = interaction.options.getAttachment('attachment', true);
   } catch (err) {
-    logger.warn('handleQurlFile: required attachment option missing', {
+    logger.warn('handleQurlSend: required attachment option missing', {
       user_id: interaction.user.id, error: err && err.message,
     });
     clearCooldown(interaction.user.id);
@@ -4803,7 +4805,7 @@ async function handleQurlFile(interaction) {
     });
   }
   if (!isAllowedSourceUrl(attachment.url)) {
-    logger.warn('handleQurlFile: attachment.url failed SSRF gate', {
+    logger.warn('handleQurlSend: attachment.url failed SSRF gate', {
       user_id: interaction.user.id, host: safeUrlHost(attachment.url),
     });
     return interaction.reply({
@@ -4859,12 +4861,12 @@ async function handleQurlMap(interaction) {
       ephemeral: true,
     });
   }
-  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlFile).
+  // NOTE: No `activeFileSends` capacity gate here (unlike handleQurlSend).
   // The capacity gate guards the connector upload path that file sends
   // hit during back-half dispatch; map sends never touch that resource.
   // Sharing the gate would punish maps for file-pipeline saturation.
   //
-  // Cooldown gate — cross-command bucket shared with /qurl file
+  // Cooldown gate — cross-command bucket shared with /qurl send
   // (sendCooldowns Map). Tests pin the contract.
   if (isOnCooldown(interaction.user.id)) {
     return interaction.reply({
@@ -4878,7 +4880,7 @@ async function handleQurlMap(interaction) {
   // enforces required server-side; the more likely cause in production
   // is a client/schema desync (redeploy timing) than abuse. Clear
   // cooldown on the throw catch so the user can retry once the deploy
-  // stabilizes — same rationale as handleQurlFile's required-option
+  // stabilizes — same rationale as handleQurlSend's required-option
   // throw branch.
   let locationValue;
   try {
@@ -4906,7 +4908,7 @@ async function handleQurlMap(interaction) {
   if (locationValue.length === 0) {
     // Honest user error (pasted only whitespace, or empty string) —
     // unlock retry. Same shape as the file-type / size cap branches
-    // in handleQurlFile.
+    // in handleQurlSend.
     clearCooldown(interaction.user.id);
     return interaction.reply({
       content: '❌ Location is empty.',
@@ -4916,7 +4918,7 @@ async function handleQurlMap(interaction) {
 
   // Shared parser: see `parseLocationInput` near the top of this file.
   // Wrap in try/catch as a defensive symmetry with
-  // handleQurlFile's catches: a future regex change in parseLocationInput
+  // handleQurlSend's catches: a future regex change in parseLocationInput
   // or a pathological input could throw synchronously before reaching
   // handleQurlSlashSend's safety net, leaving cooldown set with no
   // visible response.
@@ -4996,7 +4998,7 @@ async function handleQurlMap(interaction) {
   });
 }
 
-// --- Confirm-card handlers for `/qurl file` + `/qurl map` ---
+// --- Confirm-card handlers for `/qurl send` + `/qurl map` ---
 // Any future rename of the `qurl_confirm_*` wire literals (or these
 // handler names, since they're paired with them via registerFlow)
 // needs a SEND_FLOW_TTL_SECONDS (180s) drain on the prior deploy so
@@ -5113,7 +5115,7 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // warning banner prepended. Replacing card content with just the
   // warning string strips the resource header ("Sending file:
   // report.pdf / Expires: 24h / Self-destruct: …") that the user
-  // chose at /qurl file time — they shouldn't have to scroll back to
+  // chose at /qurl send time — they shouldn't have to scroll back to
   // remember what they're sending. needsPicker:true keeps the "Pick
   // recipients below" prompt; sendDisabled:true keeps Send greyed.
   const rejectPick = (warning) => interaction.editReply({
@@ -5972,7 +5974,7 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
 // handlers drifting on `sendDisabled` / content flags.
 //
 // `sendDisabled` is derived from recipientIds — without it, a user
-// who opened /qurl file without `recipients:` could change expiry
+// who opened /qurl send without `recipients:` could change expiry
 // before picking and see an enabled Send button against an empty
 // recipient set.
 // All four entry paths (picker, expiry, self-destruct, note modal)
@@ -6558,7 +6560,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // for the two buckets — "left the server" is stable, "lookup
   // blipped" encourages a fresh rerun if they want to include the
   // missed recipients. The rerun hint names the actual subcommand
-  // they invoked (resourceType drives /qurl file vs /qurl map).
+  // they invoked (resourceType drives /qurl send vs /qurl map).
   //
   // followUp (not edited into the "Preparing send…" editReply) is
   // INTENTIONAL: executeSendPipeline will rewrite editReply to
@@ -6567,7 +6569,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
   // message. followUp is a separate ephemeral that persists past
   // the back-half's editReply rewrites.
   if (partialLeftCount > 0 || partialTransientCount > 0) {
-    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl file';
+    const rerunCommand = payload.resourceType === RESOURCE_TYPES.MAPS ? '/qurl map' : '/qurl send';
     const parts = [];
     if (partialLeftCount > 0) {
       parts.push(`${partialLeftCount} recipient${partialLeftCount === 1 ? '' : 's'} had left the server`);
@@ -6613,7 +6615,7 @@ async function handleConfirmSendClick(interaction, { flow_id, row }) {
 //
 // On a successful Cancel, `softenCooldown` retains 5s of throttle
 // instead of fully clearing — a full clear would let a user spam
-// /qurl file → Cancel → /qurl file → Cancel and rack up
+// /qurl send → Cancel → /qurl send → Cancel and rack up
 // supersedeOrCreate DDB writes + Discord interactions with zero
 // throttle. The cooldown-loser branch leaves cooldown untouched
 // (Send is mid-fanout; bypassing is the abuse vector).
@@ -7545,13 +7547,13 @@ const commands = [
     // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
     // can't host an `if`. The order of `addSubcommand` calls below
     // matches the chain we'd write inline, with `map` inserted
-    // between `file` and `revoke` when the flag is on.
+    // between `send` and `revoke` when the flag is on.
     data: (() => {
       const builder = new SlashCommandBuilder()
         .setName('qurl')
         .setDescription('Share resources securely via qURL')
         .addSubcommand(sub =>
-          sub.setName('file')
+          sub.setName('send')
             .setDescription('Share a file via one-time qURL links')
             .addAttachmentOption(opt =>
               opt.setName('attachment')
@@ -7860,10 +7862,27 @@ const commands = [
         });
       }
 
-      // Gate: require guild API key for file/map/revoke (the set
+      // Stale-client rename reply — `/qurl file` was renamed to
+      // `/qurl send`. Discord clients cache slash registrations and
+      // can submit the old name for up to ~1h after a global rollout
+      // (near-instant on guild-scoped registration). Caught here
+      // BEFORE API_KEY_GATED_SUBCOMMANDS so unconfigured guilds get
+      // the rename hint instead of "qURL is not configured".
+      if (sub === 'file') {
+        logger.debug('qurl_file_renamed_reply: stale-client /qurl file submission caught by rename gate', {
+          user_id: interaction.user?.id,
+          guild_id: interaction.guildId,
+        });
+        return interaction.reply({
+          content: '⚠️ `/qurl file` has been renamed to `/qurl send`. Please use `/qurl send` instead — your Discord client may take up to an hour to refresh the command list.',
+          ephemeral: true,
+        });
+      }
+
+      // Gate: require guild API key for send/map/revoke (the set
       // in API_KEY_GATED_SUBCOMMANDS, hoisted to module scope).
       //
-      // For /qurl file + /qurl map this read is a fail-fast presence
+      // For /qurl send + /qurl map this read is a fail-fast presence
       // check — the resolved value is intentionally NOT threaded
       // through to the back-half. handleConfirmSendClick re-fetches at
       // Send-click time so a key rotation during the 3-minute confirm-
@@ -7886,12 +7905,12 @@ const commands = [
         resolvedApiKey = guildApiKey || config.QURL_API_KEY;
       }
 
-      // /qurl file and /qurl map deliberately don't accept the
+      // /qurl send and /qurl map deliberately don't accept the
       // dispatcher-resolved apiKey — handleConfirmSendClick re-fetches
       // at Send time so a mid-flow rotation still uses the live key.
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
-      if (sub === 'file') return handleQurlFile(interaction);
+      if (sub === 'send') return handleQurlSend(interaction);
       if (sub === 'map') {
         if (!config.MAP_COMMAND_ENABLED) {
           // Debug (not warn) — expected post-deploy traffic from
@@ -7933,21 +7952,21 @@ const commands = [
           ? {
             sectionVerb: 'Share resources',
             bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
-            runLine: '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
+            runLine: '\t1. Run `/qurl send` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
             resource: 'the file or location',
-            cmd: '`/qurl file` or `/qurl map`',
+            cmd: '`/qurl send` or `/qurl map`',
           }
           : {
             sectionVerb: 'Share files',
             bullet: '',
-            runLine: '\t1. Run `/qurl file` (attach a file)\n',
+            runLine: '\t1. Run `/qurl send` (attach a file)\n',
             resource: 'the file',
-            cmd: '`/qurl file`',
+            cmd: '`/qurl send`',
           };
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
             `**Getting started — ${mapCopy.sectionVerb} securely via one-time links:**\n` +
-            '  `/qurl file` — share a file with users via one-time qURL links\n' +
+            '  `/qurl send` — share a file with users via one-time qURL links\n' +
             mapCopy.bullet +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
@@ -8395,7 +8414,7 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
   siblingMessage: 'You already have a `/qurl setup` modal open — finish that one, or wait for it to expire.',
 });
 
-// /qurl file + /qurl map confirm-card components. All three customIds
+// /qurl send + /qurl map confirm-card components. All three customIds
 // share the same expectedStage — they're three component types
 // (button + user-select + button) attached to the same confirm-card
 // message, all routed by stage. siblingMessage is registered on the
@@ -8404,14 +8423,14 @@ registerFlow(SETUP_MODAL_CUSTOM_ID, {
 registerFlow(CONFIRM_USER_SELECT_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmUserSelect,
-  siblingMessage: 'You have a `/qurl file` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
+  siblingMessage: 'You have a `/qurl send` or `/qurl map` confirm card open in this channel — finish or cancel it first.',
 });
 // siblingMessage intentionally omitted on the SEND + CANCEL custom-
 // id registrations below — flow-dispatch's `siblingMessages` map is
 // keyed by stage (not by customId), so the message registered on
 // USER_SELECT above is reachable from any of the three customIds
 // at SEND_STAGE_AWAITING_CONFIRM. The "siblingMessage keyed by stage"
-// test in qurl-file-map.test.js pins this contract.
+// test in qurl-send-map.test.js pins this contract.
 registerFlow(CONFIRM_SEND_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmSendClick,
@@ -8501,7 +8520,7 @@ module.exports = {
       sendCooldowns,
       // Renderer exposed so tests can pin the bottom-row button
       // composition directly (e.g., the DM-context @everyone-gate
-      // assertion) without driving through handleQurlFile's entry path.
+      // assertion) without driving through handleQurlSend's entry path.
       renderConfirmCardRows,
       // Memo for the @everyone non-bot count is module-scoped. Tests
       // that reuse a guild reference across cases could otherwise get
@@ -8523,7 +8542,7 @@ module.exports = {
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these
       // hooks, coverage of the polling/revoke/add-recipients code paths
-      // can only be reached via full /qurl file + /qurl map integration
+      // can only be reached via full /qurl send + /qurl map integration
       // tests, which require mocking the entire state-machine front-half
       // before the back-half even runs. Direct exposure means each
       // function gets a focused spec without that setup overhead.
@@ -8537,7 +8556,7 @@ module.exports = {
       // The top-level back-half driver. Exported here so PR 7b's
       // tests (and the follow-up direct unit spec in #278) can pin
       // its contract against a constructed param object — without
-      // re-driving the full /qurl file + /qurl map confirm-card flow.
+      // re-driving the full /qurl send + /qurl map confirm-card flow.
       executeSendPipeline,
       // Test-only file-concurrency hooks. The slot counter is module-
       // private (live state) and exposing a setter lets the cap branch
@@ -8564,10 +8583,10 @@ module.exports = {
       SETUP_API_KEY_MIN_LENGTH,
       SETUP_API_KEY_MAX_LENGTH,
       SETUP_SUCCESS_MSG,
-      // /qurl file + /qurl map handlers + flow constants. Tests pin
+      // /qurl send + /qurl map handlers + flow constants. Tests pin
       // against production values via these exports rather than
       // re-stating the strings.
-      handleQurlFile,
+      handleQurlSend,
       handleQurlMap,
       resolveRecipientUsers,
       partitionRecipients,
@@ -8592,7 +8611,7 @@ module.exports = {
       softenCooldown,
       SEND_STAGE_AWAITING_CONFIRM,
       // Every confirm-card customId is exported so the contract test
-      // in qurl-file-map.test.js can pin every wire value — a typo
+      // in qurl-send-map.test.js can pin every wire value — a typo
       // in any of these silently breaks routing for in-flight confirm
       // cards, so they need to be test-asserted.
       CONFIRM_USER_SELECT_CUSTOM_ID,
