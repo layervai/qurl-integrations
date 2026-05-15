@@ -1089,7 +1089,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
 
   it('returns "No valid recipients" when only bots/sender are in selection', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1111,7 +1111,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
 
   it('returns "incomplete" when send config has neither file nor location', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: null, expires_in: '5m',
+      connector_resource_id: null, actual_url: null, expires_in: '30m',
     });
 
     const result = await handleAddRecipients(
@@ -1127,7 +1127,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
   // would break that wiring silently.
   it('returns newRecipients with {id, username} pairs (post-Add revoke wiring)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: null, actual_url: null, expires_in: '5m',
+      connector_resource_id: null, actual_url: null, expires_in: '30m',
     });
 
     const result = await handleAddRecipients(
@@ -1145,12 +1145,72 @@ describe('handleAddRecipients — pre-flight guards', () => {
       { id: 'u2', username: 'Bob' },
     ]);
   });
+
+  // #352: a stale or directly-written sendConfig row could carry an
+  // off-set `expires_in` value. The pre-flight gate rejects it BEFORE
+  // any mint or recordQURLSendBatch work, so we can't strand QURL
+  // links upstream or write orphan DDB rows. Symmetric with the
+  // failGate inside executeSendPipeline.
+  it('refuses when sendConfig.expires_in is off the allowed set (#352)', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1',
+      expires_in: '25h',  // not in EXPIRY_LABELS — would silently default to 24h under expiryToMs
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+
+    const result = await handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(result.msg).toMatch(/saved expiry is invalid/i);
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+  });
+
+  // #352 belt-and-suspenders: even if a future expires_in slips
+  // through the pre-flight gate, the expiresAt computation is hoisted
+  // ABOVE recordQURLSendBatch, so a throw there can't leave orphan
+  // DDB rows. Mock expiryToMs to throw and verify the ordering
+  // invariant directly.
+  it('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
+    const time = require('../src/utils/time');
+    const original = time.expiryToMs;
+    time.expiryToMs = jest.fn(() => { throw new Error('synthetic expiryToMs throw'); });
+    try {
+      mockDb.getSendConfig.mockResolvedValueOnce({
+        connector_resource_id: 'res-1', expires_in: '30m',  // passes the pre-flight gate
+        attachment_url: 'https://cdn.discordapp.com/x.png',
+        attachment_name: 'x.png', attachment_content_type: 'image/png',
+      });
+
+      let threw = false;
+      try {
+        await handleAddRecipients(
+          'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+          makeInteraction(), 'apikey',
+        );
+      } catch {
+        threw = true;
+      }
+      // Either the function threw or it bailed via the file/location
+      // outer-catch — either way, recordQURLSendBatch MUST NOT have
+      // been called, which is the load-bearing assertion.
+      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+      // Sanity: at minimum, NO DDB write occurred even if the function
+      // returned gracefully. The throw/no-throw outcome is incidental
+      // to the ordering invariant.
+      void threw;
+    } finally {
+      time.expiryToMs = original;
+    }
+  });
 });
 
 describe('handleAddRecipients — file path failure modes', () => {
   it('refuses when stored attachment_url is missing', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: null, attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
 
@@ -1164,7 +1224,7 @@ describe('handleAddRecipients — file path failure modes', () => {
 
   it('refuses when stored attachment_url is not a Discord CDN URL (SSRF guard)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://evil.example.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1183,7 +1243,7 @@ describe('handleAddRecipients — file path failure modes', () => {
 
   it('surfaces "URL has expired" when re-download throws a 403/expired/network error', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1199,7 +1259,7 @@ describe('handleAddRecipients — file path failure modes', () => {
 
   it('surfaces generic "Failed to prepare links" when re-download throws an unknown error', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1215,7 +1275,7 @@ describe('handleAddRecipients — file path failure modes', () => {
 
   it('reports underdelivery when mintLinks returns fewer links than recipients', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1242,7 +1302,7 @@ describe('handleAddRecipients — file path failure modes', () => {
     // to "expired" / "Failed to prepare links" rather than "pool exhausted".
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '5m',
+      location_name: 'Eiffel Tower', expires_in: '30m',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockRejectedValueOnce(new Error('HTTP 429: rate limit exceeded'));
@@ -1259,7 +1319,7 @@ describe('handleAddRecipients — file path failure modes', () => {
 describe('handleAddRecipients — DB failure mid-flow', () => {
   it('aborts before DMs when recordQURLSendBatch fails (no orphan live links)', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-1', expires_in: '5m',
+      connector_resource_id: 'res-1', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1283,7 +1343,7 @@ describe('handleAddRecipients — happy path (location)', () => {
   it('mints, records, DMs, returns delivered count', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '5m', personal_message: 'check this out',
+      location_name: 'Eiffel Tower', expires_in: '30m', personal_message: 'check this out',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
@@ -1325,7 +1385,7 @@ describe('handleAddRecipients — happy path (location)', () => {
   // UploadCount in CloudWatch). The kind field must be 'mixed'.
   it('emits exactly ONE upload_success with kind=mixed when both file + location prep paths run', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
-      connector_resource_id: 'res-file-orig', expires_in: '5m',
+      connector_resource_id: 'res-file-orig', expires_in: '30m',
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
       // Both paths active.
@@ -1355,7 +1415,7 @@ describe('handleAddRecipients — happy path (location)', () => {
   it('reports failed DMs as failed in the return value', async () => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: null, actual_url: 'https://maps.example.com/x',
-      location_name: 'Eiffel Tower', expires_in: '5m',
+      location_name: 'Eiffel Tower', expires_in: '30m',
     });
     mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-new' });
     mockMintLinks.mockResolvedValueOnce([
@@ -1523,6 +1583,32 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
 
   test.each(['30m', '1h', '6h', '24h', '7d'])('accepts the allowed value: %s', async (expiresIn) => {
     await expectGateAccepts(makePipelineParams({ expiresIn }), /expiresIn must be one of/);
+  });
+
+  // #352: expiresAt is computed BEFORE recordQURLSendBatch so a future
+  // `expiryToMs`-throws regression can't leave orphan DDB rows. Today
+  // the entry-level failGate above protects, but the hoist makes the
+  // ordering invariant explicit. Mock expiryToMs to throw and verify
+  // recordQURLSendBatch isn't called even though we got past the
+  // allowed-set gate.
+  test('hoists expiresAt above recordQURLSendBatch so a throw can\'t leave orphan rows (#352)', async () => {
+    const time = require('../src/utils/time');
+    const original = time.expiryToMs;
+    time.expiryToMs = jest.fn(() => { throw new Error('synthetic expiryToMs throw'); });
+    try {
+      mockDb.recordQURLSendBatch.mockClear();
+      const interaction = makeInteraction();
+      let threw = false;
+      try {
+        await executeSendPipeline(interaction, makePipelineParams({ expiresIn: '30m' }));
+      } catch {
+        threw = true;
+      }
+      expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+      void threw;
+    } finally {
+      time.expiryToMs = original;
+    }
   });
 });
 

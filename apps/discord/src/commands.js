@@ -1341,6 +1341,19 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
+  // Compute expiresAt BEFORE recordQURLSendBatch so a future
+  // `expiryToMs`-throws regression can't leave orphan DDB rows (#352).
+  // Today this is defense-in-depth — the failGate above at the
+  // `expiresIn` allowed-set check already rejects malformed values
+  // before any mint or DB work — but pinning the ordering invariant
+  // here keeps the property load-bearing regardless of upstream gate
+  // drift. Drift between this clock and the API's enforcement clock
+  // is bounded by the time between this line and the mint call
+  // (sub-second on the send-pipeline path). Negligible at the
+  // 30m–7d horizon — recipients see "in 24 hours" instead of
+  // "in 23h 59m 56s" on the worst-case path.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
@@ -1377,23 +1390,11 @@ async function executeSendPipeline(interaction, {
     });
   }
 
-  // Send DMs
+  // Send DMs (`expiresAt` computed above the DDB write — see #352).
   let delivered = 0;
   let failed = 0;
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
-
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on the
-  // send-pipeline path; can be a few seconds on handleAddRecipients
-  // which re-downloads + re-uploads + re-mints first). Negligible at
-  // the 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
@@ -1775,6 +1776,25 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
+  // Validate `sendConfig.expires_in` at the entry, BEFORE any mint or
+  // recordQURLSendBatch work (issue #352). Symmetric with the failGate
+  // at executeSendPipeline:~1131 — closes the unprotected path where a
+  // stale/regressed sendConfig row (or a future direct sendConfig
+  // writer) ships an off-set value that would otherwise default to 24h
+  // silently inside `expiryToMs` / `expiryToISO`. Rejecting here means
+  // no QURL links get minted (sparing the upstream API call) and no
+  // DDB rows get written, so there's nothing to revoke / no orphan to
+  // clean up. Returns a user-visible message rather than throwing
+  // (matches handleAddRecipients's error-return contract; the caller
+  // renders it on the post-send confirm card).
+  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
+    logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: sendConfig.expires_in });
+    return {
+      msg: 'Cannot add recipients — saved expiry is invalid. Please create a new send.',
+      newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],
+    };
+  }
+
   // Filter out bots and the sender. Convert the Discord Collection to a
   // plain array so later callers (map/forEach over newRecipients[i]) work.
   const newRecipients = [...usersCollection
@@ -1954,6 +1974,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
+  // Compute expiresAt BEFORE recordQURLSendBatch (and once per call,
+  // not per recipient) so a future `expiryToMs`-throws regression
+  // can't leave orphan DDB rows (#352). The entry-gate above already
+  // rejects malformed `sendConfig.expires_in`, but pinning the
+  // ordering here keeps the property load-bearing if the entry gate
+  // ever drifts. Same Unix-seconds + drift caveat as executeSendPipeline.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+
   // Same guarantee as executeSendPipeline: if the DB write fails, abort
   // BEFORE any DMs go out so we don't leave live QURL links with no
   // local record.
@@ -2001,11 +2029,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;
     try {
-      // Same Unix-seconds expiry computation as executeSendPipeline —
-      // see comment there. Computed once per recipient (cheap; the
-      // alternative would be threading a single timestamp through
-      // sendConfig).
-      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+      // `expiresAt` hoisted above the recordQURLSendBatch call (see
+      // the #352 comment there) — closes the per-recipient redundant
+      // computation alongside the orphan-DDB-row ordering fix.
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
         // Same alias resolution as executeSendPipeline — see comment
         // there for the nickname > globalName > username fallback
