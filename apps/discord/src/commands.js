@@ -750,9 +750,35 @@ function buildRevokedDMPayload({ senderAlias }) {
 // Happy path coalesces dm_status='sent' + DM refs into one DDB Update
 // so the hot dispatch path stays at one write per recipient. Failure
 // path is status-only — there's no message to edit later.
+//
+// NEVER throws on a delivered DM. If the DDB write fails (outage,
+// throttle, validation), DISPATCH_PERSIST_FAILED fires + an error is
+// logged, but the function returns normally so the caller continues
+// to report the recipient as delivered. Throwing here would convert
+// a real DM into a "could not be reached" line on the operator's
+// reply — worse than the bookkeeping miss.
 async function persistDispatchResult(sendId, recipientDiscordId, result) {
+  // Wraps the DDB call so a write failure can't propagate up as a
+  // failed dispatch. `delivered` ⇒ the DM is real and the operator
+  // should still see this recipient as reached.
+  const persist = async (op, delivered) => {
+    try {
+      await op();
+    } catch (err) {
+      if (delivered) {
+        logger.audit(AUDIT_EVENTS.DISPATCH_PERSIST_FAILED, { send_id: sendId });
+      }
+      logger.error('persistDispatchResult: qurl_sends write failed', {
+        sendId, recipientDiscordId, delivered, errorMessage: err.message,
+      });
+    }
+  };
+
   if (result.ok === true && result.channelId && result.messageId) {
-    await db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId);
+    await persist(
+      () => db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId),
+      true,
+    );
     return;
   }
   if (result.ok === true) {
@@ -763,26 +789,34 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     // missing-refs guard (see editTargets builder) naturally skips
     // the DM edit for these rows.
     //
-    // Order matters: DDB write FIRST, audit + warn SECOND. If the DDB
-    // write throws, the canary hasn't fired yet — neither the audit
-    // event nor the warn line will misleadingly claim SENT was
-    // recorded. Both fire only when SENT was actually persisted.
-    //
     // CANONICAL DELIVERY-RATE METRIC: DDB `count(dm_status='sent')`
     // or CloudWatch `dispatch_sent` (they should agree). The
     // `dispatch_sent_no_refs` event is a CANARY, not a subtractor —
     // if it fires, oncall investigates the discord.js response shape;
     // don't auto-subtract it from DISPATCH_SENT in dashboards.
-    await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
+    //
+    // Audit + warn fire BEFORE the persist so a DDB failure can't
+    // mask the discord.js shape-drift canary. If the persist also
+    // fails, DISPATCH_PERSIST_FAILED fires alongside (separate
+    // signal, separate dashboard).
     logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
     logger.warn('sendDM resolved ok but missing channelId/messageId — recording as sent (revoke edit will skip)', {
       sendId, recipientDiscordId,
       hasChannelId: Boolean(result.channelId),
       hasMessageId: Boolean(result.messageId),
     });
+    await persist(
+      () => db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT),
+      true,
+    );
     return;
   }
-  await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED);
+  // sendDM failed — the DM is not real. A bookkeeping error here is
+  // strictly a dropped status update; the recipient was never reached.
+  await persist(
+    () => db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED),
+    false,
+  );
 }
 
 // --- Link status monitor ---

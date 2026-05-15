@@ -1009,9 +1009,12 @@ describe('revokeAllLinks', () => {
 describe('persistDispatchResult — divergence guard', () => {
   beforeEach(() => {
     mockDb.markSendDMDelivered.mockClear();
+    mockDb.markSendDMDelivered.mockResolvedValue(undefined);
     mockDb.updateSendDMStatus.mockClear();
+    mockDb.updateSendDMStatus.mockResolvedValue(undefined);
     logger.warn.mockClear();
     logger.audit.mockClear();
+    logger.error.mockClear();
   });
 
   it('happy path: writes markSendDMDelivered with both refs', async () => {
@@ -1050,6 +1053,53 @@ describe('persistDispatchResult — divergence guard', () => {
     );
   });
 
+  it('does NOT throw when markSendDMDelivered fails — emits DISPATCH_PERSIST_FAILED + logs error', async () => {
+    // The DM was actually delivered. A bookkeeping failure here must
+    // not propagate up as a thrown rejection — the dispatch lambda
+    // would otherwise classify the recipient as "could not be reached"
+    // even though the DM landed in their inbox. Closes the cr-flagged
+    // gap where a wider markSendDMDelivered Update widens the
+    // ValidationException surface.
+    mockDb.markSendDMDelivered.mockRejectedValueOnce(new Error('throttled'));
+    await expect(
+      persistDispatchResult('s', 'r', { ok: true, channelId: 'c', messageId: 'm' }),
+    ).resolves.toBeUndefined();
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_persist_failed', { send_id: 's' });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('qurl_sends write failed'),
+      expect.objectContaining({ sendId: 's', recipientDiscordId: 'r', delivered: true }),
+    );
+  });
+
+  it('emits DISPATCH_PERSIST_FAILED when divergence-branch updateSendDMStatus fails (canary survives DDB outage)', async () => {
+    // Cycle-7 ordering moved the audit AFTER the DDB write; cycle-8
+    // cr flagged that this masks the discord.js shape-drift canary
+    // during a DDB outage. Audit + warn now fire BEFORE the persist
+    // (canary preserved), and DISPATCH_PERSIST_FAILED fires alongside
+    // when the persist also fails.
+    mockDb.updateSendDMStatus.mockRejectedValueOnce(new Error('throttled'));
+    await expect(
+      persistDispatchResult('s', 'r', { ok: true }),
+    ).resolves.toBeUndefined();
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_persist_failed', { send_id: 's' });
+  });
+
+  it('does NOT emit DISPATCH_PERSIST_FAILED when the FAILED-status write fails (no delivered DM)', async () => {
+    // sendDM said failed; no DM exists. A bookkeeping miss here is a
+    // dropped status update, not a real-vs-recorded divergence. Log
+    // an error for grep-ability but skip the canary event so it
+    // stays a high-signal indicator of "delivered but not recorded."
+    mockDb.updateSendDMStatus.mockRejectedValueOnce(new Error('throttled'));
+    await expect(
+      persistDispatchResult('s', 'r', { ok: false }),
+    ).resolves.toBeUndefined();
+    expect(logger.audit).not.toHaveBeenCalledWith('dispatch_persist_failed', expect.anything());
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('qurl_sends write failed'),
+      expect.objectContaining({ sendId: 's', recipientDiscordId: 'r', delivered: false }),
+    );
+  });
 });
 
 describe('renderSendConfirm — post-send confirmation overflow', () => {
