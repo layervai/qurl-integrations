@@ -146,6 +146,27 @@ func TestSetAliasRebindModal_BacktickInjectionEscaped(t *testing.T) {
 	}
 }
 
+// TestSetAliasRebindModal_NewlineInjectionEscaped fences the second
+// code-span breakout: Slack's mrkdwn renderer ends a code span at
+// a hard newline. A target containing \n would otherwise let
+// subsequent mrkdwn render outside the span. escapeMrkdwnCode
+// substitutes a single space.
+func TestSetAliasRebindModal_NewlineInjectionEscaped(t *testing.T) {
+	t.Parallel()
+	raw, err := SetAliasRebindModal("prod-db", "old\n<!channel>\nx", "new")
+	if err != nil {
+		t.Fatalf("SetAliasRebindModal: %v", err)
+	}
+	body := string(raw)
+	if strings.Contains(body, "<!channel>") {
+		// The mention-syntax is JSON-encoded so `<` becomes `<`
+		// in the marshaled body; the actual leak vector is the
+		// literal mention text reaching Slack's mrkdwn renderer.
+		// Either form means escape didn't apply.
+		t.Errorf("newline-injected payload leaked into body: %s", body)
+	}
+}
+
 // TestSetAliasRebindModal_PrivateMetadataIsJSON fences the
 // `private_metadata` encoding contract. The value must round-trip
 // through `json.Unmarshal` into a [SetAliasRebindMetadata] — the
@@ -200,7 +221,7 @@ func TestSetAliasRebindModal_PrivateMetadataIsJSON(t *testing.T) {
 // that boundary depends on:
 //
 //  1. The block_id is exactly [blockIDClaimCode] (single source of
-//     truth in [RedactedSubmissionBlockIDs]).
+//     truth — queried via [IsRedactedSubmissionBlock]).
 //  2. The action_id is exactly [actionIDClaimCode] (so the
 //     submission handler can pull the value out by a known key).
 //  3. The element does NOT carry a misleading `private_value` /
@@ -244,7 +265,7 @@ func TestAdminClaimModal_StableIDsAndNoFakeMasking(t *testing.T) {
 		// field is masked. Fail loudly if any of them sneak back in.
 		for _, fake := range []string{"private_value", "masked", "secret", "is_password"} {
 			if _, present := el[fake]; present {
-				t.Errorf("element carries fictional masking key %q — Slack ignores this; redaction must live at the logging boundary, see RedactedSubmissionBlockIDs", fake)
+				t.Errorf("element carries fictional masking key %q — Slack ignores this; redaction must live at the logging boundary, see IsRedactedSubmissionBlock", fake)
 			}
 		}
 		foundClaimBlock = true

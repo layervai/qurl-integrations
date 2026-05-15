@@ -27,8 +27,8 @@ const callbackIDAdminClaim = "admin_claim_redeem"
 // blockIDClaimCode is the block ID for the bootstrap-code field in
 // the admin-claim modal. Stable so view-submission handlers can pull
 // the value out by a known key — and so the bot's logging middleware
-// (PR-3c.3+) can match on it for the redaction set in
-// [RedactedSubmissionBlockIDs].
+// (PR-3c.3+) can match on it via [IsRedactedSubmissionBlock] before
+// serializing the payload.
 const blockIDClaimCode = "claim_code_block"
 
 // actionIDClaimCode is the action ID for the bootstrap-code input
@@ -167,15 +167,19 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 	return json.Marshal(payload)
 }
 
-// escapeMrkdwnCode neutralizes backticks in a string that's about to
-// be wrapped in a mrkdwn code span. Without escaping, a value
-// containing “ ` “ would close the surrounding span and let the
-// remainder render as mrkdwn — opening an injection vector for
-// user-supplied targets (admin-set DDB rows). Replacing with the
-// modifier-letter prime (U+02CA) keeps the visual approximation
-// while making the substitute non-syntactic for Slack's parser.
+// escapeMrkdwnCode neutralizes the two characters that can break out
+// of a mrkdwn code span: backtick (closes the span) and newline
+// (Slack's renderer ends the span at a hard newline). Without
+// escaping, a value containing either would let the remainder
+// render as mrkdwn — opening an injection vector for user-supplied
+// targets (admin-set DDB rows). Backtick is replaced with U+02CA
+// (MODIFIER LETTER ACUTE ACCENT) which keeps a close visual
+// approximation; newline becomes a single space so the rebind
+// modal stays one-line per target.
 func escapeMrkdwnCode(s string) string {
-	return strings.ReplaceAll(s, "`", "ˊ")
+	s = strings.ReplaceAll(s, "`", "ˊ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
 }
 
 // AdminClaimModal renders the modal shown when a user runs

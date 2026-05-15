@@ -155,6 +155,10 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// Carve-out is `help` only (friendly default).
 		{name: "aliases with extra positional rejected", text: "aliases junk", wantErr: ErrUnexpectedArgument},
 		{name: "list with extra positional rejected", text: "list extra-garbage", wantErr: ErrUnexpectedArgument},
+		// Non-flag-shaped trailing token on `get`: surface as
+		// ErrUnexpectedArgument rather than the misleading
+		// "invalid flag" message applyFlag would otherwise return.
+		{name: "get with non-flag trailing positional rejected", text: "get $prod-db junk", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
@@ -188,7 +192,11 @@ func TestParse_GetFlagErrors(t *testing.T) {
 		wantSubstr string
 	}{
 		{name: "unknown flag key", text: "get $prod-db whatever:true", wantSubstr: "unknown flag"},
-		{name: "malformed flag (no colon)", text: "get $prod-db reasontruly", wantSubstr: "expected key:value"},
+		// A trailing token with no colon hits the parseGet
+		// strict-posture check before applyFlag; it surfaces as
+		// "unexpected argument" rather than "expected key:value"
+		// because the user almost certainly didn't intend a flag.
+		{name: "malformed flag (no colon) surfaces as unexpected arg", text: "get $prod-db reasontruly", wantSubstr: "unexpected argument"},
 		{name: "empty bare value", text: "get $prod-db reason:", wantSubstr: "empty value"},
 		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSubstr: "empty value"},
 	}

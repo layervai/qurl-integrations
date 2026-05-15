@@ -322,6 +322,15 @@ func parseGet(cmd *Command, rest []string) (*Command, error) {
 	}
 	cmd.Alias = alias
 	for _, tok := range rest[1:] {
+		// Surface non-flag-shaped tokens as ErrUnexpectedArgument so
+		// `get $alias junk` reads as a typo (matches the strict
+		// posture taken on `aliases`, `list`, `admin policies`, etc.).
+		// applyFlag would otherwise report "invalid flag: \"junk\"
+		// (expected key:value)" — accurate to applyFlag but confusing
+		// to a user who didn't intend to type a flag at all.
+		if !strings.ContainsRune(tok, ':') {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, tok)
+		}
 		if err := applyFlag(cmd, tok); err != nil {
 			return nil, err
 		}
