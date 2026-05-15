@@ -179,13 +179,11 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 // these helpers instead of the gateway-cache helpers in src/discord.js.
 // Today the helpers below are unused production code — they're the
 // landing pads for the route migration after this PR ships.
+// Helpers read `client.rest.X` directly (rather than capturing
+// `client.rest` at module load) so partial test mocks of
+// `../src/discord` don't crash require-time. No production consumer
+// needs a direct `rest` reference today.
 module.exports = {
-  // Lazy access — `client.rest` resolves at property-access time, not
-  // module load, so partial test mocks of `../src/discord` don't crash
-  // require-time. Internal helpers above read `client.rest.X` directly
-  // for the same reason. No production consumer destructures this; the
-  // export is here for the discord-rest test that pins it.
-  get rest() { return client.rest; },
   sendDM,
   editDM,
   addRoleToMember,

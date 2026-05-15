@@ -42,7 +42,7 @@ jest.mock('../src/discord', () => {
 
 const restMock = require('../src/discord').__mockRestInstance;
 
-const { rest: exportedRest, sendDM, editDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { sendDM, editDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
 
 beforeEach(() => {
   restMock.post.mockReset();
@@ -51,13 +51,10 @@ beforeEach(() => {
   restMock.patch.mockReset();
 });
 
-describe('module wiring', () => {
-  it('re-exports the shared client.rest instance (not a new one)', () => {
-    // Sharing the rate-limit bucket state is the whole reason this module
-    // imports client.rest instead of constructing its own REST().
-    expect(exportedRest).toBe(restMock);
-  });
-});
+// Each helper-level test implicitly pins the shared-rate-limit-bucket
+// invariant: every helper calls `client.rest.X` (verified via
+// `restMock.post/put/delete/patch.mock.calls`), so they share the
+// same rate-limit bucket as the gateway-cache helpers in discord.js.
 
 describe('sendDM via REST', () => {
   it('creates DM channel then posts message, returns ok:true with channel + message ids', async () => {

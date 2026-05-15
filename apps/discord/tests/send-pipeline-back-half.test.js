@@ -919,13 +919,21 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM).not.toHaveBeenCalled();
     });
 
-    it('does not affect revoke success/total even when every DM edit fails', async () => {
+    it.each([
+      ['rejection',     () => mockEditDM.mockRejectedValueOnce(new Error('boom'))],
+      ['ok:false',      () => mockEditDM.mockResolvedValueOnce({ ok: false, expected: false })],
+      ['ok:false+exp',  () => mockEditDM.mockResolvedValueOnce({ ok: false, expected: true })],
+    ])('does not affect revoke success/total when DM edit fails as %s', async (_shape, setupMock) => {
+      // Both shapes of edit failure (thrown + soft ok:false return)
+      // and both severities (expected / unexpected) must keep the
+      // revoke success/total counts honest — those track the DELETE,
+      // not the edit, so a recipient-side state change can't poison
+      // the operator-facing tally.
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
-      // Both shapes of edit failure: rejection AND ok:false return.
-      mockEditDM.mockRejectedValueOnce(new Error('boom'));
+      setupMock();
 
       const result = await revokeAllLinks('send-edit-fail', 'sender-1', 'apikey', 'Alice');
 
@@ -1022,30 +1030,26 @@ describe('persistDispatchResult — divergence guard', () => {
     expect(logger.audit).not.toHaveBeenCalledWith('dispatch_sent_no_refs', expect.anything());
   });
 
-  it('records SENT + emits DISPATCH_SENT_NO_REFS + warns on ok-but-missing-refs divergence', async () => {
-    // The DM was actually delivered (sendDM said ok), so DDB records
-    // SENT to keep delivery-rate metrics faithful. The dedicated
-    // dispatch_sent_no_refs audit event is the canary if discord.js's
-    // user.send() response shape ever drifts; the revoke path's
-    // missing-refs guard naturally skips the DM edit for these rows.
-    await persistDispatchResult('s', 'r', { ok: true });
+  it.each([
+    ['only messageId missing', { ok: true, channelId: 'c' },                 false, true ],
+    ['only channelId missing', { ok: true, messageId: 'm' },                 true,  false],
+    ['both missing',           { ok: true },                                  false, false],
+  ])('records SENT + emits DISPATCH_SENT_NO_REFS on divergence (%s)', async (_name, result, hasMessageId, hasChannelId) => {
+    // Asymmetric coverage protects against a future refactor that
+    // flips `&&` to `||` in the persistDispatchResult guard — only
+    // BOTH refs present should land on the happy path.
+    await persistDispatchResult('s', 'r', result);
     expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'sent');
+    expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
+    // Diagnostic fields tell the operator which side of the response
+    // shape drifted.
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('missing channelId/messageId'),
-      // hasChannelId / hasMessageId pinned so a future refactor that
-      // drops the diagnostic fields fails loudly — they're the only
-      // way for an operator to tell which side of the response shape
-      // drifted.
-      expect.objectContaining({
-        sendId: 's',
-        recipientDiscordId: 'r',
-        hasChannelId: false,
-        hasMessageId: false,
-      }),
+      expect.objectContaining({ hasChannelId, hasMessageId }),
     );
-    expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
   });
+
 });
 
 describe('renderSendConfirm — post-send confirmation overflow', () => {
