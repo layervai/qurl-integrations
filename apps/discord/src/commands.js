@@ -171,7 +171,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
+const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -402,16 +402,16 @@ async function batchSettled(items, fn, batchSize = 5) {
 //      discord.js v14.18+).
 //   3. user.username — direct username read; defends against test
 //      mocks or shapes where the v14 displayName getter is absent.
-//   4. 'Someone' — last-resort literal so callers never get null.
+//   4. DISPLAY_NAME_FALLBACK — last-resort so callers never get null.
 // Optional chains throughout so a malformed interaction (no user, no
-// member) returns 'Someone' instead of throwing inside DM-dispatch.
+// member) returns the fallback instead of throwing inside DM-dispatch.
 // Used by the DM-embed renderer so every recipient sees the same
 // sender name across the dispatch.
 function resolveSenderAlias(interaction) {
   return interaction?.member?.displayName
     ?? interaction?.user?.displayName
     ?? interaction?.user?.username
-    ?? 'Someone';
+    ?? DISPLAY_NAME_FALLBACK;
 }
 
 // Resolve a recipient's per-guild display alias: guild nickname >
@@ -755,13 +755,10 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     await db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId);
     return;
   }
-  // Defensive: sendDM returned ok but discord.js silently omitted
-  // channelId / messageId. Today that doesn't happen — `user.send()`
-  // resolves to a Message with both — but if a future discord.js
-  // changes the response shape, the audit metric would fire
-  // DISPATCH_SENT while DDB records `failed`. Surface the divergence
-  // loudly so it's catchable in logs without dropping into prod
-  // behavior change. Treat as a failed dispatch for safety.
+  // Defensive: ok:true but missing refs would diverge the audit metric
+  // (DISPATCH_SENT) from the DDB record (failed). Surface the gap loudly
+  // and record as failed — keeps DDB honest if discord.js ever changes
+  // the user.send() response shape.
   if (result.ok === true) {
     logger.warn('sendDM resolved ok but missing channelId/messageId — recording as failed', {
       sendId, recipientDiscordId,
@@ -6041,12 +6038,11 @@ function renderSendConfirm({
   return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
-// senderAlias defaults to 'Someone' as a defense-in-depth in case a
-// future caller forgets the 4th arg. Production callers always pass
-// `resolveSenderAlias(interaction)`, which has its own 'Someone'
-// fallback; this default keeps the recipient-side copy graceful if
-// that contract ever drifts.
-async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = 'Someone') {
+// Defaulted senderAlias is defense-in-depth — production callers
+// always pass resolveSenderAlias(interaction), which has its own
+// DISPLAY_NAME_FALLBACK, so a forgotten 4th arg still renders
+// gracefully on the recipient side.
+async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DISPLAY_NAME_FALLBACK) {
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
@@ -6127,10 +6123,18 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = 'So
   // recipient, even if multiple resources fanned out to them) — collapse
   // items to the first delivered row per recipient_discord_id.
   //
+  // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
+  // Reversing the order would create a window where the recipient sees
+  // "closed the door" while the link still resolves until DELETE
+  // completes. With DELETE first, the worst case is a brief window where
+  // the live button now 404s — the same window that existed before this
+  // feature, minus the post-revoke rewrite.
+  //
   // Skips:
-  //   - recipients not in successUserIds (failed revoke = link was
-  //     already opened, so the recipient already passed through the
-  //     door — nothing to edit)
+  //   - recipients not in successUserIds (their revoke failed; either
+  //     the link was already opened, or a mixed-outcome recipient with
+  //     some links failed — either way the door isn't fully closed for
+  //     them, so the "closed the door" copy would be misleading)
   //   - rows with dm_status !== 'sent' (DM never made it; no message
   //     exists to edit)
   //   - rows lacking dm_channel_id / dm_message_id (legacy, pre-
@@ -6175,7 +6179,7 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = 'So
       let failed = 0;
       for (const r of editResults) {
         if (r.status === 'fulfilled') edited++;
-        else if (r.reason && r.reason.expected) expectedFailures++;
+        else if (r.reason?.expected === true) expectedFailures++;
         else failed++;
       }
       logger.info('Edited DMs after revoke', {

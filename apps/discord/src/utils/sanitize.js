@@ -40,19 +40,24 @@ const STRIP_RE = new RegExp(
   'g',
 );
 
+// Last-resort display-name fallback. Centralized so the
+// resolveSenderAlias chain, sanitizeDisplayName, and the
+// defensive default in revokeAllLinks all agree on one literal.
+const DISPLAY_NAME_FALLBACK = 'Someone';
+
 // `maxCodepoints` defaults to 64 (display-name budget). Larger
 // surfaces (locationName, attachment.name → 256) pass their own
 // cap; the strip + NFKC + codepoint-slice contract is identical.
-// Empty / undefined input returns the 'Someone' fallback for the
+// Empty / undefined input returns the display-name fallback for the
 // display-name caller; surface-specific callers should branch on
-// the empty case themselves rather than render "Someone".
+// the empty case themselves rather than render the fallback.
 function stripControlAndBidi(s, maxCodepoints = 64) {
-  const cleaned = String(s ?? 'Someone').normalize('NFKC').replace(STRIP_RE, '');
+  const cleaned = String(s ?? DISPLAY_NAME_FALLBACK).normalize('NFKC').replace(STRIP_RE, '');
   // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
   // code units, so a cap on a name like `'A'.repeat(63) + emoji`
   // would split a surrogate pair and Discord would render the lone high
   // surrogate as tofu. `Array.from(str)` iterates by codepoint.
-  return Array.from(cleaned).slice(0, maxCodepoints).join('') || 'Someone';
+  return Array.from(cleaned).slice(0, maxCodepoints).join('') || DISPLAY_NAME_FALLBACK;
 }
 
 /**
@@ -97,7 +102,7 @@ function sanitizeContentLabel(s, maxCodepoints = 256) {
  * cannot be truncated mid-pair into a single backslash.
  */
 function sanitizeDisplayName(s) {
-  return escapeDiscordMarkdown(stripControlAndBidi(s)) || 'Someone';
+  return escapeDiscordMarkdown(stripControlAndBidi(s)) || DISPLAY_NAME_FALLBACK;
 }
 
 /**
@@ -127,4 +132,12 @@ function stripBidiAndControls(s) {
   return String(s ?? '').normalize('NFKC').replace(STRIP_RE, '');
 }
 
-module.exports = { sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls };
+module.exports = {
+  DISPLAY_NAME_FALLBACK,
+  sanitizeFilename,
+  escapeDiscordMarkdown,
+  sanitizeDisplayName,
+  sanitizeDisplayNamePlain,
+  sanitizeContentLabel,
+  stripBidiAndControls,
+};

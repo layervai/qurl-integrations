@@ -86,17 +86,23 @@ async function sendDM(userId, message) {
   }
 }
 
-// Discord status codes / api codes that are operational outcomes for a
-// DM edit — recipient deleted the message, blocked the bot, closed the
-// channel, the bot was kicked from a shared guild. Surface as
+// Discord API codes that are operational outcomes for a DM edit —
+// recipient deleted the message, blocked the bot, closed the channel,
+// the bot was kicked from a shared guild. Surface as
 // `{ ok: false, expected: true }` at info level so they don't pollute
-// oncall signal. New codes belong here, not in the predicate.
-const DM_EDIT_EXPECTED_HTTP_STATUS = new Set([403, 404]);
+// oncall signal.
+//
+// Gated on the API code (not bare HTTP status) on purpose: a 403 or
+// 404 WITHOUT one of these codes is suspicious — examples include a
+// revoked bot token mid-flight (403 with no JSON body), a routing
+// proxy returning a synthetic 404, or a Discord-side bug. Logging
+// those at warn keeps the unknowns visible. New expected codes belong
+// here, not in the predicate.
 const DM_EDIT_EXPECTED_API_CODES = new Set([
-  10003, // Unknown Channel
-  10008, // Unknown Message
-  50001, // Missing Access
-  50007, // Cannot send messages to this user
+  10003, // Unknown Channel — DM channel deleted
+  10008, // Unknown Message — recipient deleted the DM
+  50001, // Missing Access — bot kicked / lost shared guild
+  50007, // Cannot send messages to this user — DMs disabled / blocked
 ]);
 
 /**
@@ -114,8 +120,7 @@ async function editDM(channelId, messageId, message) {
     await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
     return { ok: true };
   } catch (error) {
-    const expected = DM_EDIT_EXPECTED_HTTP_STATUS.has(error.status)
-      || DM_EDIT_EXPECTED_API_CODES.has(error.code);
+    const expected = DM_EDIT_EXPECTED_API_CODES.has(error.code);
     const level = expected ? 'info' : 'warn';
     logger[level]('Failed to edit DM', {
       channelId, messageId, status: error.status, code: error.code,
@@ -162,18 +167,11 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 // Today the helpers below are unused production code — they're the
 // landing pads for the route migration after this PR ships.
 module.exports = {
-  // Property getter — resolves to client.rest at access time, NOT at
-  // module load. This matters because: (a) partial test mocks of
-  // `../src/discord` don't crash at require-time when commands.js
-  // pulls in editDM, and (b) the same shared instance backs each
-  // call inside this module via `client.rest.X` directly. Note for
-  // consumers: `const { rest } = require('./discord-rest')` evaluates
-  // the getter at destructure time and pins to the current
-  // `client.rest`. Production safe because client.login() and
-  // http-only-init's setToken() both mutate `client.rest` in place
-  // rather than reassigning. If that ever changes, destructure-then-
-  // call becomes stale and consumers should switch to property
-  // access (`discordRest.rest.post(...)`).
+  // Lazy access — `client.rest` resolves at property-access time, not
+  // module load, so partial test mocks of `../src/discord` don't crash
+  // require-time. Internal helpers above read `client.rest.X` directly
+  // for the same reason. No production consumer destructures this; the
+  // export is here for the discord-rest test that pins it.
   get rest() { return client.rest; },
   sendDM,
   editDM,

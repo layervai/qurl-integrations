@@ -148,6 +148,24 @@ describe('editDM via REST', () => {
     const result = await editDM('c', 'm', { embeds: [], components: [] });
     expect(result).toEqual({ ok: false, expected: false });
   });
+
+  it('marks bare 403 / 404 without a known API code as UNEXPECTED', async () => {
+    // Defense against the cr-flagged scenario: Discord-side bugs,
+    // proxy 404s, and revoked-token 403s shouldn't get the silent
+    // info-level treatment reserved for known operational outcomes.
+    // The API code is the gate; status alone is not.
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Forbidden'), { status: 403, code: undefined }),
+    );
+    const r403 = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(r403).toEqual({ ok: false, expected: false });
+
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Not Found'), { status: 404, code: undefined }),
+    );
+    const r404 = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(r404).toEqual({ ok: false, expected: false });
+  });
 });
 
 describe('addRoleToMember via REST', () => {

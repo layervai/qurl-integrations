@@ -853,6 +853,23 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-ok', 'm-ok']);
     });
 
+    it('emits no edit log when every strict-success row is legacy (no editable targets)', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent' }, // legacy, no refs
+        { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent' }, // legacy, no refs
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-all-legacy', 'sender-1', 'apikey', 'Alice');
+
+      expect(mockEditDM).not.toHaveBeenCalled();
+      // Skip the "Edited DMs after revoke" log entirely when there's
+      // nothing to edit — keeps CloudWatch alerts from interpreting
+      // attempted=0 as a noteworthy event.
+      const editedLog = logger.info.mock.calls.find(c => c[0] === 'Edited DMs after revoke');
+      expect(editedLog).toBeUndefined();
+    });
+
     it('skips rows with no stored DM refs (legacy sends predating the wire-up)', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-new',    recipient_discord_id: 'u-new',    dm_status: 'sent', dm_channel_id: 'c-new', dm_message_id: 'm-new' },
@@ -914,11 +931,10 @@ describe('revokeAllLinks', () => {
       expect(logCall[1]).toMatchObject({ attempted: 3, edited: 1, expectedFailures: 1, failed: 1 });
     });
 
-    it('still edits DMs gracefully when senderAlias is omitted (forgotten-4th-arg defense)', async () => {
+    it('renders the fallback alias when senderAlias is omitted (forgotten-4th-arg defense)', async () => {
       // Production callers always pass resolveSenderAlias(interaction);
-      // this pins the defaulted-param defense so a forgotten arg renders
-      // the recipient-side copy as "Someone closed the door" instead of
-      // throwing or producing "undefined closed the door".
+      // pin the defaulted-param defense so a forgotten arg renders
+      // "Someone closed the door" instead of "undefined closed the door".
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
       ]);
@@ -927,6 +943,17 @@ describe('revokeAllLinks', () => {
       await revokeAllLinks('send-no-alias', 'sender-1', 'apikey'); // no senderAlias
 
       expect(mockEditDM).toHaveBeenCalledTimes(1);
+      // The Embed mock chains via setDescription returning `this`, so
+      // the rendered description lives on the captured mock — verify
+      // the fallback string actually lands in the embed.
+      const payload = mockEditDM.mock.calls[0][2];
+      expect(payload.embeds).toHaveLength(1);
+      // EmbedBuilder mock in this test only chains; assert via the
+      // setDescription spy on the captured embed instance.
+      const embed = payload.embeds[0];
+      const setDescCall = embed.setDescription.mock?.calls?.[0]?.[0];
+      expect(setDescCall).toBeTruthy();
+      expect(setDescCall).toMatch(/\*\*Someone\*\* closed the door/);
     });
 
     it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
