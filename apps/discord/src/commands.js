@@ -263,17 +263,35 @@ const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d
 // has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
 // events. Acceptable for our scale; revisit if a future regression in
 // gateway event delivery causes drift.
+//
+// In-flight de-duplication via the `prewarmInFlight` map below: two
+// concurrent `/qurl file @everyone` invocations in the same guild from
+// a cold cache share the same underlying `members.fetch()` promise.
+// Without coalescing, abuse via concurrent invocations could burn
+// chunk-request budget linearly. discord.js may also coalesce the
+// `GUILD_REQUEST_MEMBERS` chunks internally, but we don't rely on it
+// — the map is keyed by `guild.id` so cross-guild calls still proceed
+// in parallel.
+const prewarmInFlight = new Map();
 async function prewarmGuildMembersCache(guild, logCtx) {
   if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
   if (cacheSize >= (guild.memberCount ?? Infinity)) return;
-  try {
-    await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
-  } catch (err) {
-    logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
-      ...logCtx, guild_id: guild.id, error: err && err.message,
-    });
-  }
+  const existing = prewarmInFlight.get(guild.id);
+  if (existing) return existing;
+  const inFlight = (async () => {
+    try {
+      await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
+    } catch (err) {
+      logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
+        ...logCtx, guild_id: guild.id, error: err && err.message,
+      });
+    } finally {
+      prewarmInFlight.delete(guild.id);
+    }
+  })();
+  prewarmInFlight.set(guild.id, inFlight);
+  return inFlight;
 }
 
 function sanitizeMessage(msg) {

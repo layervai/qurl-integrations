@@ -2771,12 +2771,20 @@ describe('handleQurlFile — slash entry', () => {
 // the trigger conditions so a future refactor that drops the pre-warm
 // regresses here, not in production.
 
-// Identifies the pre-warm call by its options-object shape (`{ time }`)
-// to disambiguate from the per-ID `members.fetch(id)` calls in
-// resolveRecipientUsers. Asserting on the shape rather than the count
-// also surfaces a future refactor that switched to a different
-// discord.js API (e.g. `members.fetch(undefined)`).
-const isPrewarmCall = ([arg]) => arg && typeof arg === 'object' && typeof arg.time === 'number';
+// Identifies the pre-warm call by its options-object shape: a bulk
+// chunk fetch carries `{ time }` ONLY — no `user`/`query`/`limit`/
+// `force`. Disambiguates from the per-ID `members.fetch(id)` calls in
+// resolveRecipientUsers AND from a future bounded per-user fetch like
+// `members.fetch({ user: id, time: 2000 })` that would happen to
+// carry a `time` field. Asserting absence of the per-user keys makes
+// the disambiguation explicit so the helper stays accurate as the
+// discord.js API surface grows.
+const isPrewarmCall = ([arg]) =>
+  arg && typeof arg === 'object'
+  && typeof arg.time === 'number'
+  && arg.user === undefined
+  && arg.query === undefined
+  && arg.limit === undefined;
 
 describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
   test('@everyone in recipients string → members.fetch() pre-warm fires', async () => {
@@ -2830,6 +2838,20 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
+  test('@everyonefoo (no word boundary) → pre-warm does NOT fire', async () => {
+    // MASS_MENTION_HINT_RE uses `(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])`
+    // — same word-boundary class as recipient-parser.js's
+    // EVERYONE_TOKEN_RE. Without the boundary, a typo / paste like
+    // `@everyonefoo` would burn a chunk fetch even though the parser
+    // ignores the token. A future simplification to `/@everyone|<@&\d+>/u`
+    // would silently regress the budget defense — this test pins it.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '@everyonefoo' },
+    });
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
   test('cache already at memberCount → members.fetch() pre-warm short-circuits', async () => {
     // Hot-cache short-circuit defends against re-fetching when a prior
     // invocation in the same process lifetime already populated the
@@ -2845,6 +2867,48 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     int.guild.memberCount = 2; // matches cache.size from guildMembers above
     await handleQurlFile(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('concurrent invocations in the same guild share one in-flight fetch', async () => {
+    // Two simultaneous /qurl file @everyone calls against a cold cache
+    // should NOT each fire their own chunk request. The prewarm helper's
+    // in-flight Map<guildId, Promise> coalesces them — abuse via
+    // concurrent invocations otherwise burns chunk-request budget
+    // linearly. discord.js may also coalesce GUILD_REQUEST_MEMBERS
+    // internally, but we don't rely on that.
+    const aliceId = '500000000000000010';
+    // Pin the same guild object across both invocations — keyed by
+    // guild.id, the in-flight map only coalesces same-guild calls.
+    const sharedFetch = jest.fn(() => new Promise(() => { /* never resolves */ }));
+    const sharedGuild = {
+      id: 'shared-guild',
+      members: { cache: new Map(), fetch: sharedFetch },
+      roles: { cache: new Map() },
+      channels: { cache: new Map() },
+      memberCount: 10,
+    };
+    function makeShared() {
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+        guildMembers: { [aliceId]: {} },
+      });
+      int.guild = sharedGuild;
+      int.guildId = sharedGuild.id;
+      int.memberPermissions = { has: jest.fn(() => true) };
+      return int;
+    }
+    const int1 = makeShared();
+    const int2 = makeShared();
+    // Fire both concurrently. handleQurlFile awaits the pre-warm, but
+    // because sharedFetch never resolves we don't actually need to
+    // await the full handlers — just trigger them and assert the
+    // fetch was called at most once across both.
+    handleQurlFile(int1);
+    handleQurlFile(int2);
+    // Microtask flush so both handlers reach the prewarm await.
+    await new Promise((r) => setImmediate(r));
+    const prewarmCalls = sharedFetch.mock.calls.filter(isPrewarmCall);
+    expect(prewarmCalls.length).toBe(1);
   });
 
   test('members.fetch() rejection is swallowed — flow continues in degraded mode', async () => {
