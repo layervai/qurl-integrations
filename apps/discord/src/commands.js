@@ -761,22 +761,25 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     // so DDB matches observable reality — `count(dm_status='sent')`
     // stays a faithful delivery-rate metric. The revoke path's
     // missing-refs guard (see editTargets builder) naturally skips
-    // the DM edit for these rows. Emit DISPATCH_SENT_NO_REFS so the
-    // gap between DISPATCH_SENT and the editable-on-revoke subset is
-    // queryable from CloudWatch.
+    // the DM edit for these rows.
+    //
+    // Order matters: DDB write FIRST, audit + warn SECOND. If the DDB
+    // write throws, the canary hasn't fired yet — neither the audit
+    // event nor the warn line will misleadingly claim SENT was
+    // recorded. Both fire only when SENT was actually persisted.
     //
     // CANONICAL DELIVERY-RATE METRIC: DDB `count(dm_status='sent')`
     // or CloudWatch `dispatch_sent` (they should agree). The
     // `dispatch_sent_no_refs` event is a CANARY, not a subtractor —
     // if it fires, oncall investigates the discord.js response shape;
     // don't auto-subtract it from DISPATCH_SENT in dashboards.
+    await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
     logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
     logger.warn('sendDM resolved ok but missing channelId/messageId — recording as sent (revoke edit will skip)', {
       sendId, recipientDiscordId,
       hasChannelId: Boolean(result.channelId),
       hasMessageId: Boolean(result.messageId),
     });
-    await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
     return;
   }
   await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED);
@@ -6172,8 +6175,11 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
     }
     if (editTargets.size > 0) {
       const editPayload = buildRevokedDMPayload({ senderAlias });
-      // Same fan-out width as the DELETE batch above — Discord PATCHes
-      // share the same channel-bucket rate limit so 5-wide is plenty.
+      // Same fan-out width as the DELETE batch above. Discord's per-
+      // channel rate-limit buckets are unique per recipient (each DM
+      // channel is its own bucket), so 5 concurrent PATCHes don't share
+      // a bucket; the bound exists to limit global rate-limit pressure
+      // and audit-log burst, not per-channel contention.
       const entries = [...editTargets.entries()];
       // editDM swallows its own exceptions and returns { ok, expected }.
       // Re-throw on `!ok` so batchSettled buckets failures uniformly;
