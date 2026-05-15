@@ -5126,7 +5126,9 @@ describe('handleConfirmVoiceEveryone', () => {
     // gap (voice_member_count - valid_count = drops).
     const int = makeVoiceInteraction({ members: [u1, u2] });
     // Inject a partial-cache row so channel.members.size = 3 but
-    // valid.length stays at 2 after the partial-cache drop.
+    // valid.length stays at 2 after the partial-cache drop. The
+    // empty object `{}` triggers the no-`.user` branch in the voice
+    // resolution loop (commands.js: `if (m?.user) ... else partialCacheDrops++`).
     const channel = int.guild.channels.cache.get(VOICE_CH);
     channel.members.set('partial-cache-id', {});
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });

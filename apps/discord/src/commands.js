@@ -5598,19 +5598,11 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
-  // Mirrors the audit log in handleConfirmEveryone — a successful
-  // voice-channel fan-out is comparably load-bearing for ops ("did
-  // someone fan to N members of #voice-channel?") and shouldn't
-  // require a DDB scan of qurl_send_configs to surface in logs.
-  //
-  // Asymmetry with handleConfirmEveryone: that log emits both
-  // cache_size and member_count (cache vs guild-total; the gap is
-  // the partial-cache signal at guild scope). The voice path has
-  // no guild-total peer — Discord doesn't expose a "total ever-
-  // could-connect" count for a voice channel — so one field
-  // (voice_member_count = channel.members.size) is sufficient. The
-  // (voice_member_count - valid_count) gap captures the same
-  // forensic signal at voice-channel scope.
+  // Audit-log parity with handleConfirmEveryone — voice fan-outs
+  // need to be findable in logs without a qurl_send_configs scan.
+  // Asymmetry: no guild-total peer at voice scope (Discord doesn't
+  // expose one), so one channel-size field —
+  // (voice_member_count - valid_count) = partial-cache + filter gap.
   logger.info('handleConfirmVoiceEveryone: voice @everyone expansion succeeded', {
     flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
     voice_channel_id: voiceChannelId,
