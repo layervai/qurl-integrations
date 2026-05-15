@@ -1764,6 +1764,112 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(emitted).not.toContain('mint_failed');
   });
 
+  // Bulk-path button-packing contract: handleAddRecipients now
+  // discards the trust button inside each per-link payload and
+  // appends ONE trust button at the bottom of the dispatched
+  // message (so multi-link recipients don't see N redundant
+  // "What is qURL?" verify buttons). For the N=1 case asserted
+  // here, the result must match the executeSendPipeline single-
+  // path layout: one ActionRow holding [Step Through, What is qURL?].
+  // A future refactor that re-introduces per-link trust buttons,
+  // or that breaks the contract that components[0].components[0]
+  // is the Step Through button, would surface here.
+  it('packs the trust button once at the bottom (not per-link) for the bulk path', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-pack' });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/pack', resource_id: 'res-loc-pack' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-pack', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    const [, payload] = mockSendDM.mock.calls[0];
+    // One ActionRow holding both buttons — matches the
+    // executeSendPipeline layout for the typical 1-link send.
+    expect(payload.components).toHaveLength(1);
+    const buttons = payload.components[0].components;
+    expect(buttons).toHaveLength(2);
+    // No assertion on label/url shape here; build-delivery-embed.test.js
+    // owns those contracts. This test only pins the packing structure
+    // — that the bulk path produces a [Step Through, What is qURL?]
+    // row, not a separate trust row, in the 1-link case.
+  });
+
+  // The bulk-path shared-embed optimization: at N>1, the EmbedBuilder
+  // is built once and the same reference repeated via Array(N).fill.
+  // discord.js' .toJSON() is a pure read of internal state, so the
+  // optimization is safe — but a future discord.js bump that
+  // introduces a mutating serialize hook (or a buildDeliveryEmbed
+  // change that turns the embed mutation-aware) would break the
+  // pattern silently. This test pins the reference-equality contract.
+  it('shares one EmbedBuilder reference across N>1 embeds in the payload', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-shared', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'res-file-shared-new', fileBuffer: Buffer.from('x'),
+    });
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-file', resource_id: 'res-file-shared-new' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-loc', resource_id: 'res-loc-shared-new' }]);
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-shared-new' });
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+
+    await handleAddRecipients(
+      'send-share', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    const [, payload] = mockSendDM.mock.calls[0];
+    // file + location → 2 links to the one recipient.
+    expect(payload.embeds).toHaveLength(2);
+    // The optimization: same EmbedBuilder reference, not two copies.
+    expect(payload.embeds[0]).toBe(payload.embeds[1]);
+    // Belt-and-braces: even if a future discord.js bump introduced a
+    // position-aware toJSON (some library serialize hooks consult
+    // internal counters), the serialized output must remain identical
+    // across the embeds[] entries — otherwise the recipient would see
+    // diverged author/footer/description across embeds that share the
+    // builder reference.
+    if (typeof payload.embeds[0].toJSON === 'function') {
+      expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
+    }
+    // Link-ordering contract: the two minted qURLs (file then location,
+    // per the mintLinks mock sequencing above) must map positionally
+    // onto the Step Through buttons in the assembled payload. A future
+    // refactor that shuffles recipientLinks[recipient.id] between
+    // population and the packBulkDeliveryComponents call would
+    // silently mis-route recipients to the wrong qURL otherwise.
+    // discord.js mock here is the lightweight chainable variant —
+    // setURL.mock.calls captures the URL each button was built with;
+    // pull the URL via the first call's first arg.
+    const urls = payload.components
+      .flatMap(row => row.components)
+      .map(b => b.setURL.mock.calls[0]?.[0])
+      .filter(Boolean);
+    // The two step-throughs (file then location) precede the trust
+    // button; the trust button's URL is the hardcoded brand landing.
+    expect(urls).toEqual([
+      'https://q.test/share-file',
+      'https://q.test/share-loc',
+      'https://layerv.ai/qurl/',
+    ]);
+  });
+
   // Locks the single-emission contract: a sendConfig with both file
   // AND location must NOT fire upload_success twice (would double-count
   // UploadCount in CloudWatch). The kind field must be 'mixed'.

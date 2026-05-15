@@ -19,6 +19,34 @@ const RESOURCE_TYPES = {
   MAPS: 'maps',
 };
 
+// Trust signals surfaced on the per-recipient DM embed (sender provenance
+// + "is this real?" verify path). The destination domain in the footer
+// mirrors the host of the minted qURL — keep in lockstep with whatever
+// host qurl-service returns from POST /v1/qurls. The landing URL is the
+// public brand page first-time recipients can hit to verify qURL is a
+// real service before clicking Step Through.
+//
+// LANDING_URL is intentionally brand-canonical — it stays pinned to
+// the layerv.ai/qurl page even when a tenant brands their minted-link
+// host via `branded_domain`. The verify path is "is qURL itself
+// real?", not "is this tenant real?"; routing through the canonical
+// brand page is the correct trust signal regardless of which host
+// served the link.
+//
+// TODO(branded-domain) — tracked: layervai/qurl-integrations#383
+// DESTINATION_DOMAIN is a brand-default literal. qurl-service already
+// supports a `branded_domain` concept (tenant-custom hosts on minted
+// links — see qurl-service api.gen.go). Discord doesn't consume that
+// field today, but the moment it does, the footer "opens qurl.link"
+// becomes factually wrong while Step Through opens e.g.
+// `door.acme.com`. When qurl-integrations starts honoring
+// branded_domain in the minted-link response, derive the footer text
+// from link.qurlLink's host rather than this literal.
+const TRUST = {
+  LANDING_URL: 'https://layerv.ai/qurl/',
+  DESTINATION_DOMAIN: 'qurl.link',
+};
+
 // DM delivery status values
 const DM_STATUS = {
   SENT: 'sent',
@@ -398,4 +426,5 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  TRUST,
 };

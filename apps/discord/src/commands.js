@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
 const logger = require('./logger');
-const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS } = require('./constants');
+const { COLORS, TIMEOUTS, RESOURCE_TYPES, DM_STATUS, MAX_FILE_SIZE, MAX_CONCURRENT_MONITORS, AUDIT_EVENTS, TRUST } = require('./constants');
 const {
   expiryToISO,
   expiryToMs,
@@ -477,6 +477,25 @@ function resolveSenderAlias(interaction) {
     ?? DISPLAY_NAME_FALLBACK;
 }
 
+// Author-row provenance fields for the per-recipient DM. The
+// `interaction?.guild?` chain defends the edge case where guild is
+// null (commands are guild-only so this shouldn't happen in
+// production). `iconURL()` returns `string | null`; coalesce to
+// `undefined` because some discord.js versions stringify null into
+// the iconURL slot.
+//
+// `size: 64` matches Discord's embed-author iconURL rendering
+// (~24×24px on most clients, 2× retina ≈ 48px). The default size
+// is the guild-icon-store resolution (up to 4096px), which would
+// ship a much larger asset than gets rendered. Per-DM bandwidth
+// savings × the dispatch loop = a real win at scale.
+function resolveGuildProvenance(interaction) {
+  return {
+    guildName: interaction?.guild?.name,
+    guildIconUrl: interaction?.guild?.iconURL({ size: 64 }) ?? undefined,
+  };
+}
+
 // Resolve a recipient's per-guild display alias: guild nickname >
 // globalName > username. Falls back through whatever we have on the
 // recipient object so the helper works for User-from-UserSelect,
@@ -695,7 +714,104 @@ async function resolveLocation(parsed) {
   }
 }
 
-function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
+// Trust-signal Link button surfaced beside Step Through on every
+// delivery DM. Mirrors a browser address bar's "click the lock to
+// verify" affordance: a first-time recipient can hit qURL's public
+// landing page to confirm the brand exists before clicking Step
+// Through.
+function buildTrustButton() {
+  return new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    // U+1F6E1 + U+FE0F. The FE0F variation selector forces emoji-
+    // presentation rendering — without it some clients (older Linux,
+    // some web fallbacks) render the bare shield codepoint as a
+    // text-style glyph rather than the colored emoji.
+    .setEmoji('🛡️')
+    .setLabel('What is qURL?')
+    .setURL(TRUST.LANDING_URL);
+}
+
+// The Step Through Link button is the primary action on every DM.
+// Extracted as a factory so the bulk-path call site can compose
+// per-link buttons without round-tripping through buildDeliveryPayload
+// (which always pairs it with a trust button — wasteful when the
+// bulk path packs a single trust button at the bottom for the whole
+// message). 🚪 emoji ties the "opened a door for you" copy to the
+// action — author row, embed accent, and button emoji all reinforce
+// one metaphor.
+function buildStepThroughButton(qurlLink) {
+  return new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setEmoji('🚪')
+    .setLabel('Step Through')
+    .setURL(qurlLink);
+}
+
+// Pack a list of qURL links into the bulk-path component rows:
+// one Step Through button per link plus one trust button at the
+// end, chunked 5-per-ActionRow (Discord's per-row cap). The
+// dispatch caller upstream caps links at 10 (Discord's 10-embed-
+// per-message limit), so the worst case is 11 buttons → 3 rows.
+// Behavior at N=1 produces the same single-row [Step Through,
+// What is qURL?] shape executeSendPipeline emits, so a /qurl send
+// followed by /qurl add-recipients renders identically on the
+// recipient side.
+//
+// PRECONDITION: 1 <= qurlLinks.length <= 10.
+//   - Empty: a single row containing only the trust button would
+//     ship without any embeds, which Discord rejects.
+//   - >10: N + 1 buttons across 5-per-row chunks exceeds Discord's
+//     5-ActionRow message cap (e.g. N=11 → 3 rows, N=24 → 5 rows,
+//     N=25 → 6 rows = API rejection). The upstream caller in
+//     handleAddRecipients already caps via `links.slice(0, 10)` to
+//     match Discord's 10-embed-per-message limit; the throw below
+//     pins both ends of the contract for any future caller that
+//     misses the docstring.
+function packBulkDeliveryComponents(qurlLinks) {
+  if (!Array.isArray(qurlLinks) || qurlLinks.length === 0) {
+    throw new Error('packBulkDeliveryComponents: qurlLinks must be a non-empty array');
+  }
+  if (qurlLinks.length > 10) {
+    throw new Error(`packBulkDeliveryComponents: qurlLinks length ${qurlLinks.length} exceeds the 10-link cap`);
+  }
+  const allButtons = [
+    ...qurlLinks.map(buildStepThroughButton),
+    buildTrustButton(),
+  ];
+  const rows = [];
+  for (let i = 0; i < allButtons.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
+  }
+  return rows;
+}
+
+// Cap a string at `maxUtf16Units` UTF-16 code units (matching how
+// Discord's API measures `embed.author.name` and similar limits),
+// trimming a trailing lone high surrogate if the cap lands mid-pair
+// so the result is never an invalid UTF-16 sequence. Discord renders
+// a lone surrogate as tofu; the trim ensures a clean cut.
+function capUtf16Units(s, maxUtf16Units) {
+  if (s.length <= maxUtf16Units) return s;
+  let truncated = s.slice(0, maxUtf16Units);
+  const lastCharCode = truncated.charCodeAt(truncated.length - 1);
+  // High-surrogate range (U+D800..U+DBFF): if the cap split a pair,
+  // drop the orphan so the result decodes cleanly. The low-surrogate
+  // case (U+DC00..U+DFFF at the boundary) is unreachable by
+  // construction — `slice(0, n)` would have excluded a low surrogate
+  // at position n, so the high half is the only orphan possible at
+  // position n-1. The asymmetric check is correct, not a bug.
+  if (lastCharCode >= 0xD800 && lastCharCode <= 0xDBFF) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated;
+}
+
+// Composes the embed only (no button row). Split out so the bulk-path
+// dispatch in handleAddRecipients can build N embeds + N step-through
+// buttons + 1 trust button without round-tripping through
+// buildDeliveryPayload (which always allocates a trust button per
+// call). The single-path call sites use buildDeliveryPayload below.
+function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage }) {
   // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
   // value; anything else renders a misleading recipient surface (e.g.
   // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
@@ -707,21 +823,42 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
     const got = String(expiresAt);
     const gotType = typeof expiresAt;
     throw new Error(
-      `buildDeliveryPayload: expiresAt must be a positive integer `
+      `buildDeliveryEmbed: expiresAt must be a positive integer `
       + `Unix-seconds number (got ${got}, typeof=${gotType})`
     );
   }
 
-  // sanitizeDisplayName centralizes spoof defense so a future caller
-  // adding another sender-name surface picks up the same protections.
-  const safeSender = sanitizeDisplayName(senderAlias);
+  // Author row is plaintext (no markdown rendering), so the PLAIN
+  // sanitization variant is the right tool for both sender and
+  // guildName halves — backslash-escapes would render literally
+  // here, but the bidi/zero-width spoof defense still applies.
+  // guildName opts into an empty fallback ({ fallback: '' }) so an
+  // all-strip hostile name (RLO/ZWSP/BOM only) collapses to "" and
+  // the author row falls back to sender-only — rather than rendering
+  // the nonsense `Vik · Someone` that the DISPLAY_NAME_FALLBACK
+  // default would produce, degrading the trust signal on the exact
+  // hostile input the strip exists to defend.
+  //
+  // Combined-length budget: 64 (sender cap) + 3 (` · `) + 64 (guild
+  // cap) = 131 codepoints. Discord's author.name limit is 256, but
+  // measured in UTF-16 code units (not codepoints), so a worst-case
+  // mix of 64 surrogate-pair emoji on each half is 64×2 + 3 + 64×2
+  // = 259 UTF-16 units — over the cap. Vanishingly rare in practice
+  // (would need both halves attacker-controlled and all-emoji), but
+  // the slice-and-trim below caps the final string at 256 UTF-16
+  // units codepoint-aware so the API never rejects the embed.
+  const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
+  const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
+  const authorName = capUtf16Units(
+    safeGuildName ? `${safeSenderPlain} · ${safeGuildName}` : safeSenderPlain,
+    256,
+  );
 
-  // Discord renders fields BELOW the description, so all three lines
-  // (sender / optional personal message / expiry) must live in one
-  // setDescription block — an addFields personal-message would land
-  // after the expiry line, not between sender and expiry. Folding
-  // also strips addFields' vertical padding, keeping the Step Through
-  // button close to the sender line.
+  // Discord renders fields BELOW the description, so all lines (optional
+  // personal message + expiry) must live in one setDescription block —
+  // an addFields personal-message would land after the expiry line, not
+  // between description and expiry. Folding also strips addFields'
+  // vertical padding, keeping the Step Through button close.
   //
   // `<t:N:R>` is Discord's client-side relative-time markdown: the
   // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
@@ -743,9 +880,9 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // recipient sees one tidy quote — matches the design mockup which
   // shows the message as a single-line styled box. 280-codepoint cap
   // keeps the embed visually compact. Headroom: 280 codepoints ≤ 1120
-  // UTF-8 bytes + ~10 chars of `> *"…"*` wrapper + 64-char sender +
-  // ~30-char expiry line ≪ Discord's 4096-char description cap.
-  const descLines = [`**${safeSender}** opened a door for you.`];
+  // UTF-8 bytes + ~10 chars of `> *"…"*` wrapper + ~30-char expiry
+  // line ≪ Discord's 4096-char description cap.
+  const descLines = ['opened a door for you.'];
   if (personalMessage) {
     // Skip the styled-blockquote line if the input collapses to an
     // empty string after newline-flatten + trim (e.g. "  \n \n  ").
@@ -773,27 +910,32 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   }
   descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
 
-  const embed = new EmbedBuilder()
+  // Author row is the embed's "address bar" — anchored top, visually
+  // distinct from the description, the closest analog Discord offers
+  // to a browser's origin display. Icon is only attached when the
+  // guild has one — bare `undefined` (NOT null) is what discord.js
+  // wants for "no icon"; some versions stringify null into the URL slot.
+  const authorOpts = { name: authorName };
+  if (guildIconUrl) authorOpts.iconURL = guildIconUrl;
+
+  return new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription(descLines.join('\n'));
+    .setAuthor(authorOpts)
+    .setDescription(descLines.join('\n'))
+    // Footer reinforces the destination domain — same trust idea as a
+    // browser showing where a link points before you click. Literal
+    // string (not interpolated from qurlLink) keeps the recipient
+    // surface stable even if a future minted link uses a subdomain.
+    .setFooter({ text: `opens ${TRUST.DESTINATION_DOMAIN}` });
+}
 
-  // Link button: opens qurlLink in the recipient's browser on a
-  // single click. No interaction handler needed — Discord handles
-  // the redirect. ButtonStyle.Link is the only style that carries a
-  // URL (Primary/Success/Danger/Secondary fire interaction handlers,
-  // no redirect).
-  //
-  // 🚪 emoji ties the "opened a door for you" copy to the action —
-  // sender line, embed accent, and button emoji all reinforce one
-  // metaphor instead of three. Door is a stronger visual mark on a
-  // grey-Link button than the generic 🔗 chain it replaces.
-  const stepThrough = new ButtonBuilder()
-    .setStyle(ButtonStyle.Link)
-    .setEmoji('🚪')
-    .setLabel('Step Through')
-    .setURL(qurlLink);
-  const components = [new ActionRowBuilder().addComponents(stepThrough)];
-
+// Convenience wrapper composing the embed + one ActionRow holding
+// [Step Through, What is qURL?]. Used by the single-path call site
+// (executeSendPipeline); the bulk path composes from the primitives
+// directly so it can pack N step-throughs with one shared trust button.
+function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, expiresAt, personalMessage }) {
+  const embed = buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, personalMessage });
+  const components = [new ActionRowBuilder().addComponents(buildStepThroughButton(qurlLink), buildTrustButton())];
   return { embeds: [embed], components };
 }
 
@@ -1589,6 +1731,7 @@ async function executeSendPipeline(interaction, {
   // resolutions of the same string. Both pipelines now share the same
   // hoist pattern for both expiresAt AND senderAlias.
   const senderAlias = resolveSenderAlias(interaction);
+  const { guildName, guildIconUrl } = resolveGuildProvenance(interaction);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
@@ -1606,6 +1749,8 @@ async function executeSendPipeline(interaction, {
     try {
       const dmPayload = buildDeliveryPayload({
         senderAlias,
+        guildName,
+        guildIconUrl,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage,
@@ -2186,6 +2331,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // the function level rather than as orphan rows. Closes #352.
   const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
   const senderAlias = resolveSenderAlias(originalInteraction);
+  const { guildName, guildIconUrl } = resolveGuildProvenance(originalInteraction);
 
   // Persist to DB before DMs
   const batchSends = [];
@@ -2245,31 +2391,30 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let result = { ok: false };
     try {
-      const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
+      // links.slice(0, 10) caps at Discord's 10-embed-per-message
+      // limit. The embed body is identical per-link (sender + guild +
+      // expiry don't vary), so build the EmbedBuilder once and repeat
+      // the reference N times. discord.js serializes each embeds[]
+      // entry via .toJSON() — a pure read of internal state — so
+      // reference sharing is safe. Saves N-1 EmbedBuilder allocations
+      // + N-1 sanitize-chain runs on the senderAlias/guildName halves.
+      // packBulkDeliveryComponents enforces 1 <= len <= 10 with
+      // fail-loud throws; the upstream guard at line 2372 above
+      // (`if (!links || links.length === 0)`) is what keeps us out
+      // of the lower-bound throw. If a future refactor splits this
+      // dispatch loop or drops that guard, the throw will surface
+      // here at the helper boundary — see packBulkDeliveryComponents
+      // docstring for the contract.
+      const cappedLinks = links.slice(0, 10);
+      const sharedEmbed = buildDeliveryEmbed({
         senderAlias,
-        qurlLink: link.qurlLink,
+        guildName,
+        guildIconUrl,
         expiresAt,
         personalMessage: sendConfig.personal_message,
-      }));
-      // Contract with buildDeliveryPayload: each payload's `components`
-      // array contains exactly one ActionRow whose `components` are the
-      // per-link buttons. We pull each payload's first row's children
-      // (one Step Through button per link) and re-pack into 5-per-row
-      // ActionRows since Discord caps at 5 buttons per ActionRow.
-      const allEmbeds = payloads.flatMap(p => p.embeds);
-      const allButtons = payloads.flatMap(p => {
-        // Hard fail rather than silently drop buttons if the contract
-        // ever changes — easier to catch than a button quietly missing
-        // from a recipient's DM.
-        if (!p.components || !p.components[0] || !Array.isArray(p.components[0].components)) {
-          throw new Error('buildDeliveryPayload contract violated: expected components[0].components to be an array');
-        }
-        return p.components[0].components;
       });
-      const allComponents = [];
-      for (let i = 0; i < allButtons.length; i += 5) {
-        allComponents.push(new ActionRowBuilder().addComponents(allButtons.slice(i, i + 5)));
-      }
+      const allEmbeds = Array(cappedLinks.length).fill(sharedEmbed);
+      const allComponents = packBulkDeliveryComponents(cappedLinks.map(link => link.qurlLink));
 
       result = await sendDM(recipient.id, { embeds: allEmbeds, components: allComponents });
     } finally {
@@ -8254,9 +8399,14 @@ module.exports = {
       computeEveryoneDisplayCount,
       handleAddRecipients,
       buildDeliveryPayload,
+      buildDeliveryEmbed,
+      buildStepThroughButton,
+      buildTrustButton,
+      packBulkDeliveryComponents,
       buildRevokedDMPayload,
       persistDispatchResult,
       resolveSenderAlias,
+      resolveGuildProvenance,
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these
       // hooks, coverage of the polling/revoke/add-recipients code paths
