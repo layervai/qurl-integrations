@@ -3991,11 +3991,15 @@ async function handleQurlSlashSend(interaction, params) {
         // Cache miss: voice channel evicted or `GuildVoiceStates`
         // intent dropped mid-flight. Surface a banner + log so a
         // degraded environment doesn't silently lose voice-mode.
+        //
+        // Banner replaces (not appends to) `warningsBlock`: the
+        // text-path warnings can't exist on this branch because
+        // `recipientsOmitted` is true (no `recipients:` arg means no
+        // tokens to parse, so `warningsBlock` is always `''` here).
         logger.info('handleQurlSlashSend: voice-mode skipped — channel members cache missing', {
           user_id: interaction.user.id, voice_channel_id: voiceChannelId,
         });
-        finalWarningsBlock = warningsBlock
-          + `⚠\u{FE0F} Couldn't read voice channel members — pick recipients below.\n\n`;
+        finalWarningsBlock = `⚠\u{FE0F} Couldn't read voice channel members — pick recipients below.\n\n`;
       } else {
         const voiceMembers = [];
         for (const [, m] of voiceChannel.members) {
@@ -4005,10 +4009,13 @@ async function handleQurlSlashSend(interaction, params) {
           voiceMembers, interaction.user.id, { excludeSender: true }
         );
         // Inverted shape: commit voice-mode iff the resolved set fits
-        // the cap; otherwise branch by reason. Avoids an empty
-        // "if (length === 0) {}" no-op for the sender-only / bots-only
-        // / truly-empty case — those simply drop through to the
-        // picker-mode default (set above) with no banner.
+        // the cap; otherwise branch by reason. Sender-only / truly-
+        // empty falls through to picker-mode with NO banner (user
+        // didn't ask for voice-everyone; there's nothing actionable to
+        // surface). Bots-only DOES surface a banner — a voice channel
+        // populated entirely by bots is the kind of "wait, didn't it
+        // know I was in voice?" state that benefits from the dropped-
+        // bots accounting being visible.
         if (voicePart.valid.length > 0
             && voicePart.valid.length <= config.QURL_SEND_MAX_RECIPIENTS) {
           recipientMode = RECIPIENT_MODE_VOICE;
@@ -4018,6 +4025,13 @@ async function handleQurlSlashSend(interaction, params) {
           // relevant when `recipients:` was omitted (no text-parsing
           // warnings apply). Surface bot drops so the user knows why the
           // count is lower than the channel's connected total.
+          finalWarningsBlock = renderRecipientWarnings({
+            droppedBots: voicePart.droppedBots,
+          });
+        } else if (voicePart.valid.length === 0 && voicePart.droppedBots > 0) {
+          // Bots-only voice channel. Quiet fallback would leave the
+          // user wondering why the auto-default didn't take; the bot-
+          // drop accounting explains it.
           finalWarningsBlock = renderRecipientWarnings({
             droppedBots: voicePart.droppedBots,
           });
@@ -4039,8 +4053,9 @@ async function handleQurlSlashSend(interaction, params) {
             eligible: voicePart.valid.length,
             cap: config.QURL_SEND_MAX_RECIPIENTS,
           });
-          finalWarningsBlock = warningsBlock
-            + `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} eligible recipients `
+          // Banner replaces `warningsBlock` (always `''` on this
+          // branch — see cache-miss comment above).
+          finalWarningsBlock = `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} eligible recipients `
             + `(max ${config.QURL_SEND_MAX_RECIPIENTS}) — pick recipients below.\n\n`;
         }
       }

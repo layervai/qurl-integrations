@@ -2873,6 +2873,23 @@ describe('handleQurlFile — slash entry', () => {
       expect(payload.recipientIds).not.toContain(bot);
     });
 
+    test('bots-only voice → picker fallback WITH bot-drop banner (not silent)', async () => {
+      // Distinction from sender-only / truly-empty: those silently
+      // fall back because there's nothing actionable to surface, but
+      // a voice channel populated entirely by bots is the kind of
+      // "wait, didn't it know I was in voice?" state where the
+      // bot-drop accounting clarifies WHY voice-mode didn't take.
+      const int = makeVoiceEntryInteraction({
+        members: [bot],
+        botIds: [bot],
+      });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.recipientIds).toEqual([]);
+      expect(payload.warningsBlock).toMatch(/bot/i);
+    });
+
     test('sender-only voice → falls back to picker-mode (no auto voice)', async () => {
       // After excludeSender the voice set is empty. Don't surface a
       // warning; the user didn't ask for voice-everyone, so falling
@@ -2940,7 +2957,12 @@ describe('handleQurlFile — slash entry', () => {
       // "everyone in voice." Voice-mode auto-default only fires when
       // recipients is omitted entirely.
       const int = makeVoiceEntryInteraction({ members: [u1, u2] });
-      int.options.getString = (key) => (key === 'recipients' ? `<@${u1}>` : null);
+      // Re-implement the jest.fn() stub rather than replacing the
+      // property — keeps the call-tracking behavior that the rest of
+      // the suite relies on.
+      int.options.getString.mockImplementation((key) =>
+        (key === 'recipients' ? `<@${u1}>` : null)
+      );
       await handleQurlFile(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
