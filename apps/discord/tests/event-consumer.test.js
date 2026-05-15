@@ -1196,6 +1196,74 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     // this number and may rely on it for their soak headroom math.
     expect(eventConsumer._test.MAX_INFLIGHT_HANDLERS).toBe(100);
   });
+
+  describe('MAX_INFLIGHT_HANDLERS env validation (module-load IIFE)', () => {
+    // The IIFE that parses QURL_BOT_MAX_INFLIGHT_HANDLERS runs at
+    // module-load. To exercise it under varying env values we
+    // re-require the module inside jest.isolateModules with the env
+    // var stubbed, capture console.warn output, and assert the
+    // resolved value + warning content. Pins the validation branch
+    // that production depends on for fail-loud-on-typo behavior.
+    function withIsolatedEnv(envValue, run) {
+      jest.isolateModules(() => {
+        const prev = process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+        const origConsoleWarn = console.warn;
+        const warns = [];
+        console.warn = (...args) => warns.push(args.join(' '));
+        try {
+          if (envValue === undefined) {
+            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+          } else {
+            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = envValue;
+          }
+          const fresh = require('../src/event-consumer');
+          run(fresh, warns);
+        } finally {
+          console.warn = origConsoleWarn;
+          if (prev === undefined) {
+            delete process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS;
+          } else {
+            process.env.QURL_BOT_MAX_INFLIGHT_HANDLERS = prev;
+          }
+        }
+      });
+    }
+
+    test.each([
+      ['100abc', 'trailing garbage'],
+      ['-5', 'negative integer'],
+      ['0', 'zero'],
+      ['1.5', 'non-integer'],
+      ['Infinity', 'infinity literal'],
+      ['NaN', 'NaN literal'],
+      ['abc', 'non-numeric'],
+      [' ', 'whitespace'],
+    ])('rejects %p (%s) and falls back to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+        expect(warns.some((w) => w.includes('QURL_BOT_MAX_INFLIGHT_HANDLERS') && w.includes('rejected'))).toBe(true);
+      });
+    });
+
+    test.each([
+      ['50', 50],
+      ['200', 200],
+      ['1', 1],
+    ])('accepts %p as %i', (envValue, expected) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(expected);
+        // No warning for valid values.
+        expect(warns.some((w) => w.includes('rejected'))).toBe(false);
+      });
+    });
+
+    test('unset env var resolves to default without warning', () => {
+      withIsolatedEnv(undefined, (fresh, warns) => {
+        expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+        expect(warns).toHaveLength(0);
+      });
+    });
+  });
 });
 
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {

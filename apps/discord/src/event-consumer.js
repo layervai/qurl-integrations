@@ -94,6 +94,16 @@
 // drain. The cap is the safety net before the worker tier flag-flip
 // in PR 10.
 //
+// This is a soft cap, not a hard semaphore. pollOnce checks
+// `inFlightCount >= cap` BEFORE issuing a ReceiveMessage, but a
+// receive that passes the check can return up to RECEIVE_MAX_MESSAGES
+// (10) messages, and each subsequent processMessage increments via
+// trackDispatch. So in a sustained burst, inFlightCount can transiently
+// reach `cap + RECEIVE_MAX_MESSAGES - 1` (≈9% overshoot at the default
+// cap of 100) before the next pollOnce gates. The cap is a backpressure
+// signal — "stop pulling new work" — not a precise upper bound; size
+// memory headroom assuming `cap + 10` simultaneous handler promises.
+//
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
 // `client.actions.InteractionCreate.handle(data)` call. The listener
@@ -275,8 +285,10 @@ const MAX_INFLIGHT_HANDLERS = (() => {
   // bug at boot instead of silently truncating.
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    // logger isn't loaded this early in module init; console.warn
-    // for visibility at boot, then fall back to the default.
+    // Intentional console.warn (not logger.warn) for boot-time
+    // visibility before any logger transports attach to a structured
+    // sink. A misconfigured env-var should be obvious on container
+    // stdout regardless of LOG_LEVEL or transport state.
     console.warn(
       `[event-consumer] QURL_BOT_MAX_INFLIGHT_HANDLERS=${JSON.stringify(raw)} rejected ` +
       `(must be a positive integer); using default ${DEFAULT_MAX_INFLIGHT_HANDLERS}.`,
@@ -557,8 +569,18 @@ function trackDispatch(maybePromise) {
   if (!isWorkerDispatch) return;
   if (!maybePromise || typeof maybePromise.then !== 'function') return;
   inFlightCount += 1;
+  // `.finally` runs before `.catch` on rejection, so the decrement
+  // always lands first — the .catch below sees the rejection AFTER
+  // the counter has dropped.
+  //
+  // Math.max guards against negative drift if a stale promise
+  // resolves after `_resetStateForTest` cleared the count. Tests
+  // that never await their resolvable promises before resetting
+  // would otherwise leak a decrement into the next test's
+  // starting state. Production can't reach this — every increment
+  // is paired with exactly one decrement on the same promise.
   maybePromise.finally(() => {
-    inFlightCount -= 1;
+    inFlightCount = Math.max(0, inFlightCount - 1);
   }).catch((err) => {
     // Attaching `.finally()` above counts as a handler for Node's
     // unhandled-rejection bookkeeping, so a rejection that pre-PR
@@ -586,18 +608,13 @@ async function pollOnce(client) {
   // transition back to below-cap (handled after this branch) logs
   // at info. This matches the `lastMissingEventIdWarnMs` pattern
   // already in this file — transition-loud, steady-state-quiet.
+  const capPayload = { inFlight: inFlightCount, cap: MAX_INFLIGHT_HANDLERS };
   if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
     if (!atCapPauseLogged) {
-      logger.warn(AT_CAP_PAUSE_WARN_MSG, {
-        inFlight: inFlightCount,
-        cap: MAX_INFLIGHT_HANDLERS,
-      });
+      logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
       atCapPauseLogged = true;
     } else {
-      logger.debug(AT_CAP_PAUSE_DEBUG_MSG, {
-        inFlight: inFlightCount,
-        cap: MAX_INFLIGHT_HANDLERS,
-      });
+      logger.debug(AT_CAP_PAUSE_DEBUG_MSG, capPayload);
     }
     await abortableSleep(INFLIGHT_BACKOFF_MS);
     return;
@@ -607,10 +624,7 @@ async function pollOnce(client) {
   // pairs in CloudWatch. Reset the gate so the next at-cap entry
   // re-fires the warn (each streak gets exactly one warn).
   if (atCapPauseLogged) {
-    logger.info(AT_CAP_RELEASED_INFO_MSG, {
-      inFlight: inFlightCount,
-      cap: MAX_INFLIGHT_HANDLERS,
-    });
+    logger.info(AT_CAP_RELEASED_INFO_MSG, capPayload);
     atCapPauseLogged = false;
   }
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
