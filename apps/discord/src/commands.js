@@ -757,6 +757,14 @@ function buildRevokedDMPayload({ senderAlias }) {
 // to report the recipient as delivered. Throwing here would convert
 // a real DM into a "could not be reached" line on the operator's
 // reply — worse than the bookkeeping miss.
+//
+// CALLER INVARIANT: every call site MUST await db.recordQURLSendBatch
+// before invoking the dispatch loop that calls this function. The
+// underlying UpdateCommand has no attribute_exists guard (#366), so
+// without that ordering a stale recipient_discord_id would create an
+// orphan row. executeSendPipeline + handleAddRecipients both honor
+// this — recordQURLSendBatch awaits to completion (with an early-
+// return on throw) before the batchSettled dispatch loop starts.
 async function persistDispatchResult(sendId, recipientDiscordId, result) {
   // Wraps the DDB call so a write failure can't propagate up as a
   // failed dispatch. `delivered` ⇒ the DM is real and the operator

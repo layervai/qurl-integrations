@@ -163,6 +163,39 @@ describe('editDM via REST', () => {
     const r404 = await editDM('c', 'm', { embeds: [], components: [] });
     expect(r404).toEqual({ ok: false, expected: false });
   });
+
+  it('tags the expected log line with expectedReason for greppability', async () => {
+    // Closes the cr-flagged invisibility gap: a future spike in any
+    // single expected code (notably 50007 on PATCH, which isn't
+    // observed today — see #369) should be greppable from CloudWatch
+    // by the human-readable description rather than requiring an
+    // external code lookup.
+    const logger = require('../src/logger');
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Cannot send messages to this user'), { status: 403, code: 50007 }),
+    );
+    await editDM('c', 'm', { embeds: [], components: [] });
+    expect(logger.info).toHaveBeenCalledWith(
+      'Failed to edit DM',
+      expect.objectContaining({
+        code: 50007,
+        expectedReason: expect.stringContaining('Cannot send messages to this user'),
+      }),
+    );
+    // Unexpected branch must NOT carry the expectedReason field.
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Internal Server Error'), { status: 500, code: 0 }),
+    );
+    await editDM('c', 'm', { embeds: [], components: [] });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Failed to edit DM',
+      expect.not.objectContaining({ expectedReason: expect.anything() }),
+    );
+  });
 });
 
 describe('addRoleToMember via REST', () => {

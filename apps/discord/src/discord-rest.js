@@ -98,15 +98,20 @@ async function sendDM(userId, message) {
 // proxy returning a synthetic 404, or a Discord-side bug. Logging
 // those at warn keeps the unknowns visible. New expected codes belong
 // here, not in the predicate.
-const DM_EDIT_EXPECTED_API_CODES = new Set([
-  10003, // Unknown Channel — DM channel deleted
-  10008, // Unknown Message — recipient deleted the DM
-  50001, // Missing Access — bot kicked / lost shared guild
+// Codes plus human-readable descriptions. The description lands in the
+// info-level log when it matches, so a future log search for an
+// unexpected spike (e.g., 50007 on PATCH — not observed today) reads
+// the cause directly rather than requiring an external code lookup.
+const DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS = new Map([
+  [10003, 'Unknown Channel — DM channel deleted'],
+  [10008, 'Unknown Message — recipient deleted the DM'],
+  [50001, 'Missing Access — bot kicked / lost shared guild'],
   // 50007 is observed at POST /messages time (new DM rejected), not
   // typically at PATCH on an existing message in an already-open DM
   // channel. Kept defensively — if it ever fires on PATCH it's still
-  // a recipient-side state change, not an oncall surprise.
-  50007, // Cannot send messages to this user — DMs disabled / blocked
+  // a recipient-side state change, not an oncall surprise. The
+  // description tag in the log makes the spike greppable for #369.
+  [50007, 'Cannot send messages to this user — DMs disabled / blocked'],
 ]);
 
 /**
@@ -133,11 +138,17 @@ async function editDM(channelId, messageId, message) {
     await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
     return { ok: true };
   } catch (error) {
-    const expected = DM_EDIT_EXPECTED_API_CODES.has(error.code);
+    const expectedDescription = DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS.get(error.code);
+    const expected = expectedDescription !== undefined;
     const level = expected ? 'info' : 'warn';
     logger[level]('Failed to edit DM', {
       channelId, messageId, status: error.status, code: error.code,
       errorMessage: error.message,
+      // Present only on the expected branch — names which entry in
+      // DM_EDIT_EXPECTED_API_CODE_DESCRIPTIONS matched. Keeps a future
+      // spike in any single expected code (e.g., 50007 on PATCH)
+      // greppable from CloudWatch without an external lookup.
+      ...(expected && { expectedReason: expectedDescription }),
     });
     return { ok: false, expected };
   }
