@@ -2,6 +2,7 @@ package internal
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,12 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// misleading "alias must start with $" message.
 		{name: "admin allow with extra arg after both slots filled", text: "admin allow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
 		{name: "admin disallow with extra arg after both slots filled", text: "admin disallow <#C1|a> $alias garbage", wantErr: ErrUnexpectedArgument},
+		// Strict-posture on `setalias`: a stray flag-shaped token
+		// after the target must reject, not silently get glued
+		// into Target via space-join. Quoted multi-word targets
+		// survive as a single token through [tokenize].
+		{name: "setalias with extra trailing token rejected", text: "setalias $prod-db https://x.example dm:true", wantErr: ErrUnexpectedArgument},
+		{name: "setalias with extra trailing positional rejected", text: "setalias $prod-db https://x.example extra-garbage", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
@@ -153,16 +160,21 @@ func TestParse_ErrorPaths(t *testing.T) {
 // no-op into ephemeral-channel post. Empty values (`key:` or `key:""`)
 // reject so the handler in PR-3c.3+ can rely on absence-in-map to
 // mean "flag unset" (no third "set-to-empty" state to distinguish).
+// `wantSubstr` fences the user-visible message so both empty-value
+// shapes (`key:` and `key:""`) report a consistent "empty value"
+// reason instead of one of them landing in the generic
+// "expected key:value" bucket.
 func TestParse_GetFlagErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		text string
+		name       string
+		text       string
+		wantSubstr string
 	}{
-		{name: "unknown flag key", text: "get $prod-db whatever:true"},
-		{name: "malformed flag (no colon)", text: "get $prod-db reasontruly"},
-		{name: "empty bare value", text: "get $prod-db reason:"},
-		{name: "empty quoted value", text: `get $prod-db reason:""`},
+		{name: "unknown flag key", text: "get $prod-db whatever:true", wantSubstr: "unknown flag"},
+		{name: "malformed flag (no colon)", text: "get $prod-db reasontruly", wantSubstr: "expected key:value"},
+		{name: "empty bare value", text: "get $prod-db reason:", wantSubstr: "empty value"},
+		{name: "empty quoted value", text: `get $prod-db reason:""`, wantSubstr: "empty value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +182,9 @@ func TestParse_GetFlagErrors(t *testing.T) {
 			_, err := Parse(tc.text)
 			if err == nil {
 				t.Fatalf("Parse(%q) error = nil, want non-nil", tc.text)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("Parse(%q) error = %q, want substring %q", tc.text, err.Error(), tc.wantSubstr)
 			}
 		})
 	}

@@ -27,8 +27,10 @@ import (
 func IdempotencyKey(teamID, channelID, userID, triggerOrViewID string) string {
 	// The separator (NUL) keeps adjacent fields unambiguous —
 	// `("ab", "c")` and `("a", "bc")` would otherwise hash equally.
-	// Plain '|' would work too, but NUL is reserved against any
-	// future field that happens to contain a pipe.
+	// Slack-issued IDs (team/channel/user/trigger/view) are
+	// alphanumeric and never contain NUL, so concatenation around
+	// the separator is guaranteed unambiguous regardless of what
+	// future ID shape Slack ships.
 	const sep = "\x00"
 	h := sha256.New()
 	h.Write([]byte(teamID))

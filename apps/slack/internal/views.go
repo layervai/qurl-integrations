@@ -135,6 +135,13 @@ type SetAliasRebindMetadata struct {
 // and `newTarget` are the human-readable strings to show side-by-side.
 // The caller is expected to pass this payload to `views.open` along
 // with the Slack-supplied trigger ID.
+//
+// oldTarget/newTarget are interpolated into mrkdwn code spans
+// (a backtick-wrapped %s). The caller is expected to pass URLs or
+// r_... resource IDs — neither shape contains backticks. If a
+// future caller widens this to user-typed prose, it must escape
+// backticks before passing in to avoid breaking the code-span
+// rendering.
 func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error) {
 	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName})
 	if err != nil {
