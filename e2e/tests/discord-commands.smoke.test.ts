@@ -147,10 +147,8 @@ describe('Discord command registration (smoke)', () => {
       if (rawMapFlag !== 'true' && rawMapFlag !== 'false') {
         throw new Error(
           `MAP_COMMAND_ENABLED must be set to "true" or "false" before this smoke runs (got: ${JSON.stringify(rawMapFlag)}). `
-          + 'Set it locally via `MAP_COMMAND_ENABLED=false npm test`, or check that '
-          + 'the "Resolve MAP_COMMAND_ENABLED from <env>.tfvars" step in '
-          + 'qurl-integrations-infra/.github/workflows/e2e-smoke.yml ran '
-          + 'before the smoke step.',
+          + 'In CI it is set by the e2e-smoke workflow from the deploy env\'s tfvars; '
+          + 'locally, run with e.g. `MAP_COMMAND_ENABLED=false npm test`.',
         );
       }
       const mapEnabled = rawMapFlag === 'true';

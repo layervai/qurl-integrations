@@ -7632,11 +7632,6 @@ const commands = [
             )
         );
       }
-      // Imperative addSubcommand calls to match the style used for
-      // `file` and the conditional `map` block above — uniform shape
-      // makes the order-matters property of slash registration
-      // visually obvious. `addSubcommand` returns `this`, but we
-      // rely on the side effect.
       builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
@@ -7932,16 +7927,8 @@ const commands = [
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
-        // Flag-on and flag-off help-copy variants kept side-by-side
-        // so a future edit to one branch is obviously checked against
-        // the other. `cmd` is referenced twice (Terms + Large servers);
-        // single token keeps them in lockstep. `sectionVerb` makes
-        // the "Getting started" header track what's actually
-        // registered ("Share files" reads more accurately than
-        // "Share resources" when /qurl map is off). `runLine` uses
-        // the same parenthetical-instruction phrasing in both
-        // branches so flipping the toggle doesn't reshape the
-        // step-1 sentence style.
+        // `cmd` is used in two spots (Terms + Large servers); a
+        // single token keeps them in lockstep across copy edits.
         const mapCopy = config.MAP_COMMAND_ENABLED
           ? {
             sectionVerb: 'Share resources',

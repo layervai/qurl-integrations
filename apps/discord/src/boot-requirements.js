@@ -84,11 +84,9 @@ function missingEventShipperKeys(cfg) {
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
-// Mirrors missingEventShipperKeys: parsed cfg in, missing-keys
-// array out. PLACEHOLDER is treated as missing because the SSM
-// parameter ships with that literal sentinel value — the
-// remediation ("seed a real key") is identical to the
-// missing-key case.
+// PLACEHOLDER is treated as missing because the SSM parameter
+// ships with that literal sentinel value; remediation ("seed a
+// real key") is identical to the empty-key case.
 //
 // TODO(infra-sentinel-sync): the literal "PLACEHOLDER" is also
 // the seed value for `aws_ssm_parameter.bot` in

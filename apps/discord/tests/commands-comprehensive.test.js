@@ -2207,15 +2207,6 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 });
 
-// The pre-flag "responds empty for short focused-location values
-// (below min-length)" test once lived here; under MAP_COMMAND_ENABLED=false
-// its respond([]) assertion was strictly weaker than the flag-off block
-// below (which also asserts mockSearchPlaces was never called). Min-length
-// gate coverage moved entirely to qurl-file-map.test.js's "skips Places
-// call for partial queries below the min-length cap" test, which runs
-// under MAP_COMMAND_ENABLED=true and exercises the path the gate
-// actually guards.
-
 // Flag-off coverage. The config mock at the top of this file does NOT
 // set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
 // resolves it to false — matching the production default. Every test
