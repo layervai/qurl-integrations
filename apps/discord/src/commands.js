@@ -3837,8 +3837,12 @@ function renderConfirmCardRows({
   // Count is render-time non-bot when the cache is fully populated
   // (`cache.size >= memberCount`); falls back to `guild.memberCount`
   // (total, includes bots — over-count, but the only reliable number
-  // when the cache is cold). Same filter-drift trade-off the voice-
-  // everyone button accepts — `partitionRecipients` is still the
+  // when the cache is cold). FILTER DRIFT (distinct from voice-
+  // everyone's): voice-everyone's render-time count can drift from
+  // click-time via members joining/leaving the voice channel between
+  // render and click; @everyone's drift is cold-cache-overcounts-by-
+  // bots, resolved when the click-time pre-warm fills the cache. In
+  // both cases the label is a hint and `partitionRecipients` is the
   // click-time authority.
   if (
     mode === RECIPIENT_MODE_PICKER
@@ -3858,12 +3862,20 @@ function renderConfirmCardRows({
     } else if (typeof memberCount === 'number') {
       displayCount = memberCount;
     }
+    // Disable on three conditions:
+    //  - `null` (memberCount unavailable + cache cold) → `(?)` label
+    //    so the user sees the button can't act vs. silent no-op
+    //  - `0` (degenerate empty guild — theoretically unreachable since
+    //    a 0-member guild can't host a slash command)
+    //  - `> QURL_SEND_MAX_RECIPIENTS` (cap-exceeded) → surface the
+    //    constraint at render time with an explicit suffix in the
+    //    label so the user sees why before clicking, rather than
+    //    getting the click-time hard-reject warning. Cap-reject in
+    //    handleConfirmEveryone is still the authoritative gate
+    //    (defense against memberCount-vs-actual-cache drift).
+    const overCap = displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
     const labelCount = displayCount == null ? '?' : String(displayCount);
-    // Disable on both `0` (empty guild — degenerate) AND `null`
-    // (memberCount unavailable + cache cold). The `(?)` label
-    // accompanies the disabled state so the user sees the button can't
-    // act right now rather than getting a silent-no-op click on a
-    // count-less label.
+    const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
     //
     // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
     // components. The current worst-case render is
@@ -3874,9 +3886,9 @@ function renderConfirmCardRows({
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
-        .setLabel(`\u{1F4E2} @everyone (${labelCount})`)
+        .setLabel(`\u{1F4E2} @everyone (${labelCount})${labelSuffix}`)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(displayCount == null || displayCount === 0),
+        .setDisabled(displayCount == null || displayCount === 0 || overCap),
     );
   }
   bottomRow.addComponents(
@@ -5463,7 +5475,10 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   const selectedUsers = [];
   let partialCacheDrops = 0;
   const cache = interaction.guild.members?.cache;
-  if (cache && typeof cache.entries === 'function') {
+  // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
+  // which both `Map` and discord.js `Collection` provide. Truthy-check
+  // alone would NPE on a degraded `{}` cache shape from a partial init.
+  if (cache && typeof cache[Symbol.iterator] === 'function') {
     for (const [, member] of cache) {
       if (member?.user) selectedUsers.push(member.user);
       else partialCacheDrops++;
@@ -5475,6 +5490,12 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     });
   }
   if (selectedUsers.length === 0) {
+    // "member cache not ready" is the common case (cold cache + non-
+    // zero guild). The degenerate genuinely-empty guild
+    // (`memberCount === 0`) can't reach this branch in production —
+    // handleQurlSlashSend's guild-gate rejects DM at entry and a
+    // guild with zero members can't host a slash command anyway. The
+    // shared copy is acceptable.
     return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
   }
   const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);

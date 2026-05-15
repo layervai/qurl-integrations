@@ -6633,6 +6633,71 @@ describe('renderConfirmCardRows', () => {
       expect(customIds).not.toContain('qurl_confirm_everyone');
     });
 
+    test('disabled with "exceeds cap" suffix when memberCount > QURL_SEND_MAX_RECIPIENTS', async () => {
+      // Render-time disable for the over-cap case so the user sees the
+      // constraint BEFORE clicking, rather than getting the click-time
+      // hard-reject warning. The click-time cap-reject in
+      // handleConfirmEveryone is still the authoritative gate.
+      const config = require('../src/config');
+      const { ButtonBuilder } = require('discord.js');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      try {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 100, configurable: true, writable: true });
+        ButtonBuilder.mockClear();
+        const int = makeInteraction({
+          options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+          guildMembers: { '100000000000000001': {} },
+        });
+        int.memberPermissions = { has: jest.fn(() => true) };
+        int.guild.memberCount = 500;  // way over cap=100
+        await handleQurlFile(int);
+        const everyoneBtn = ButtonBuilder.mock.results.find(
+          (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+        );
+        expect(everyoneBtn).toBeDefined();
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('exceeds 100 cap'));
+        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+      } finally {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+      }
+    });
+
+    test('both @everyone AND voice-everyone buttons render together when invoked from voice + MENTION_EVERYONE', async () => {
+      // Pin the 5-component-row invariant in the worst-case render:
+      // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = exactly 5,
+      // hitting Discord's hard ActionRow limit. A future refactor that
+      // shifts any of those into a second row (or adds a 6th) would
+      // break this assertion.
+      const { ButtonBuilder, ChannelType } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const voiceChannelId = 'voice-room-1';
+      const int = makeInteraction({
+        channelId: voiceChannelId,
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 5;
+      // Drop the slash invocation INTO a voice channel by attaching a
+      // voice-channel shape to the interaction. The slash-entry's
+      // voice-detection branch reads `interaction.channel.type`.
+      int.channel = {
+        id: voiceChannelId, name: 'general', type: ChannelType.GuildVoice,
+        members: new Map([['100000000000000001', { user: makeUser('100000000000000001') }]]),
+      };
+      int.guild.channels.cache.set(voiceChannelId, int.channel);
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      // Both affordances present; full bottom row = Voice + @everyone +
+      // Note + Send + Cancel = 5 components (Discord's hard cap).
+      expect(customIds).toContain('qurl_confirm_voice_everyone');
+      expect(customIds).toContain('qurl_confirm_everyone');
+      expect(customIds).toContain('qurl_confirm_note_btn');
+      expect(customIds).toContain('qurl_confirm_send');
+      expect(customIds).toContain('qurl_confirm_cancel');
+      expect(customIds.length).toBe(5);
+    });
+
     test('does NOT render in voice-mode (recipientMode === RECIPIENT_MODE_VOICE)', async () => {
       // Voice-mode already targets the voice-channel population. The
       // @everyone button there would confuse "everyone" semantics —
