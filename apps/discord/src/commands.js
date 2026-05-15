@@ -4321,6 +4321,11 @@ async function handleQurlSlashSend(interaction, params) {
     // contributor pursuing strict click/text parity knows the lever.
     if (parsed.massMentionExpanded && valid.length > 0) {
       recipientMode = RECIPIENT_MODE_EVERYONE;
+      // `finalValid`, `finalSelfIncluded`, `finalWarningsBlock` stay as-is —
+      // parser output is authoritative for EVERYONE mode (no voice-resolve
+      // re-partition needed). Pinned here so a future refactor that adds
+      // an EVERYONE-mode re-partition step doesn't forget which branch
+      // owns the reassignment.
     } else if (recipientsOmitted && voiceChannelId) {
       // Read voice-connected members through the same channel cache
       // lookup that handleConfirmVoiceEveryone and the bottom-button
