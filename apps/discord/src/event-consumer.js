@@ -738,12 +738,12 @@ async function pollOnce(client) {
   // budget.
   //
   // Log throttling: only the transition into at-cap is loud (warn);
-  // subsequent at-cap polls in the same streak are debug. The
-  // transition back to below-cap (handled after this branch) logs
-  // at info. This matches the `lastMissingEventIdWarnMs` pattern
-  // already in this file — transition-loud, steady-state-quiet.
-  // Snapshot capPayload at pollOnce entry. Shared across at-cap
-  // warn/debug AND the release-info branch — so the release log's
+  // steady-state at-cap is silent. The transition back to below-cap
+  // (handled after this branch) logs at info. This matches the
+  // `lastMissingEventIdWarnMs` pattern already in this file —
+  // transition-loud, steady-state-quiet.
+  // Snapshot capPayload at pollOnce entry. Shared across the at-cap
+  // entry-warn AND the release-info branch — so the release log's
   // `inFlight` field is the value that *triggered* the release
   // (necessarily below cap), not "drained to N" at the moment of
   // logging. That's the right framing for pairing pause-start
@@ -770,14 +770,16 @@ async function pollOnce(client) {
     // in PR #407 for the per-iteration breakdown.)
     // Trade-off: a release that lands mid-sleep delays the next
     // below-cap observation (and the paired pause-end log) by up to
-    // MAX (1.6s). Operators pairing pause-start/pause-end durations
-    // in CloudWatch see this as inflated dwell time at the ceiling.
+    // MAX (1.6s) worst-case, ~MAX/2 (~800ms) average since releases
+    // land uniformly within the sleep window. Operators pairing
+    // pause-start/pause-end durations in CloudWatch see this as
+    // inflated dwell time at the ceiling.
     //
-    // No jitter: each worker process maintains its own at-cap state
-    // (in-flight handlers are per-process), so synchronized wakes
-    // across workers aren't possible. The downstream wedge isn't
-    // sensitive to wake-time alignment either, so plain doubling is
-    // the right shape.
+    // No jitter: the downstream wedge isn't sensitive to wake-time
+    // alignment, so even if multiple worker processes hit the cap
+    // at the same wall-clock moment (shared-downstream wedge) and
+    // their doubling ladders align, plain doubling is still the
+    // right shape — there's no thundering-herd surface to spread.
     currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
     return;
   }
