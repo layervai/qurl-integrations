@@ -868,7 +868,11 @@ function isAbortError(err) {
 //   - SignatureDoesNotMatch — usually clock skew, which also self-heals
 //     once chrony catches up.
 // Re-classify if prod data shows these recur past a fail-fast threshold;
-// today they belong with throttling.
+// today they belong with throttling. AccessDenied is in the permanent
+// set on the bet that misconfig (typo'd queue ARN, missing IAM grant)
+// dominates over deploy-time IAM eventual-consistency gaps. If prod
+// telemetry ever shows AccessDenied spikes correlated with deploys
+// rather than config changes, demote it back to transient.
 const PERMANENT_AWS_ERROR_CODES = new Set([
   // Queue doesn't exist (typo'd URL or wrong region in queue URL).
   'QueueDoesNotExist',
@@ -886,6 +890,13 @@ const PERMANENT_AWS_ERROR_CODES = new Set([
   'InvalidClientTokenId',
 ]);
 
+// Returns the matched permanent-error code from anywhere in err's
+// cause chain, or null if none. Any matching key at any layer wins —
+// if an error has both .name = 'TimeoutError' (transient) and
+// .code = 'QueueDoesNotExist' (permanent), this returns
+// 'QueueDoesNotExist'. The conservative cut is "if any layer says
+// permanent, treat as permanent" — under SDK wrapping a real
+// misconfig can surface anywhere in the chain.
 function permanentAwsErrorCode(err) {
   const visited = new Set();
   let current = err;
@@ -954,6 +965,31 @@ function abortableSleep(ms) {
   });
 }
 
+// Dispatch the fatal-shutdown route. If onFatalCb is wired, call it
+// (sync throws AND async rejections both fall back to process.exit(1)).
+// If not, exit directly. Does NOT await — the caller's defensive
+// return must stay synchronous so pollLoop exits before the next
+// iteration (under test mocks an await would let it iterate).
+function invokeOnFatal() {
+  if (!onFatalCb) {
+    process.exit(1);
+    return;
+  }
+  try {
+    Promise.resolve(onFatalCb()).catch((cbErr) => {
+      logger.error('Event consumer: onFatal rejected, falling back to process.exit', {
+        error: cbErr?.message,
+      });
+      process.exit(1);
+    });
+  } catch (cbErr) {
+    logger.error('Event consumer: onFatal threw, falling back to process.exit', {
+      error: cbErr?.message,
+    });
+    process.exit(1);
+  }
+}
+
 async function pollLoop(client) {
   // Null-guard symmetric with abortableSleep + stop(). Paranoia, not
   // a real path: start() always assigns stopController before invoking
@@ -988,32 +1024,7 @@ async function pollLoop(client) {
         logger.error('Event consumer: permanent AWS failure, exiting', {
           error: err.message, code: permanentCode,
         });
-        if (onFatalCb) {
-          // gracefulShutdown is async, so both sync throws AND async
-          // rejections must route to the fallback exit. try/catch
-          // catches only sync; Promise.resolve(...).catch() covers
-          // the async leg by normalizing the return value first.
-          // We do NOT await here — the return below must stay
-          // synchronous so the loop exits before the next iteration
-          // (under test mocks, an await would let pollLoop iterate).
-          // The fallback exit fires later via the .catch().
-          try {
-            Promise.resolve(onFatalCb()).catch((cbErr) => {
-              logger.error('Event consumer: onFatal rejected, falling back to process.exit', {
-                error: cbErr?.message,
-              });
-              process.exit(1);
-            });
-          } catch (cbErr) {
-            // Sync throw from onFatal — same fallback shape.
-            logger.error('Event consumer: onFatal threw, falling back to process.exit', {
-              error: cbErr?.message,
-            });
-            process.exit(1);
-          }
-        } else {
-          process.exit(1);
-        }
+        invokeOnFatal();
         // Defensive return: stops the loop from iterating again into
         // the same failure under test mocks AND during the async
         // gap before gracefulShutdown's drain awaits this loop.
@@ -1303,6 +1314,7 @@ module.exports = {
     // Set. Kept under the historical name for test-site stability;
     // semantically still "how many handlers are tracked right now."
     getInFlightCount: () => inFlightPromises.size,
+    isRunning: () => running,
     isWorkerDispatching: () => isWorkerDispatch,
     isAtCapPauseLogged: () => atCapPauseLogged,
     // Test-only setter. trackDispatch reads the module-level

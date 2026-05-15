@@ -907,9 +907,16 @@ describe('event-consumer: pollLoop error backoff', () => {
         expect.stringContaining('poll iteration failed'),
         expect.anything(),
       );
+      // running stays true after pollLoop's defensive return — pollLoop
+      // doesn't manipulate the flag itself; stop() owns that. Explicit
+      // assertion locks the contract so a future refactor that flips
+      // running inside the error branch (and breaks stop()'s
+      // already-stopped guard) fails loudly here.
+      expect(eventConsumer._test.isRunning()).toBe(true);
       // stop() returns cleanly even though pollLoop already returned
       // on its own (running is still true; stop() flips it + aborts).
       await eventConsumer.stop();
+      expect(eventConsumer._test.isRunning()).toBe(false);
     } finally {
       exitSpy.mockRestore();
     }
