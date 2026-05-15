@@ -3559,9 +3559,7 @@ function renderConfirmCardContent({
     content += 'ℹ\u{FE0F} **Send includes you.**\n';
   }
   if (needsPicker) {
-    content += '\n**Pick recipients below** (1–'
-      + String(Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS))
-      + ' users), then click **Send**.\n';
+    content += '\n**Pick recipients below.**\n';
   } else if (mode === RECIPIENT_MODE_VOICE) {
     // Voice-mode "To:" — names omitted in favor of the channel context.
     // The #voice mention is the source of truth for who's included;
@@ -3611,7 +3609,7 @@ function renderConfirmCardContent({
     // of the card.
     content += `**Note:** ${formatPersonalMessagePreview(personalMessage)}\n`;
   }
-  content += '\nClick **Send** to deliver one-time qURL links, or **Cancel** to abort.';
+  content += '\nClick **Send** to deliver one-time qURL, or **Cancel** to abort.';
   // Fail-safe cap below Discord's 2000-char content limit so adversarial
   // inputs can't trip a 400 from editReply and orphan the flow row.
   // Cap (1988) + '…(truncated)' indicator (12 codepoints) = 2000 max
@@ -3710,16 +3708,10 @@ function renderConfirmCardRows({
   const maxValues = defaults.length > 0
     ? Math.min(DISCORD_SELECT_MAX_VALUES_HARD_CAP, config.QURL_SEND_MAX_RECIPIENTS, Math.max(baseCap, defaults.length))
     : baseCap;
-  // Placeholder surfaces both ceilings: pick-slot count (Discord's
-  // setMaxValues) AND the post-expansion recipient cap. With roles in
-  // the picker, a single slot can expand to many members — saying
-  // only "1–10" would mislead users who pick 10 roles expecting 10
-  // recipients.
-  const recipientCap = config.QURL_SEND_MAX_RECIPIENTS;
   if (mode === RECIPIENT_MODE_PICKER) {
     const picker = new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
-      .setPlaceholder(`Pick up to ${maxValues} users/roles (recipients capped at ${recipientCap})`)
+      .setPlaceholder(`Pick up to ${maxValues} users/roles`)
       .setMinValues(1)
       .setMaxValues(maxValues);
     if (defaults.length > 0) {
