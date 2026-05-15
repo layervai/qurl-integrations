@@ -499,6 +499,20 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
+// Pure predicate. The 5 call sites (failGate at executeSendPipeline,
+// entry gate at handleAddRecipients, expiry-select handlers, voice-
+// everyone select-menu fallback) all need different error rendering
+// shapes — `failGate`, return-error-obj, fallback-with-warn — so
+// only the membership check is DRY'd here; the per-site error
+// surface stays inline.
+// `Object.prototype.hasOwnProperty.call` (not `EXPIRY_LABELS[v]`) is
+// load-bearing for prototype-pollution safety AND because a
+// caller-supplied `toString`/`constructor` key could otherwise pass
+// the truthy check.
+function isValidExpiry(v) {
+  return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
+}
+
 // Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
 // limit is 25; capping at 10 bounds the UX. The initial confirm-card
 // UserSelectMenu AND the post-send "Add Recipients" flow both use this
@@ -1128,7 +1142,7 @@ async function executeSendPipeline(interaction, {
   // ship an off-set value (`'25h'`, `'bogus'`) that lands in the
   // DB and trips downstream when `expiryToISO` / `expiryToMs`
   // hit it. Validate at the boundary instead.
-  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+  if (!isValidExpiry(expiresIn)) {
     failGate(TypeError, `executeSendPipeline: expiresIn must be one of ${Object.keys(EXPIRY_LABELS).join('|')} (got ${truncForLog(expiresIn)})`);
   }
 
@@ -1772,15 +1786,19 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-  // #352 entry gate. Symmetric with the executeSendPipeline failGate
-  // (`grep "expiresIn must be one of"`) — closes the unprotected
+  // #352 entry gate. Shares the same `EXPIRY_LABELS` membership
+  // predicate as the executeSendPipeline failGate
+  // (`grep "expiresIn must be one of"`), closing the unprotected
   // path where a stale/regressed sendConfig row could ship an
   // off-set value. Protects BOTH downstream `expiryToMs` AND
   // `expiryToISO` (each used below for mint + DM dispatch) from
-  // their shared silent-24h-default fallback. Returns an error
-  // object rather than throwing to match handleAddRecipients'
-  // contract — the caller renders it on the post-send confirm card.
-  if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
+  // their shared silent-24h-default fallback. Failure shape
+  // diverges from failGate intentionally: failGate throws (caller
+  // catches at the slash-command boundary), while this gate returns
+  // an error object — handleAddRecipients's caller renders the
+  // string on the post-send confirm card, where a throw would land
+  // as a generic "Internal error" with no actionable message.
+  if (!isValidExpiry(sendConfig.expires_in)) {
     logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
       msg: 'Cannot add recipients — this send\'s saved expiry is invalid (the original send\'s links still work; create a new send to reach additional recipients).',
@@ -3658,7 +3676,7 @@ async function handleQurlSlashSend(interaction, params) {
     // Defense-in-depth: expiresIn comes from the slash command's choice
     // list which Discord enforces server-side, but a forged interaction
     // could carry an off-set value. EXPIRY_LABELS owns the closed set.
-    if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, expiresIn)) {
+    if (!isValidExpiry(expiresIn)) {
       clearCooldown(interaction.user.id);
       return interaction.editReply({
         content: '❌ Unrecognized expiry value. Re-run and pick from the list.',
@@ -4880,7 +4898,7 @@ async function handleConfirmExpirySelect(interaction, { flow_id, row }) {
   // Validate before deferring so the forgery branch can use `reply`
   // (the cheaper, single-call ack) instead of `followUp` after a
   // wasted deferUpdate. Symmetric with the self-destruct handler.
-  if (!picked || !Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, picked)) {
+  if (!picked || !isValidExpiry(picked)) {
     logger.warn('handleConfirmExpirySelect: forged off-set expiry value', {
       flow_id, value: truncForLog(picked),
     });
