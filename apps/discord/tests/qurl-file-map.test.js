@@ -2996,6 +2996,38 @@ describe('handleQurlFile — slash entry', () => {
       expect(payload.recipientIds.length).toBeGreaterThanOrEqual(2);
     });
 
+    test('text `@everyone` with sender MISSING from members.cache post-prewarm → selfIncluded:false (documented divergence from button-click path)', async () => {
+      // Pins the divergence documented at commands.js:~4296 (slash-text
+      // EVERYONE branch). In the narrow shard-resume / partial-chunk
+      // race where prewarm runs but the sender's row never lands in
+      // `members.cache`, the text path expands @everyone over whatever
+      // IS in cache and yields `selfIncluded:false`. The button-click
+      // path (handleConfirmEveryone at commands.js:5694) would
+      // defensively push `interaction.user` for the same cache state
+      // and yield `selfIncluded:true`.
+      //
+      // A future contributor "fixing" the asymmetry by mirroring the
+      // defensive push on the text path would flip this assertion and
+      // be forced to revisit the documented divergence — that's the
+      // point of pinning it.
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+        // SENDER_ID intentionally omitted: simulates the post-prewarm
+        // race where the chunk-fetch landed everyone EXCEPT the sender.
+        guildMembers: {
+          '100000000000000051': {},
+          '100000000000000052': {},
+        },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 3;
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('everyone');
+      expect(payload.selfIncluded).toBe(false);
+      expect(payload.recipientIds).not.toContain(SENDER_ID);
+    });
+
     test('text `@everyone` WITHOUT MENTION_EVERYONE → stays PICKER (parser denied expansion)', async () => {
       // Counter-test: `massMentionDenied:true` does NOT set the
       // EVERYONE-mode trigger — `massMentionExpanded` is mutually
