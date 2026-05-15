@@ -604,11 +604,9 @@ const USER_SELECT_PER_PICK_CAP = 25;
 const WARNING_LIST_DISPLAY_MAX = 10;
 const WARNING_NAME_CODEPOINT_CAP = 80;
 
-// Discord's hard cap on select-menu max_values. The initial confirm-card
-// renderer widens max_values to fit text-resolved recipientIds (so
-// addDefaultUsers can pre-check them — default_values.length ≤
-// max_values is a Discord-side invariant), and that widen is bounded
-// by this cap so we never construct a menu Discord rejects at validation.
+// Discord's hard cap on select-menu max_values. Both picker call sites
+// clamp against this so we never construct a menu Discord rejects at
+// validation (e.g. if USER_SELECT_PER_PICK_CAP is ever raised above 25).
 const DISCORD_SELECT_MAX_VALUES_HARD_CAP = 25;
 
 // Shared Google Maps URL patterns. `/qurl map`'s slash-option
