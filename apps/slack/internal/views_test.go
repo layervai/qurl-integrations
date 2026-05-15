@@ -21,8 +21,8 @@ func TestHelpResponse_ValidJSON(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("invalid JSON: %v\nbody: %s", err, raw)
 	}
-	if got["response_type"] != responseTypeEphemeral {
-		t.Errorf("response_type = %v, want %s", got["response_type"], responseTypeEphemeral)
+	if got["response_type"] != respTypeEphemeral {
+		t.Errorf("response_type = %v, want %s", got["response_type"], respTypeEphemeral)
 	}
 	blocks, ok := got["blocks"].([]any)
 	if !ok {

@@ -14,12 +14,6 @@ import (
 // slack-go/slack library here to avoid pulling a heavyweight
 // transitive into the binary just for a fixed set of view payloads.
 
-// responseTypeEphemeral is the Slack response_type that scopes a
-// message to the requester (visible only to them, in-channel).
-// Lifted to a constant because it appears in every response payload
-// shape — `:warning:` errors, the help block, the spinner replacement.
-const responseTypeEphemeral = "ephemeral"
-
 // callbackIDSetAliasRebind is the modal callback used by the
 // `setalias` rebind confirmation flow. The view-submission handler
 // matches on this to know which path to take.
@@ -87,7 +81,7 @@ func IsRedactedSubmissionBlock(blockID string) bool {
 // slash-command HTTP response body (not a modal).
 func HelpResponse() ([]byte, error) {
 	payload := map[string]any{
-		"response_type": responseTypeEphemeral,
+		respFieldResponseType: respTypeEphemeral,
 		"blocks": []any{
 			sectionBlock("*/qurl* — Create and manage qURLs from Slack"),
 			dividerBlock(),
@@ -213,9 +207,9 @@ func AdminClaimModal() ([]byte, error) {
 // plan); false for direct slash-command response bodies.
 func ErrorResponse(message string, replaceOriginal bool) ([]byte, error) {
 	payload := map[string]any{
-		"response_type":    responseTypeEphemeral,
-		"replace_original": replaceOriginal,
-		"text":             ":warning: " + message,
+		respFieldResponseType: respTypeEphemeral,
+		"replace_original":    replaceOriginal,
+		respFieldText:         ":warning: " + message,
 	}
 	return json.Marshal(payload)
 }
