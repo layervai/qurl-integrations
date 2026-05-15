@@ -1779,16 +1779,19 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   }
 
   // Validate `sendConfig.expires_in` at the entry, BEFORE any mint or
-  // recordQURLSendBatch work (issue #352). Symmetric with the failGate
-  // at executeSendPipeline:~1131 — closes the unprotected path where a
-  // stale/regressed sendConfig row (or a future direct sendConfig
-  // writer) ships an off-set value that would otherwise default to 24h
-  // silently inside `expiryToMs` / `expiryToISO`. Rejecting here means
-  // no QURL links get minted (sparing the upstream API call) and no
-  // DDB rows get written, so there's nothing to revoke / no orphan to
-  // clean up. Returns a user-visible message rather than throwing
-  // (matches handleAddRecipients's error-return contract; the caller
-  // renders it on the post-send confirm card).
+  // recordQURLSendBatch work (issue #352). Symmetric with the
+  // executeSendPipeline failGate (`grep "expiresIn must be one of"`
+  // — anchored on the throw message rather than a line number so
+  // future drift doesn't rot the breadcrumb) — closes the
+  // unprotected path where a stale/regressed sendConfig row (or a
+  // future direct sendConfig writer) ships an off-set value that
+  // would otherwise default to 24h silently inside `expiryToMs` /
+  // `expiryToISO`. Rejecting here means no QURL links get minted
+  // (sparing the upstream API call) and no DDB rows get written, so
+  // there's nothing to revoke / no orphan to clean up. Returns a
+  // user-visible message rather than throwing (matches
+  // handleAddRecipients's error-return contract; the caller renders
+  // it on the post-send confirm card).
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
     logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
