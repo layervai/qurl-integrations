@@ -753,9 +753,23 @@ function buildRevokedDMPayload({ senderAlias }) {
 async function persistDispatchResult(sendId, recipientDiscordId, result) {
   if (result.ok === true && result.channelId && result.messageId) {
     await db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId);
-  } else {
-    await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED);
+    return;
   }
+  // Defensive: sendDM returned ok but discord.js silently omitted
+  // channelId / messageId. Today that doesn't happen — `user.send()`
+  // resolves to a Message with both — but if a future discord.js
+  // changes the response shape, the audit metric would fire
+  // DISPATCH_SENT while DDB records `failed`. Surface the divergence
+  // loudly so it's catchable in logs without dropping into prod
+  // behavior change. Treat as a failed dispatch for safety.
+  if (result.ok === true) {
+    logger.warn('sendDM resolved ok but missing channelId/messageId — recording as failed', {
+      sendId, recipientDiscordId,
+      hasChannelId: Boolean(result.channelId),
+      hasMessageId: Boolean(result.messageId),
+    });
+  }
+  await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED);
 }
 
 // --- Link status monitor ---
@@ -6027,7 +6041,12 @@ function renderSendConfirm({
   return { content: msg, attachmentText: null, needsExpand: successNames.length > REVOKE_TRUNC_LIMIT };
 }
 
-async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias) {
+// senderAlias defaults to 'Someone' as a defense-in-depth in case a
+// future caller forgets the 4th arg. Production callers always pass
+// `resolveSenderAlias(interaction)`, which has its own 'Someone'
+// fallback; this default keeps the recipient-side copy graceful if
+// that contract ever drifts.
+async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = 'Someone') {
   // Items carry dm_channel_id / dm_message_id / dm_status so the post-
   // revoke step can edit each strict-success recipient's DM in place.
   // Legacy rows predating that wire-up have the refs unset — the edit
@@ -6137,17 +6156,38 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias) {
       // Same fan-out width as the DELETE batch above — Discord PATCHes
       // share the same channel-bucket rate limit so 5-wide is plenty.
       const entries = [...editTargets.entries()];
+      // editDM swallows its own exceptions and returns { ok, expected }.
+      // Re-throw on `!ok` so batchSettled buckets failures uniformly;
+      // pass through res.expected so the rolled-up log can distinguish
+      // operational outcomes (recipient deleted DM / blocked bot) from
+      // surprises that warrant oncall attention.
       const editResults = await batchSettled(entries, async ([, refs]) => {
         const res = await editDM(refs.channelId, refs.messageId, editPayload);
-        if (!res.ok) throw new Error('editDM returned not-ok');
+        if (!res.ok) {
+          const e = new Error('editDM returned not-ok');
+          e.expected = res.expected;
+          throw e;
+        }
         return res;
       }, 5);
-      const edited = editResults.filter(r => r.status === 'fulfilled').length;
+      let edited = 0;
+      let expectedFailures = 0;
+      let failed = 0;
+      for (const r of editResults) {
+        if (r.status === 'fulfilled') edited++;
+        else if (r.reason && r.reason.expected) expectedFailures++;
+        else failed++;
+      }
       logger.info('Edited DMs after revoke', {
         sendId,
         attempted: editTargets.size,
         edited,
-        failed: editTargets.size - edited,
+        // Recipient-side operational outcomes (DM deleted, bot blocked,
+        // etc.) — already logged at info inside editDM. Split out here
+        // so the rolled-up failure count in CloudWatch isn't poisoned
+        // by user-side state changes.
+        expectedFailures,
+        failed,
       });
     }
   }
@@ -7652,6 +7692,7 @@ module.exports = {
       handleAddRecipients,
       buildDeliveryPayload,
       buildRevokedDMPayload,
+      persistDispatchResult,
       resolveSenderAlias,
       safeUrlHost,
       // Back-half functions exposed for direct unit testing. Without these

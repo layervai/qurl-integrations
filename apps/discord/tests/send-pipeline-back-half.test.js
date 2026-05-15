@@ -228,6 +228,7 @@ const {
   mintLinksInBatches,
   activeMonitors,
   executeSendPipeline,
+  persistDispatchResult,
 } = _test;
 
 // ---------------------------------------------------------------------------
@@ -890,21 +891,42 @@ describe('revokeAllLinks', () => {
       expect(result.total).toBe(1);
     });
 
-    it('logs split attempted/edited/failed counts when some edits succeed and others fail', async () => {
+    it('logs split attempted/edited/expectedFailures/failed counts', async () => {
+      // Three recipients — one ok, one operational outcome (recipient
+      // deleted DM), one true failure. The split log lets CloudWatch
+      // alert on `failed` without false-positiving on user-side state
+      // changes (`expectedFailures`).
       mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-ok',   dm_status: 'sent', dm_channel_id: 'c-ok',   dm_message_id: 'm-ok' },
-        { resource_id: 'res-2', recipient_discord_id: 'u-fail', dm_status: 'sent', dm_channel_id: 'c-fail', dm_message_id: 'm-fail' },
+        { resource_id: 'res-1', recipient_discord_id: 'u-ok',  dm_status: 'sent', dm_channel_id: 'c-ok',  dm_message_id: 'm-ok' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-exp', dm_status: 'sent', dm_channel_id: 'c-exp', dm_message_id: 'm-exp' },
+        { resource_id: 'res-3', recipient_discord_id: 'u-bad', dm_status: 'sent', dm_channel_id: 'c-bad', dm_message_id: 'm-bad' },
       ]);
       mockDeleteLink.mockResolvedValue(undefined);
       mockEditDM
         .mockResolvedValueOnce({ ok: true })
-        .mockResolvedValueOnce({ ok: false, expected: true });
+        .mockResolvedValueOnce({ ok: false, expected: true })
+        .mockResolvedValueOnce({ ok: false, expected: false });
 
       await revokeAllLinks('send-split-log', 'sender-1', 'apikey', 'Alice');
 
       const logCall = logger.info.mock.calls.find(c => c[0] === 'Edited DMs after revoke');
       expect(logCall).toBeTruthy();
-      expect(logCall[1]).toMatchObject({ attempted: 2, edited: 1, failed: 1 });
+      expect(logCall[1]).toMatchObject({ attempted: 3, edited: 1, expectedFailures: 1, failed: 1 });
+    });
+
+    it('still edits DMs gracefully when senderAlias is omitted (forgotten-4th-arg defense)', async () => {
+      // Production callers always pass resolveSenderAlias(interaction);
+      // this pins the defaulted-param defense so a forgotten arg renders
+      // the recipient-side copy as "Someone closed the door" instead of
+      // throwing or producing "undefined closed the door".
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+
+      await revokeAllLinks('send-no-alias', 'sender-1', 'apikey'); // no senderAlias
+
+      expect(mockEditDM).toHaveBeenCalledTimes(1);
     });
 
     it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
@@ -921,6 +943,42 @@ describe('revokeAllLinks', () => {
 
       expect(mockEditDM).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('persistDispatchResult — divergence guard', () => {
+  beforeEach(() => {
+    mockDb.markSendDMDelivered.mockClear();
+    mockDb.updateSendDMStatus.mockClear();
+    logger.warn.mockClear();
+  });
+
+  it('happy path: writes markSendDMDelivered with both refs', async () => {
+    await persistDispatchResult('s', 'r', { ok: true, channelId: 'c', messageId: 'm' });
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith('s', 'r', 'c', 'm');
+    expect(mockDb.updateSendDMStatus).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('plain failure: writes FAILED without warning', async () => {
+    await persistDispatchResult('s', 'r', { ok: false });
+    expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'failed');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('warns + records FAILED when sendDM resolves ok but refs are missing (future regression catch)', async () => {
+    // discord.js's user.send() resolves to a Message with channelId/id;
+    // if that contract ever drifts we'd silently fire DISPATCH_SENT
+    // while DDB records `failed`. The warn here surfaces the divergence
+    // for log-based alerting without changing recorded state.
+    await persistDispatchResult('s', 'r', { ok: true });
+    expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'failed');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('missing channelId/messageId'),
+      expect.objectContaining({ sendId: 's', recipientDiscordId: 'r' }),
+    );
   });
 });
 

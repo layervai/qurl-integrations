@@ -32,15 +32,6 @@ const { Routes } = require('discord-api-types/v10');
 const { client } = require('./discord');
 const logger = require('./logger');
 
-// Shared instance — same object as `require('./discord').client.rest`.
-// Read lazily via a getter (rather than `const rest = client.rest` at
-// module load) so partial test mocks of `../src/discord` don't crash
-// at require-time when commands.js pulls editDM. Production tokens
-// land on `client.rest` from `client.login()` or `http-only-init`'s
-// explicit `setToken`; either way the getter resolves to the same
-// object by the time a helper is invoked.
-const rest = () => client.rest;
-
 /**
  * Send a direct message to a Discord user via REST (no Gateway).
  *
@@ -69,10 +60,10 @@ const rest = () => client.rest;
 
 async function sendDM(userId, message) {
   try {
-    const channel = await rest().post(Routes.userChannels(), {
+    const channel = await client.rest.post(Routes.userChannels(), {
       body: { recipient_id: userId },
     });
-    const sent = await rest().post(Routes.channelMessages(channel.id), {
+    const sent = await client.rest.post(Routes.channelMessages(channel.id), {
       body: message,
     });
     return { ok: true, channelId: channel.id, messageId: sent.id };
@@ -120,7 +111,7 @@ const DM_EDIT_EXPECTED_API_CODES = new Set([
  */
 async function editDM(channelId, messageId, message) {
   try {
-    await rest().patch(Routes.channelMessage(channelId, messageId), { body: message });
+    await client.rest.patch(Routes.channelMessage(channelId, messageId), { body: message });
     return { ok: true };
   } catch (error) {
     const expected = DM_EDIT_EXPECTED_HTTP_STATUS.has(error.status)
@@ -141,7 +132,7 @@ async function editDM(channelId, messageId, message) {
  */
 async function addRoleToMember(guildId, userId, roleId) {
   try {
-    await rest().put(Routes.guildMemberRole(guildId, userId, roleId));
+    await client.rest.put(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('addRoleToMember via REST failed', {
@@ -156,7 +147,7 @@ async function addRoleToMember(guildId, userId, roleId) {
  */
 async function removeRoleFromMember(guildId, userId, roleId) {
   try {
-    await rest().delete(Routes.guildMemberRole(guildId, userId, roleId));
+    await client.rest.delete(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('removeRoleFromMember via REST failed', {
@@ -171,10 +162,18 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 // Today the helpers below are unused production code — they're the
 // landing pads for the route migration after this PR ships.
 module.exports = {
-  // Resolves to client.rest at access time (not module-load time) so
-  // partial test mocks of `../src/discord` don't crash early. Public
-  // shape unchanged for existing callers: `const { rest } = require(...)`
-  // still pins a direct reference to the shared REST instance.
+  // Property getter — resolves to client.rest at access time, NOT at
+  // module load. This matters because: (a) partial test mocks of
+  // `../src/discord` don't crash at require-time when commands.js
+  // pulls in editDM, and (b) the same shared instance backs each
+  // call inside this module via `client.rest.X` directly. Note for
+  // consumers: `const { rest } = require('./discord-rest')` evaluates
+  // the getter at destructure time and pins to the current
+  // `client.rest`. Production safe because client.login() and
+  // http-only-init's setToken() both mutate `client.rest` in place
+  // rather than reassigning. If that ever changes, destructure-then-
+  // call becomes stale and consumers should switch to property
+  // access (`discordRest.rest.post(...)`).
   get rest() { return client.rest; },
   sendDM,
   editDM,
