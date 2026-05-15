@@ -763,11 +763,11 @@ async function pollOnce(client) {
     // + the exit info already bookend the pause for operators.
     await abortableSleep(currentBackoffMs);
     // Exponential backoff: each consecutive at-cap iteration doubles
-    // the wait up to MAX, so a sustained streak drops the wake rate
+    // the wait up to MAX (cadence: 100→200→400→800→1600ms, then
+    // clamped at 1600ms), so a sustained streak drops the wake rate
     // from 10/s to ~0.6/s at the ceiling without significantly
-    // delaying recovery. (The first 5 iterations average ~1.6/s
-    // before settling at the 1.6s ceiling — see the cadence table
-    // in PR #407 for the per-iteration breakdown.)
+    // delaying recovery. The first 5 iterations average ~1.6/s
+    // before settling at the 1.6s ceiling.
     // Trade-off: a release that lands mid-sleep delays the next
     // below-cap observation (and the paired pause-end log) by up to
     // MAX (1.6s) worst-case, ~MAX/2 (~800ms) average since releases
