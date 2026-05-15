@@ -878,7 +878,7 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM.mock.calls[0].slice(0, 2)).toEqual(['c-clean', 'm-clean']);
     });
 
-    it('emits no edit log when every strict-success row is legacy (no editable targets)', async () => {
+    it('emits debug silent-skip log + no info edit log when every strict-success row is legacy', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-a', recipient_discord_id: 'u-a', dm_status: 'sent' }, // legacy, no refs
         { resource_id: 'res-b', recipient_discord_id: 'u-b', dm_status: 'sent' }, // legacy, no refs
@@ -888,11 +888,17 @@ describe('revokeAllLinks', () => {
       await revokeAllLinks('send-all-legacy', 'sender-1', 'apikey', 'Alice');
 
       expect(mockEditDM).not.toHaveBeenCalled();
-      // Skip the "Edited DMs after revoke" log entirely when there's
-      // nothing to edit — keeps CloudWatch alerts from interpreting
-      // attempted=0 as a noteworthy event.
+      // Skip the "Edited DMs after revoke" info log entirely when
+      // there's nothing to edit — keeps CloudWatch alerts from
+      // interpreting attempted=0 as a noteworthy event.
       const editedLog = logger.info.mock.calls.find(c => c[0] === 'Edited DMs after revoke');
       expect(editedLog).toBeUndefined();
+      // Debug-level silent-skip log surfaces the SQLite local-dev path
+      // (where DM refs aren't persisted) so devs don't chase a phantom
+      // bug. Doesn't fire in prod by default.
+      const skipLog = logger.debug.mock.calls.find(c => c[0] === 'Revoke succeeded but no editable DM targets');
+      expect(skipLog).toBeTruthy();
+      expect(skipLog[1]).toMatchObject({ sendId: 'send-all-legacy', revoke_success: 2 });
     });
 
     it('skips rows with no stored DM refs (legacy sends predating the wire-up)', async () => {

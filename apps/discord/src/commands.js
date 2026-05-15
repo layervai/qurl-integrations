@@ -782,23 +782,12 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     return;
   }
   if (result.ok === true) {
-    // Defensive: the DM was actually delivered (sendDM said ok), but
-    // discord.js silently omitted channelId / messageId. Record SENT
-    // so DDB matches observable reality — `count(dm_status='sent')`
-    // stays a faithful delivery-rate metric. The revoke path's
-    // missing-refs guard (see editTargets builder) naturally skips
-    // the DM edit for these rows.
-    //
-    // CANONICAL DELIVERY-RATE METRIC: DDB `count(dm_status='sent')`
-    // or CloudWatch `dispatch_sent` (they should agree). The
-    // `dispatch_sent_no_refs` event is a CANARY, not a subtractor —
-    // if it fires, oncall investigates the discord.js response shape;
-    // don't auto-subtract it from DISPATCH_SENT in dashboards.
-    //
-    // Audit + warn fire BEFORE the persist so a DDB failure can't
-    // mask the discord.js shape-drift canary. If the persist also
-    // fails, DISPATCH_PERSIST_FAILED fires alongside (separate
-    // signal, separate dashboard).
+    // sendDM said ok but discord.js omitted channelId / messageId.
+    // Record SENT so DDB delivery rollups stay faithful; the revoke
+    // path's missing-refs guard skips the DM edit naturally.
+    // dispatch_sent_no_refs is a CANARY (not a DISPATCH_SENT
+    // subtractor) — emitted before the persist so a DDB outage
+    // can't mask a discord.js shape-drift.
     logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
     logger.warn('sendDM resolved ok but missing channelId/messageId — recording as sent (revoke edit will skip)', {
       sendId, recipientDiscordId,
@@ -6207,7 +6196,16 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
         channelId: it.dm_channel_id, messageId: it.dm_message_id,
       });
     }
-    if (editTargets.size > 0) {
+    if (editTargets.size === 0) {
+      // Surface the silent-skip path so a developer running locally
+      // against SQLite (where DM refs are intentionally not persisted
+      // — see #365) can tell the edit is being skipped on purpose
+      // rather than chasing a phantom bug. Debug level so it doesn't
+      // surface in prod logs by default.
+      logger.debug('Revoke succeeded but no editable DM targets', {
+        sendId, revoke_success: success,
+      });
+    } else {
       const editPayload = buildRevokedDMPayload({ senderAlias });
       // Same fan-out width as the DELETE batch above. Discord's per-
       // channel rate-limit buckets are unique per recipient (each DM
