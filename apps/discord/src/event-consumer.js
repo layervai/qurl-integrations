@@ -161,8 +161,10 @@ function recordSeen(eventId) {
 }
 
 // Worker state. start() flips `running` true and kicks off the poll
-// loop; stop() flips it false and awaits in-flight `processMessage`
-// calls. The loopPromise + inflight set are the join points.
+// loop; stop() flips `stopping` true and awaits loopPromise.
+// pollOnce uses Promise.all over the per-message wrappers, which
+// already serializes "all messages in this batch done" against
+// loopPromise resolution — no separate inflight set needed.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -175,7 +177,6 @@ let running = false;
 let stopping = false;
 let loopPromise = null;
 let receiveAbortController = null;
-const inflight = new Set();
 let sqsClient = null;
 
 // Hook for unit tests: lets the test inject a mock SQSClient
@@ -324,24 +325,27 @@ async function pollOnce(client) {
   });
   if (Messages.length === 0) return;
 
-  // Process messages in parallel. Each runs its own processMessage —
-  // independent failures don't block siblings. The `inflight` set
-  // lets stop() await all in-progress handlers before returning.
-  const promises = Messages.map(async (message) => {
-    const p = processMessage(client, message);
-    inflight.add(p);
+  // Process messages in parallel. Each wrapper catches its own
+  // failures so one rejection doesn't collapse the Promise.all and
+  // strand siblings. The only escape from `processMessage` is a
+  // DeleteMessage throw — every other error path is internally
+  // caught + delete-eager. So this log is specifically the
+  // SQS-delete-failed signal: the message will redrive after the
+  // visibility timeout and re-dispatch the interaction. OCC at
+  // flow-state + Discord token-uniqueness guard the post-handler
+  // side effects; counts of this log line are the operational
+  // signal for "how often do we redrive a successfully-dispatched
+  // interaction." Worth alerting on if it climbs.
+  await Promise.all(Messages.map(async (message) => {
     try {
-      await p;
+      await processMessage(client, message);
     } catch (err) {
-      logger.error('Event consumer: processMessage failed', {
+      logger.error('Event consumer: DeleteMessage failed; message will redeliver after visibility timeout', {
         error: err.message,
         messageId: message.MessageId,
       });
-    } finally {
-      inflight.delete(p);
     }
-  });
-  await Promise.all(promises);
+  }));
 }
 
 // AbortController surfaces aborted requests with err.name === 'AbortError'
@@ -423,7 +427,13 @@ function start(client) {
  * letting them roll back to visible and re-deliver to a sibling.
  */
 async function stop() {
-  if (!running) return;
+  // Idempotent on both not-running AND already-stopping: two
+  // concurrent stop() calls (e.g., SIGTERM racing an uncaughtException
+  // both routing through gracefulShutdown) would otherwise both
+  // pass !running, both abort, both await loopPromise. Harmless but
+  // racy on the running=false reset; the stopping check makes the
+  // single-stopper invariant explicit.
+  if (!running || stopping) return;
   stopping = true;
   // Cancel the in-flight long-poll so stop() returns within tens of
   // ms instead of waiting up to RECEIVE_WAIT_SECONDS (20s) for the
@@ -441,17 +451,9 @@ async function stop() {
   if (receiveAbortController) {
     receiveAbortController.abort();
   }
-  logger.info('Event consumer: stopping', { inflightCount: inflight.size });
+  logger.info('Event consumer: stopping');
   try {
     await loopPromise;
-    // pollOnce's internal Promise.all already awaits per-message
-    // handlers, so by the time loopPromise resolves the inflight
-    // set should be empty. Belt-and-suspenders await covers the
-    // narrow window where the loop exited just before adding the
-    // last batch's promises to inflight.
-    if (inflight.size > 0) {
-      await Promise.allSettled(Array.from(inflight));
-    }
   } catch (err) {
     logger.error('Event consumer: error during stop', { error: err.message });
   } finally {
@@ -471,7 +473,6 @@ function _resetStateForTest() {
   stopping = false;
   loopPromise = null;
   receiveAbortController = null;
-  inflight.clear();
   sqsClient = null;
   seenEventIds.clear();
 }

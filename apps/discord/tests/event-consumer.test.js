@@ -379,7 +379,7 @@ describe('event-consumer: pollOnce', () => {
     // pollOnce returns normally so siblings complete.
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(3);
     expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('processMessage failed'),
+      expect.stringContaining('DeleteMessage failed'),
       expect.objectContaining({ messageId: 'm-2' }),
     );
   });
