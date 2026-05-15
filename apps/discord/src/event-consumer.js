@@ -753,6 +753,10 @@ async function pollOnce(client) {
     // Exponential backoff: each consecutive at-cap iteration doubles
     // the wait up to MAX, so a sustained streak drops the wake rate
     // from 10/s to ~0.6/s without significantly delaying recovery.
+    // Trade-off: a release that lands mid-sleep delays the next
+    // below-cap observation (and the paired pause-end log) by up to
+    // MAX (1.6s). Operators pairing pause-start/pause-end durations
+    // in CloudWatch see this as inflated dwell time at the ceiling.
     currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
     return;
   }
@@ -764,8 +768,8 @@ async function pollOnce(client) {
   if (atCapPauseLogged) {
     logger.info(AT_CAP_RELEASED_INFO_MSG, capPayload);
     atCapPauseLogged = false;
+    currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
   }
-  currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
     QueueUrl: queueUrl,
