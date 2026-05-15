@@ -2733,7 +2733,9 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 // hardcoding a copy that drifts.
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
-  + 'Your team can use `/qurl file` and `/qurl map` to share files and locations securely.\n'
+  + (config.MAP_COMMAND_ENABLED
+    ? 'Your team can use `/qurl file` and `/qurl map` to share files and locations securely.\n'
+    : 'Your team can use `/qurl file` to share files securely.\n')
   + 'All qURL usage will be billed to your API key.';
 
 // Button-stage handler. Routed by flow-dispatch when the admin
@@ -3173,7 +3175,23 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // Subcommands that require the guild API key resolution + cooldown gate.
 // Single-source allowlist: adding a new send-style subcommand only
 // requires touching this set, not the dispatcher fall-through.
-const API_KEY_GATED_SUBCOMMANDS = new Set(['file', 'map', 'revoke']);
+//
+// `'map'` joins the set only when MAP_COMMAND_ENABLED is on. The
+// conditional removal is load-bearing — the gate runs BEFORE the
+// dispatch in execute() below, so if `'map'` stayed in the set with
+// the flag off, a stale-client /qurl map in an unconfigured guild
+// would hit "qURL is not configured for this server" instead of
+// QURL_MAP_DISABLED_REPLY.
+const API_KEY_GATED_SUBCOMMANDS = new Set(
+  config.MAP_COMMAND_ENABLED ? ['file', 'map', 'revoke'] : ['file', 'revoke'],
+);
+
+// User-facing reply for stale /qurl map submissions when the toggle
+// is off. Reached when a Discord client routes a cached `map`
+// submission after the registration has dropped it. Copy mirrors
+// the flag-off branch of SETUP_SUCCESS_MSG so both surfaces describe
+// the same remaining capability.
+const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl file` to share files securely.';
 
 // Slash-option choice arrays. The same wording flows into both the
 // slash-command autocomplete and the confirm-card dropdowns so users
@@ -7523,105 +7541,115 @@ const commands = [
     // `e2e/tests/discord-commands.smoke.test.ts` too — the smoke test
     // pins the subcommand NAME set (not option types, requiredness, or
     // descriptions) to catch registration regressions at deploy time.
-    data: new SlashCommandBuilder()
-      .setName('qurl')
-      .setDescription('Share resources securely via qURL')
-      .addSubcommand(sub =>
-        sub.setName('file')
-          .setDescription('Share a file via one-time qURL links')
-          .addAttachmentOption(opt =>
-            opt.setName('attachment')
-              .setDescription('The file to share')
-              .setRequired(true)
-          )
-          .addStringOption(opt =>
-            opt.setName('recipients')
-              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-              .setRequired(false)
-              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-          )
-          .addStringOption(opt =>
-            opt.setName('expires-in')
-              .setDescription('How long the qURL links stay valid (default: 24 hours)')
-              .setRequired(false)
-              .addChoices(...EXPIRY_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('self-destruct')
-              .setDescription('Optional countdown after first open (default: no timer)')
-              .setRequired(false)
-              .addChoices(...SELF_DESTRUCT_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('personal-message')
-              .setDescription('Optional note included in each recipient\'s DM')
-              .setRequired(false)
-              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-          )
-      )
-      .addSubcommand(sub =>
-        sub.setName('map')
-          .setDescription('Share a Google Maps location via one-time qURL links')
-          .addStringOption(opt =>
-            opt.setName('location')
-              .setDescription('Google Maps URL, or a place / address to search')
-              .setRequired(true)
-              // Picking a suggestion sends a `qurl_place:<id>` sentinel;
-              // free text is resolved server-side via resolveLocation.
-              .setAutocomplete(true)
-              // 500 chars covers full Google Maps URLs (which can be
-              // 200-400 chars after place params + coordinates) plus
-              // headroom; not tied to the recipients-parser cap because
-              // location is a single URL/address, not a token list.
-              .setMaxLength(500)
-          )
-          .addStringOption(opt =>
-            opt.setName('recipients')
-              .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
-              .setRequired(false)
-              .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
-          )
-          .addStringOption(opt =>
-            opt.setName('location-name')
-              .setDescription('Override the label shown to recipients (defaults to URL/address)')
-              .setRequired(false)
-              .setMaxLength(256)
-          )
-          .addStringOption(opt =>
-            opt.setName('expires-in')
-              .setDescription('How long the qURL links stay valid (default: 24 hours)')
-              .setRequired(false)
-              .addChoices(...EXPIRY_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('self-destruct')
-              .setDescription('Optional countdown after first open (default: no timer)')
-              .setRequired(false)
-              .addChoices(...SELF_DESTRUCT_CHOICES)
-          )
-          .addStringOption(opt =>
-            opt.setName('personal-message')
-              .setDescription('Optional note included in each recipient\'s DM')
-              .setRequired(false)
-              .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
-          )
-      )
-      .addSubcommand(sub =>
+    // IIFE so the `/qurl map` subcommand can be conditionally added
+    // based on config.MAP_COMMAND_ENABLED — a plain fluent chain
+    // can't host an `if`. The order of `addSubcommand` calls below
+    // matches the chain we'd write inline, with `map` inserted
+    // between `file` and `revoke` when the flag is on.
+    data: (() => {
+      const builder = new SlashCommandBuilder()
+        .setName('qurl')
+        .setDescription('Share resources securely via qURL')
+        .addSubcommand(sub =>
+          sub.setName('file')
+            .setDescription('Share a file via one-time qURL links')
+            .addAttachmentOption(opt =>
+              opt.setName('attachment')
+                .setDescription('The file to share')
+                .setRequired(true)
+            )
+            .addStringOption(opt =>
+              opt.setName('recipients')
+                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+                .setRequired(false)
+                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+            )
+            .addStringOption(opt =>
+              opt.setName('expires-in')
+                .setDescription('How long the qURL links stay valid (default: 24 hours)')
+                .setRequired(false)
+                .addChoices(...EXPIRY_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('self-destruct')
+                .setDescription('Optional countdown after first open (default: no timer)')
+                .setRequired(false)
+                .addChoices(...SELF_DESTRUCT_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('personal-message')
+                .setDescription('Optional note included in each recipient\'s DM')
+                .setRequired(false)
+                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+            )
+        );
+      if (config.MAP_COMMAND_ENABLED) {
+        builder.addSubcommand(sub =>
+          sub.setName('map')
+            .setDescription('Share a Google Maps location via one-time qURL links')
+            .addStringOption(opt =>
+              opt.setName('location')
+                .setDescription('Google Maps URL, or a place / address to search')
+                .setRequired(true)
+                // Picking a suggestion sends a `qurl_place:<id>` sentinel;
+                // free text is resolved server-side via resolveLocation.
+                .setAutocomplete(true)
+                // 500 chars covers full Google Maps URLs (which can be
+                // 200-400 chars after place params + coordinates) plus
+                // headroom; not tied to the recipients-parser cap because
+                // location is a single URL/address, not a token list.
+                .setMaxLength(500)
+            )
+            .addStringOption(opt =>
+              opt.setName('recipients')
+                .setDescription('Users to send to — paste @mentions. Leave blank to pick from a menu.')
+                .setRequired(false)
+                .setMaxLength(RECIPIENTS_SLASH_MAX_LENGTH)
+            )
+            .addStringOption(opt =>
+              opt.setName('location-name')
+                .setDescription('Override the label shown to recipients (defaults to URL/address)')
+                .setRequired(false)
+                .setMaxLength(256)
+            )
+            .addStringOption(opt =>
+              opt.setName('expires-in')
+                .setDescription('How long the qURL links stay valid (default: 24 hours)')
+                .setRequired(false)
+                .addChoices(...EXPIRY_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('self-destruct')
+                .setDescription('Optional countdown after first open (default: no timer)')
+                .setRequired(false)
+                .addChoices(...SELF_DESTRUCT_CHOICES)
+            )
+            .addStringOption(opt =>
+              opt.setName('personal-message')
+                .setDescription('Optional note included in each recipient\'s DM')
+                .setRequired(false)
+                .setMaxLength(PERSONAL_MESSAGE_INPUT_MAX)
+            )
+        );
+      }
+      builder.addSubcommand(sub =>
         sub.setName('revoke')
           .setDescription('Revoke links from a previous send')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('help')
           .setDescription('Show qURL bot help')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('setup')
           .setDescription('Configure your qURL API key for this server (admin only)')
-      )
-      .addSubcommand(sub =>
+      );
+      builder.addSubcommand(sub =>
         sub.setName('status')
           .setDescription('Check if qURL is configured (admin only)')
-      ),
+      );
+      return builder;
+    })(),
     async execute(interaction) {
       const sub = interaction.options.getSubcommand();
 
@@ -7864,7 +7892,21 @@ const commands = [
       // The dispatcher's API_KEY_GATED_SUBCOMMANDS gate above is the
       // fail-fast presence check.
       if (sub === 'file') return handleQurlFile(interaction);
-      if (sub === 'map') return handleQurlMap(interaction);
+      if (sub === 'map') {
+        if (!config.MAP_COMMAND_ENABLED) {
+          // Debug (not warn) — expected post-deploy traffic from
+          // clients with cached command defs, not an error. Cache
+          // TTL depends on registration mode: up to 1h on global
+          // (multi-tenant) registration, near-instant on guild-
+          // scoped (single-GUILD_ID). Grep this line to see decay.
+          logger.debug('qurl_map_disabled_reply: stale-client /qurl map submission caught by toggle gate', {
+            user_id: interaction.user?.id,
+            guild_id: interaction.guildId,
+          });
+          return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
+        }
+        return handleQurlMap(interaction);
+      }
       if (sub === 'revoke') return handleRevoke(interaction, resolvedApiKey);
       if (sub === 'help') {
         // Section order: user-facing flow first (Getting started → How it
@@ -7885,11 +7927,28 @@ const commands = [
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
+        // `cmd` is used in two spots (Terms + Large servers); a
+        // single token keeps them in lockstep across copy edits.
+        const mapCopy = config.MAP_COMMAND_ENABLED
+          ? {
+            sectionVerb: 'Share resources',
+            bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
+            runLine: '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
+            resource: 'the file or location',
+            cmd: '`/qurl file` or `/qurl map`',
+          }
+          : {
+            sectionVerb: 'Share files',
+            bullet: '',
+            runLine: '\t1. Run `/qurl file` (attach a file)\n',
+            resource: 'the file',
+            cmd: '`/qurl file`',
+          };
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
-            '**Getting started — Share resources securely via one-time links:**\n' +
+            `**Getting started — ${mapCopy.sectionVerb} securely via one-time links:**\n` +
             '  `/qurl file` — share a file with users via one-time qURL links\n' +
-            '  `/qurl map` — share a Google Maps location via one-time qURL links\n' +
+            mapCopy.bullet +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -7899,16 +7958,16 @@ const commands = [
             // misalign "1." with "2.", "3.", "4."). The tab indent now
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
-            '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n' +
+            mapCopy.runLine +
             '  2. Optionally `recipients:@a @b @role` (up to 25 users via @mentions or role expansion) — '
               + 'leave blank to pick from a menu (up to 10 at a time)\n' +
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
-            '**Terms:** a *protected resource* is the file or location you\'re sharing. ' +
+            `**Terms:** a *protected resource* is ${mapCopy.resource} you're sharing. ` +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
-            'You create a qurl for a protected resource each time you run `/qurl file` or `/qurl map`.\n\n' +
-            '**Large servers (~1000+ members):** `/qurl file` or `/qurl map` with role @mentions ' +
+            `You create a qurl for a protected resource each time you run ${mapCopy.cmd}.\n\n` +
+            `**Large servers (~1000+ members):** ${mapCopy.cmd} with role @mentions ` +
             'may skip members the bot has not yet cached locally (the bot fetches members lazily, ' +
             'and very large servers may not be fully populated). ' +
             'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +
@@ -8094,6 +8153,15 @@ async function handleAutocomplete(interaction) {
     const subcommand = interaction.options.getSubcommand(false);
     const focused = interaction.options.getFocused(true);
     if (subcommand !== 'map' || focused?.name !== 'location') {
+      return await interaction.respond([]);
+    }
+    // Feature-flag gate. When MAP_COMMAND_ENABLED is off the map
+    // subcommand isn't registered, so Discord shouldn't deliver an
+    // autocomplete for it — but a stale client racing the registration
+    // roll could. Short-circuit before searchPlaces so we don't burn
+    // operator GOOGLE_MAPS_API_KEY quota on a submit that will be
+    // rejected by the dispatcher anyway.
+    if (!config.MAP_COMMAND_ENABLED) {
       return await interaction.respond([]);
     }
     const rawQuery = (focused.value || '').trim();
@@ -8511,6 +8579,9 @@ module.exports = {
       parseLocationInput,
       resolveLocation,
       RESOLVE_REASON,
+      // Disabled-state reply for stale /qurl map submissions. Exported
+      // so flag-off tests pin against the production string.
+      QURL_MAP_DISABLED_REPLY,
       handleAutocomplete,
       // Test-only reset: the autocomplete-failure burst counter is
       // module-level state that accumulates across tests within a

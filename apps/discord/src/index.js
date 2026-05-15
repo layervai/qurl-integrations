@@ -8,7 +8,7 @@ const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, missingEventShipperKeys, resolveProcessRole } = require('./boot-requirements');
+const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, missingEventShipperKeys, missingMapCommandKeys, resolveProcessRole } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
 const eventConsumer = require('./event-consumer');
 
@@ -260,6 +260,19 @@ if (process.env.NODE_ENV === 'production') {
 const eventShipperMissing = missingEventShipperKeys(config);
 if (eventShipperMissing.length > 0) {
   logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
+  process.exit(1);
+}
+
+// Symmetric with the eventShipper check above — fail fast on
+// inconsistent flag-vs-secret state. The error message is the
+// operator-facing source of truth for the remediation steps.
+const mapCommandMissing = missingMapCommandKeys(config);
+if (mapCommandMissing.length > 0) {
+  logger.error(
+    `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
+    'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
+    '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
+  );
   process.exit(1);
 }
 

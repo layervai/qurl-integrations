@@ -19,6 +19,10 @@ jest.mock('../src/config', () => ({
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
+  // /qurl map feature toggle — these tests cover the enabled-feature
+  // path (handleAutocomplete → searchPlaces, handleQurlMap dispatch,
+  // confirm-card MAPS flow). Production default is off.
+  MAP_COMMAND_ENABLED: true,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 25,
   DATABASE_PATH: ':memory:',

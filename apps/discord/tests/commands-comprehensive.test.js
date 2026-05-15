@@ -14,6 +14,13 @@ jest.mock('../src/config', () => ({
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
+  // /qurl map feature toggle — explicitly false here so the flag-off
+  // describe block below tests the documented production default. A
+  // missing key would *also* read as falsy (the bot's `=== 'true'`
+  // parser), but a future refactor that flipped the default-on
+  // semantics would silently keep these tests green; the explicit
+  // value pins the contract.
+  MAP_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   DATABASE_PATH: ':memory:',
@@ -2200,15 +2207,76 @@ describe('handleSetupModal (dispatcher path)', () => {
   });
 });
 
-describe('handleCommand — autocomplete', () => {
-  it('responds empty for short focused-location values (below min-length)', async () => {
-    // /qurl map's location: option is now autocomplete-enabled.
-    // handleCommand routes the interaction to handleAutocomplete,
-    // which gates on a minimum partial-input length (2 chars). 'Eif'
-    // exceeds the gate, so Places gets called — but since the test
-    // mocks searchPlaces to return [], the dropdown stays empty.
-    // The contract here is that respond() IS called (with []), where
-    // previously it was a silent drop.
+// Flag-off coverage. The config mock at the top of this file does NOT
+// set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
+// resolves it to false — matching the production default. Every test
+// in this block verifies a surface that should be inert when the flag
+// is off. The flag-on path is covered by qurl-file-map.test.js (whose
+// config mock sets MAP_COMMAND_ENABLED: true).
+describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
+  const { mockSearchPlaces } = require('./helpers/places-mock');
+
+  it('SETUP_SUCCESS_MSG omits /qurl map', () => {
+    // Built at module load with the flag snapshot. Pin against the
+    // production string via _test so a future copy edit can't drift
+    // this assertion from reality.
+    expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
+    expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl file');
+  });
+
+  it('/qurl help reply omits /qurl map references', async () => {
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'help'),
+      },
+    });
+    await handleCommand(interaction);
+    const replyArg = interaction.reply.mock.calls.find(([arg]) => typeof arg?.content === 'string')?.[0];
+    expect(replyArg).toBeDefined();
+    expect(replyArg.content).not.toContain('/qurl map');
+    // Sanity: the help reply is still rendered (we want absence of
+    // map, not absence of help). Catches a regression where the
+    // entire help branch goes silent.
+    expect(replyArg.content).toContain('/qurl file');
+    expect(replyArg.content).toContain('qURL Bot — Help');
+    // Pin the flag-off `sectionVerb` swap — a regression that drops
+    // the conditional verb would render "Share resources" against a
+    // map-disabled deploy. Catches the swap in isolation from the
+    // overall mapCopy structure.
+    expect(replyArg.content).toContain('Share files securely');
+    expect(replyArg.content).not.toContain('Share resources securely');
+  });
+
+  it('dispatcher replies with QURL_MAP_DISABLED_REPLY for /qurl map (stale-client safety net)', async () => {
+    // Discord won't normally route a `map` submission when the
+    // subcommand isn't registered, but a stale client carrying the
+    // pre-flip command definition can still submit one. The
+    // dispatcher's defensive branch turns that into a clean ephemeral
+    // instead of falling through to handleQurlMap → Places.
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'map'),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: _test.QURL_MAP_DISABLED_REPLY,
+      ephemeral: true,
+    });
+    // handleQurlMap defers + then hits Places; if the dispatcher ever
+    // routed through it by mistake, deferReply would fire. Negative
+    // assertion guards against that regression.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('autocomplete for /qurl map location does NOT call searchPlaces (Places quota safety)', async () => {
+    // The earlier "responds empty for /qurl map location" test pins
+    // the user-visible contract (respond([])). This one pins the
+    // operator-cost contract: we don't burn the GOOGLE_MAPS_API_KEY
+    // quota on a submit that the dispatcher will reject anyway.
+    mockSearchPlaces.mockClear();
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -2216,13 +2284,50 @@ describe('handleCommand — autocomplete', () => {
       options: {
         ...makeInteraction().options,
         getSubcommand: jest.fn(() => 'map'),
-        getFocused: jest.fn(() => ({ name: 'location', value: 'Eif' })),
+        getFocused: jest.fn(() => ({ name: 'location', value: 'Eiffel Tower' })),
       },
     });
-
     await handleCommand(interaction);
-
     expect(interaction.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  it('stale /qurl map in an unconfigured guild hits disabled reply BEFORE the API-key gate (routing order)', async () => {
+    // The most subtle invariant of this PR: API_KEY_GATED_SUBCOMMANDS
+    // intentionally OMITS 'map' when the flag is off. If 'map' had
+    // stayed in the set, the dispatcher's API_KEY_GATED_SUBCOMMANDS
+    // gate would fire "qURL is not configured for this server"
+    // BEFORE the dispatch could route to QURL_MAP_DISABLED_REPLY —
+    // a stale client in a never-configured guild would see the
+    // wrong copy.
+    //
+    // Setup: empty per-guild key (mockDb default) AND empty global
+    // fallback (mutated config). The gate would otherwise fire if
+    // 'map' were still in API_KEY_GATED_SUBCOMMANDS; the disabled
+    // reply firing instead is the load-bearing assertion.
+    const configMock = require('../src/config');
+    const origQurlApiKey = configMock.QURL_API_KEY;
+    configMock.QURL_API_KEY = '';
+    mockDb.getGuildApiKey.mockResolvedValueOnce(null);
+    try {
+      const interaction = makeInteraction({
+        options: {
+          ...makeInteraction().options,
+          getSubcommand: jest.fn(() => 'map'),
+        },
+      });
+      await handleCommand(interaction);
+      // Strict shape: exactly one reply call, exactly the disabled
+      // copy. A future refactor that re-adds 'map' to
+      // API_KEY_GATED_SUBCOMMANDS would either: (a) reply with
+      // "qURL is not configured" instead, OR (b) reply twice (gate
+      // copy first, then disabled copy on fall-through). Both
+      // regressions are caught by the length + value assertion.
+      const allReplies = interaction.reply.mock.calls.map(([arg]) => arg?.content || '');
+      expect(allReplies).toEqual([_test.QURL_MAP_DISABLED_REPLY]);
+    } finally {
+      configMock.QURL_API_KEY = origQurlApiKey;
+    }
   });
 });
 

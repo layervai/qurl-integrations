@@ -17,6 +17,8 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingMapCommandKeys,
+  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -162,6 +164,56 @@ describe('missingEventShipperKeys', () => {
       missingEventShipperKeys({
         ENABLE_EVENT_SHIPPER: true,
         QURL_BOT_EVENTS_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('missingMapCommandKeys', () => {
+  it('returns empty when the flag is off — Maps key state is irrelevant', () => {
+    expect(missingMapCommandKeys({})).toEqual([]);
+    expect(missingMapCommandKeys({ MAP_COMMAND_ENABLED: false })).toEqual([]);
+    // Even with a missing or PLACEHOLDER key — the toggle is the gate.
+    // No /qurl map registration means no Places call possible.
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: false, GOOGLE_MAPS_API_KEY: '' }),
+    ).toEqual([]);
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: false,
+        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual([]);
+  });
+
+  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is missing', () => {
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+    expect(
+      missingMapCommandKeys({ MAP_COMMAND_ENABLED: true, GOOGLE_MAPS_API_KEY: '' }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+  });
+
+  it('flags GOOGLE_MAPS_API_KEY when toggle is on but the key is still the PLACEHOLDER sentinel', () => {
+    // The exact regression that triggered the toggle PR: the SSM
+    // parameter shipped as the literal "PLACEHOLDER" value in both
+    // sandbox + prod accounts. Without this branch, an operator
+    // flipping the toggle without seeding the SSM secret would boot
+    // successfully and fail at the first /qurl map invocation.
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: true,
+        GOOGLE_MAPS_API_KEY: GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
+      }),
+    ).toEqual(['GOOGLE_MAPS_API_KEY']);
+  });
+
+  it('returns empty when toggle is on AND the key is a real value', () => {
+    expect(
+      missingMapCommandKeys({
+        MAP_COMMAND_ENABLED: true,
+        GOOGLE_MAPS_API_KEY: 'AIzaSyA-real-looking-key-1234567890',
       }),
     ).toEqual([]);
   });
