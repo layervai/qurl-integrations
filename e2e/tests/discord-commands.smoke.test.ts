@@ -133,14 +133,29 @@ describe('Discord command registration (smoke)', () => {
       //
       // `'map'` is conditional on the deploy-time MAP_COMMAND_ENABLED
       // toggle (see apps/discord/src/config.js + the commands.js IIFE).
-      // The smoke runner has to read the same flag the bot reads, or
-      // a flag-on deploy would fail the smoke (no map in expected
-      // set) while a flag-off deploy with a stale workflow env would
-      // pass-with-map and silently miss a regression. Plumb
-      // MAP_COMMAND_ENABLED into the smoke step's `env:` block in
-      // .github/workflows/e2e-smoke.yml in lockstep with the bot
-      // task-definition env.
-      const mapEnabled = process.env.MAP_COMMAND_ENABLED === 'true';
+      // The smoke runner has to read the same flag the bot reads.
+      // Strict shape check: require the env var to be exactly "true"
+      // or "false" — if a workflow regression drops the "Resolve
+      // MAP_COMMAND_ENABLED" step (see e2e-smoke.yml in
+      // qurl-integrations-infra), the env would be unset and the
+      // smoke would silently default to a flag-off expectation,
+      // masking a flag-on deploy as a regression. Failing the test
+      // up front with a named workflow step is louder than chasing a
+      // mystery subcommand-set diff. Resolved value also logged so
+      // CI output shows what the smoke actually asserted.
+      const rawMapFlag = process.env.MAP_COMMAND_ENABLED;
+      if (rawMapFlag !== 'true' && rawMapFlag !== 'false') {
+        throw new Error(
+          `MAP_COMMAND_ENABLED must be set to "true" or "false" before this smoke runs (got: ${JSON.stringify(rawMapFlag)}). `
+          + 'Set it locally via `MAP_COMMAND_ENABLED=false npm test`, or check that '
+          + 'the "Resolve MAP_COMMAND_ENABLED from <env>.tfvars" step in '
+          + 'qurl-integrations-infra/.github/workflows/e2e-smoke.yml ran '
+          + 'before the smoke step.',
+        );
+      }
+      const mapEnabled = rawMapFlag === 'true';
+      // eslint-disable-next-line no-console
+      console.log(`smoke: MAP_COMMAND_ENABLED resolved to "${rawMapFlag}" (mapEnabled=${mapEnabled})`);
       const expectedSubcommands = mapEnabled
         ? ['file', 'help', 'map', 'revoke', 'setup', 'status']
         : ['file', 'help', 'revoke', 'setup', 'status'];
