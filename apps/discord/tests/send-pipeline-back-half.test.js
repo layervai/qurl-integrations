@@ -1172,6 +1172,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
     ['totally bogus', 'never'],
     ['empty string', ''],
     ['undefined', undefined],
+    ['null', null],
     ['number (not string)', 24],
   ])('refuses when sendConfig.expires_in=%s (off allowed set) (#352)', async (_label, expiresIn) => {
     mockDb.getSendConfig.mockResolvedValueOnce({
@@ -1203,7 +1204,6 @@ describe('handleAddRecipients — pre-flight guards', () => {
       expect.objectContaining({ sendId: 'send-1', expiresIn: String(expiresIn) }),
     );
   });
-
 });
 
 describe('handleAddRecipients — file path failure modes', () => {

@@ -496,17 +496,11 @@ const EXPIRY_LABELS = {
 
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
-// Pure predicate. The 5 call sites (failGate at executeSendPipeline,
-// entry gate at handleAddRecipients, renderConfirmCardRows default-
-// selection guard, slash-command forged-interaction guard,
-// handleConfirmExpirySelect forged-value guard) all need different
-// error rendering shapes — `failGate` throws, return-error-obj,
-// fallback-with-warn — so only the membership check is DRY'd here;
-// the per-site error surface stays inline.
-// `Object.prototype.hasOwnProperty.call` (not `EXPIRY_LABELS[v]`) is
-// load-bearing for prototype-pollution safety AND because a
-// caller-supplied `toString`/`constructor` key could otherwise pass
-// the truthy check.
+// Pure predicate for the EXPIRY_LABELS closed-set membership check.
+// `Object.prototype.hasOwnProperty.call` (NOT `EXPIRY_LABELS[v]`) is
+// load-bearing: a caller-supplied `'toString'`/`'constructor'` key
+// would otherwise pass a truthy check via prototype access.
+// `git grep isValidExpiry` for call sites.
 function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
