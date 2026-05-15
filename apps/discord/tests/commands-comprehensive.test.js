@@ -2313,10 +2313,11 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   it('stale /qurl map in an unconfigured guild hits disabled reply BEFORE the API-key gate (routing order)', async () => {
     // The most subtle invariant of this PR: API_KEY_GATED_SUBCOMMANDS
     // intentionally OMITS 'map' when the flag is off. If 'map' had
-    // stayed in the set, the dispatcher's gate (commands.js:7882)
-    // would fire "qURL is not configured for this server" BEFORE the
-    // dispatch could route to QURL_MAP_DISABLED_REPLY — a stale
-    // client in a never-configured guild would see the wrong copy.
+    // stayed in the set, the dispatcher's API_KEY_GATED_SUBCOMMANDS
+    // gate would fire "qURL is not configured for this server"
+    // BEFORE the dispatch could route to QURL_MAP_DISABLED_REPLY —
+    // a stale client in a never-configured guild would see the
+    // wrong copy.
     //
     // Setup: empty per-guild key (mockDb default) AND empty global
     // fallback (mutated config). The gate would otherwise fire if
