@@ -201,6 +201,10 @@ const {
   CONFIRM_NOTE_BUTTON_CUSTOM_ID,
   CONFIRM_NOTE_MODAL_CUSTOM_ID,
   CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
+  CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
+  RECIPIENT_MODE_PICKER,
+  RECIPIENT_MODE_VOICE,
+  normalizeRecipientMode,
   SEND_FLOW_TTL_SECONDS,
   SELF_DESTRUCT_NO_TIMER_CHOICE,
   isOnCooldown,
@@ -225,6 +229,7 @@ const {
   handleConfirmNoteButton,
   handleConfirmNoteModal,
   handleConfirmVoiceEveryone,
+  handleConfirmPickManual,
 } = commands;
 
 // ──────────────────────────────────────────────────────────────
@@ -434,6 +439,39 @@ describe('partitionRecipients', () => {
     const dup = makeUser('100000000000000001');
     const r = partitionRecipients([dup, dup, makeUser('100000000000000002')], SENDER_ID);
     expect(r.valid.length).toBe(3);
+  });
+
+  test('excludeSender:true drops the sender pre-validity (selfIncluded stays false)', () => {
+    // Voice-everyone semantics. The sender is dropped silently — no
+    // droppedBots-style accounting, and `selfIncluded` cannot be true
+    // on this path. The user-visible "you not included" copy is
+    // rendered from recipientMode, not from this partition return.
+    const users = [
+      makeUser('100000000000000001'),
+      makeUser(SENDER_ID),
+      makeUser('100000000000000002'),
+    ];
+    const r = partitionRecipients(users, SENDER_ID, { excludeSender: true });
+    expect(r.valid.map((u) => u.id))
+      .toEqual(['100000000000000001', '100000000000000002']);
+    expect(r.droppedBots).toBe(0);
+    expect(r.selfIncluded).toBe(false);
+  });
+
+  test('excludeSender:true + sender-only input → valid=[] (caller handles fallback copy)', () => {
+    const r = partitionRecipients([makeUser(SENDER_ID)], SENDER_ID, { excludeSender: true });
+    expect(r.valid).toEqual([]);
+    expect(r.droppedBots).toBe(0);
+    expect(r.selfIncluded).toBe(false);
+  });
+
+  test('excludeSender default (false) preserves legacy self-send behavior', () => {
+    // Picker / text paths call without the option and rely on the
+    // sender appearing in `valid` with `selfIncluded:true`. Pin that
+    // omitting the option doesn't accidentally activate exclusion.
+    const r = partitionRecipients([makeUser(SENDER_ID)], SENDER_ID);
+    expect(r.valid.map((u) => u.id)).toEqual([SENDER_ID]);
+    expect(r.selfIncluded).toBe(true);
   });
 });
 
@@ -1988,6 +2026,27 @@ describe('renderConfirmCardContent', () => {
     expect(out).not.toMatch(/Send includes/);
   });
 
+  test('voice-mode + selfIncluded=true → notice suppressed (forged/drifted payload defense)', () => {
+    // Every production voice-mode write path sets selfIncluded:false,
+    // so this state is structurally unreachable. The renderer guard
+    // exists for a forged or schema-drifted payload that would
+    // otherwise stack a contradictory "Send includes you." notice on
+    // top of the voice-mode "(you not included)" copy on the "To:"
+    // line. Pin the guard so a future refactor can't silently let the
+    // two messages coexist.
+    const u1 = { id: '100000000000000001', username: 'alice' };
+    const out = renderConfirmCardContent({
+      ...baseProps,
+      validRecipients: [u1],
+      selfIncluded: true,
+      recipientMode: 'voice',
+      voiceChannelId: 'voice-ch',
+    });
+    expect(out).not.toMatch(/Send includes you/);
+    // Voice-mode "To:" still renders correctly.
+    expect(out).toMatch(/you not included/);
+  });
+
   test('personal-message preview cap at 80 chars, rendered as blockquote', () => {
     const long = 'x'.repeat(120);
     const out = renderConfirmCardContent({ ...baseProps, personalMessage: long });
@@ -2757,6 +2816,158 @@ describe('handleQurlFile — slash entry', () => {
     await handleQurlFile(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     expect(mockDeleteFlow).not.toHaveBeenCalled();
+  });
+
+  describe('voice-channel slash entry (auto voice-everyone default)', () => {
+    // When `/qurl file` is invoked from a voice channel WITHOUT a
+    // `recipients:` value, the front half auto-resolves the voice-
+    // connected members (minus sender + bots) and lands in voice-mode.
+    // These tests pin (a) the recipient set excludes the sender,
+    // (b) the persisted payload carries recipientMode:'voice', and
+    // (c) the fall-back to picker-mode is silent when voice is empty
+    // / sender-only / over-cap.
+
+    const VOICE_CH = 'voice-ch-slash-1';
+    const u1 = '100000000000000011';
+    const u2 = '100000000000000012';
+    const bot = '100000000000000099';
+
+    function makeVoiceEntryInteraction({ members = [], botIds = [] } = {}) {
+      const chanMembers = new Map();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT },
+      });
+      // Stamp the voice channel as the invocation channel + cache row.
+      int.channel = { id: VOICE_CH, type: 2 };
+      for (const mid of members) {
+        const isBot = botIds.includes(mid);
+        const member = { user: { id: mid, bot: isBot } };
+        int.guild.members.cache.set(mid, member);
+        chanMembers.set(mid, member);
+      }
+      int.guild.channels.cache.set(VOICE_CH, {
+        id: VOICE_CH, type: 2, name: 'general', members: chanMembers,
+      });
+      return int;
+    }
+
+    test('happy path: voice members minus sender land in payload, recipientMode:"voice"', async () => {
+      const int = makeVoiceEntryInteraction({ members: [SENDER_ID, u1, u2] });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('voice');
+      expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
+      expect(payload.recipientIds).not.toContain(SENDER_ID);
+      expect(payload.selfIncluded).toBe(false);
+    });
+
+    test('bots in voice are filtered before voice-mode is committed', async () => {
+      const int = makeVoiceEntryInteraction({
+        members: [u1, bot, u2],
+        botIds: [bot],
+      });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('voice');
+      expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
+      expect(payload.recipientIds).not.toContain(bot);
+    });
+
+    test('bots-only voice → picker fallback WITH bot-drop banner (not silent)', async () => {
+      // Distinction from sender-only / truly-empty: those silently
+      // fall back because there's nothing actionable to surface, but
+      // a voice channel populated entirely by bots is the kind of
+      // "wait, didn't it know I was in voice?" state where the
+      // bot-drop accounting clarifies WHY voice-mode didn't take.
+      const int = makeVoiceEntryInteraction({
+        members: [bot],
+        botIds: [bot],
+      });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.recipientIds).toEqual([]);
+      expect(payload.warningsBlock).toMatch(/bot/i);
+    });
+
+    test('sender-only voice → falls back to picker-mode (no auto voice)', async () => {
+      // After excludeSender the voice set is empty. Don't surface a
+      // warning; the user didn't ask for voice-everyone, so falling
+      // back to the picker UX is the quiet path.
+      const int = makeVoiceEntryInteraction({ members: [SENDER_ID] });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.recipientIds).toEqual([]);
+    });
+
+    test('empty voice channel → falls back to picker-mode', async () => {
+      const int = makeVoiceEntryInteraction({ members: [] });
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.recipientIds).toEqual([]);
+    });
+
+    test('over-cap voice → falls back to picker-mode WITH banner explaining why', async () => {
+      // Unreachable under default config (20k cap vs Discord's 99-member
+      // voice cap), but a shrunk env override would trip this. Silent
+      // fallback would leave the user wondering why voice-mode didn't
+      // take. Banner + info log document the degraded state. Mirrors
+      // the button-handler's hard-reject copy at handleConfirmVoiceEveryone.
+      const config = require('../src/config');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      config.QURL_SEND_MAX_RECIPIENTS = 1;  // force over-cap with 2 members
+      try {
+        const int = makeVoiceEntryInteraction({ members: [u1, u2] });
+        await handleQurlFile(int);
+        const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+        expect(payload.recipientMode).toBe('picker');
+        expect(payload.recipientIds).toEqual([]);
+        // User sees the "why" rather than a silent voice→picker switch.
+        // Wording is "eligible recipients" (post-filter count) not raw
+        // "connected" — sender + bots are already filtered out by this
+        // point, so phrasing as "connected" would diverge from what
+        // Discord's voice panel shows.
+        expect(payload.warningsBlock).toMatch(/Voice channel has 2 eligible recipients/);
+        expect(payload.warningsBlock).toMatch(/max 1/);
+      } finally {
+        config.QURL_SEND_MAX_RECIPIENTS = originalCap;
+      }
+    });
+
+    test('voice channel cache miss → picker-mode with "Couldn\'t read voice channel" banner', async () => {
+      // Cache miss simulates the GuildVoiceStates intent dropping or
+      // the channel being evicted between command receipt and our
+      // lookup. Banner surfaces the degraded state instead of silently
+      // landing in picker-mode.
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      int.channel = { id: VOICE_CH, type: 2 };
+      // Inject the channel id WITHOUT registering it in the cache —
+      // makes guild.channels.cache.get(id) return undefined, the cache-
+      // miss shape.
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.warningsBlock).toMatch(/Couldn't read voice channel members/);
+    });
+
+    test('explicit `recipients:` overrides voice-mode default (manual selection wins)', async () => {
+      // A user who typed `recipients:` clearly meant THOSE people, not
+      // "everyone in voice." Voice-mode auto-default only fires when
+      // recipients is omitted entirely.
+      const int = makeVoiceEntryInteraction({ members: [u1, u2] });
+      // Re-implement the jest.fn() stub rather than replacing the
+      // property — keeps the call-tracking behavior that the rest of
+      // the suite relies on.
+      int.options.getString.mockImplementation((key) =>
+        (key === 'recipients' ? `<@${u1}>` : null)
+      );
+      await handleQurlFile(int);
+      const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
+      expect(payload.recipientMode).toBe('picker');
+      expect(payload.recipientIds).toEqual([u1]);
+    });
   });
 });
 
@@ -4379,18 +4590,20 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(lastCall.content).not.toMatch(/No one is connected/i);
   });
 
-  test('sender is voice-connected → selfIncluded:true propagates to the new payload', async () => {
-    // Symmetric with handleConfirmUserSelect's "self-send" coverage —
-    // partitionRecipients flips selfIncluded when the invoking user
-    // appears in the resolved set. The confirm-card renderer reads
-    // this flag to surface the "Send includes you." neutral notice.
-    // Without this test, a future refactor that bypassed
-    // partitionRecipients (e.g., reading recipientIds directly from
-    // channel.members.keys()) would silently drop the notice.
+  test('sender is voice-connected → excluded from recipientIds + selfIncluded:false', async () => {
+    // Voice-everyone semantically means "everyone else in the room,"
+    // not "and CC myself." partitionRecipients's `excludeSender: true`
+    // option drops the sender pre-validity, so the new payload
+    // structurally cannot carry selfIncluded:true on this path. Pins
+    // the contract — a future refactor that read recipientIds from
+    // channel.members.keys() directly would silently re-include the
+    // sender.
     const int = makeVoiceInteraction({ members: [SENDER_ID, u1] });
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
-    expect(payload.selfIncluded).toBe(true);
+    expect(payload.recipientIds).toEqual([u1]);
+    expect(payload.recipientIds).not.toContain(SENDER_ID);
+    expect(payload.selfIncluded).toBe(false);
   });
 
   test('sender NOT in voice channel → selfIncluded:false on the new payload', async () => {
@@ -4398,6 +4611,30 @@ describe('handleConfirmVoiceEveryone', () => {
     await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
     const payload = mockTransitionFlow.mock.calls[0][2].payload;
     expect(payload.selfIncluded).toBe(false);
+  });
+
+  test('new payload carries recipientMode:"voice" — commits the layout switch', async () => {
+    // Voice-mode hides the picker row and swaps the bottom button to
+    // "👥 Pick people instead." Without persisting the mode, a
+    // subsequent expiry/note interaction's re-render would re-derive
+    // picker-mode layout and snap back, leaving the user in a
+    // confusing "did my click take?" state.
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientMode).toBe('voice');
+  });
+
+  test('sender-only voice channel → reject path with "you\'re the only one" copy', async () => {
+    // After excludeSender, a channel containing only the sender yields
+    // valid:[]. The reject copy surfaces the actual reason rather than
+    // the misleading "No one is connected" branch (which is reserved
+    // for an actually-empty channel).
+    const int = makeVoiceInteraction({ members: [SENDER_ID] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/only one in this voice channel/i);
   });
 
   test('transitionFlow conflict → superseded message (OCC race with sibling interaction)', async () => {
@@ -4480,7 +4717,11 @@ describe('handleConfirmVoiceEveryone', () => {
       await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
       expect(mockTransitionFlow).not.toHaveBeenCalled();
       const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
-      expect(lastCall.content).toMatch(/Voice channel has 2 connected \(max 1\)/i);
+      // "eligible recipients" wording is shared with the slash-entry
+      // over-cap banner — both counts are post-partition (sender +
+      // bots filtered), so "connected" would diverge from Discord's
+      // voice panel.
+      expect(lastCall.content).toMatch(/Voice channel has 2 eligible recipients \(max 1\)/i);
       expect(lastCall.content).toMatch(/picker or @mentions/i);
     } finally {
       config.QURL_SEND_MAX_RECIPIENTS = origCap;
@@ -4501,6 +4742,115 @@ describe('handleConfirmVoiceEveryone', () => {
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastCall.content).toMatch(/Card data is corrupted/);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// handleConfirmPickManual — "Pick people instead" button on the
+// confirm card. Voice-mode escape hatch: flips recipientMode back to
+// 'picker', clears the voice-resolved recipientIds, and re-renders.
+// ──────────────────────────────────────────────────────────────
+
+describe('handleConfirmPickManual', () => {
+  const u1 = '100000000000000001';
+  const u2 = '100000000000000002';
+  const VOICE_CH = 'voice-ch-pm';
+
+  const voicePayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [u1, u2],
+    recipientAliases: { [u1]: 'alice', [u2]: 'bob' },
+    recipientMode: 'voice',
+    voiceChannelId: VOICE_CH,
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+    warningsBlock: '',
+  };
+
+  test('clears recipientIds + recipientAliases and flips recipientMode → "picker"', async () => {
+    const int = makeInteraction();
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalledWith('fid', 1, expect.objectContaining({
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: expect.objectContaining({
+        recipientMode: 'picker',
+        recipientIds: [],
+        recipientAliases: {},
+        selfIncluded: false,
+      }),
+      terminal: false,
+    }));
+  });
+
+  test('preserves resourceType / expiresIn / personalMessage from the original payload', async () => {
+    // The toggle is purely UI mode; resource + send-config fields
+    // carry through unchanged so the user keeps their context.
+    const int = makeInteraction();
+    const payloadWithExtras = {
+      ...voicePayload,
+      expiresIn: '7d',
+      selfDestructSeconds: 60,
+      personalMessage: 'hi team',
+    };
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: payloadWithExtras, version: 1 } });
+    const newPayload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(newPayload.resourceType).toBe('file');
+    expect(newPayload.expiresIn).toBe('7d');
+    expect(newPayload.selfDestructSeconds).toBe(60);
+    expect(newPayload.personalMessage).toBe('hi team');
+    expect(newPayload.voiceChannelId).toBe(VOICE_CH);
+  });
+
+  test('corrupt resourceType → deleteFlow + "Card data is corrupted" copy', async () => {
+    const int = makeInteraction();
+    const corrupt = { ...voicePayload, resourceType: 'audio' };
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: corrupt, version: 1 } });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }));
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/Card data is corrupted/);
+  });
+
+  test('transitionFlow conflict → superseded message', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    const int = makeInteraction();
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/superseded/);
+    expect(lastCall.components).toEqual([]);
+  });
+
+  test('transitionFlow not_found → expired message', async () => {
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    const int = makeInteraction();
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+    const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(lastCall.content).toMatch(/expired/);
+    expect(lastCall.components).toEqual([]);
+  });
+
+  test('transitionFlow synchronous throw → ephemeral retry followUp (DDB blip recovery)', async () => {
+    // Symmetric with the expiry / self-destruct handler throw tests.
+    // A DDB outage during the mode-toggle write would otherwise bubble
+    // through the dispatcher's generic "superseded" copy — wrong, since
+    // nothing was actually superseded. The targeted followUp keeps the
+    // user's interaction acked and surfaces actionable retry copy.
+    mockTransitionFlow.mockRejectedValueOnce(new Error('DDB blip'));
+    const int = makeInteraction();
+    await handleConfirmPickManual(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not switch to manual picker/i),
+      ephemeral: true,
+    }));
+    expect(int.editReply).not.toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/superseded/i),
+    }));
   });
 });
 
@@ -5247,6 +5597,48 @@ describe('rerenderConfirmCard cache-miss recipient fallback', () => {
     expect(defaultedExpiryOptions).toHaveLength(1);
     expect(defaultedExpiryOptions[0].value).toBe('24h');
   });
+
+  test('voice-mode + empty recipientIds → "0 users in #voice" + Send disabled (no auto-revert to picker)', async () => {
+    // Reachable when a voice channel empties out between renders (every
+    // non-sender member leaves voice). Voice-mode is sticky: rather
+    // than silently snapping back to picker-mode mid-flow, the card
+    // shows the honest empty state and the user clicks "Pick people
+    // instead" to recover. Send stays disabled (recipientIds=[]) so a
+    // wayward click can't fan out to zero recipients.
+    const { ButtonBuilder } = require('discord.js');
+    ButtonBuilder.mockClear();
+    const payload = {
+      resourceType: 'file',
+      resourceLabel: 'x.png',
+      recipientIds: [],
+      recipientAliases: {},
+      recipientMode: 'voice',
+      voiceChannelId: 'voice-empty',
+      expiresIn: '24h',
+      selfDestructSeconds: null,
+      personalMessage: null,
+    };
+    const int = makeInteraction();
+    int.values = ['7d'];
+    await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+    const lastEdit = int.editReply.mock.calls.slice(-1)[0][0];
+    // Voice-mode rendering still applies — content shows the channel
+    // mention + "(you not included)" notice even with zero recipients.
+    expect(lastEdit.content).toMatch(/0 users in <#voice-empty>/);
+    expect(lastEdit.content).toMatch(/you not included/);
+    // The picker prompt MUST NOT appear (we're in voice-mode).
+    expect(lastEdit.content).not.toMatch(/Pick recipients below/);
+    // Send is disabled (no recipients), pick-manual is rendered as
+    // the recovery path.
+    const sendBtn = ButtonBuilder.mock.results.find(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_send'
+    );
+    expect(sendBtn.value.setDisabled).toHaveBeenCalledWith(true);
+    const customIds = ButtonBuilder.mock.results.map(
+      (r) => r.value.setCustomId.mock.calls[0]?.[0]
+    );
+    expect(customIds).toContain('qurl_confirm_pick_manual');
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -5450,7 +5842,14 @@ describe('renderConfirmCardRows', () => {
     // Discord's 80-UTF-16 hard cap.
     const allEmojiName = '🎉'.repeat(46);
     expect(allEmojiName.length).toBe(92); // confirm worst-case UTF-16
-    const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+    // Pass a `recipients:` mention so the slash-entry path stays in
+    // picker-mode — the voice button is rendered (and label-truncated)
+    // only in picker-mode. The voice-mode auto-default would swap in
+    // a "Pick people instead" button instead, hiding what we're testing.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000099>' },
+      guildMembers: { '100000000000000099': {} },
+    });
     int.channel = { id: 'voice-emoji', type: 2 };
     int.guild.channels.cache.set('voice-emoji', {
       id: 'voice-emoji', name: allEmojiName, type: 2,
@@ -5490,7 +5889,12 @@ describe('renderConfirmCardRows', () => {
     // 45, 46 to land near the slice boundary.
     const longName = 'a'.repeat(44) + '🎉🎉🎉' + 'b'.repeat(47);
     const int = makeInteraction({
-      options: { attachment: VALID_ATTACHMENT },
+      // `recipients:` keeps the slash-entry in picker-mode so the
+      // voice-everyone button (the subject under test) renders.
+      // Voice-mode auto-default would otherwise swap it for "Pick
+      // people instead."
+      options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000099>' },
+      guildMembers: { '100000000000000099': {} },
       // Inject the channel into the interaction so renderConfirmCardRows'
       // live read finds it.
     });
@@ -5521,6 +5925,143 @@ describe('renderConfirmCardRows', () => {
         i++; // skip the trail surrogate
       }
     }
+  });
+
+  describe('voice-mode layout (recipientMode:"voice")', () => {
+    // Round-trip the render layout via handleQurlFile invoked from a
+    // voice channel WITHOUT `recipients:`. The slash-entry voice-mode
+    // auto-default lands the card in voice-mode, which:
+    //   - HIDES the MentionableSelect picker row
+    //   - SHOWS a "👥 Pick people instead" button
+    //   - DOES NOT show the "🔊 Everyone in #voice" button (that's
+    //     the entry point INTO voice mode; once you're in, it's gone)
+    // Without these pins, a future refactor that re-enables the picker
+    // in voice-mode (or drops the pick-manual button) passes every
+    // other test in this file.
+
+    const VOICE_CH = 'voice-ch-layout';
+    const u1 = '100000000000000031';
+
+    function setupVoice(int) {
+      int.channel = { id: VOICE_CH, type: 2 };
+      const member = { user: { id: u1, bot: false } };
+      int.guild.members.cache.set(u1, member);
+      int.guild.channels.cache.set(VOICE_CH, {
+        id: VOICE_CH, type: 2, name: 'general',
+        members: new Map([[u1, member]]),
+      });
+    }
+
+    test('picker row is NOT rendered (MentionableSelectMenuBuilder never instantiated)', async () => {
+      const { MentionableSelectMenuBuilder } = require('discord.js');
+      MentionableSelectMenuBuilder.mockClear();
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      setupVoice(int);
+      await handleQurlFile(int);
+      // The literal "one or the other" contract — voice-mode kills the
+      // picker. A test that asserted on `editReply.components.length`
+      // alone would silently drift if rows were added/removed elsewhere.
+      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
+    });
+
+    test('"Pick people instead" button IS rendered; "Everyone in #voice" button is NOT', async () => {
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      setupVoice(int);
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+      expect(customIds).not.toContain('qurl_confirm_voice_everyone');
+    });
+
+    test('bottom row has exactly 4 buttons in order: Pick-manual, Note, Send, Cancel', async () => {
+      // Layout pin. Voice-mode bottom row carries the escape hatch +
+      // the standard note/send/cancel trio. The pick-manual button is
+      // leftmost (replacing the voice-everyone affordance in picker
+      // mode); any future refactor that re-orders these should update
+      // this test deliberately.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      setupVoice(int);
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toEqual([
+        'qurl_confirm_pick_manual',
+        'qurl_confirm_note_btn',
+        'qurl_confirm_send',
+        'qurl_confirm_cancel',
+      ]);
+    });
+
+    test('voice-mode "To:" line uses a native channel mention (not raw channel.name) — markdown-injection safe', async () => {
+      // Regression pin: channel names like `**spoiler**` or `||hide||`
+      // would otherwise inject markdown into the confirm card content.
+      // Rendering via `<#channelId>` lets Discord resolve the mention
+      // client-side without going through name interpolation.
+      const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
+      int.channel = { id: VOICE_CH, type: 2 };
+      const member = { user: { id: u1, bot: false } };
+      int.guild.members.cache.set(u1, member);
+      int.guild.channels.cache.set(VOICE_CH, {
+        id: VOICE_CH, type: 2,
+        name: '**inject** _under_ ||hide||',
+        members: new Map([[u1, member]]),
+      });
+      await handleQurlFile(int);
+      const editReplyCalls = int.editReply.mock.calls;
+      const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
+      expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
+      expect(lastCall.content).not.toContain('**inject**');
+      expect(lastCall.content).not.toContain('||hide||');
+    });
+
+    test('voice-mode survives an unrelated menu interaction (expiry change) without decaying to picker', async () => {
+      // Belt-and-braces: after the slash-entry voice-mode auto-default
+      // commits, an expiry-change re-renders the card through
+      // rerenderConfirmCard. If the rerender path defaulted to
+      // picker-mode (instead of reading payload.recipientMode), the
+      // card would silently snap layout mid-flow. The dedicated
+      // voice-mode-with-empty-recipients test covers the degenerate
+      // case; this pins the happy path round-trip.
+      const { MentionableSelectMenuBuilder, ButtonBuilder } = require('discord.js');
+      // Construct a post-slash-entry voice-mode payload (what
+      // handleQurlSlashSend would have written to flow_state).
+      const payload = {
+        resourceType: 'file',
+        resourceLabel: 'x.png',
+        recipientIds: [u1],
+        recipientAliases: { [u1]: 'alice' },
+        recipientMode: 'voice',
+        voiceChannelId: VOICE_CH,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        warningsBlock: '',
+      };
+      MentionableSelectMenuBuilder.mockClear();
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({ guildMembers: { [u1]: {} } });
+      int.values = ['7d'];  // change expiry from 24h → 7d
+      await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload, version: 1 } });
+      // Layout pin: picker still hidden, pick-manual still rendered,
+      // voice-everyone still NOT rendered. The "To:" line still uses
+      // the channel mention.
+      expect(MentionableSelectMenuBuilder).not.toHaveBeenCalled();
+      const customIds = ButtonBuilder.mock.results.map(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0]
+      );
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+      expect(customIds).not.toContain('qurl_confirm_voice_everyone');
+      const lastCall = int.editReply.mock.calls.slice(-1)[0][0];
+      expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
+      expect(lastCall.content).toMatch(/you not included/);
+    });
   });
 });
 
@@ -5624,6 +6165,7 @@ describe('constants + exports', () => {
     expect(CONFIRM_NOTE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_note_btn');
     expect(CONFIRM_NOTE_MODAL_CUSTOM_ID).toBe('qurl_confirm_note_modal');
     expect(CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID).toBe('qurl_confirm_voice_everyone');
+    expect(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID).toBe('qurl_confirm_pick_manual');
   });
 
   test('all customIds unique', () => {
@@ -5636,8 +6178,33 @@ describe('constants + exports', () => {
       CONFIRM_NOTE_BUTTON_CUSTOM_ID,
       CONFIRM_NOTE_MODAL_CUSTOM_ID,
       CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID,
+      CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID,
     ]);
-    expect(ids.size).toBe(8);
+    expect(ids.size).toBe(9);
+  });
+
+  test('recipientMode tokens are stable wire values (persisted in flow_state rows)', () => {
+    // The mode token gets serialized into DDB along with the rest of
+    // the payload. Renaming the literal would orphan in-flight cards
+    // across a deploy — the dispatcher reads the field at click time
+    // and would silently mis-route. Pin the literals here.
+    expect(RECIPIENT_MODE_PICKER).toBe('picker');
+    expect(RECIPIENT_MODE_VOICE).toBe('voice');
+  });
+
+  test('normalizeRecipientMode: only "voice" maps to voice; everything else picker', () => {
+    // Stale flow_state rows (created before this field existed) read
+    // as undefined. Off-set values (forged interaction, schema drift,
+    // typo in a future refactor) also fall back to picker. Pin the
+    // table so a future refactor that flips the default can't slip
+    // through.
+    expect(normalizeRecipientMode('voice')).toBe('voice');
+    expect(normalizeRecipientMode('picker')).toBe('picker');
+    expect(normalizeRecipientMode(undefined)).toBe('picker');
+    expect(normalizeRecipientMode(null)).toBe('picker');
+    expect(normalizeRecipientMode('')).toBe('picker');
+    expect(normalizeRecipientMode('VOICE')).toBe('picker'); // case-sensitive
+    expect(normalizeRecipientMode('unknown')).toBe('picker');
   });
 
   test('siblingMessage is keyed by stage so any of the three confirm-card customIds surfaces the same message', () => {
@@ -5675,6 +6242,21 @@ describe('constants + exports', () => {
       'qurl_confirm_note_modal',
     ];
     for (const id of newCustomIds) {
+      expect(() => registerFlow(id, {
+        expectedStage: 'noop_stage_for_collision_check',
+        handler: () => undefined,
+      })).toThrow(/already registered/);
+    }
+  });
+
+  test('voice-everyone + pick-manual buttons are registered at the confirm-card stage', () => {
+    // Same shape as the "four new confirm-card menu customIds" check.
+    // Catches the registration-omission shape for the voice-mode pair
+    // — a missed registerFlow surfaces as an unrouted dispatch in
+    // production, which is harder to debug than a duplicate-register
+    // throw at startup.
+    const { registerFlow } = require('../src/flow-dispatch');
+    for (const id of ['qurl_confirm_voice_everyone', 'qurl_confirm_pick_manual']) {
       expect(() => registerFlow(id, {
         expectedStage: 'noop_stage_for_collision_check',
         handler: () => undefined,
