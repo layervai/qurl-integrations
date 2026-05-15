@@ -1847,7 +1847,7 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // analogous off-EXPIRY_LABELS log level. Forensics-only signal.
     logger.warn('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
-      msg: 'Cannot add recipients — this send\'s saved expiry is invalid (the original send\'s links still work; create a new send to reach additional recipients).',
+      msg: `Cannot add recipients — this send's saved expiry is invalid (the original send's links still work; create a new send to reach additional recipients).`,
       newResourceIds: [], delivered: 0, failed: 0, newRecipients: [],
     };
   }

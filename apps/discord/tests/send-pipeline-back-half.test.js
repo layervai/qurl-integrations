@@ -1165,11 +1165,18 @@ describe('handleAddRecipients — pre-flight guards', () => {
   // off-set `expires_in` value. The pre-flight gate rejects it BEFORE
   // any mint or recordQURLSendBatch work, so we can't strand QURL
   // links upstream or write orphan DDB rows. Symmetric with the
-  // failGate inside executeSendPipeline.
-  it('refuses when sendConfig.expires_in is off the allowed set (#352)', async () => {
+  // failGate inside executeSendPipeline — coverage shapes mirror the
+  // executeSendPipeline allowed-set gate test below.
+  test.each([
+    ['off-set numeric-style', '25h'],
+    ['totally bogus', 'never'],
+    ['empty string', ''],
+    ['undefined', undefined],
+    ['number (not string)', 24],
+  ])('refuses when sendConfig.expires_in=%s (off allowed set) (#352)', async (_label, expiresIn) => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1',
-      expires_in: '25h',  // not in EXPIRY_LABELS — would silently default to 24h under expiryToMs
+      expires_in: expiresIn,
       attachment_url: 'https://cdn.discordapp.com/x.png',
       attachment_name: 'x.png', attachment_content_type: 'image/png',
     });
@@ -1188,10 +1195,12 @@ describe('handleAddRecipients — pre-flight guards', () => {
     // facing metric can be wired on the same shape. The motivation
     // for #352 was preserving audit visibility on the orphan-row
     // failure mode; the entry gate's log is the operator-side
-    // counterpart to user-visible `result.msg`.
+    // counterpart to user-visible `result.msg`. `truncForLog` coerces
+    // via String(v), so non-string inputs (e.g. number 24) surface
+    // as their stringified form.
     expect(logger.warn).toHaveBeenCalledWith(
       'addRecipients refused invalid expires_in',
-      expect.objectContaining({ sendId: 'send-1', expiresIn: '25h' }),
+      expect.objectContaining({ sendId: 'send-1', expiresIn: String(expiresIn) }),
     );
   });
 
@@ -1592,6 +1601,11 @@ describe('executeSendPipeline — attachment.url SSRF re-validation gate', () =>
 });
 
 describe('executeSendPipeline — expiresIn allowed-set gate', () => {
+  // Defensive: any test in this block that pollutes expiryToMs (the
+  // #352 hoist test below uses mockImplementationOnce) gets reset.
+  // Mirrors the parallel block at the top of handleAddRecipients tests.
+  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
+
   test.each([
     ['off-set numeric-style', '25h'],
     ['totally bogus', 'never'],
