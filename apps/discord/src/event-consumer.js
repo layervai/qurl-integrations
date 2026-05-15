@@ -86,7 +86,7 @@
 // this requirement.
 //
 // Backpressure: the poll loop tracks in-flight detached handlers
-// and pauses receives when `inFlightCount >= MAX_INFLIGHT_HANDLERS`
+// and pauses receives when `inFlightPromises.size >= MAX_INFLIGHT_HANDLERS`
 // (env-overridable; see QURL_BOT_MAX_INFLIGHT_HANDLERS). Without
 // this, under a bursty arrival pattern with slow downstream
 // DDB/REST work, handler promises would accumulate without bound,
@@ -94,27 +94,27 @@
 // drain. The cap is the safety net before the worker tier flag-flip
 // in PR 10.
 //
-// SCOPE: this is a receive-gate mechanism only. It pauses new work
-// when capacity is exhausted; it does NOT help with graceful
-// shutdown. trackDispatch retains a count, not promise references,
-// so stop() cannot drain in-flight handlers — a SIGTERM during a
-// detached DDB write races gracefulShutdown's db.close() (same race
-// the pre-PR gateway path has, since the gateway also runs handlers
-// detached). For drain-on-shutdown support, see #391: the refactor
-// would also capture promises in a Set so stop() can `await
-// Promise.allSettled([...inFlightPromises])` with a deadline cap.
+// Two purposes: (1) the cap pauses receives when capacity is
+// exhausted; (2) the set of references lets stop() await a
+// deadline-capped drain of in-flight handlers before
+// gracefulShutdown proceeds to db.close(). See the stop() comment
+// block below for the drain contract — a SIGTERM during a detached
+// DDB write still races db.close() if the handler exceeds the
+// DRAIN_DEADLINE_MS (3s) cap, but typical workloads settle well
+// under that and the race window is meaningfully reduced.
 //
 // This is a soft cap, not a hard semaphore. pollOnce checks
-// `inFlightCount >= cap` BEFORE issuing a ReceiveMessage, but a
-// receive that passes the check can return up to RECEIVE_MAX_MESSAGES
-// (10) messages, and each subsequent processMessage increments via
-// trackDispatch. So in a sustained burst, inFlightCount can transiently
-// reach `cap + RECEIVE_MAX_MESSAGES - 1` (≈9% overshoot at the default
-// cap of 100) before the next pollOnce gates. The cap is a backpressure
-// signal — "stop pulling new work" — not a precise upper bound; size
-// memory headroom assuming `cap + RECEIVE_MAX_MESSAGES` simultaneous
-// handler promises. (Strict ceiling is cap + RECEIVE_MAX_MESSAGES - 1;
-// the .env.example rounds up by 1 for headroom math.)
+// `inFlightPromises.size >= cap` BEFORE issuing a ReceiveMessage,
+// but a receive that passes the check can return up to
+// RECEIVE_MAX_MESSAGES (10) messages, and each subsequent
+// processMessage adds via trackDispatch. So in a sustained burst,
+// the set can transiently reach `cap + RECEIVE_MAX_MESSAGES - 1`
+// (≈9% overshoot at the default cap of 100) before the next pollOnce
+// gates. The cap is a backpressure signal — "stop pulling new work"
+// — not a precise upper bound; size memory headroom assuming
+// `cap + RECEIVE_MAX_MESSAGES` simultaneous handler promises.
+// (Strict ceiling is cap + RECEIVE_MAX_MESSAGES - 1; the .env.example
+// rounds up by 1 for headroom math.)
 //
 // How tracking works without coupling to handler internals: the
 // consumer sets `isWorkerDispatch = true` synchronously around the
@@ -244,22 +244,24 @@ function recordSeen(eventId) {
 // serializes "all messages in this batch were dispatched (emit +
 // DeleteMessage attempted)" against loopPromise resolution.
 //
-// What stop() does NOT await: the async handlers registered on
-// `interactionCreate` (handleCommand / handleFlowInteraction) run
-// detached after the synchronous `client.actions.InteractionCreate.handle`
-// emit. The backpressure tracker (trackDispatch / inFlightCount)
-// CAPTURES those promises for bounding-the-cap purposes but stop()
-// doesn't await them — graceful-shutdown's 10s budget would be
-// blown by a long-running DM-fan-out handler. A handler still
-// mid-DDB-write when SIGTERM lands could race gracefulShutdown's
-// eventual `db.close()` — same race the pre-existing in-process
-// gateway path has, since the gateway also emits + runs detached.
+// What stop() awaits: the poll loop (loopPromise) AND a
+// deadline-capped drain of detached handlers tracked by
+// trackDispatch. After loopPromise resolves, every processMessage's
+// emit window has completed and trackDispatch holds references to
+// every handler promise the worker dispatched. stop() then awaits
+// `Promise.allSettled([...inFlightPromises])` racing a
+// DRAIN_DEADLINE_MS (3s) timer — handlers that don't settle by
+// then race db.close() the same way they did pre-#391, but typical
+// workloads (DDB writes, REST round-trips) settle well under 3s,
+// so the drain reduces the race window meaningfully. The
+// gracefulShutdown 10s budget in index.js still bounds the total;
+// 3s for drain leaves room for db.close() and Discord teardown.
 //
-// If a tighter "drain handlers before db close" guarantee is ever
-// needed, trackDispatch would have to additionally capture each
-// promise in a Set (it currently only retains the count) so stop()
-// could `await Promise.allSettled([...inFlightPromises])` with its
-// own deadline cap (e.g. 3s). Deferred until needed.
+// What stop() still does NOT guarantee: handlers exceeding the 3s
+// drain deadline. A slow DM-fan-out batch that runs past the
+// deadline races db.close() the same way the pre-PR gateway path
+// always has (since the gateway also emits + runs detached). The
+// drain is a *probability improvement*, not a correctness change.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -331,17 +333,37 @@ const MAX_INFLIGHT_HANDLERS = (() => {
 // exits inside the graceful-shutdown budget.
 const INFLIGHT_BACKOFF_MS = 100;
 
-// In-flight handler count (incremented in trackDispatch when a
-// consumer-driven dispatch's promise is registered; decremented
-// when that promise settles). isWorkerDispatch is the per-emit
-// gate that distinguishes consumer-driven dispatches (which we
-// want to count) from gateway-WS-driven dispatches in combined
-// mode (which we don't — the gateway tier doesn't backpressure
-// against itself). The flag is set true synchronously around
+// Maximum time stop() waits for in-flight handler promises to
+// settle before proceeding past `await loopPromise`. Stays well
+// under gracefulShutdown's 10s budget so db.close() has room to run
+// even when the deadline fires. Handlers that haven't settled by
+// then race db.close() the same way they did pre-#391, but the
+// drain reduces the race window meaningfully for typical workloads.
+//
+// Mutable (not const) so tests can shrink the deadline to keep the
+// suite fast. _resetStateForTest restores the default; production
+// code never mutates this — only `_setDrainDeadlineForTest` does.
+const DEFAULT_DRAIN_DEADLINE_MS = 3000;
+let DRAIN_DEADLINE_MS = DEFAULT_DRAIN_DEADLINE_MS;
+
+// In-flight handler promises (added in trackDispatch when a
+// consumer-driven dispatch is registered; deleted when that
+// promise settles). isWorkerDispatch is the per-emit gate that
+// distinguishes consumer-driven dispatches (which we register)
+// from gateway-WS-driven dispatches in combined mode (which we
+// don't — the gateway tier doesn't backpressure against itself).
+// The flag is set true synchronously around
 // `client.actions.InteractionCreate.handle(data)` in processMessage
 // and cleared in the finally; the listener's emit fires inside that
 // window because EventEmitter.emit is synchronous.
-let inFlightCount = 0;
+//
+// Set rather than a bare counter: `.size` gives O(1) cap checks AND
+// the live set of references lets stop() await drain via
+// `Promise.allSettled([...inFlightPromises])`. Set.delete on a
+// non-member is a no-op, so stale .finally callbacks from
+// `_resetStateForTest` or hot-reload can't drift the size — the
+// underflow guard the previous counter shape needed is gone.
+const inFlightPromises = new Set();
 let isWorkerDispatch = false;
 
 // State-machine rate-limit on the at-cap log. Sustained at-cap
@@ -601,27 +623,17 @@ async function processMessage(client, message) {
 function trackDispatch(maybePromise) {
   if (!isWorkerDispatch) return;
   if (!maybePromise || typeof maybePromise.then !== 'function') return;
-  inFlightCount += 1;
-  // `.finally` runs before `.catch` on rejection, so the decrement
+  inFlightPromises.add(maybePromise);
+  // `.finally` runs before `.catch` on rejection, so the delete
   // always lands first — the .catch below sees the rejection AFTER
-  // the counter has dropped.
+  // the promise has been removed from the set.
   //
-  // Underflow guard: every increment is paired with exactly one
-  // decrement on the same promise, so production cannot reach
-  // inFlightCount <= 0 here. If we do, a test resolved its
-  // resolvable promise after `_resetStateForTest` cleared the count
-  // (or jest --watch hot-reloaded the module between the increment
-  // and decrement). Log loud and skip the decrement: the previous
-  // Math.max(0, ...) clamp silently absorbed this, hiding any future
-  // double-decrement regression behind a test-pollution disguise.
+  // Set.delete on a non-member is a no-op, so stale .finally
+  // callbacks (after _resetStateForTest clears the set, or a
+  // hot-reload swaps modules) silently no-op rather than drifting
+  // the size negative. No underflow guard needed.
   maybePromise.finally(() => {
-    if (inFlightCount <= 0) {
-      logger.error('Event consumer: trackDispatch decrement would underflow inFlightCount (internal invariant violation)', {
-        inFlightCount,
-      });
-      return;
-    }
-    inFlightCount -= 1;
+    inFlightPromises.delete(maybePromise);
   }).catch((err) => {
     // Attaching `.finally()` above counts as a handler for Node's
     // unhandled-rejection bookkeeping, so a rejection that pre-PR
@@ -667,12 +679,12 @@ async function pollOnce(client) {
   // logging. That's the right framing for pairing pause-start
   // (entry-snapshot at cap) with pause-end (entry-snapshot below
   // cap) in CloudWatch.
-  const capPayload = { inFlight: inFlightCount, cap: MAX_INFLIGHT_HANDLERS };
+  const capPayload = { inFlight: inFlightPromises.size, cap: MAX_INFLIGHT_HANDLERS };
   // `>=` (not `>`): the cap is the first paused value, so cap=100
   // means we pause AT 100 in-flight, not at 101. Steady-state ceiling
   // is therefore (cap - 1) + RECEIVE_MAX_MESSAGES overshoot. Off-by-
   // one is intentional and matches the .env.example math.
-  if (inFlightCount >= MAX_INFLIGHT_HANDLERS) {
+  if (inFlightPromises.size >= MAX_INFLIGHT_HANDLERS) {
     if (!atCapPauseLogged) {
       logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
       atCapPauseLogged = true;
@@ -946,6 +958,56 @@ async function stop() {
   logger.info('Event consumer: stopping');
   try {
     await loopPromise;
+    // After loopPromise resolves, every processMessage's
+    // synchronous-emit window has completed, so trackDispatch has
+    // captured all in-flight handler promises that the worker
+    // dispatched. Wait up to DRAIN_DEADLINE_MS for those detached
+    // handlers (DDB writes, REST calls, DM fan-out) to settle so
+    // the subsequent db.close() in gracefulShutdown doesn't race
+    // them. The deadline is non-negotiable — index.js's 10s
+    // force-exit fires regardless, so we cap our wait at 3s to
+    // leave room for db.close() and any other shutdown work.
+    //
+    // Snapshot the set into an array before allSettled: pending
+    // .finally callbacks mutate inFlightPromises during the await,
+    // and Set iteration is fine with concurrent mutation but the
+    // explicit copy makes intent obvious.
+    if (inFlightPromises.size > 0) {
+      const drainCount = inFlightPromises.size;
+      const drainStart = Date.now();
+      logger.info('Event consumer: draining in-flight handlers', {
+        count: drainCount,
+        deadlineMs: DRAIN_DEADLINE_MS,
+      });
+      let drainTimer;
+      try {
+        await Promise.race([
+          Promise.allSettled([...inFlightPromises]),
+          new Promise((resolve) => {
+            drainTimer = setTimeout(resolve, DRAIN_DEADLINE_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(drainTimer);
+      }
+      const elapsed = Date.now() - drainStart;
+      if (inFlightPromises.size > 0) {
+        // Deadline elapsed before all handlers settled. Log at warn —
+        // the same race the pre-#391 path always had (handlers racing
+        // db.close), now bounded. Operators paging on a flood of these
+        // would tune DRAIN_DEADLINE_MS or chase the slow downstream.
+        logger.warn('Event consumer: drain deadline elapsed, proceeding with handlers still in-flight', {
+          unsettled: inFlightPromises.size,
+          settled: drainCount - inFlightPromises.size,
+          elapsedMs: elapsed,
+        });
+      } else {
+        logger.info('Event consumer: drain complete', {
+          count: drainCount,
+          elapsedMs: elapsed,
+        });
+      }
+    }
   } catch (err) {
     logger.error('Event consumer: error during stop', { error: err.message });
   } finally {
@@ -993,9 +1055,10 @@ function _resetStateForTest() {
   sqsClient = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
-  inFlightCount = 0;
+  inFlightPromises.clear();
   isWorkerDispatch = false;
   atCapPauseLogged = false;
+  DRAIN_DEADLINE_MS = DEFAULT_DRAIN_DEADLINE_MS;
 }
 
 module.exports = {
@@ -1021,11 +1084,15 @@ module.exports = {
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
     INFLIGHT_BACKOFF_MS,
+    DRAIN_DEADLINE_MS,
     AT_CAP_PAUSE_WARN_MSG,
     AT_CAP_PAUSE_DEBUG_MSG,
     AT_CAP_RELEASED_INFO_MSG,
     getReceiveAbortController: () => receiveAbortController,
-    getInFlightCount: () => inFlightCount,
+    // Returns the in-flight count by reading `.size` on the live
+    // Set. Kept under the historical name for test-site stability;
+    // semantically still "how many handlers are tracked right now."
+    getInFlightCount: () => inFlightPromises.size,
     isWorkerDispatching: () => isWorkerDispatch,
     isAtCapPauseLogged: () => atCapPauseLogged,
     // Test-only setter. trackDispatch reads the module-level
@@ -1034,5 +1101,11 @@ module.exports = {
     // Tests that want to simulate the synchronous flag wrap done by
     // processMessage call this helper instead.
     _setWorkerDispatchingForTest: (v) => { isWorkerDispatch = !!v; },
+    // Test-only setter for the drain deadline. Default 3000ms is
+    // too slow for the suite to wait through on every deadline-elapsed
+    // test; tests shrink it to ~50ms so the unhappy-path assertions
+    // run quickly. `_resetStateForTest` restores the default between
+    // tests so changes don't leak.
+    _setDrainDeadlineForTest: (ms) => { DRAIN_DEADLINE_MS = ms; },
   },
 };

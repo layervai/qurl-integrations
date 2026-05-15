@@ -911,6 +911,118 @@ describe('event-consumer: start/stop lifecycle', () => {
   // The "abort silently exits pollLoop" test above already pins
   // that pollLoop's loop body actually runs (asserts receiveCount
   // ≥ 1), which covers the underlying concern.
+
+  // Helpers reused across the drain tests below. Local rather than
+  // module-level because they assume the start/stop lifecycle setup.
+  function withWorkerDispatchHelper(fn) {
+    eventConsumer._test._setWorkerDispatchingForTest(true);
+    try {
+      return fn();
+    } finally {
+      eventConsumer._test._setWorkerDispatchingForTest(false);
+    }
+  }
+
+  test('stop() drains in-flight handlers before resolving (settled within deadline)', async () => {
+    // Pins the drain contract: stop() should await the in-flight
+    // handler promises captured by trackDispatch before returning,
+    // so gracefulShutdown's subsequent db.close() doesn't race a
+    // handler's mid-DDB-write. Resolution is deferred to a setTimeout
+    // so the .finally microtasks haven't fired by the time stop()
+    // reaches its drain branch — the drain enters with promises
+    // still pending, awaits them via allSettled, logs "drain
+    // complete" before stop() resolves.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    // Tight deadline so the test stays fast even if a CI host is
+    // slow — the resolution timer below fires well inside this
+    // budget, so the deadline-elapsed branch shouldn't trigger.
+    eventConsumer._test._setDrainDeadlineForTest(500);
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Register two resolvable promises via trackDispatch.
+    const resolvers = [];
+    withWorkerDispatchHelper(() => {
+      for (let i = 0; i < 2; i += 1) {
+        let resolve;
+        const p = new Promise((r) => { resolve = r; });
+        resolvers.push(resolve);
+        eventConsumer.trackDispatch(p);
+      }
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(2);
+
+    // Schedule resolution to fire DURING the drain wait. setTimeout
+    // (not a synchronous resolve) so the .finally microtasks haven't
+    // already run by the time stop()'s drain branch executes.
+    setTimeout(() => resolvers.forEach((r) => r('done')), 20);
+    await eventConsumer.stop();
+
+    expect(logger.info).toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.objectContaining({ count: 2 }),
+    );
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('stop() returns within deadline when handlers do not settle', async () => {
+    // Pins the deadline contract: stop() must NOT block indefinitely
+    // on a never-resolving handler. Shrink the deadline so the test
+    // doesn't wait the full 3s default; assert the warn log fires
+    // and stop() resolves within a margin of the deadline.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    eventConsumer._test._setDrainDeadlineForTest(50);
+
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Register a never-resolving promise so the drain hits its deadline.
+    withWorkerDispatchHelper(() => {
+      eventConsumer.trackDispatch(new Promise(() => {}));
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+
+    const start = Date.now();
+    await eventConsumer.stop();
+    const elapsed = Date.now() - start;
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Event consumer: drain deadline elapsed, proceeding with handlers still in-flight',
+      expect.objectContaining({ unsettled: 1, settled: 0 }),
+    );
+    // Stop() returned even though the handler never settled. Allow
+    // a generous upper bound for CI flakiness; the assertion is
+    // "stop didn't hang past the deadline by an order of magnitude."
+    expect(elapsed).toBeLessThan(50 * 20);
+  });
+
+  test('stop() skips drain branch when no handlers are in-flight (no spurious logs)', async () => {
+    // Pins the no-op path: an idle worker stop()s without firing the
+    // drain logs (drainCount > 0 gate). Common case in production —
+    // most stops will land between bursts when no handlers are pending.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+    eventConsumer.start(client);
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+    await eventConsumer.stop();
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      'Event consumer: draining in-flight handlers',
+      expect.anything(),
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.anything(),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      'Event consumer: drain deadline elapsed, proceeding with handlers still in-flight',
+      expect.anything(),
+    );
+  });
 });
 
 describe('event-consumer: backpressure (in-flight handler cap)', () => {
@@ -1097,34 +1209,28 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     );
   });
 
-  test('trackDispatch decrement logs loud and skips when underflow would occur', async () => {
-    // Replaces the previous silent `Math.max(0, ...)` clamp: if a
-    // promise settles after `_resetStateForTest` zeroed the count
-    // (or hot-reload swapped modules), the decrement would underflow.
-    // Production cannot reach this — every increment is paired with
-    // exactly one decrement on the same promise — so this firing
-    // means a test or external caller broke the invariant. Pin that
-    // we log the underflow at error level (so the suite surfaces the
-    // bug) and skip the decrement (so subsequent tests see 0, not -1).
+  test('trackDispatch tolerates _resetStateForTest mid-flight (Set.delete is a no-op on non-member)', async () => {
+    // PR #391 replaced the counter+underflow-guard pattern with a
+    // Set<Promise>. Set.delete on a non-member is a no-op, so a
+    // stale .finally callback firing AFTER _resetStateForTest cleared
+    // the set silently does nothing — no error log, no negative size.
+    // This pins the "set semantics absorb test pollution" property
+    // that justified removing the fail-loud underflow guard.
     let resolveHandler;
     const handlerPromise = new Promise((r) => { resolveHandler = r; });
     withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
 
-    // Simulate the test-pollution scenario: reset state (zeros the
-    // count) BEFORE the registered promise settles, then resolve.
-    // The .finally fires against the zeroed counter and trips the
-    // underflow guard.
     eventConsumer._test._resetStateForTest();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
     resolveHandler('done');
     await flushMicrotasks();
 
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('trackDispatch decrement would underflow'),
-      expect.objectContaining({ inFlightCount: 0 }),
+    // No "underflow" log fired — the new path can't reach that branch.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('underflow'),
+      expect.anything(),
     );
-    // Count stayed at 0 — the decrement was skipped, not applied.
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
