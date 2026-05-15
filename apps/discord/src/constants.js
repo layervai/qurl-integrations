@@ -19,6 +19,17 @@ const RESOURCE_TYPES = {
   MAPS: 'maps',
 };
 
+// Trust signals surfaced on the per-recipient DM embed (sender provenance
+// + "is this real?" verify path). The destination domain in the footer
+// mirrors the host of the minted qURL — keep in lockstep with whatever
+// host qurl-service returns from POST /v1/qurls. The landing URL is the
+// public brand page first-time recipients can hit to verify qURL is a
+// real service before clicking Step Through.
+const TRUST = {
+  LANDING_URL: 'https://layerv.ai/qurl/',
+  DESTINATION_DOMAIN: 'qurl.link',
+};
+
 // DM delivery status values
 const DM_STATUS = {
   SENT: 'sent',
@@ -398,4 +409,5 @@ module.exports = {
   GITHUB_ACTIONS,
   GOOD_FIRST_ISSUE_PATTERNS,
   AUDIT_EVENTS,
+  TRUST,
 };

@@ -19,11 +19,13 @@ jest.mock('discord.js', () => {
   const makeEmbed = () => {
     const embed = {
       _description: null,
+      _author: null,
+      _footer: null,
       setColor: jest.fn().mockReturnThis(),
-      setAuthor: jest.fn().mockReturnThis(),
+      setAuthor: jest.fn(function (a) { embed._author = a; return embed; }),
       setDescription: jest.fn(function (d) { embed._description = d; return embed; }),
       addFields: jest.fn().mockReturnThis(),
-      setFooter: jest.fn().mockReturnThis(),
+      setFooter: jest.fn(function (f) { embed._footer = f; return embed; }),
       setTimestamp: jest.fn().mockReturnThis(),
     };
     capturedEmbeds.push(embed);
@@ -143,71 +145,95 @@ const baseArgs = {
   // shows the recipient a live "in 24 hours" / "in 16 hours" / etc.
   expiresAt: 1735689600,  // arbitrary fixed timestamp; tests assert it survives into the embed
   personalMessage: null,
+  // Author-row provenance defaults. The senderAlias-sanitization tests
+  // below leave these as the default and focus assertions on the author
+  // row's `name`; dedicated tests further down exercise guildName /
+  // guildIconUrl edge cases (missing icon, hostile guildName, null
+  // guild). Keep the default benign so a sender-side regression isn't
+  // masked by a server-name surface.
+  guildName: 'Acme Discord',
+  guildIconUrl: 'https://cdn.discordapp.com/icons/g/icon.png',
 };
 
 beforeEach(() => { capturedEmbeds.length = 0; capturedButtons.length = 0; });
 
-describe('buildDeliveryPayload — senderAlias sanitization', () => {
-  it('renders a normal alias unchanged in the description', () => {
+describe('buildDeliveryPayload — senderAlias sanitization (author row)', () => {
+  // Sender provenance now lives in setAuthor's plaintext `name` slot
+  // (the embed's "address bar"), so these assertions target the author
+  // row, not the description. Description-injection is unreachable here
+  // by construction — the author row doesn't render markdown — but the
+  // bidi/zero-width spoof defense still applies (an RLO-prefixed name
+  // would flip the visible direction of the author line just as it
+  // would have inside the old `**Vik**` description slot).
+  it('renders a normal alias unchanged in the author row name', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
-    expect(capturedEmbeds[0]._description).toContain('**Vik** opened a door for you.');
+    expect(capturedEmbeds[0]._author.name).toContain('Vik');
+    expect(capturedEmbeds[0]._description).toContain('opened a door for you.');
+    expect(capturedEmbeds[0]._description).not.toContain('**Vik**');
   });
 
   it('strips U+202E (RLO) from the alias to prevent direction-flip spoof', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '\u202EAdmin' });
-    const desc = capturedEmbeds[0]._description;
-    expect(desc.includes('\u202E')).toBe(false);
-    expect(desc).toContain('**Admin** opened a door for you.');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName.includes('\u202E')).toBe(false);
+    expect(authorName).toContain('Admin');
   });
 
   it('strips zero-width spaces and bidi isolates from the alias', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '\u200BVik\u2066\u2069' });
-    const desc = capturedEmbeds[0]._description;
-    expect(/[\u200B\u2066\u2069]/.test(desc)).toBe(false);
-    expect(desc).toContain('**Vik** opened a door for you.');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(/[\u200B\u2066\u2069]/.test(authorName)).toBe(false);
+    expect(authorName).toContain('Vik');
   });
 
   it('strips U+061C (Arabic Letter Mark) — completes bidi-control parity with RLM/LRM', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '\u061CVik' });
-    const desc = capturedEmbeds[0]._description;
-    expect(desc).not.toMatch(/\u061C/);
-    expect(desc).toContain('**Vik** opened a door for you.');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).not.toMatch(/\u061C/);
+    expect(authorName).toContain('Vik');
   });
 
   it('strips line/paragraph separators and BOM (would otherwise break embed layout)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '\uFEFFVik\u2028\u2029' });
-    const desc = capturedEmbeds[0]._description;
-    expect(/[\uFEFF\u2028\u2029]/.test(desc)).toBe(false);
-    expect(desc).toContain('**Vik** opened a door for you.');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(/[\uFEFF\u2028\u2029]/.test(authorName)).toBe(false);
+    expect(authorName).toContain('Vik');
   });
 
   it('falls back to "Someone" when alias is entirely strip-eligible chars', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '\u200B\u202E\u2066\u00AD' });
-    expect(capturedEmbeds[0]._description).toContain('**Someone** opened a door for you.');
+    expect(capturedEmbeds[0]._author.name).toContain('Someone');
   });
 
   it('falls back to "Someone" when alias is null/undefined/empty', () => {
     for (const alias of [null, undefined, '']) {
       capturedEmbeds.length = 0;
       buildDeliveryPayload({ ...baseArgs, senderAlias: alias });
-      expect(capturedEmbeds[0]._description).toContain('**Someone** opened a door for you.');
+      expect(capturedEmbeds[0]._author.name).toContain('Someone');
     }
   });
 
-  it('escapes markdown chars in alias (e.g. masked-link injection)', () => {
+  // Author row is plaintext (Discord doesn't render markdown in setAuthor's
+  // name slot), so a `[click](https://evil.com)` alias renders as literal
+  // characters rather than a clickable masked link. The plain sanitization
+  // path is therefore the correct one — backslash-escapes would appear
+  // visibly. Pin both halves: characters appear verbatim in the author
+  // name (no escape pass), AND no clickable link sneaks into the
+  // description (sender no longer renders there).
+  it('renders markdown-injection alias as literal text (no escape, no clickable link)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: '[click](https://evil.com)' });
-    const desc = capturedEmbeds[0]._description;
-    // Brackets and parens must be backslash-escaped so Discord renders them
-    // literally instead of as a clickable masked link.
-    expect(desc).toContain('\\[click\\]\\(https://evil.com\\)');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).toContain('[click](https://evil.com)');
+    expect(authorName).not.toContain('\\[');
+    expect(capturedEmbeds[0]._description).not.toContain('[click]');
   });
 
   it('caps long aliases at 64 chars (defensive upper bound vs Discord 32-char display-name cap)', () => {
     const long = 'A'.repeat(200);
     buildDeliveryPayload({ ...baseArgs, senderAlias: long });
-    const desc = capturedEmbeds[0]._description;
-    expect(desc).toContain('**' + 'A'.repeat(64) + '** opened a door for you.');
-    expect(desc).not.toContain('**' + 'A'.repeat(65));
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).toContain('A'.repeat(64));
+    expect(authorName).not.toContain('A'.repeat(65));
   });
 
   // The 64-char cap is codepoint-aware (Array.from + slice + join) — a
@@ -217,10 +243,10 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   it('does not split surrogate pairs at the 64-char boundary', () => {
     const alias = 'A'.repeat(63) + '🎉';
     buildDeliveryPayload({ ...baseArgs, senderAlias: alias });
-    const desc = capturedEmbeds[0]._description;
-    expect(desc).toContain('**' + 'A'.repeat(63) + '🎉** opened a door for you.');
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).toContain('A'.repeat(63) + '🎉');
     // No lone high surrogate (\uD83C is the high half of 🎉)
-    expect(desc).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
+    expect(authorName).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
   });
 
   // Regression net for the live-countdown design: the Door-closes line
@@ -325,10 +351,12 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // the button reads as intentional rather than generic-CTA-grey.
   it('builds the Step Through button as a Link-style button with the qURL as its URL', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink: 'https://qurl.link/#at_unique_token' });
-    // Last button constructed in the buildDeliveryPayload call is the Step Through.
-    const stepThrough = capturedButtons[capturedButtons.length - 1];
+    // capturedButtons holds [stepThrough, trustButton] — the trust button
+    // joined the row alongside Step Through (the "verify this is real"
+    // affordance, brand-address-bar metaphor). Find by label rather than
+    // by index so a future reorder doesn't false-pass this test.
+    const stepThrough = capturedButtons.find(b => b._label === 'Step Through');
     expect(stepThrough).toBeDefined();
-    expect(stepThrough._label).toBe('Step Through');
     expect(stepThrough._emoji).toBe('🚪');
     expect(stepThrough._style).toBe(5); // ButtonStyle.Link
     expect(stepThrough._url).toBe('https://qurl.link/#at_unique_token');
@@ -416,7 +444,7 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // setDescription is what guarantees the design ordering. Pin the
   // relative order so a future refactor that splits any of the three
   // back into addFields would be caught.
-  it('renders sender → personal message → expiry in that order when all three are present', () => {
+  it('renders action → personal message → expiry in that order when all three are present', () => {
     buildDeliveryPayload({
       ...baseArgs,
       senderAlias: 'Vik',
@@ -428,9 +456,13 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     // `indexOf` check would false-pass if a future personalMessage
     // happened to contain the literal substring `"Closes <t:"`,
     // ordering both indices the same way. Pin position by line.
+    //
+    // Sender no longer appears in the description — it's in the
+    // author row (asserted separately). Line 0 is now the action
+    // statement: "opened a door for you."
     const lines = desc.split('\n');
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[0]).toBe('opened a door for you.');
     expect(lines[1]).toContain('Quarterly numbers');
     expect(lines[2]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
     // And no addFields call — folded entirely into description.
@@ -438,18 +470,18 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   });
 
   // When personalMessage is absent, the description still renders
-  // sender → expiry in order (no orphaned blank line between them).
-  it('renders sender → expiry with no gap when personalMessage is omitted', () => {
+  // action → expiry in order (no orphaned blank line between them).
+  it('renders action → expiry with no gap when personalMessage is omitted', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
     const desc = capturedEmbeds[0]._description;
     const lines = desc.split('\n');
     // EXACTLY 2 lines — guards against an orphan blank line creeping
-    // in between sender and expiry when personalMessage is absent.
+    // in between action and expiry when personalMessage is absent.
     // Do NOT loosen to `toBeGreaterThanOrEqual(2)`: a 3-line desc
     // would mean someone re-introduced `descLines.push('')` for
     // padding, which renders as a visible empty row in Discord.
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[0]).toBe('opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
     // Mirror the all-three-pieces ordering test: also assert addFields
     // is never called on the no-personalMessage path. Belt-and-braces
@@ -460,7 +492,7 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
 
   // Belt-and-braces: a personalMessage that collapses to "" after
   // newline-flatten + trim must not render a visible-but-empty
-  // `> *""*` blockquote between sender and expiry. The call sites
+  // `> *""*` blockquote between action and expiry. The call sites
   // pass `sanitizeMessage(...) || null` so an empty input short-
   // circuits at the outer `if (personalMessage)` today, but a
   // future caller that bypasses that contract would otherwise hit
@@ -479,8 +511,102 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     // personalMessage path above; an empty blockquote line creeping
     // back in would push this to 3 and render visibly in Discord.
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[0]).toBe('opened a door for you.');
     expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+  });
+});
+
+describe('buildDeliveryPayload — author row provenance', () => {
+  // The author row is the embed's "address bar" — anchored top, visually
+  // distinct from the description, the closest analog Discord offers
+  // to a browser's origin display. These tests pin the composition rule
+  // (`${sender} · ${guildName}`) and the iconURL contract (only set when
+  // the guild has one — bare `undefined`, not `null`, on omission).
+  it('composes author name as "sender · guildName" when both are present', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName: 'Acme Discord' });
+    expect(capturedEmbeds[0]._author.name).toBe('Vik · Acme Discord');
+  });
+
+  it('falls back to sender-only when guildName is missing/empty', () => {
+    for (const guildName of [null, undefined, '']) {
+      capturedEmbeds.length = 0;
+      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName });
+      // No trailing ` · ` separator when no guild is known. Defended for
+      // the edge case where interaction.guild is null (commands are
+      // guild-only so this shouldn't fire in production).
+      expect(capturedEmbeds[0]._author.name).toBe('Vik');
+    }
+  });
+
+  it('applies plain (non-markdown-escaping) sanitization to guildName', () => {
+    // Same bidi/zero-width spoof defense the senderAlias path gets — an
+    // attacker controlling guild name could RLO-flip the author row.
+    // Author surface is plaintext, so the markdown-escape pass doesn't
+    // apply; sanitizeDisplayNamePlain is the right tool here.
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName: '‮Acme​' });
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).not.toMatch(/[\u202E\u200B]/);
+    expect(authorName).toContain('Acme');
+    expect(authorName).toBe('Vik · Acme');
+  });
+
+  it('attaches guild iconURL when provided', () => {
+    const iconUrl = 'https://cdn.discordapp.com/icons/g/icon.png';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildIconUrl: iconUrl });
+    expect(capturedEmbeds[0]._author.iconURL).toBe(iconUrl);
+  });
+
+  it('omits iconURL key entirely when guild has no icon', () => {
+    // discord.js wants bare `undefined` (NOT explicit `null`) for "no
+    // icon" — some versions stringify null into the URL slot. Pin that
+    // the key is absent rather than present-and-null.
+    for (const noIcon of [null, undefined, '']) {
+      capturedEmbeds.length = 0;
+      buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildIconUrl: noIcon });
+      expect(capturedEmbeds[0]._author).not.toHaveProperty('iconURL');
+    }
+  });
+});
+
+describe('buildDeliveryPayload — footer + trust button', () => {
+  // Footer reinforces the destination domain the way a browser shows
+  // where a link points before you click. Literal string (not derived
+  // from qurlLink) so a future minted-link subdomain doesn't drift the
+  // recipient-visible domain.
+  it('sets a footer naming the destination domain', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
+    expect(capturedEmbeds[0]._footer).toEqual({ text: 'opens qurl.link' });
+  });
+
+  // The trust button is the "click the lock to verify" affordance —
+  // a first-time recipient can hit qURL's public landing to confirm
+  // the brand exists before clicking Step Through. Locks the URL +
+  // Link style so a future refactor that swaps to a Primary-style
+  // (custom_id-only) button — which would silently break the click-
+  // to-landing flow — surfaces here.
+  it('builds a Link-style "What is qURL?" trust button pointing at the brand landing', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
+    const trust = capturedButtons.find(b => b._label === 'What is qURL?');
+    expect(trust).toBeDefined();
+    expect(trust._emoji).toBe('🛡');
+    expect(trust._style).toBe(5); // ButtonStyle.Link
+    expect(trust._url).toBe('https://layerv.ai/qurl/');
+  });
+
+  // Both buttons live in a single ActionRow next to each other — the
+  // verify path is co-located with the primary action (matches the
+  // brand-address-bar metaphor) rather than tucked into a separate
+  // row below.
+  it('ships Step Through and What is qURL? in the same ActionRow', () => {
+    const { components } = buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
+    expect(components).toHaveLength(1);
+    expect(components[0].addComponents).toHaveBeenCalledTimes(1);
+    // addComponents called with both buttons; pull them out and pin
+    // the order (step-through first, trust second).
+    const args = components[0].addComponents.mock.calls[0];
+    expect(args).toHaveLength(2);
+    expect(args[0]._label).toBe('Step Through');
+    expect(args[1]._label).toBe('What is qURL?');
   });
 });
 
