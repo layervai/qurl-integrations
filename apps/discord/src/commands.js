@@ -588,10 +588,9 @@ function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Set to Discord's
-// hard limit so the picker exposes the full per-pick budget. The initial
-// confirm-card UserSelectMenu AND the post-send "Add Recipients" flow
-// both use this — keep them in lockstep so a future change doesn't drift.
+// Per-pick cap on UserSelectMenuBuilder.setMaxValues, set to Discord's
+// max_values hard limit. Used by both the initial confirm-card picker
+// and the post-send "Add Recipients" flow — keep them in lockstep.
 const USER_SELECT_PER_PICK_CAP = 25;
 
 // Shared render caps for warnings-block bullets that surface user-
@@ -2009,8 +2008,12 @@ async function executeSendPipeline(interaction, {
           }
           setCooldown(interaction.user.id);
 
-          // Show user select menu — collect the response on the REPLY message
-          const maxSelect = Math.min(USER_SELECT_PER_PICK_CAP, remaining);
+          // Show user select menu — collect the response on the REPLY message.
+          const maxSelect = Math.min(
+            USER_SELECT_PER_PICK_CAP,
+            remaining,
+            DISCORD_SELECT_MAX_VALUES_HARD_CAP,
+          );
           const userSelectRow = new ActionRowBuilder().addComponents(
             new UserSelectMenuBuilder()
               .setCustomId(`qurl_addusers_${sendId}`)
@@ -3942,15 +3945,9 @@ function renderConfirmCardRows({
 }) {
   const rows = [];
   const mode = normalizeRecipientMode(recipientMode);
-  // Picker opens at the smallest of the per-pick UX cap, the system
-  // recipient cap, and Discord's max_values hard cap. With
-  // USER_SELECT_PER_PICK_CAP set to Discord's hard cap (25) and
-  // QURL_SEND_MAX_RECIPIENTS ≥ 25 in every deployed config, this lands
-  // on 25; the three-way min stays so a future lowering of
-  // USER_SELECT_PER_PICK_CAP (or a tighter QURL_SEND_MAX_RECIPIENTS via
-  // env) continues to clamp correctly. Pre-resolved recipientIds past
-  // maxValues stay in payload.recipientIds and get the send — only the
-  // visual pre-check via addDefaultUsers truncates.
+  // Pre-resolved recipientIds past maxValues stay in payload.recipientIds
+  // and still get sent — only the visual pre-check via addDefaultUsers
+  // truncates.
   const defaults = Array.isArray(recipientIds) ? recipientIds : [];
   const maxValues = Math.min(
     USER_SELECT_PER_PICK_CAP,

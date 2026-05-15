@@ -4171,13 +4171,9 @@ describe('handleConfirmUserSelect', () => {
   });
 
   test('defense-in-depth: cap-exceeded pick rejected even though picker setMaxValues makes it unreachable today', async () => {
-    // The picker's setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=25,
-    // QURL_SEND_MAX_RECIPIENTS) and Discord's own max_values hard cap of
-    // 25, so production users physically can't pick more than 25. But a
-    // future change to either constant (or a forged interaction) could
-    // trip this branch — pin the guard so a refactor that drops it
-    // produces a visible failure. QURL_SEND_MAX_RECIPIENTS = 25 in the
-    // mocked config; build a pick of 26 to exceed it.
+    // Picker caps at 25; pin the post-pick guard against a forged
+    // interaction or future cap drift. Mocked QURL_SEND_MAX_RECIPIENTS
+    // is 25, so a pick of 26 trips the branch.
     const users = Array.from({ length: 26 }, (_, i) => makeUser(`1000000000000000${String(i).padStart(2, '0')}`));
     const int = makeSelectInteraction({ users });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
@@ -6540,11 +6536,9 @@ describe('renderConfirmCardRows', () => {
     expect(builder.addDefaultUsers).not.toHaveBeenCalled();
   });
 
-  test('slash-entry with pre-resolved recipients opens picker at full per-pick cap with all defaults pre-checked', async () => {
-    // Discord requires default_values.length ≤ max_values. The picker's
-    // per-pick cap equals Discord's hard max_values cap (25), so the
-    // initial render always opens at 25 and any pre-resolved defaults
-    // (≤25) get fully pre-checked via addDefaultUsers.
+  test('slash-entry with pre-resolved recipients pre-checks all defaults via addDefaultUsers', async () => {
+    // Discord requires default_values.length ≤ max_values; the picker
+    // opens at the full per-pick cap (25) so any defaults ≤25 fit.
     const { MentionableSelectMenuBuilder } = require('discord.js');
     MentionableSelectMenuBuilder.mockClear();
     const ids = Array.from({ length: 12 }, (_, i) => `1000000000000000${String(i + 10)}`);
