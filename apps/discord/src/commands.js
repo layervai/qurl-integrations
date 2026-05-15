@@ -3922,6 +3922,10 @@ function renderConfirmCardRows({
     const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
     const labelCount = displayCount == null ? '?' : String(displayCount);
     const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
+    // No `VOICE_LABEL_NAME_UTF16_BUDGET`-equivalent here because no
+    // user-controlled string is interpolated: worst-case label is
+    // `📢 @everyone (NNNNN) — exceeds NNNNN cap` ≈ 41 UTF-16 units,
+    // well under Discord's 80-unit button-label cap.
     //
     // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
     // components. The current worst-case render is
@@ -5537,7 +5541,8 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   }
   if (partialCacheDrops > 0) {
     logger.debug('handleConfirmEveryone: partial-cache rows dropped from @everyone resolution', {
-      flow_id, dropped: partialCacheDrops, cache_size: cache?.size,
+      flow_id, guild_id: interaction.guildId,
+      dropped: partialCacheDrops, cache_size: cache?.size,
     });
   }
   if (selectedUsers.length === 0) {
@@ -5570,6 +5575,11 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     const hasOtherNonBotInCache = selectedUsers.some(
       (u) => u && !u.bot && u.id !== interaction.user.id,
     );
+    // `interaction.user.bot` may be undefined depending on interaction
+    // shape (slash commands can't come from bots in production, so
+    // `partitionRecipients`'s `if (u.bot)` is a no-op here regardless).
+    // Falsy `.bot` → kept; the invariant holds across context-menu /
+    // future interaction types too.
     if (hasOtherNonBotInCache) selectedUsers.push(interaction.user);
   }
   // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes

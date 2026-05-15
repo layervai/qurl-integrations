@@ -5315,6 +5315,21 @@ describe('handleConfirmEveryone', () => {
     expect(reply.content).toMatch(/No usable recipients|bot/i);
   });
 
+  test('forged interaction with no guild → reject without crash + permission warning', async () => {
+    // Forged HTTP interaction crafted with the @everyone custom_id but
+    // no guild (DM context). canMentionEveryone derives `false` via
+    // `!!interaction.guild`, so the perm re-check fires and surfaces
+    // the rejection. The reject path re-renders via
+    // renderConfirmCardRows; the @everyone block there dereferences
+    // `interaction.memberPermissions?.has?.(...)` and must not crash
+    // on the null-guild interaction.
+    const int = makeEveryoneInteraction({ guildId: null });  // → guild = null
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/Mention Everyone/);
+  });
+
   test('success-path emits info-level audit log with counts', async () => {
     // Successful @everyone expansion is a load-bearing audit signal —
     // "did someone fan out to N users?" should be findable in logs
@@ -6667,7 +6682,7 @@ describe('renderConfirmCardRows', () => {
       expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
     });
 
-    test('does NOT render in DM context — direct renderer assertion', async () => {
+    test('does NOT render in DM context — direct renderer assertion', () => {
       // Pin the renderer's `interaction.guild` gate directly (not via
       // handleQurlFile's entry-point DM-rejection). Without a direct
       // assertion, a future refactor that loosens the renderer gate
@@ -6700,7 +6715,7 @@ describe('renderConfirmCardRows', () => {
       expect(customIds).not.toContain('qurl_confirm_everyone');
     });
 
-    test('non-bot count is memoized across re-renders with stable cache', async () => {
+    test('non-bot count is memoized across re-renders with stable cache', () => {
       // Confirm cards re-render on every picker change / expiry select /
       // note edit. For a large guild the per-render O(N) bot filter
       // would compound; the memo keyed on `cache.size:memberCount` lets
@@ -6761,7 +6776,7 @@ describe('renderConfirmCardRows', () => {
       expect(iterations).toBe(1);
     });
 
-    test('memo busts on cache.size change', async () => {
+    test('memo busts on cache.size change', () => {
       // Member join/leave changes `cache.size` (or `memberCount`),
       // which fingerprints the memo entry and forces re-computation.
       const commands = require('../src/commands');
@@ -6907,37 +6922,37 @@ describe('renderConfirmCardRows', () => {
       expect(customIds.length).toBe(5);
     });
 
-    test('does NOT render in voice-mode (recipientMode === RECIPIENT_MODE_VOICE)', async () => {
+    test('does NOT render in voice-mode (recipientMode === RECIPIENT_MODE_VOICE)', () => {
       // Voice-mode already targets the voice-channel population. The
       // @everyone button there would confuse "everyone" semantics —
       // does it mean voice or guild? Gate stays at picker-mode only.
-      // Render-only test: drive via rerenderConfirmCard with
-      // recipientMode: 'voice' and verify the button is absent.
+      // Direct renderer assertion (matches the DM-context test above)
+      // — couples this contract to the renderer's gate, not to expiry-
+      // select's internals.
       const { ButtonBuilder } = require('discord.js');
-      const { handleConfirmExpirySelect } = require('../src/commands');
+      const { renderConfirmCardRows } = commands._test;
       ButtonBuilder.mockClear();
-      const int = makeInteraction({
-        guildMembers: { '100000000000000001': {} },
-      });
-      int.memberPermissions = { has: jest.fn(() => true) };
-      int.guild.memberCount = 5;
-      // Drive a re-render via expiry select with recipientMode=voice.
-      int.values = ['7d'];
-      const voicePayload = {
-        resourceType: 'file',
-        resourceLabel: 'x.png',
-        recipientIds: ['100000000000000001'],
+      const memberCache = new Map([['100000000000000001', { user: makeUser('100000000000000001') }]]);
+      const interaction = {
+        guild: {
+          id: 'g-voice', members: { cache: memberCache }, memberCount: 5,
+          channels: { cache: new Map() },
+        },
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      renderConfirmCardRows({
+        sendDisabled: false,
         expiresIn: '24h',
         selfDestructSeconds: null,
         personalMessage: null,
-        recipientMode: 'voice',
         voiceChannelId: 'voice-ch-1',
-      };
-      mockTransitionFlow.mockResolvedValueOnce({ result: 'ok', version: 2 });
-      await handleConfirmExpirySelect(int, { flow_id: 'fid', row: { payload: voicePayload, version: 1 } });
+        interaction,
+        recipientIds: ['100000000000000001'],
+        recipientMode: 'voice',
+      });
       const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
       expect(customIds).not.toContain('qurl_confirm_everyone');
-      // sanity check: voice-mode renders the "Pick people instead" button.
+      // Sanity check: voice-mode renders the "Pick people instead" button.
       expect(customIds).toContain('qurl_confirm_pick_manual');
     });
   });
