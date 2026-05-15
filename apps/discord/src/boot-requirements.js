@@ -72,6 +72,13 @@ function missingKekRequiredKeys(env) {
 // failure modes are silent enough that they wouldn't surface in
 // monitoring until /qurl interactions start timing out from the user's
 // end. Fail-closed at boot is preferable.
+//
+// API asymmetry: this takes the PARSED `cfg` while the siblings
+// (missingBootKeys, missingProdKeys, missingKekRequiredKeys) take
+// raw `env`. The reason is that ENABLE_EVENT_SHIPPER is parsed in
+// config.js (`process.env.ENABLE_EVENT_SHIPPER === 'true'` → boolean)
+// and consumers should not re-implement that parsing. Reading from
+// cfg keeps the literal-'true' contract in one place.
 function missingEventShipperKeys(cfg) {
   if (!cfg.ENABLE_EVENT_SHIPPER) return [];
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];

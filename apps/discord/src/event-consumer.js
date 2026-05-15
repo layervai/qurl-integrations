@@ -158,13 +158,18 @@ const SEEN_EVENT_ID_CAP = 100_000;
 // would never be read. delete-then-add is the recency-refresh idiom.
 const seenEventIds = new Set();
 
-// One-shot flag for the missing-event_id warning. The first time
-// the consumer observes an envelope without a valid event_id in a
-// process lifetime, we warn (visible at default log levels). Every
-// subsequent missing event_id is debug-only to keep signal:noise
-// sane — the first warning is the actionable alert; the rest are
-// the diagnostic trail. Reset by _resetStateForTest.
-let loggedMissingEventId = false;
+// Time-bounded warn dedup for the missing-event_id observation.
+// First time we observe a non-string/whitespace event_id, we warn
+// (visible at default log levels) and start a 1h cooldown — every
+// subsequent missing event_id within that window logs at debug,
+// then the next observation outside the window re-arms the warn.
+// This catches the case where a producer regression is fixed and
+// then resurfaces hours later (a pure one-shot flag would miss it);
+// and keeps signal:noise sane (the alert isn't repeated on every
+// message during a sustained regression). Reset by
+// _resetStateForTest; the timestamp is wall-clock and cheap to read.
+let lastMissingEventIdWarnMs = 0;
+const MISSING_EVENT_ID_WARN_COOLDOWN_MS = 60 * 60 * 1000;
 
 function recordSeen(eventId) {
   // Be precise about the LRU's contract — the producer publishes
@@ -289,7 +294,25 @@ async function deleteMessage(receiptHandle) {
  * catches them and logs). Per the module-header rationale, we
  * delete the message regardless of handler outcome.
  */
+// SQS Standard caps message bodies at 256 KB; we cap ours
+// conservatively at ~200 KB (SQS attribute headers eat into the
+// envelope). Anything over this is rejected before JSON.parse —
+// cheap defense if the publisher set ever loosens (today the
+// trust boundary is IAM-locked, see TODO(infra-publisher-set)
+// above). Also the natural place a future envelope-signature
+// check would land.
+const MAX_BODY_BYTES = 200 * 1024;
+
 async function processMessage(client, message) {
+  if (message.Body && message.Body.length > MAX_BODY_BYTES) {
+    logger.error('Event consumer: message body exceeds size cap, deleting', {
+      messageId: message.MessageId,
+      bodyBytes: message.Body.length,
+      cap: MAX_BODY_BYTES,
+    });
+    await deleteMessage(message.ReceiptHandle);
+    return;
+  }
   let parsed;
   try {
     parsed = JSON.parse(message.Body);
@@ -341,15 +364,15 @@ async function processMessage(client, message) {
   if (typeof eventId !== 'string' || eventId.trim() === '') {
     // Telemetry blind spot: recordSeen short-circuits on a
     // non-string or whitespace-only event_id, so dup-detection
-    // won't see this message. The first observation per process
-    // is logged at WARN so a producer-side regression surfaces at
-    // default log levels (debug-only would be invisible in prod
-    // until ops grepped); subsequent observations are debug-only
-    // to keep signal:noise sane. The first warn is the actionable
-    // alert.
-    if (!loggedMissingEventId) {
-      loggedMissingEventId = true;
-      logger.warn('Event consumer: envelope missing valid event_id; LRU dedup will not track (first observation; subsequent will log at debug)', {
+    // won't see this message. WARN-rate-limited to once per hour
+    // so a sustained producer regression doesn't flood logs while
+    // a transient-and-resurfaced regression still triggers a fresh
+    // alert. Subsequent observations within the cooldown window
+    // are debug-only.
+    const now = Date.now();
+    if (now - lastMissingEventIdWarnMs >= MISSING_EVENT_ID_WARN_COOLDOWN_MS) {
+      lastMissingEventIdWarnMs = now;
+      logger.warn('Event consumer: envelope missing valid event_id; LRU dedup will not track (warn re-armed every 1h; subsequent observations log at debug)', {
         messageId: message.MessageId,
         eventType,
         eventIdType: typeof eventId,
@@ -483,12 +506,17 @@ async function pollOnce(client) {
 // in the error-backoff path so an operator sees the log line and the
 // loop doesn't spin without a backoff.
 function isAbortError(err) {
-  // Walk err.cause recursively (capped at 5 hops to bound the
-  // worst-case cyclic structure). Future @aws-sdk releases may
-  // wrap aborts in one or more layers of cause chain; recursing
-  // keeps the silent-shutdown property regardless of nesting depth.
+  // Walk err.cause until we hit an abort shape, a non-object, or a
+  // node we've already visited. Visited-set (vs a depth counter)
+  // catches both cyclic chains AND non-cyclic chains deeper than
+  // an arbitrary cap — future @aws-sdk releases that wrap aborts
+  // in more than a few cause layers would still match. Bounded
+  // memory because the chain length is bounded by distinct error
+  // instances, which is small in practice.
+  const visited = new Set();
   let current = err;
-  for (let i = 0; i < 5 && current; i += 1) {
+  while (current && typeof current === 'object' && !visited.has(current)) {
+    visited.add(current);
     if (current.name === 'AbortError'
       || current.name === 'CanceledError'
       || current.code === 'AbortError'
@@ -698,7 +726,7 @@ function _resetStateForTest() {
   receiveAbortController = null;
   sqsClient = null;
   seenEventIds.clear();
-  loggedMissingEventId = false;
+  lastMissingEventIdWarnMs = 0;
 }
 
 module.exports = {

@@ -307,12 +307,12 @@ describe('event-consumer: processMessage dispatch paths', () => {
     );
   });
 
-  test('missing event_id: first observation warns, subsequent log at debug', async () => {
-    // The first occurrence per process surfaces at WARN so a
-    // producer-side regression is visible at default log levels
-    // (debug-only would be invisible in prod). Subsequent
-    // observations are debug-only to keep signal:noise sane —
-    // the first warn is the actionable alert.
+  test('missing event_id: warn rate-limited to once per cooldown window, then re-armed', async () => {
+    // The warn is rate-limited to once per 1h cooldown so a
+    // sustained producer regression doesn't flood logs. The
+    // re-arm catches the case where a regression is fixed and
+    // resurfaces hours later. Subsequent observations within the
+    // cooldown window are debug-only.
     sqsMock.on(DeleteMessageCommand).resolves({});
     const client = makeStubClient();
     const message1 = makeMessage(
@@ -324,27 +324,67 @@ describe('event-consumer: processMessage dispatch paths', () => {
       { messageId: 'm-no-eid-2', receiptHandle: 'rh-2' },
     );
 
+    // First two close-together: first warns, second is debug-only.
     await withMockedSqs(async () => {
       await eventConsumer._test.processMessage(client, message1);
       await eventConsumer._test.processMessage(client, message2);
     });
 
     expect(client.actions.InteractionCreate.handle).toHaveBeenCalledTimes(2);
-    // First observation: warn.
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('envelope missing valid event_id'),
       expect.objectContaining({ messageId: 'm-no-eid-1', eventType: 'INTERACTION_CREATE', eventIdType: 'undefined' }),
     );
-    // Second observation: debug only.
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('envelope missing valid event_id'),
       expect.objectContaining({ messageId: 'm-no-eid-2' }),
     );
-    // Warn fires exactly once across both events.
+    // Warn fires exactly once within the cooldown window.
     const warnCalls = logger.warn.mock.calls.filter(
       ([msg]) => typeof msg === 'string' && msg.includes('envelope missing valid event_id'),
     );
     expect(warnCalls).toHaveLength(1);
+
+    // Simulate ≥1h passing by spying Date.now to return a value
+    // past the cooldown. The next observation should re-arm the warn.
+    const dateSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 60 * 60 * 1000 + 1);
+    try {
+      const message3 = makeMessage(
+        { eventType: 'INTERACTION_CREATE', data: { id: 'no-eid-3' } },
+        { messageId: 'm-no-eid-3', receiptHandle: 'rh-3' },
+      );
+      await withMockedSqs(() => eventConsumer._test.processMessage(client, message3));
+      const reArmedWarns = logger.warn.mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('envelope missing valid event_id'),
+      );
+      expect(reArmedWarns).toHaveLength(2);
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  test('oversized message body short-circuits before JSON.parse + still deletes', async () => {
+    // Pins the cheap defense against an oversized body — today the
+    // trust boundary (IAM-locked publisher) prevents abuse, but if
+    // the publisher set ever loosens, a 1 MB payload would
+    // otherwise drive JSON.parse cost (and any downstream
+    // serialization in handlers) into the consumer process.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const message = {
+      Body: 'x'.repeat(250 * 1024), // 250 KB > 200 KB cap
+      ReceiptHandle: 'rh-oversize',
+      MessageId: 'm-oversize',
+    };
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+
+    expect(client.actions.InteractionCreate.handle).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('message body exceeds size cap'),
+      expect.objectContaining({ messageId: 'm-oversize', cap: expect.any(Number) }),
+    );
+    expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
   });
 
   test('seenEventIds not populated on malformed body or unknown eventType', async () => {
