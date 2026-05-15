@@ -1174,6 +1174,7 @@ describe('handleAddRecipients — pre-flight guards', () => {
     ['undefined', undefined],
     ['null', null],
     ['number (not string)', 24],
+    ['NaN', NaN],
   ])('refuses when sendConfig.expires_in=%s (off allowed set) (#352)', async (_label, expiresIn) => {
     mockDb.getSendConfig.mockResolvedValueOnce({
       connector_resource_id: 'res-1',
@@ -1612,6 +1613,7 @@ describe('executeSendPipeline — expiresIn allowed-set gate', () => {
     ['empty string', ''],
     ['undefined', undefined],
     ['number (not string)', 24],
+    ['NaN', NaN],
   ])('throws on expiresIn=%s', async (_label, expiresIn) => {
     const interaction = makeInteraction();
     await expect(executeSendPipeline(interaction, makePipelineParams({ expiresIn })))
