@@ -89,6 +89,7 @@ func HelpResponse() ([]byte, error) {
 				"*Aliased commands (alias-only world)*",
 				"`/qurl get $alias` — mint an access link for an alias",
 				"`/qurl get $alias dm:true` — DM the link instead of channel ephemeral",
+				"`/qurl get $alias reason:\"audit text\"` — attach a reason to the mint (audit trail)",
 				"`/qurl setalias $alias <url-or-resource_id>` — bind an alias (admin only)",
 				"`/qurl unsetalias $alias` — clear an alias (admin only)",
 				"`/qurl aliases` — list channel-allowed aliases",
@@ -137,11 +138,13 @@ type SetAliasRebindMetadata struct {
 // with the Slack-supplied trigger ID.
 //
 // oldTarget/newTarget are interpolated into mrkdwn code spans
-// (a backtick-wrapped %s). The caller is expected to pass URLs or
-// r_... resource IDs — neither shape contains backticks. If a
-// future caller widens this to user-typed prose, it must escape
-// backticks before passing in to avoid breaking the code-span
-// rendering.
+// (a backtick-wrapped %s). URLs and r_... resource IDs realistically
+// never contain backticks, but the rebind modal is shown to one admin
+// after another admin set the target, so a malicious admin could
+// otherwise break out of the code span and inject mrkdwn
+// (e.g. <!channel>, <@U…>) into the confirming admin's view.
+// [escapeMrkdwnCode] neutralizes the only character that matters
+// for the code-span surface.
 func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error) {
 	meta, err := json.Marshal(SetAliasRebindMetadata{Alias: aliasName})
 	if err != nil {
@@ -155,13 +158,24 @@ func SetAliasRebindModal(aliasName, oldTarget, newTarget string) ([]byte, error)
 		"close":            plainTextObj("Cancel"),
 		"private_metadata": string(meta),
 		"blocks": []any{
-			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", aliasName)),
-			sectionBlock(fmt.Sprintf("*Current target:* `%s`", oldTarget)),
-			sectionBlock(fmt.Sprintf("*New target:* `%s`", newTarget)),
+			sectionBlock(fmt.Sprintf("Alias `$%s` is already bound.", escapeMrkdwnCode(aliasName))),
+			sectionBlock(fmt.Sprintf("*Current target:* `%s`", escapeMrkdwnCode(oldTarget))),
+			sectionBlock(fmt.Sprintf("*New target:* `%s`", escapeMrkdwnCode(newTarget))),
 			contextBlock("This action overwrites the existing binding for everyone in the workspace."),
 		},
 	}
 	return json.Marshal(payload)
+}
+
+// escapeMrkdwnCode neutralizes backticks in a string that's about to
+// be wrapped in a mrkdwn code span. Without escaping, a value
+// containing “ ` “ would close the surrounding span and let the
+// remainder render as mrkdwn — opening an injection vector for
+// user-supplied targets (admin-set DDB rows). Replacing with the
+// modifier-letter prime (U+02CA) keeps the visual approximation
+// while making the substitute non-syntactic for Slack's parser.
+func escapeMrkdwnCode(s string) string {
+	return strings.ReplaceAll(s, "`", "ˊ")
 }
 
 // AdminClaimModal renders the modal shown when a user runs

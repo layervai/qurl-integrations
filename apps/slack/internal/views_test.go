@@ -116,6 +116,36 @@ func TestSetAliasRebindModal_Shape(t *testing.T) {
 	}
 }
 
+// TestSetAliasRebindModal_BacktickInjectionEscaped fences the
+// mrkdwn-code-span guard. A malicious admin who sets a target
+// containing a backtick could otherwise break out of the
+// `oldTarget` / `newTarget` code spans and inject mrkdwn (e.g.
+// `<!channel>`) into another admin's rebind confirmation modal.
+// escapeMrkdwnCode replaces backticks with the modifier-letter
+// prime (U+02CA), so the substring "<!channel>" never appears
+// outside the escaped code span.
+func TestSetAliasRebindModal_BacktickInjectionEscaped(t *testing.T) {
+	t.Parallel()
+	raw, err := SetAliasRebindModal("prod-db", "old`<!channel>`junk", "new`<@U123>`x")
+	if err != nil {
+		t.Fatalf("SetAliasRebindModal: %v", err)
+	}
+	body := string(raw)
+	// The mrkdwn payloads should not contain a literal backtick
+	// from user input — the only backticks present should be the
+	// ones we wrap around the spans ourselves.
+	for _, leak := range []string{"<!channel>", "<@U123>"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("backtick-injected payload %q leaked into rendered body: %s", leak, body)
+		}
+	}
+	// The escaped substitute (U+02CA) should appear in the body
+	// so the user still sees a visual approximation of the value.
+	if !strings.Contains(body, "ˊ") {
+		t.Error("escapeMrkdwnCode substitute (U+02CA) missing — backticks were not escaped")
+	}
+}
+
 // TestSetAliasRebindModal_PrivateMetadataIsJSON fences the
 // `private_metadata` encoding contract. The value must round-trip
 // through `json.Unmarshal` into a [SetAliasRebindMetadata] — the

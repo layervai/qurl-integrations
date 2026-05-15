@@ -214,6 +214,9 @@ func Parse(text string) (*Command, error) {
 		return parseAliasOnly(cmd, rest)
 	case SubcmdAliases:
 		cmd.Subcommand = SubcmdAliases
+		if len(rest) > 0 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, rest[0])
+		}
 		return cmd, nil
 	case SubcmdAdmin:
 		cmd.Subcommand = SubcmdAdmin
@@ -223,6 +226,9 @@ func Parse(text string) (*Command, error) {
 		return parseCreate(cmd, rest)
 	case SubcmdList:
 		cmd.Subcommand = SubcmdList
+		if len(rest) > 0 {
+			return nil, fmt.Errorf("%w: %q", ErrUnexpectedArgument, rest[0])
+		}
 		return cmd, nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownSubcommand, tokens[0])

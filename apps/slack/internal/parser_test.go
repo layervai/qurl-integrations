@@ -150,6 +150,11 @@ func TestParse_ErrorPaths(t *testing.T) {
 		// tokenize's post-strip empty-token drop ensures the verb
 		// hits the missing-target branch — matches the strict posture.
 		{name: "setalias with empty quoted target rejected", text: `setalias $prod-db ""`, wantErr: ErrMissingTarget},
+		// Strict-posture on no-arg verbs `aliases` and `list`: extra
+		// positionals reject just like `admin policies extra` does.
+		// Carve-out is `help` only (friendly default).
+		{name: "aliases with extra positional rejected", text: "aliases junk", wantErr: ErrUnexpectedArgument},
+		{name: "list with extra positional rejected", text: "list extra-garbage", wantErr: ErrUnexpectedArgument},
 	}
 
 	for _, tc := range cases {
