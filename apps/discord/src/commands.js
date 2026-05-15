@@ -443,40 +443,37 @@ function resolveRoleNames(guild, ids) {
 
 // --- Shared DM delivery payload builder ---
 // Builds the {embeds, components} payload for a per-recipient DM. The
-// embed copy is intentionally evocative ("opened a door", "Door closes")
+// embed copy is intentionally evocative ("opened a door", "Closes")
 // rather than literal ("shared a file with you") — the brand goal is to
 // convey the qURL hidden-layer model, not just announce a file transfer.
-// The qURL link is rendered as a `🔗 Step Through` Link button rather
+// The qURL link is rendered as a `🚪 Step Through` Link button rather
 // than a bare URL field; recipients click the button to open the link
 // in their default browser.
 //
 // `senderAlias` is the sender's friendly display name (Discord nickname
 // > globalName > username) sourced from resolveSenderAlias.
 // `personalMessage` is optional caller-provided context; if present, it
-// renders as an italicized blockquote above the body paragraph.
+// renders as an italicized blockquote between the sender line and the
+// expiry line.
 //
 // Returns the full Discord message options object (`embeds` + `components`)
 // rather than just the embed, since the button is not part of the embed
 // — it lives in a top-level component row alongside it. Callers pass the
 // returned payload directly to `sendDM`.
 //
-// Example of what the recipient sees:
+// Rendered output (blank rows = Discord's natural section spacing,
+// NOT literal `\n` separators — descLines.join('\n') is single-newline):
 //
 //     ┌─────────────────────────────────────────────────────────────┐
 //     │  qURL · APP · Today at 2:47 PM                              │  (Discord-rendered header)
 //     │                                                             │
-//     │  Vik opened a door for you.                                 │  (description)
-//     │                                                             │
-//     │  > "Quarterly numbers — for your eyes only."                │  (optional personal message — italic blockquote)
-//     │                                                             │
-//     │  🕐 Door closes in 1 day                                    │  (Discord <t:N:R> — auto-updates client-side
-//     │                                                             │   to "in 16 hours" / "in 1 hour" / "1 hour ago")
-//     │                                                             │
-//     │  Quantum URL (qURL) · The internet has a hidden layer.     │  (final embed field;
-//     │  This is how you enter.                                     │   `qURL` → https://layerv.ai)
+//     │  Vik opened a door for you.                                 │  (description, line 1)
+//     │  > "Quarterly numbers — for your eyes only."                │  (description, line 2 — optional italic blockquote)
+//     │  🕐 Closes in 1 day                                         │  (description, line 3 — Discord <t:N:R>, auto-updates
+//     │                                                             │   client-side to "in 16 hours" / "in 1 hour" / "1 hour ago")
 //     │                                                             │
 //     │  ┌──────────────────────────┐                               │
-//     │  │   🔗 Step Through        │  (Link button — opens qURL)
+//     │  │   🚪 Step Through        │  (Link button — opens qURL)
 //     │  └──────────────────────────┘                               │
 //     └─────────────────────────────────────────────────────────────┘
 //
@@ -626,80 +623,100 @@ async function resolveLocation(parsed) {
 }
 
 function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessage }) {
-  // sanitizeDisplayName: NFKC + bidi/zero-width strip + markdown escape
-  // + 64-char cap + 'Someone' fallback. Centralized so a future caller
-  // adding another sender-name surface picks up the same spoof defense.
+  // Discord's `<t:N:R>` markdown wants a positive integer Unix-seconds
+  // value; anything else renders a misleading recipient surface (e.g.
+  // `<t:0:R>` → "56 years ago", `<t:undefined:R>` → literal text,
+  // `<t:1735689600.5:R>` → parse failure). Match the contract exactly
+  // and fail loud — call sites all compute via `Math.floor(...)` so no
+  // legitimate input is rejected. `typeof` in the throw closes the
+  // null-vs-undefined-vs-object triage gap for operators.
+  if (!Number.isInteger(expiresAt) || expiresAt <= 0) {
+    const got = String(expiresAt);
+    const gotType = typeof expiresAt;
+    throw new Error(
+      `buildDeliveryPayload: expiresAt must be a positive integer `
+      + `Unix-seconds number (got ${got}, typeof=${gotType})`
+    );
+  }
+
+  // sanitizeDisplayName centralizes spoof defense so a future caller
+  // adding another sender-name surface picks up the same protections.
   const safeSender = sanitizeDisplayName(senderAlias);
+
+  // Discord renders fields BELOW the description, so all three lines
+  // (sender / optional personal message / expiry) must live in one
+  // setDescription block — an addFields personal-message would land
+  // after the expiry line, not between sender and expiry. Folding
+  // also strips addFields' vertical padding, keeping the Step Through
+  // button close to the sender line.
+  //
+  // `<t:N:R>` is Discord's client-side relative-time markdown: the
+  // recipient sees "in 1 day" at send time, "in 16 hours" 8h later,
+  // and "1 hour ago" once expired. No bot-side editing needed.
+  //
+  // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file`
+  // and `/qurl map` pipe raw input through `sanitizeMessage`
+  // (markdown escape + @-mention strip) before constructing this
+  // payload, and the addRecipients path reads from
+  // `sendConfig.personal_message` which was sanitized at write time.
+  // Raw interpolation below is safe ONLY because of that upstream
+  // pass. A future caller that bypasses sanitizeMessage (or a DB row
+  // read that skips re-sanitize) would silently regress to markdown
+  // injection — keep the contract.
+  //
+  // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
+  // does not span newlines, so a multi-line message would render with
+  // only the first line styled. Flatten newlines to a space so the
+  // recipient sees one tidy quote — matches the design mockup which
+  // shows the message as a single-line styled box. 280-codepoint cap
+  // keeps the embed visually compact. Headroom: 280 codepoints ≤ 1120
+  // UTF-8 bytes + ~10 chars of `> *"…"*` wrapper + 64-char sender +
+  // ~30-char expiry line ≪ Discord's 4096-char description cap.
+  const descLines = [`**${safeSender}** opened a door for you.`];
+  if (personalMessage) {
+    // Skip the styled-blockquote line if the input collapses to an
+    // empty string after newline-flatten + trim (e.g. "  \n \n  ").
+    // The call sites already pass `sanitizeMessage(...) || null` so
+    // an empty input arrives as null and short-circuits the outer
+    // `if (personalMessage)`. This guard only matters if a future
+    // caller bypasses that contract — belt-and-braces vs rendering
+    // a visible-but-empty `> *""*` row between sender and expiry.
+    //
+    // Order is intentional: cap → replace → trim. The 280-codepoint
+    // cap applies to RAW input (bounds the work done by replace/trim
+    // against a 10KB single-line pathological input) rather than to
+    // the rendered output. A future "fix" to `replace().trim()` then
+    // cap would be a subtly different contract — the visible output
+    // would be capped at 280 but unbounded work would happen before.
+    //
+    // `Array.from(s).slice(0, 280).join('')` is codepoint-aware: a
+    // 4-byte emoji (surrogate pair) is one element in the resulting
+    // array, so the cap can't split it into a lone high surrogate.
+    // 280 codepoints = at most 560 UTF-16 units = still well under
+    // Discord's 4096-char description cap. Mirrors the cap pattern
+    // sanitizeDisplayName uses for senderAlias.
+    const capped = Array.from(personalMessage).slice(0, 280).join('').replace(/[\r\n]+/g, ' ').trim();
+    if (capped) descLines.push(`> *"${capped}"*`);
+  }
+  descLines.push(`🕐 Closes <t:${expiresAt}:R>`);
 
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription(`**${safeSender}** opened a door for you.`);
-
-  if (personalMessage) {
-    // CONTRACT: `personalMessage` arrives pre-sanitized. `/qurl file` and
-    // `/qurl map` pipe raw input through `sanitizeMessage` (markdown
-    // escape + @-mention strip) before constructing this payload, and the
-    // addRecipients path reads from `sendConfig.personal_message` which
-    // was sanitized at write time. Raw interpolation into the template
-    // below is safe ONLY because of that upstream pass. A future caller
-    // that bypasses sanitizeMessage (or a DB row read that skips re-
-    // sanitize) would silently regress to markdown injection — keep the
-    // contract.
-    //
-    // Discord blockquote (`> `) only quotes one line and italic (`*…*`)
-    // does not span newlines, so a multi-line message would render with
-    // only the first line styled. Flatten newlines to a space so the
-    // recipient sees one tidy quote — matches the design mockup which
-    // shows the message as a single-line styled box. 280-char cap keeps
-    // the embed visually compact now that the fixed body copy is gone.
-    const capped = personalMessage.substring(0, 280).replace(/[\r\n]+/g, ' ').trim();
-    embed.addFields({ name: '\u200B', value: `> *"${capped}"*` });
-  }
-
-  embed.addFields(
-    {
-      // Discord's native relative-time markdown: <t:UNIX:R> renders
-      // CLIENT-SIDE based on the viewer's current time, so the recipient
-      // sees "in 1 day" at send time, "in 16 hours" 8 hours later, and
-      // "1 hour ago" once the link has expired. No bot-side editing
-      // needed — Discord handles the live update.
-      //
-      // Fail-loud on a missing/invalid expiresAt rather than rendering
-      // literal "<t:undefined:R>" or "<t:NaN:R>" to a recipient. Matches
-      // the contract-violation throw in handleAddRecipients (same fail-
-      // loud-over-silent-degradation principle).
-      name: '\u200B',
-      value: (() => {
-        if (!Number.isFinite(expiresAt)) {
-          throw new Error(`buildDeliveryPayload: expiresAt must be a finite Unix-seconds number (got ${expiresAt})`);
-        }
-        return `\ud83d\udd50 Door closes <t:${expiresAt}:R>`;
-      })(),
-    },
-    {
-      // Brand line lives in a regular embed field (NOT setFooter) because
-      // Discord embed footers are plain-text only and we need the markdown
-      // hyperlink on `qURL` to point at https://layerv.ai. The brand line
-      // anchors the recipient back to the qURL product page.
-      name: '\u200B',
-      value: 'Quantum URL ([qURL](https://layerv.ai)) · The internet has a hidden layer. This is how you enter.',
-    },
-  );
+    .setDescription(descLines.join('\n'));
 
   // Link button: opens qurlLink in the recipient's browser on a
   // single click. No interaction handler needed — Discord handles
-  // the redirect.
+  // the redirect. ButtonStyle.Link is the only style that carries a
+  // URL (Primary/Success/Danger/Secondary fire interaction handlers,
+  // no redirect).
   //
-  // Style is `ButtonStyle.Link` because Discord requires URL buttons
-  // to be Link-style (Primary/Success/Danger/Secondary cannot carry
-  // a URL — they only fire interaction handlers). Link buttons render
-  // gray, which can read as "text" rather than a clickable affordance.
-  // The leading 🔗 emoji adds visual weight so the recipient sees a
-  // clear button shape; arrow `→` dropped from the label since the
-  // emoji conveys the same "go elsewhere" intent.
+  // 🚪 emoji ties the "opened a door for you" copy to the action —
+  // sender line, embed accent, and button emoji all reinforce one
+  // metaphor instead of three. Door is a stronger visual mark on a
+  // grey-Link button than the generic 🔗 chain it replaces.
   const stepThrough = new ButtonBuilder()
     .setStyle(ButtonStyle.Link)
-    .setEmoji('🔗')
+    .setEmoji('🚪')
     .setLabel('Step Through')
     .setURL(qurlLink);
   const components = [new ActionRowBuilder().addComponents(stepThrough)];
@@ -1341,6 +1358,31 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is the
+  // wall-clock gap between THIS compute site and the earlier mint call
+  // (mintLinksInBatches has already returned by the time we land here
+  // on the send-pipeline path; on handleAddRecipients the gap also
+  // covers re-download + re-upload + re-mint). So recipients see
+  // "in 24 hours" measured against send-time, not mint-time. Negligible
+  // at the 30m–7d horizon — even a worst-case 10s gap rounds the same
+  // way in the relative-time display.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
+  // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
+  // are written — otherwise the DB writes would happen, then the throw
+  // would bubble out with no DMs sent, leaving orphan QURL records
+  // with no recipient. The throw fires HERE (at the hoisted compute
+  // site below, function-scoped) rather than at the per-recipient
+  // render step inside batchSettled — that distinction matters for
+  // the failure-mode bookkeeping: a thrown expiryToMs surfaces as a
+  // single uncaught error at the function level, not as N
+  // `DISPATCH_FAILED` audit emissions. Closes #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
@@ -1383,24 +1425,22 @@ async function executeSendPipeline(interaction, {
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on the
-  // send-pipeline path; can be a few seconds on handleAddRecipients
-  // which re-downloads + re-uploads + re-mints first). Negligible at
-  // the 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+  // Mirror handleAddRecipients: hoist resolveSenderAlias out of the
+  // per-recipient batchSettled callback. The function is a pure
+  // resolution of nickname > globalName > username from `interaction`,
+  // so the per-link call inside the callback was N redundant
+  // resolutions of the same string. Both pipelines now share the same
+  // hoist pattern for both expiresAt AND senderAlias.
+  const senderAlias = resolveSenderAlias(interaction);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     // Audit in `finally` so the metric fires for every recipient regardless
     // of where the dispatch fails — sendDM resolving to false, sendDM
     // throwing (against contract — see apps/discord/src/discord.js), OR
-    // buildDeliveryPayload throwing (e.g. on a pathological personalMessage).
+    // buildDeliveryPayload throwing (e.g. on a non-integer expiresAt —
+    // see its `Number.isInteger` guard; would throw on every iteration
+    // of the batch, since expiresAt is computed once above).
     // Audit fires BEFORE the DB write so a DDB-layer throw can't suppress
     // it either — that's the failure mode the audit metric exists to
     // measure. Coverage spans the entire dispatch attempt, not just the
@@ -1408,10 +1448,7 @@ async function executeSendPipeline(interaction, {
     let sent = false;
     try {
       const dmPayload = buildDeliveryPayload({
-        // member.displayName resolves to nickname || globalName || username,
-        // so it works whether the sender has a per-guild nickname, only a
-        // global display name, or just the legacy @-handle.
-        senderAlias: resolveSenderAlias(interaction),
+        senderAlias,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage,
@@ -1943,6 +1980,29 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
+  // Hoist payload-shared inputs to the top of the dispatch block so
+  // the entire batch shares one expiry timestamp and one resolved
+  // sender alias. Mirrors executeSendPipeline's structure — both
+  // pipelines now compute expiresAt once per call, eliminating
+  // Date.now() drift between recipients in the same batch.
+  // resolveSenderAlias is a pure function of originalInteraction so
+  // hoisting also avoids re-resolving the
+  // nickname/globalName/username chain per dispatch.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed
+  // `sendConfig.expires_in` throwing in `expiryToMs` aborts the
+  // dispatch BEFORE any DDB rows are written — otherwise the DB
+  // writes would happen, then the throw would bubble out with no DMs
+  // sent, leaving orphan QURL records with no recipient. The
+  // `handleAddRecipients` path is especially exposed here because
+  // sendConfig.expires_in is read from DDB (rather than validated
+  // upstream like executeSendPipeline's slash-command param), so a
+  // stale/regressed row predating the current validation would slip
+  // through. Throwing pre-write makes the failure mode visible at
+  // the function level rather than as orphan rows. Closes #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+  const senderAlias = resolveSenderAlias(originalInteraction);
+
   // Persist to DB before DMs
   const batchSends = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
@@ -2001,16 +2061,8 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     // counts as dispatch_failed instead of disappearing from CloudWatch.
     let sent = false;
     try {
-      // Same Unix-seconds expiry computation as executeSendPipeline —
-      // see comment there. Computed once per recipient (cheap; the
-      // alternative would be threading a single timestamp through
-      // sendConfig).
-      const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
       const payloads = links.slice(0, 10).map(link => buildDeliveryPayload({
-        // Same alias resolution as executeSendPipeline — see comment
-        // there for the nickname > globalName > username fallback
-        // rationale.
-        senderAlias: resolveSenderAlias(originalInteraction),
+        senderAlias,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage: sendConfig.personal_message,

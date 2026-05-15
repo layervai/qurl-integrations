@@ -512,9 +512,7 @@ function parseRecipientMentions(raw, interaction, opts = {}) {
       pushInvalidIfNew(invalidChannelIds, channelId, m[0]);
       continue;
     }
-    const isVoice = channel.type === VOICE_CHANNEL_TYPE
-      || channel.type === STAGE_VOICE_CHANNEL_TYPE;
-    if (!isVoice) {
+    if (!isVoiceChannelType(channel.type)) {
       // Non-voice channel mention — reject. We intentionally do NOT
       // restore the legacy "Everyone in this text channel" behavior
       // (PR #174 fixed the @everyone-on-default-server expansion bug
