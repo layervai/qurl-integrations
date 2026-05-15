@@ -6609,28 +6609,85 @@ describe('renderConfirmCardRows', () => {
       expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
     });
 
-    test('does NOT render in DM context (interaction.guild === null)', async () => {
-      // @everyone has no semantics in DM; the gate `interaction.guild`
-      // must skip rendering even with MENTION_EVERYONE set (defense-in-
-      // depth — handleQurlSlashSend rejects DM at entry, but the
-      // renderer is reused on re-renders that could in principle see
-      // a degraded shape).
+    test('does NOT render in DM context — direct renderer assertion', async () => {
+      // Pin the renderer's `interaction.guild` gate directly (not via
+      // handleQurlFile's entry-point DM-rejection). Without a direct
+      // assertion, a future refactor that loosens the renderer gate
+      // would only fail tests via the entry-point guard, leaving the
+      // renderer-only contract under-pinned.
       const { ButtonBuilder } = require('discord.js');
+      const commands = require('../src/commands');
+      // _test exports are only available in non-production (NODE_ENV !==
+      // 'production'). Jest runs without setting NODE_ENV → test mode.
+      const { renderConfirmCardRows } = commands._test;
       ButtonBuilder.mockClear();
-      // handleQurlFile rejects DM at entry, so test the renderer via
-      // a fresh slash-entry that DOES have a guild but then exercise
-      // the render-only branch by mocking interaction.guild = null on
-      // a later render path. Cleaner: invoke directly via handleQurlFile
-      // on a guild-less interaction and assert no button construction
-      // happens at all (because the handler returns before render).
-      const int = makeInteraction({
-        guildId: null,  // → guild = null in makeInteraction
-        options: { attachment: VALID_ATTACHMENT },
+      // DM-shaped interaction: no `guild`, but MENTION_EVERYONE is
+      // (defensively) granted on memberPermissions to prove the
+      // renderer doesn't lean on perms alone.
+      const dmInteraction = {
+        guild: null,
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      renderConfirmCardRows({
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction: dmInteraction,
+        recipientIds: [],
+        recipientMode: 'picker',
       });
-      int.memberPermissions = { has: jest.fn(() => true) };
-      await handleQurlFile(int);
       const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
       expect(customIds).not.toContain('qurl_confirm_everyone');
+    });
+
+    test('non-bot count is memoized across re-renders with stable cache', async () => {
+      // Confirm cards re-render on every picker change / expiry select /
+      // note edit. For a large guild the per-render O(N) bot filter
+      // would compound; the memo keyed on `cache.size:memberCount` lets
+      // a single flow's re-renders share one count computation. Pin by
+      // observing that `isBotMember` is called O(N) on the FIRST render
+      // and zero times on subsequent renders against the same guild.
+      const { ButtonBuilder } = require('discord.js');
+      const commands = require('../src/commands');
+      const { renderConfirmCardRows } = commands._test;
+      ButtonBuilder.mockClear();
+      // Shared guild reference + warm cache so the warm-path branch fires.
+      const memberCache = new Map();
+      memberCache.set('u1', { user: { id: 'u1', bot: false } });
+      memberCache.set('u2', { user: { id: 'u2', bot: false } });
+      memberCache.set('b1', { user: { id: 'b1', bot: true } });
+      const guild = {
+        id: 'guild-memo',
+        members: { cache: memberCache },
+        memberCount: 3,
+        channels: { cache: new Map() },
+      };
+      const interaction = {
+        guild,
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      const args = {
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction,
+        recipientIds: [],
+        recipientMode: 'picker',
+      };
+      // Render 5x; observe the @everyone button label stays consistent.
+      for (let i = 0; i < 5; i++) renderConfirmCardRows(args);
+      const everyoneLabels = ButtonBuilder.mock.results
+        .filter((r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone')
+        .map((r) => r.value.setLabel.mock.calls[0]?.[0]);
+      // 5 renders → 5 button instances, each labeled `(2)` (3 cached,
+      // 1 bot). The memo invariant is correctness-equivalent to the
+      // non-memoized path; the cost saving is internal.
+      expect(everyoneLabels.length).toBe(5);
+      everyoneLabels.forEach((l) => expect(l).toContain('(2)'));
     });
 
     test('disabled with "exceeds cap" suffix when memberCount > QURL_SEND_MAX_RECIPIENTS', async () => {

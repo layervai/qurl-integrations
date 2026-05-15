@@ -3622,6 +3622,34 @@ function formatPersonalMessagePreview(message) {
 // `recipientMode` defaults to RECIPIENT_MODE_PICKER for stale rows that
 // existed before this field was introduced; the legacy shape is exactly
 // the picker-mode branch below.
+
+// Memoized non-bot count for the @everyone button label. Confirm cards
+// re-render on every picker change / expiry select / note add+edit; in
+// a single flow the cache typically doesn't change between re-renders,
+// so iterating it on every render is wasted work. The WeakMap is keyed
+// by `guild` and entries auto-evict when the Guild is GC'd. A future
+// member-join/leave that changes `cache.size` or `memberCount` busts
+// the memo automatically — the key tuple (`cache.size:memberCount`) is
+// the freshness fingerprint.
+const everyoneCountMemo = new WeakMap();
+function computeEveryoneDisplayCount(guild) {
+  const cache = guild?.members?.cache;
+  const memberCount = guild?.memberCount;
+  if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
+    const fingerprint = `${cache.size}:${memberCount}`;
+    const cached = everyoneCountMemo.get(guild);
+    if (cached && cached.fingerprint === fingerprint) return cached.count;
+    let n = 0;
+    for (const [, m] of cache) {
+      if (!isBotMember(m)) n++;
+    }
+    everyoneCountMemo.set(guild, { fingerprint, count: n });
+    return n;
+  }
+  if (typeof memberCount === 'number') return memberCount;
+  return null;
+}
+
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
   voiceChannelId, interaction, recipientIds, recipientMode,
@@ -3841,38 +3869,29 @@ function renderConfirmCardRows({
   // everyone's): voice-everyone's render-time count can drift from
   // click-time via members joining/leaving the voice channel between
   // render and click; @everyone's drift is cold-cache-overcounts-by-
-  // bots, resolved when the click-time pre-warm fills the cache. In
-  // both cases the label is a hint and `partitionRecipients` is the
-  // click-time authority.
+  // bots OR stale-row-inflation (departed members lingering in cache
+  // briefly between gateway events), resolved when the click-time
+  // pre-warm fills the cache. In all cases the label is a hint and
+  // `partitionRecipients` is the click-time authority.
   if (
     mode === RECIPIENT_MODE_PICKER
     && interaction && interaction.guild
     && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
   ) {
     const guild = interaction.guild;
-    const cache = guild.members?.cache;
-    const memberCount = guild.memberCount;
-    let displayCount = null;
-    if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
-      let n = 0;
-      for (const [, m] of cache) {
-        if (!isBotMember(m)) n++;
-      }
-      displayCount = n;
-    } else if (typeof memberCount === 'number') {
-      displayCount = memberCount;
-    }
-    // Disable on three conditions:
+    const displayCount = computeEveryoneDisplayCount(guild);
+    // Disable on two conditions:
     //  - `null` (memberCount unavailable + cache cold) → `(?)` label
     //    so the user sees the button can't act vs. silent no-op
-    //  - `0` (degenerate empty guild — theoretically unreachable since
-    //    a 0-member guild can't host a slash command)
     //  - `> QURL_SEND_MAX_RECIPIENTS` (cap-exceeded) → surface the
     //    constraint at render time with an explicit suffix in the
     //    label so the user sees why before clicking, rather than
     //    getting the click-time hard-reject warning. Cap-reject in
     //    handleConfirmEveryone is still the authoritative gate
     //    (defense against memberCount-vs-actual-cache drift).
+    // (`=== 0` is structurally unreachable — a guild with zero members
+    // can't host the slash command in the first place — so it's not
+    // worth a defensive branch.)
     const overCap = displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
     const labelCount = displayCount == null ? '?' : String(displayCount);
     const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
@@ -3888,7 +3907,7 @@ function renderConfirmCardRows({
         .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
         .setLabel(`\u{1F4E2} @everyone (${labelCount})${labelSuffix}`)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(displayCount == null || displayCount === 0 || overCap),
+        .setDisabled(displayCount == null || overCap),
     );
   }
   bottomRow.addComponents(
@@ -7931,6 +7950,10 @@ module.exports = {
       batchSettled,
       expiryToISO,
       sendCooldowns,
+      // Renderer exposed so tests can pin the bottom-row button
+      // composition directly (e.g., the DM-context @everyone-gate
+      // assertion) without driving through handleQurlFile's entry path.
+      renderConfirmCardRows,
       handleAddRecipients,
       buildDeliveryPayload,
       resolveSenderAlias,
