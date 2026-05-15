@@ -1341,17 +1341,11 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
-  // Compute expiresAt BEFORE recordQURLSendBatch so a future
-  // `expiryToMs`-throws regression can't leave orphan DDB rows (#352).
-  // Today this is defense-in-depth — the failGate above at the
-  // `expiresIn` allowed-set check already rejects malformed values
-  // before any mint or DB work — but pinning the ordering invariant
-  // here keeps the property load-bearing regardless of upstream gate
-  // drift. Drift between this clock and the API's enforcement clock
-  // is bounded by the time between this line and the mint call
-  // (sub-second on the send-pipeline path). Negligible at the
-  // 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
+  // #352 ordering invariant: expiresAt computed BEFORE any DDB
+  // write. Defense-in-depth — the failGate above already rejects
+  // malformed expiresIn before reaching here. Clock drift vs. the
+  // API's enforcement clock is sub-second on this path; negligible
+  // at the 30m–7d horizon.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
@@ -1778,20 +1772,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Send configuration not found.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: [] };
   }
 
-  // Validate `sendConfig.expires_in` at the entry, BEFORE any mint or
-  // recordQURLSendBatch work (issue #352). Symmetric with the
-  // executeSendPipeline failGate (`grep "expiresIn must be one of"`
-  // — anchored on the throw message rather than a line number so
-  // future drift doesn't rot the breadcrumb) — closes the
-  // unprotected path where a stale/regressed sendConfig row (or a
-  // future direct sendConfig writer) ships an off-set value that
-  // would otherwise default to 24h silently inside `expiryToMs` /
-  // `expiryToISO`. Rejecting here means no QURL links get minted
-  // (sparing the upstream API call) and no DDB rows get written, so
-  // there's nothing to revoke / no orphan to clean up. Returns a
-  // user-visible message rather than throwing (matches
-  // handleAddRecipients's error-return contract; the caller renders
-  // it on the post-send confirm card).
+  // #352 entry gate. Symmetric with the executeSendPipeline failGate
+  // (`grep "expiresIn must be one of"`) — closes the unprotected
+  // path where a stale/regressed sendConfig row could ship an
+  // off-set value. Protects BOTH downstream `expiryToMs` AND
+  // `expiryToISO` (each used below for mint + DM dispatch) from
+  // their shared silent-24h-default fallback. Returns an error
+  // object rather than throwing to match handleAddRecipients'
+  // contract — the caller renders it on the post-send confirm card.
   if (!Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, sendConfig.expires_in)) {
     logger.error('addRecipients refused invalid expires_in', { sendId, expiresIn: truncForLog(sendConfig.expires_in) });
     return {
@@ -1979,12 +1967,9 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-  // Compute expiresAt BEFORE recordQURLSendBatch (and once per call,
-  // not per recipient) so a future `expiryToMs`-throws regression
-  // can't leave orphan DDB rows (#352). The entry-gate above already
-  // rejects malformed `sendConfig.expires_in`, but pinning the
-  // ordering here keeps the property load-bearing if the entry gate
-  // ever drifts. Same Unix-seconds + drift caveat as executeSendPipeline.
+  // #352 ordering invariant: expiresAt computed BEFORE any DDB write
+  // (and once per call, not per recipient). Defense-in-depth on top
+  // of the entry gate above. Same drift caveat as executeSendPipeline.
   const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
 
   // Same guarantee as executeSendPipeline: if the DB write fails, abort
