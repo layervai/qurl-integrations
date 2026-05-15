@@ -5496,6 +5496,9 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   if (!canMentionEveryone) {
     logger.warn('handleConfirmEveryone: click without MENTION_EVERYONE — likely forged', {
       flow_id, interaction_id: interaction.id,
+      // `guild_id` for cross-line correlation with the success info
+      // log; `null` in DM context which is itself the forge signal.
+      guild_id: interaction.guildId ?? null,
     });
     return rejectEveryone('⚠\u{FE0F} `@everyone` requires the **Mention Everyone** permission.\n\n');
   }
@@ -5580,6 +5583,18 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     // Falsy `.bot` → kept; the invariant holds across context-menu /
     // future interaction types too.
     selectedUsers.push(interaction.user);
+  }
+  // Sender-only degenerate: guild has the sender (+ optionally bots)
+  // but no other non-bot members. @everyone's click intent is "fan out
+  // to OTHERS"; falling through to partition would land `valid=[sender]`
+  // and silently send to just the sender — defensible self-send
+  // semantics, but misleading for a click labeled 📢 @everyone. Reject
+  // with explicit copy so the user can decide (self-send via the
+  // picker is still possible). Reached only when sender's row IS in
+  // cache and no other non-bots are present — the bots-only-no-sender
+  // case lands in `valid.length === 0` below with droppedBots > 0.
+  if (senderInCache && !hasOtherNonBotInCache) {
+    return rejectEveryone('⚠\u{FE0F} `@everyone` matched only you — no other non-bot members to send to.\n\n');
   }
   // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
   // the sender (voice-mode semantic is "everyone else in this voice

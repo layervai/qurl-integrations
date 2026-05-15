@@ -5181,13 +5181,74 @@ describe('handleConfirmEveryone', () => {
     );
   });
 
-  test('cache stays empty after prewarm → reject with "try again" copy', async () => {
-    const int = makeEveryoneInteraction({ guildMembers: {}, memberCount: 0 });
+  test('cache stays empty after prewarm despite populated guild → reject with "try again" copy', async () => {
+    // The production-relevant scenario: prewarm completed but landed
+    // zero members in cache (gateway blip, partial chunk delivery,
+    // discord.js cache eviction race). memberCount > 0 distinguishes
+    // this from the degenerate empty-guild case (which can't reach
+    // the click handler at all — slash commands need a guild context).
+    const int = makeEveryoneInteraction({ guildMembers: {}, memberCount: 5 });
     int.guild.members.fetch = jest.fn().mockResolvedValue(new Map());
     await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/member cache not ready/i);
+  });
+
+  test('sender-only-in-cache (no other non-bots) → reject with "matched only you" copy', async () => {
+    // Click-intent for 📢 @everyone is "fan out to others." If the
+    // guild has just the sender + bots, falling through to partition
+    // would silently send to just the sender — defensible self-send
+    // semantics, but misleading for an @everyone click. Reject
+    // explicitly; self-send via the picker is still possible.
+    const int = makeEveryoneInteraction({
+      // Sender in cache, only bots otherwise (no other humans).
+      guildMembers: { [SENDER_ID]: {}, [bot1]: { bot: true } },
+      memberCount: 2,
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/matched only you/i);
+  });
+
+  test('valid.length === cap (exactly at boundary) → proceeds (cap-reject is strictly >)', async () => {
+    // Boundary test: the cap-reject is `valid.length > cap`, so exactly
+    // at cap should proceed. Voice-everyone shares the same
+    // partitionRecipients cap surface; cheap insurance against an
+    // off-by-one drift on either handler.
+    const config = require('../src/config');
+    const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+    try {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 3, configurable: true, writable: true });
+      const int = makeEveryoneInteraction({
+        guildMembers: {  // 3 non-bots exactly = cap
+          [SENDER_ID]: {},
+          '100000000000000010': {},
+          '100000000000000011': {},
+        },
+        memberCount: 3,
+      });
+      await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+      expect(mockTransitionFlow).toHaveBeenCalled();
+      const payload = mockTransitionFlow.mock.calls[0][2].payload;
+      expect(payload.recipientIds.length).toBe(3);
+    } finally {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+    }
+  });
+
+  test('forged-interaction warn log includes guild_id for forensics correlation', async () => {
+    // The success info log carries guild_id; the forged warn log
+    // should too, so ops can correlate "is one user forging across
+    // guilds?" without joining lines.
+    const int = makeEveryoneInteraction({ canMentionEveryone: false });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('without MENTION_EVERYONE'),
+      expect.objectContaining({ flow_id: 'fid', guild_id: expect.any(String) }),
+    );
   });
 
   test('only bots in cache → reject with bots-dropped copy', async () => {
@@ -6995,6 +7056,91 @@ describe('renderConfirmCardRows', () => {
       // Sanity check: voice-mode renders the "Pick people instead" button.
       expect(customIds).toContain('qurl_confirm_pick_manual');
     });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// computeEveryoneDisplayCount — direct unit tests for the helper that
+// drives the @everyone button's label count. Exported via `_test` so
+// the WeakMap+fingerprint contract can be pinned in isolation rather
+// than only through `renderConfirmCardRows`.
+// ──────────────────────────────────────────────────────────────
+
+describe('computeEveryoneDisplayCount', () => {
+  const { computeEveryoneDisplayCount, _everyoneCountMemo } = commands._test;
+
+  test('warm cache (cache.size === memberCount) → accurate non-bot count', () => {
+    const guild = {
+      id: 'g-warm',
+      memberCount: 3,
+      members: {
+        cache: new Map([
+          ['u1', { user: { id: 'u1', bot: false } }],
+          ['u2', { user: { id: 'u2', bot: false } }],
+          ['b1', { user: { id: 'b1', bot: true } }],
+        ]),
+      },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 2, accurate: true });
+  });
+
+  test('cold cache (cache.size < memberCount) → memberCount fallback, NOT accurate', () => {
+    // Fallback to raw memberCount over-counts by bot population; the
+    // `accurate: false` flag tells callers (render-time over-cap
+    // disable) not to trust the number for safety decisions.
+    const guild = {
+      id: 'g-cold',
+      memberCount: 50,
+      members: { cache: new Map([['u1', { user: { id: 'u1', bot: false } }]]) },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 50, accurate: false });
+  });
+
+  test('memberCount undefined + warm-shape cache → cold fallback returns {count: null, accurate: false}', () => {
+    // The `cache.size >= memberCount` test reads as `cache.size >=
+    // undefined`, which evaluates to false → cold branch. memberCount
+    // missing also fails the cold-branch's `typeof === 'number'`
+    // check → final return is `{count: null, accurate: false}`. Pin
+    // this since the comparison's evaluation is non-obvious.
+    const guild = {
+      id: 'g-no-mc',
+      members: { cache: new Map([['u1', { user: { id: 'u1', bot: false } }]]) },
+      // memberCount intentionally absent
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: null, accurate: false });
+  });
+
+  test('cache missing → memberCount fallback when present', () => {
+    const guild = { id: 'g-no-cache', memberCount: 7, members: undefined };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 7, accurate: false });
+  });
+
+  test('cache and memberCount both missing → null', () => {
+    const guild = { id: 'g-bare', members: undefined };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: null, accurate: false });
+  });
+
+  test('partial-cache row (no .user) does not inflate count', () => {
+    // The `m?.user && !isBotMember(m)` guard aligns the render-time
+    // count with the click-time partition filter — a degraded row
+    // counts as 0 here AND lands in `partialCacheDrops` there.
+    const guild = {
+      id: 'g-partial',
+      memberCount: 2,
+      members: {
+        cache: new Map([
+          ['u1', { user: { id: 'u1', bot: false } }],
+          ['degraded', { /* no .user */ }],
+        ]),
+      },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 1, accurate: true });
   });
 });
 
