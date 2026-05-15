@@ -2947,11 +2947,11 @@ const CONFIRM_NOTE_MODAL_CUSTOM_ID = 'qurl_confirm_note_modal';
 // thousands of audience) needs to revisit this for stage-only.
 const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 // "Pick people instead" button — rendered in voice-mode and
-// everyone-mode (i.e. `payload.recipientMode === 'voice' || 'everyone'`).
-// Clicking it flips the card back to picker-mode (recipientIds
-// dropped, MentionableSelect row restored). Lives on its own customId
-// so flow-dispatch routes directly instead of branching inside the
-// voice/@everyone handlers.
+// everyone-mode (i.e. `payload.recipientMode` is `'voice'` or
+// `'everyone'`). Clicking it flips the card back to picker-mode
+// (recipientIds dropped, MentionableSelect row restored). Lives on
+// its own customId so flow-dispatch routes directly instead of
+// branching inside the voice/@everyone handlers.
 const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
 // Whole-guild `@everyone` button on the confirm card. Workaround for
 // Discord's MentionableSelectMenu omitting the `@everyone` role from
@@ -3876,14 +3876,19 @@ function renderConfirmCardRows({
   const bottomRow = new ActionRowBuilder();
   // Voice-mode and everyone-mode share the same escape hatch: picker
   // row is hidden above, so this button is the only path back to
-  // manual selection without re-running the slash command. The
-  // voice-mode branch additionally requires `voiceChannelId` (the
-  // button only renders for the slash-entry voice-auto-default path
-  // that snapshotted a channel id); everyone-mode has no such
-  // dependency. Style as Secondary so it doesn't compete visually
-  // with Send (Success). Handler is shared (handleConfirmPickManual)
-  // and resets recipientMode → 'picker'.
-  if ((mode === RECIPIENT_MODE_VOICE && voiceChannelId) || mode === RECIPIENT_MODE_EVERYONE) {
+  // manual selection without re-running the slash command. Style as
+  // Secondary so it doesn't compete visually with Send (Success).
+  // Handler is shared (handleConfirmPickManual) and resets
+  // recipientMode → 'picker'.
+  //
+  // DEFENSIVE: voice-mode gate does NOT require voiceChannelId.
+  // Every production write path pairs voice-mode with voiceChannelId,
+  // but a forged or schema-drifted payload presenting voice-mode
+  // without it would otherwise fall through to the picker-no-voice
+  // branch below and render the 📢 @everyone entry button against a
+  // hidden picker — no recovery path. Closing the gate here keeps
+  // the escape hatch reachable in that degraded state.
+  if (mode === RECIPIENT_MODE_VOICE || mode === RECIPIENT_MODE_EVERYONE) {
     bottomRow.addComponents(
       new ButtonBuilder()
         .setCustomId(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID)
@@ -4289,6 +4294,16 @@ async function handleQurlSlashSend(interaction, params) {
     // case is already handled above with a "❌ No valid recipients"
     // banner; landing that in EVERYONE-mode would render a card with
     // no recipients but no picker either.
+    //
+    // ORDERING: this branch deliberately precedes the voice-mode
+    // auto-default below. `massMentionExpanded` requires
+    // `recipientsOmitted: false` (the user typed something to be
+    // parsed), and voice-mode auto-default requires
+    // `recipientsOmitted: true`, so the two branches are mutually
+    // exclusive in production. The ordering still encodes "explicit
+    // @everyone wins over voice auto-default" as documentation — a
+    // future refactor that loosens either guard MUST keep this
+    // precedence or the auto-default could shadow an explicit @-text.
     if (parsed.massMentionExpanded && valid.length > 0) {
       recipientMode = RECIPIENT_MODE_EVERYONE;
     } else if (recipientsOmitted && voiceChannelId) {
