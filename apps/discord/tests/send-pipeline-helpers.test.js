@@ -111,7 +111,7 @@ jest.mock('../src/database', () => {
     recordQURLSend: jest.fn(),
     recordQURLSendBatch: jest.fn(),
     updateSendDMStatus: jest.fn(),
-    updateSendDMRefs: jest.fn(),
+    markSendDMDelivered: jest.fn(),
     getRecentSends: jest.fn(() => []),
     getSendResourceIds: jest.fn(() => []),
     saveSendConfig: jest.fn(),
@@ -1422,7 +1422,7 @@ describe('handleAddRecipients', () => {
       recordQURLSend: jest.fn(),
       recordQURLSendBatch: jest.fn(),
       updateSendDMStatus: jest.fn(),
-      updateSendDMRefs: jest.fn(),
+      markSendDMDelivered: jest.fn(),
       getRecentSends: jest.fn(() => []),
       getSendResourceIds: jest.fn(() => []),
     };
@@ -1439,6 +1439,8 @@ describe('handleAddRecipients', () => {
       postStarMilestone: jest.fn(),
       postToGitHubFeed: jest.fn(),
       sendDM: mockSendDM,
+    }));
+    jest.mock('../src/discord-rest', () => ({
       editDM: jest.fn().mockResolvedValue({ ok: true }),
     }));
 
@@ -1796,7 +1798,9 @@ describe('handleAddRecipients', () => {
 
     expect(result.msg).toMatch(/Added 1 recipient/);
     expect(result.msg).toMatch(/1 could not be reached/);
-    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('send-partial', 'rcpt-1', 'sent');
+    // Happy path coalesces status='sent' + DM refs into markSendDMDelivered;
+    // failure path keeps the status-only update (no refs to persist).
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledWith('send-partial', 'rcpt-1', 'dm-c-1', 'dm-m-1');
     expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('send-partial', 'rcpt-2', 'failed');
   });
 

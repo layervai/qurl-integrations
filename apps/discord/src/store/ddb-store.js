@@ -64,6 +64,7 @@ const {
 const { encrypt, encryptStrict, decrypt } = require('../utils/crypto');
 const config = require('../config');
 const logger = require('../logger');
+const { DM_STATUS } = require('../constants');
 
 // Badge taxonomy — same values as SqliteStore so callers that
 // compare across envs see identical enum values.
@@ -1026,16 +1027,14 @@ async function updateSendDMStatus(sendId, recipientDiscordId, status) {
   }));
 }
 
-// Persist the DM channel + message ids for a delivered send. Required so
-// /qurl revoke can edit the recipient's DM in place ("Alice closed the
-// door") instead of leaving a stale Step Through button pointing at a
-// dead link.
-async function updateSendDMRefs(sendId, recipientDiscordId, channelId, messageId) {
+// Coalesces dm_status + DM channel/message refs into one Update so the
+// hot dispatch path stays at one DDB write per successful recipient.
+async function markSendDMDelivered(sendId, recipientDiscordId, channelId, messageId) {
   await ddb.send(new UpdateCommand({
     TableName: TABLES.qurl_sends,
     Key: { send_id: sendId, recipient_discord_id: recipientDiscordId },
-    UpdateExpression: 'SET dm_channel_id = :c, dm_message_id = :m',
-    ExpressionAttributeValues: { ':c': channelId, ':m': messageId },
+    UpdateExpression: 'SET dm_status = :s, dm_channel_id = :c, dm_message_id = :m',
+    ExpressionAttributeValues: { ':s': DM_STATUS.SENT, ':c': channelId, ':m': messageId },
   }));
 }
 
@@ -1535,7 +1534,7 @@ module.exports = {
   // Weekly digest
   getWeeklyDigestData,
   // QURL sends
-  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, updateSendDMRefs,
+  recordQURLSend, recordQURLSendBatch, updateSendDMStatus, markSendDMDelivered,
   getRecentSends, markSendRevoked,
   saveSendConfig, getSendConfig, getSendResourceIds, getSendItems,
   // Guild configs

@@ -132,7 +132,7 @@ jest.mock('discord.js', () => {
 const mockDb = {
   recordQURLSendBatch: jest.fn(),
   updateSendDMStatus: jest.fn(),
-  updateSendDMRefs: jest.fn(),
+  markSendDMDelivered: jest.fn(),
   getRecentSends: jest.fn(() => []),
   getSendResourceIds: jest.fn(() => []),
   getSendItems: jest.fn(() => []),
@@ -153,6 +153,8 @@ jest.mock('../src/discord', () => ({
   postStarMilestone: jest.fn(),
   postToGitHubFeed: jest.fn(),
   sendDM: mockSendDM,
+}));
+jest.mock('../src/discord-rest', () => ({
   editDM: mockEditDM,
 }));
 
@@ -874,17 +876,6 @@ describe('revokeAllLinks', () => {
       expect(mockEditDM).not.toHaveBeenCalled();
     });
 
-    it('does not edit any DM when senderAlias is omitted (back-compat — legacy callers)', async () => {
-      mockDb.getSendItems.mockResolvedValueOnce([
-        { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
-      ]);
-      mockDeleteLink.mockResolvedValue(undefined);
-
-      await revokeAllLinks('send-noalias', 'sender-1', 'apikey'); // no senderAlias
-
-      expect(mockEditDM).not.toHaveBeenCalled();
-    });
-
     it('does not affect revoke success/total even when every DM edit fails', async () => {
       mockDb.getSendItems.mockResolvedValueOnce([
         { resource_id: 'res-1', recipient_discord_id: 'u-1', dm_status: 'sent', dm_channel_id: 'c-1', dm_message_id: 'm-1' },
@@ -897,6 +888,23 @@ describe('revokeAllLinks', () => {
 
       expect(result.success).toBe(1);
       expect(result.total).toBe(1);
+    });
+
+    it('logs split attempted/edited/failed counts when some edits succeed and others fail', async () => {
+      mockDb.getSendItems.mockResolvedValueOnce([
+        { resource_id: 'res-1', recipient_discord_id: 'u-ok',   dm_status: 'sent', dm_channel_id: 'c-ok',   dm_message_id: 'm-ok' },
+        { resource_id: 'res-2', recipient_discord_id: 'u-fail', dm_status: 'sent', dm_channel_id: 'c-fail', dm_message_id: 'm-fail' },
+      ]);
+      mockDeleteLink.mockResolvedValue(undefined);
+      mockEditDM
+        .mockResolvedValueOnce({ ok: true })
+        .mockResolvedValueOnce({ ok: false, expected: true });
+
+      await revokeAllLinks('send-split-log', 'sender-1', 'apikey', 'Alice');
+
+      const logCall = logger.info.mock.calls.find(c => c[0] === 'Edited DMs after revoke');
+      expect(logCall).toBeTruthy();
+      expect(logCall[1]).toMatchObject({ attempted: 2, edited: 1, failed: 1 });
     });
 
     it('de-dupes per recipient when multiple rows share recipient_discord_id', async () => {
@@ -1516,8 +1524,9 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(result.failed).toBe(0);
     expect(result.msg).toMatch(/Added 2 recipients/);
     expect(result.newResourceIds).toEqual(expect.arrayContaining(['res-loc-new']));
-    // updateSendDMStatus called once per recipient with SENT.
-    expect(mockDb.updateSendDMStatus).toHaveBeenCalledTimes(2);
+    // Happy-path delivery coalesces status='sent' + DM refs into a
+    // single markSendDMDelivered write per recipient.
+    expect(mockDb.markSendDMDelivered).toHaveBeenCalledTimes(2);
     // Audit emission: upload_success + dispatch_sent (×2 recipients).
     // mint_* is intentionally not emitted from the bot — see
     // constants.js AUDIT_EVENTS comment.

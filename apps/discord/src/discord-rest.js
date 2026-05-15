@@ -33,8 +33,13 @@ const { client } = require('./discord');
 const logger = require('./logger');
 
 // Shared instance — same object as `require('./discord').client.rest`.
-// Re-exported below for tests + potential direct use.
-const rest = client.rest;
+// Read lazily via a getter (rather than `const rest = client.rest` at
+// module load) so partial test mocks of `../src/discord` don't crash
+// at require-time when commands.js pulls editDM. Production tokens
+// land on `client.rest` from `client.login()` or `http-only-init`'s
+// explicit `setToken`; either way the getter resolves to the same
+// object by the time a helper is invoked.
+const rest = () => client.rest;
 
 /**
  * Send a direct message to a Discord user via REST (no Gateway).
@@ -48,7 +53,7 @@ const rest = client.rest;
  * `{ ok: false, error }` on failure. Callers log/branch on `.ok` rather
  * than letting exceptions propagate — matches the ergonomics of the
  * legacy gateway-based `sendDM` in `discord.js`. `messageId` is captured
- * so the /qurl revoke path can edit the recipient's DM in place after a
+ * so the /qURL revoke path can edit the recipient's DM in place after a
  * successful revoke.
  *
  * @param {string} userId — Discord snowflake.
@@ -64,10 +69,10 @@ const rest = client.rest;
 
 async function sendDM(userId, message) {
   try {
-    const channel = await rest.post(Routes.userChannels(), {
+    const channel = await rest().post(Routes.userChannels(), {
       body: { recipient_id: userId },
     });
-    const sent = await rest.post(Routes.channelMessages(channel.id), {
+    const sent = await rest().post(Routes.channelMessages(channel.id), {
       body: message,
     });
     return { ok: true, channelId: channel.id, messageId: sent.id };
@@ -90,6 +95,45 @@ async function sendDM(userId, message) {
   }
 }
 
+// Discord status codes / api codes that are operational outcomes for a
+// DM edit — recipient deleted the message, blocked the bot, closed the
+// channel, the bot was kicked from a shared guild. Surface as
+// `{ ok: false, expected: true }` at info level so they don't pollute
+// oncall signal. New codes belong here, not in the predicate.
+const DM_EDIT_EXPECTED_HTTP_STATUS = new Set([403, 404]);
+const DM_EDIT_EXPECTED_API_CODES = new Set([
+  10003, // Unknown Channel
+  10008, // Unknown Message
+  50001, // Missing Access
+  50007, // Cannot send messages to this user
+]);
+
+/**
+ * Edit a previously-sent DM via REST (no Gateway). Single PATCH —
+ * no `channels.fetch` + `messages.fetch` preamble that would be 2
+ * extra round-trips on a cold cache.
+ *
+ * CONTRACT: Discord's PATCH /channels/:cid/messages/:mid does NOT
+ * clear unset fields. Callers MUST pass `components: []` explicitly
+ * to strip a previous Link button. See buildRevokedDMPayload in
+ * commands.js for the contract-bearing payload.
+ */
+async function editDM(channelId, messageId, message) {
+  try {
+    await rest().patch(Routes.channelMessage(channelId, messageId), { body: message });
+    return { ok: true };
+  } catch (error) {
+    const expected = DM_EDIT_EXPECTED_HTTP_STATUS.has(error.status)
+      || DM_EDIT_EXPECTED_API_CODES.has(error.code);
+    const level = expected ? 'info' : 'warn';
+    logger[level]('Failed to edit DM', {
+      channelId, messageId, status: error.status, code: error.code,
+      errorMessage: error.message,
+    });
+    return { ok: false, expected };
+  }
+}
+
 /**
  * Add a role to a guild member via REST (no Gateway).
  * Idempotent on the Discord side — re-adding an existing role is
@@ -97,7 +141,7 @@ async function sendDM(userId, message) {
  */
 async function addRoleToMember(guildId, userId, roleId) {
   try {
-    await rest.put(Routes.guildMemberRole(guildId, userId, roleId));
+    await rest().put(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('addRoleToMember via REST failed', {
@@ -112,7 +156,7 @@ async function addRoleToMember(guildId, userId, roleId) {
  */
 async function removeRoleFromMember(guildId, userId, roleId) {
   try {
-    await rest.delete(Routes.guildMemberRole(guildId, userId, roleId));
+    await rest().delete(Routes.guildMemberRole(guildId, userId, roleId));
     return { ok: true };
   } catch (err) {
     logger.error('removeRoleFromMember via REST failed', {
@@ -127,8 +171,13 @@ async function removeRoleFromMember(guildId, userId, roleId) {
 // Today the helpers below are unused production code — they're the
 // landing pads for the route migration after this PR ships.
 module.exports = {
-  rest,
+  // Resolves to client.rest at access time (not module-load time) so
+  // partial test mocks of `../src/discord` don't crash early. Public
+  // shape unchanged for existing callers: `const { rest } = require(...)`
+  // still pins a direct reference to the shared REST instance.
+  get rest() { return client.rest; },
   sendDM,
+  editDM,
   addRoleToMember,
   removeRoleFromMember,
 };

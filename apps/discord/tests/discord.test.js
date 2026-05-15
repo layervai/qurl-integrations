@@ -330,30 +330,6 @@ describe('discord module', () => {
     });
   });
 
-  describe('editDM', () => {
-    it('edits the target message and returns ok', async () => {
-      const mockMsg = { edit: jest.fn().mockResolvedValue(undefined) };
-      const mockChannel = {
-        messages: { fetch: jest.fn().mockResolvedValue(mockMsg) },
-      };
-      mockClient.channels = mockClient.channels || {};
-      mockClient.channels.fetch = jest.fn().mockResolvedValue(mockChannel);
-      const payload = { embeds: [{ description: 'closed' }], components: [] };
-      const result = await discord.editDM('c-1', 'm-1', payload);
-      expect(result).toEqual({ ok: true });
-      expect(mockChannel.messages.fetch).toHaveBeenCalledWith('m-1');
-      expect(mockMsg.edit).toHaveBeenCalledWith(payload);
-    });
-
-    it('marks 404 as expected (recipient deleted the message)', async () => {
-      const err = Object.assign(new Error('Unknown Message'), { status: 404, code: 10008 });
-      mockClient.channels = mockClient.channels || {};
-      mockClient.channels.fetch = jest.fn().mockRejectedValue(err);
-      const result = await discord.editDM('c-x', 'm-x', { embeds: [], components: [] });
-      expect(result).toEqual({ ok: false, expected: true });
-    });
-  });
-
   describe('shutdown', () => {
     it('destroys client', () => {
       discord.shutdown();

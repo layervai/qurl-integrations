@@ -32,6 +32,7 @@ jest.mock('../src/discord', () => {
     post: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
+    patch: jest.fn(),
   };
   return {
     client: { rest: mockRestInstance },
@@ -41,12 +42,13 @@ jest.mock('../src/discord', () => {
 
 const restMock = require('../src/discord').__mockRestInstance;
 
-const { rest: exportedRest, sendDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
+const { rest: exportedRest, sendDM, editDM, addRoleToMember, removeRoleFromMember } = require('../src/discord-rest');
 
 beforeEach(() => {
   restMock.post.mockReset();
   restMock.put.mockReset();
   restMock.delete.mockReset();
+  restMock.patch.mockReset();
 });
 
 describe('module wiring', () => {
@@ -58,12 +60,12 @@ describe('module wiring', () => {
 });
 
 describe('sendDM via REST', () => {
-  it('creates DM channel then posts message, returns ok:true', async () => {
+  it('creates DM channel then posts message, returns ok:true with channel + message ids', async () => {
     restMock.post
-      .mockResolvedValueOnce({ id: 'channel-1' }) // create channel
-      .mockResolvedValueOnce({}); // post message
+      .mockResolvedValueOnce({ id: 'channel-1' })     // create channel
+      .mockResolvedValueOnce({ id: 'message-1' });    // post message
     const result = await sendDM('user-1', { content: 'hi' });
-    expect(result).toEqual({ ok: true, channelId: 'channel-1' });
+    expect(result).toEqual({ ok: true, channelId: 'channel-1', messageId: 'message-1' });
     expect(restMock.post).toHaveBeenCalledTimes(2);
     // First call: create DM channel — POST /users/@me/channels.
     expect(restMock.post.mock.calls[0][0]).toBe('/users/@me/channels');
@@ -105,6 +107,46 @@ describe('sendDM via REST', () => {
     expect(result.status).toBe(429);
     expect(result.error).toBe('rate limited');
     expect(restMock.post).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('editDM via REST', () => {
+  it('PATCHes the target message in one REST call and returns ok', async () => {
+    restMock.patch.mockResolvedValueOnce(undefined);
+    const payload = { embeds: [{ description: 'closed' }], components: [] };
+    const result = await editDM('channel-1', 'message-1', payload);
+    expect(result).toEqual({ ok: true });
+    expect(restMock.patch).toHaveBeenCalledTimes(1);
+    expect(restMock.patch.mock.calls[0][0]).toBe('/channels/channel-1/messages/message-1');
+    expect(restMock.patch.mock.calls[0][1]).toEqual({ body: payload });
+  });
+
+  it('marks 10008 (Unknown Message — recipient deleted the DM) as expected', async () => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('Unknown Message'), { status: 404, code: 10008 }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({ ok: false, expected: true });
+  });
+
+  it.each([
+    ['10003', 10003, 404],  // Unknown Channel
+    ['50001', 50001, 403],  // Missing Access
+    ['50007', 50007, 403],  // Cannot send messages to this user
+  ])('marks %s as expected', async (_name, code, status) => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('expected'), { status, code }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({ ok: false, expected: true });
+  });
+
+  it('marks unrecognized errors as unexpected (logged at warn)', async () => {
+    restMock.patch.mockRejectedValueOnce(
+      Object.assign(new Error('boom'), { status: 500, code: 0 }),
+    );
+    const result = await editDM('c', 'm', { embeds: [], components: [] });
+    expect(result).toEqual({ ok: false, expected: false });
   });
 });
 

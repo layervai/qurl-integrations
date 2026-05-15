@@ -89,7 +89,7 @@ const STORE_METHODS = Object.freeze([
   'recordQURLSend',
   'recordQURLSendBatch',
   'updateSendDMStatus',
-  'updateSendDMRefs',
+  'markSendDMDelivered',
   'getRecentSends',
   'markSendRevoked',
   'saveSendConfig',

@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
+const { DM_STATUS } = require('./constants');
 
 // Ensure data directory exists
 const dbDir = path.dirname(config.DATABASE_PATH);
@@ -719,13 +720,14 @@ const dbModule = {
     stmt.run(status, sendId, recipientDiscordId);
   },
 
-  // No-op stub. The DDB backend persists the DM channel + message ids so
-  // /qurl revoke can edit recipients' DMs in place; the SQLite backend
-  // is local-dev only (production sets STORE_TYPE=ddb) and intentionally
-  // does not carry that schema. Local revokes still succeed — they just
-  // skip the "Alice closed the door" edit on the recipient side.
+  // SQLite is local-dev only — STORE_TYPE=ddb in prod. We still write
+  // dm_status='sent' so local delivery-count rollups stay consistent;
+  // the DM refs are intentionally not persisted, so /qURL revoke
+  // skips the recipient-side DM edit when running against SQLite.
   // eslint-disable-next-line no-unused-vars
-  updateSendDMRefs(_sendId, _recipientDiscordId, _channelId, _messageId) {},
+  markSendDMDelivered(sendId, recipientDiscordId, _channelId, _messageId) {
+    this.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
+  },
 
   getRecentSends(senderDiscordId, limit = 10) {
     // LEFT JOIN on qurl_send_configs so we can:
