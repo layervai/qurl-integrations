@@ -408,6 +408,18 @@ let atCapPauseLogged = false;
 const AT_CAP_PAUSE_WARN_MSG = 'Event consumer: in-flight cap reached, pausing receive until handlers drain';
 const AT_CAP_RELEASED_INFO_MSG = 'Event consumer: in-flight cap released, resuming receive';
 
+// Reset the paired at-cap state — backoff value + warn gate. The two
+// always move together: a non-base `currentBackoffMs` implies an
+// in-progress streak (the at-cap branch is the only writer that grows
+// it), which implies `atCapPauseLogged === true`. Three call sites
+// reset both (pollOnce below-cap transition, stop()'s finally,
+// _resetStateForTest); the helper keeps them in lockstep so a future
+// fourth site can't silently break the invariant by forgetting one.
+function clearAtCapState() {
+  atCapPauseLogged = false;
+  currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
+}
+
 // Hook for unit tests: lets the test inject a mock SQSClient
 // (aws-sdk-client-mock'd in tests/event-consumer.test.js) without
 // constructing a real client at module load. Pure DI — production
@@ -752,7 +764,10 @@ async function pollOnce(client) {
     await abortableSleep(currentBackoffMs);
     // Exponential backoff: each consecutive at-cap iteration doubles
     // the wait up to MAX, so a sustained streak drops the wake rate
-    // from 10/s to ~0.6/s without significantly delaying recovery.
+    // from 10/s to ~0.6/s at the ceiling without significantly
+    // delaying recovery. (The first 5 iterations average ~1.6/s
+    // before settling at the 1.6s ceiling — see the cadence table
+    // in PR #407 for the per-iteration breakdown.)
     // Trade-off: a release that lands mid-sleep delays the next
     // below-cap observation (and the paired pause-end log) by up to
     // MAX (1.6s). Operators pairing pause-start/pause-end durations
@@ -773,8 +788,7 @@ async function pollOnce(client) {
   // wait (each streak gets exactly one warn and starts responsive).
   if (atCapPauseLogged) {
     logger.info(AT_CAP_RELEASED_INFO_MSG, capPayload);
-    atCapPauseLogged = false;
-    currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
+    clearAtCapState();
   }
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
@@ -1247,13 +1261,13 @@ async function stop() {
     // null contract holds without a second branch.
     stopController = null;
     onFatalCb = null;
-    // Reset the at-cap log gate so a `start → at-cap → stop → start`
-    // round-trip doesn't inherit a stale `true` and miss the next
-    // streak's transition warn. Production never restarts after stop,
-    // but integration tests that exercise the lifecycle would
-    // otherwise see a phantom suppressed warn.
-    atCapPauseLogged = false;
-    currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
+    // Reset the at-cap pair (gate + backoff) so a
+    // `start → at-cap → stop → start` round-trip doesn't inherit a
+    // stale `true`/ceiling and miss the next streak's transition warn
+    // or start the next streak at MAX. Production never restarts
+    // after stop, but integration tests that exercise the lifecycle
+    // would otherwise see a phantom suppressed warn.
+    clearAtCapState();
     // Intentionally do NOT null `sqsClient`. Production never calls
     // start() after stop() — gracefulShutdown runs once at SIGTERM,
     // then process.exit. Reusing the client across a hypothetical
@@ -1282,8 +1296,7 @@ function _resetStateForTest() {
   lastMissingEventIdWarnMs = 0;
   inFlightPromises.clear();
   isWorkerDispatch = false;
-  atCapPauseLogged = false;
-  currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
+  clearAtCapState();
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
