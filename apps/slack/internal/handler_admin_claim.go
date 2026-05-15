@@ -172,7 +172,7 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 	if dmErr := h.cfg.PostDM(ctx, userID, ":warning: Could not claim workspace. Please try again or contact LayerV support."); dmErr != nil {
 		// DM failed — fall through to the field-level error so the
 		// user has at least one signal.
-		slog.Warn("admin claim error DM failed; falling back to field-level modal error", "error", dmErr, "user_id", userID)
+		slog.Warn("admin claim error DM failed; falling back to field-level modal error", "error", dmErr, "user_id", userID) //nolint:gosec // G706: slog's JSON handler escapes control chars in attribute values; same posture as handler.go's request-path slog sites.
 		respondModalError(w, blockIDClaimCode, "Could not redeem code. Please try again.")
 		return
 	}
@@ -187,10 +187,10 @@ func (h *Handler) surfaceClaimError(ctx context.Context, w http.ResponseWriter, 
 func logUnmappedClaimError(err error, userID string) {
 	var ae *slackdata.Error
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusNotFound {
-		slog.Error("admin claim redeem returned 404 — likely a misrouted bootstrap_codes table or DDB endpoint", "error", err, "user_id", userID)
+		slog.Error("admin claim redeem returned 404 — likely a misrouted bootstrap_codes table or DDB endpoint", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
 		return
 	}
-	slog.Warn("admin claim redeem failed", "error", err, "user_id", userID)
+	slog.Warn("admin claim redeem failed", "error", err, "user_id", userID) //nolint:gosec // G706: see surfaceClaimError — slog escapes tainted attribute values.
 }
 
 // respondModalError writes a Slack-prescribed view_submission errors

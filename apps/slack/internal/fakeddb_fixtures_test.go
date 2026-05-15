@@ -171,3 +171,22 @@ var (
 	_       = errFromString
 	_ error = errString("")
 )
+
+// Helpers added by #231 / #234 that #233's tests don't consume
+// directly. The unused-linter (v2.10.1, CI's pinned version) doesn't
+// see through method-value bindings in a func body, so we anchor
+// each one via a TestMain init-time touch. See the
+// adminTestHelpersKeepReferenced init below.
+//
+//nolint:gochecknoinits // keep-referenced until #231 / #234 land — needs an init body for method-value anchors.
+func init() {
+	var ts *adminTestServers
+	var f *fakeDDB
+	_ = seedWorkspaceNonAdmin
+	_ = seedChannelPolicySingle
+	_ = ts.seedNonAdmin
+	_ = ts.seedWorkspaceCustom
+	_ = ts.seedPolicySingle
+	_ = ts.failOnAllowResource
+	_ = f.policyHasResource
+}
