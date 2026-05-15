@@ -869,6 +869,189 @@ describe('event-consumer: pollLoop error backoff', () => {
     // toward the 1s budget and surface here.
     expect(elapsedMs).toBeLessThan(100);
   });
+
+  test('pollLoop exits on permanent AWS error (QueueDoesNotExist) — fatal log + process.exit(1)', async () => {
+    // Misconfigured-but-set queue URL (typo, wrong region, etc.) was
+    // the gap the boot check couldn't catch. Retrying forever would
+    // spam logs without resolving anything; fail-fast surfaces the
+    // misconfig as ECS task-restart noise in deploy-time monitoring.
+    // Test mocks process.exit so the test runner survives; pollLoop's
+    // defensive `return` after exit(1) prevents the loop from
+    // iterating into the same failure under the mock.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('Specified queue does not exist');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client);
+      // Yield so pollOnce throws + catch routes through exit().
+      await new Promise((r) => setImmediate(r));
+
+      // toHaveBeenCalledTimes(1) — if the defensive return after exit
+      // ever gets dropped, the test mock would let the loop iterate
+      // into the same failure and exit would be called repeatedly.
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(exitSpy).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('permanent AWS failure'),
+        expect.objectContaining({ code: 'QueueDoesNotExist' }),
+      );
+      // Transient error log MUST NOT fire on this path — we want one
+      // fatal line, not the same misconfig spammed.
+      expect(logger.error).not.toHaveBeenCalledWith(
+        expect.stringContaining('poll iteration failed'),
+        expect.anything(),
+      );
+      // running stays true after pollLoop's defensive return — pollLoop
+      // doesn't manipulate the flag itself; stop() owns that. Explicit
+      // assertion locks the contract so a future refactor that flips
+      // running inside the error branch (and breaks stop()'s
+      // already-stopped guard) fails loudly here.
+      expect(eventConsumer._test.isRunning()).toBe(true);
+      // stop() returns cleanly even though pollLoop already returned
+      // on its own (running is still true; stop() flips it + aborts).
+      await eventConsumer.stop();
+      expect(eventConsumer._test.isRunning()).toBe(false);
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('pollLoop exits on err.cause-wrapped permanent error (SDK wrapping)', async () => {
+    // The unit test for permanentAwsErrorCode pins the cause-walk
+    // shape; this pins that the integration path actually invokes
+    // the walk, not just the top-level name check. A future SDK
+    // refresh that wraps errors in an extra layer must still trip
+    // fail-fast — without this, the regression would only surface
+    // in prod when the misconfig fires.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const inner = Object.assign(new Error('access denied'), {
+        name: 'AccessDeniedException',
+      });
+      const outer = new Error('SDK wrapper');
+      outer.cause = inner;
+      throw outer;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client);
+      await new Promise((r) => setImmediate(r));
+
+      expect(exitSpy).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('permanent AWS failure'),
+        expect.objectContaining({ code: 'AccessDeniedException' }),
+      );
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal callback routes permanent-error path away from process.exit', async () => {
+    // index.js wires `onFatal: () => gracefulShutdown(1)` so the
+    // permanent-error path runs the same teardown SIGTERM does
+    // (in-flight handler drain, db.close() WAL checkpoint, WebSocket
+    // close). Without this, a direct process.exit truncates all of
+    // it. Pin that an onFatal callback intercepts; process.exit is
+    // NOT called.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn();
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).not.toHaveBeenCalled();
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal throw falls back to process.exit(1)', async () => {
+    // Defense in depth: if gracefulShutdown itself throws (rare —
+    // its own try/catch covers routine errors), we still want the
+    // task to terminate so ECS surfaces the misconfig. Pin the
+    // fallback so a future onFatal regression doesn't silently
+    // leave the process running after the fatal log.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn(() => { throw new Error('shutdown failed'); });
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('onFatal threw, falling back to process.exit'),
+        expect.objectContaining({ error: 'shutdown failed' }),
+      );
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal async rejection falls back to process.exit(1)', async () => {
+    // Sister to the sync-throw test. The wired callback in production
+    // is `() => gracefulShutdown(1)` which returns a Promise — a
+    // sync try/catch alone would miss an async rejection from inside
+    // gracefulShutdown. The .catch() on Promise.resolve(onFatalCb())
+    // covers that leg.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn(() => Promise.reject(new Error('async shutdown failed')));
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      // Two setImmediate yields: first for pollOnce to throw + catch
+      // to call onFatal, second for the rejection's microtask to land
+      // on the .catch() and trigger the fallback exit.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('onFatal rejected, falling back to process.exit'),
+        expect.objectContaining({ error: 'async shutdown failed' }),
+      );
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
 });
 
 describe('event-consumer: start/stop lifecycle', () => {
@@ -964,6 +1147,57 @@ describe('event-consumer: start/stop lifecycle', () => {
     const e10 = new Error('cyclic');
     e10.cause = e10;
     expect(isAbortError(e10)).toBe(false);
+  });
+
+  test('permanentAwsErrorCode recognizes misconfig shapes, returns null for transient', () => {
+    const { permanentAwsErrorCode } = eventConsumer._test;
+    // Non-error inputs degrade cleanly.
+    expect(permanentAwsErrorCode(null)).toBeNull();
+    expect(permanentAwsErrorCode(undefined)).toBeNull();
+    expect(permanentAwsErrorCode(new Error('boom'))).toBeNull();
+
+    // SDK-v3 error-class names (error.name).
+    const queueGone = Object.assign(new Error('q gone'), { name: 'QueueDoesNotExist' });
+    expect(permanentAwsErrorCode(queueGone)).toBe('QueueDoesNotExist');
+    const accessDenied = Object.assign(new Error('AD'), { name: 'AccessDeniedException' });
+    expect(permanentAwsErrorCode(accessDenied)).toBe('AccessDeniedException');
+
+    // AWS-API-layer codes (error.Code, v2-style, still present on some
+    // v3 paths).
+    const v2NonExistent = Object.assign(new Error('q gone'), {
+      Code: 'AWS.SimpleQueueService.NonExistentQueue',
+    });
+    expect(permanentAwsErrorCode(v2NonExistent)).toBe('AWS.SimpleQueueService.NonExistentQueue');
+    const invalidUrl = Object.assign(new Error('bad url'), { code: 'InvalidQueueUrl' });
+    expect(permanentAwsErrorCode(invalidUrl)).toBe('InvalidQueueUrl');
+
+    // Region mismatch surfaces as UnknownEndpoint.
+    const badRegion = Object.assign(new Error('endpoint'), { name: 'UnknownEndpoint' });
+    expect(permanentAwsErrorCode(badRegion)).toBe('UnknownEndpoint');
+
+    // Bad creds.
+    const badCreds = Object.assign(new Error('creds'), { name: 'UnrecognizedClientException' });
+    expect(permanentAwsErrorCode(badCreds)).toBe('UnrecognizedClientException');
+
+    // Wrapped error: SDK-style err.cause chain still matches via the walk.
+    const wrapped = Object.assign(new Error('wrap'), {
+      cause: { name: 'QueueDoesNotExist' },
+    });
+    expect(permanentAwsErrorCode(wrapped)).toBe('QueueDoesNotExist');
+
+    // Transient errors (throttling, network, timeout) must NOT match —
+    // the existing error-backoff handles those.
+    const throttle = Object.assign(new Error('rate'), { name: 'ThrottlingException' });
+    expect(permanentAwsErrorCode(throttle)).toBeNull();
+    const networkErr = Object.assign(new Error('econnreset'), { code: 'ECONNRESET' });
+    expect(permanentAwsErrorCode(networkErr)).toBeNull();
+    const timeoutErr = Object.assign(new Error('t/o'), { name: 'TimeoutError' });
+    expect(permanentAwsErrorCode(timeoutErr)).toBeNull();
+
+    // Cyclic cause chain — bounded by visited-set, doesn't hang.
+    const cyclic = new Error('cyclic');
+    cyclic.cause = cyclic;
+    expect(permanentAwsErrorCode(cyclic)).toBeNull();
   });
 
   test('pollOnce passes the stopController.signal in the SDK send options', async () => {
