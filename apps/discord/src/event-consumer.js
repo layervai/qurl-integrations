@@ -884,17 +884,16 @@ function abortableSleep(ms) {
         clearTimeout(t);
         resolve();
       };
-      // { once: true } drops the listener after firing so a
-      // re-armed sleep on the same signal (impossible today but
-      // load-bearing if start/stop cycling ever returns) doesn't
-      // accumulate stale handlers.
+      // Timeout-wins branch above removeEventListener's; { once: true }
+      // here is defensive — AbortSignal fires 'abort' at most once per spec.
       stopController.signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
 
 async function pollLoop(client) {
-  while (!stopController.signal.aborted) {
+  // Null-guard symmetric with abortableSleep + stop().
+  while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);
     } catch (err) {
@@ -1170,9 +1169,9 @@ module.exports = {
     // Test-only initializer for the stop controller. Tests that
     // exercise pollOnce directly (bypassing start()) need a
     // controller to exist so the SDK send() call can read its
-    // signal. Construct fresh; production code only sets this via
-    // start().
-    _setStopControllerForTest: (ac) => { stopController = ac ?? new AbortController(); },
+    // signal. Always constructs fresh — to clear, use
+    // _resetStateForTest. Production code only sets this via start().
+    _setStopControllerForTest: () => { stopController = new AbortController(); },
     // Returns the in-flight count by reading `.size` on the live
     // Set. Kept under the historical name for test-site stability;
     // semantically still "how many handlers are tracked right now."

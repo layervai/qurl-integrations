@@ -783,11 +783,10 @@ describe('event-consumer: abortableSleep (AbortSignal-driven)', () => {
     eventConsumer._test._setStopControllerForTest();
     const start = Date.now();
     const sleepPromise = eventConsumer._test.abortableSleep(10_000);
-    // Yield once so the addEventListener call has registered before
-    // we abort (otherwise the abort path racing the listener-
-    // attachment path is implementation-dependent; the
-    // already-aborted fast path in abortableSleep covers that case
-    // separately).
+    // Harmless yield: the Promise executor runs synchronously, so the
+    // addEventListener call is wired by the time abortableSleep
+    // returns. The already-aborted fast path in abortableSleep covers
+    // the abort-before-listener case separately.
     await Promise.resolve();
     eventConsumer._test.getStopController().abort();
     await sleepPromise;
