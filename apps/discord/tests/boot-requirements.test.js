@@ -16,6 +16,7 @@ const {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  missingEventShipperKeys,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 } = require('../src/boot-requirements');
@@ -131,6 +132,37 @@ describe('missingKekRequiredKeys', () => {
     // missingProdKeys does not run for them.
     expect(
       missingKekRequiredKeys({ GITHUB_CLIENT_SECRET: 'x', KEY_ENCRYPTION_KEY: 'k' })
+    ).toEqual([]);
+  });
+});
+
+describe('missingEventShipperKeys', () => {
+  it('returns empty when the flag is unset (event-shipper path inactive)', () => {
+    expect(missingEventShipperKeys({})).toEqual([]);
+    expect(missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false })).toEqual([]);
+    // Even with a missing queue URL — the flag is the gate, not the URL.
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: false, QURL_BOT_EVENTS_QUEUE_URL: undefined })
+    ).toEqual([]);
+  });
+
+  it('flags QURL_BOT_EVENTS_QUEUE_URL when flag is on without a URL', () => {
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true })
+    ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
+    // Empty string counts as missing — matches the `!env[k]` falsy
+    // treatment elsewhere in this module.
+    expect(
+      missingEventShipperKeys({ ENABLE_EVENT_SHIPPER: true, QURL_BOT_EVENTS_QUEUE_URL: '' })
+    ).toEqual(['QURL_BOT_EVENTS_QUEUE_URL']);
+  });
+
+  it('returns empty when both are set', () => {
+    expect(
+      missingEventShipperKeys({
+        ENABLE_EVENT_SHIPPER: true,
+        QURL_BOT_EVENTS_QUEUE_URL: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
+      }),
     ).toEqual([]);
   });
 });

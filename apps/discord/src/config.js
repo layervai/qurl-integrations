@@ -306,4 +306,31 @@ module.exports = {
   QURL_SEND_COOLDOWN_MS: intEnv('QURL_SEND_COOLDOWN_MS', 30000, { minPositive: true }),
 
   SHARD_ID,
+
+  // Event-shipper (zero-downtime design, Pillar 1). When true, the
+  // gateway tier forwards every Discord dispatch to SQS instead of
+  // running handlers in-process, and the worker tier (PROCESS_ROLE=http
+  // or combined) polls SQS and routes events through the same
+  // handleCommand / handleFlowInteraction path. When false, the bot
+  // runs the legacy in-process shape — gateway role both receives WS
+  // dispatches AND runs handlers; worker role is dormant on the queue.
+  //
+  // Must be the literal string "true" — same shape as
+  // ENABLE_OPENNHP_FEATURES so an env-var typo (TRUE/1/yes/etc.) can't
+  // silently flip a production deploy into the new dispatch path.
+  //
+  // Rollback cliff: this flag is valid only through PR 10 (gateway
+  // strip-down). The follow-up that removes the in-process fallback
+  // also removes this flag; after that, rollback is a `git revert` +
+  // emergency redeploy. See `apps/discord/docs/zero-downtime-design.md`
+  // → "Rollback cliff: ENABLE_EVENT_SHIPPER".
+  ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
+
+  // SQS Standard queue the gateway publishes to and the worker
+  // consumes from (provisioned by qurl-integrations-infra PR B).
+  // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in
+  // index.js so a misconfigured deploy fails closed instead of
+  // silently no-op'ing the consumer or dropping every dispatch on
+  // the producer side.
+  QURL_BOT_EVENTS_QUEUE_URL: process.env.QURL_BOT_EVENTS_QUEUE_URL,
 };

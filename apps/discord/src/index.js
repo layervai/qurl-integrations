@@ -8,8 +8,9 @@ const { startGatewayHealthServer } = require('./gateway-health');
 const { startGatewayHeartbeat, startActiveGuildCount, noteGatewayActivity } = require('./gateway-metrics');
 const db = require('./store');
 const { startOrphanTokenSweeper } = require('./orphan-token-sweeper');
-const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, resolveProcessRole } = require('./boot-requirements');
+const { missingBootKeys, missingProdKeys, missingKekRequiredKeys, missingEventShipperKeys, resolveProcessRole } = require('./boot-requirements');
 const { initHttpOnly } = require('./http-only-init');
+const eventConsumer = require('./event-consumer');
 
 // Process role — selects which subset of the bot runs in this
 // container. Three modes:
@@ -251,16 +252,40 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
-// Gateway-only event wiring. HTTP-only replicas skip these because
-// they never login() and so the client never fires these events —
-// but the `.on()` registrations would still leak handler references
-// and register no-op listeners, so gate them for clarity.
-if (isGateway) {
-  // Register commands when ready
-  client.once('ready', async () => {
-    await registerCommands(client);
-  });
+// Event-shipper (zero-downtime Pillar 1) — when the flag is on, the
+// queue URL is the load-bearing piece: producer publishes to it,
+// consumer polls from it. Role-agnostic by design: env vars are
+// uniform across roles in a single deploy, so one role refusing to
+// boot is preferable to a half-wired split.
+const eventShipperMissing = missingEventShipperKeys(config);
+if (eventShipperMissing.length > 0) {
+  logger.error(`ENABLE_EVENT_SHIPPER=true but missing required env vars: ${eventShipperMissing.join(', ')}`);
+  process.exit(1);
+}
 
+// Worker role: the SQS-driven dispatch path. Distinct from `isHttp`
+// because the http role today serves OAuth callbacks + webhooks
+// regardless of the flag; only when ENABLE_EVENT_SHIPPER is on does
+// the http role ALSO consume from SQS. Derived once here so the
+// consumer-startup and event-listener registration sites stay in sync.
+const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
+
+// Interaction routing. Same dispatcher whether the source is the
+// Gateway WS (isGateway) or an SQS message reconstructed via
+// client.actions.InteractionCreate.handle (isWorker, see
+// src/event-consumer.js). Registered once, gated on either flag, so
+// combined-mode + flag-on doesn't double-register.
+//
+// PR 10 evolution note: once the producer side lands, the gateway
+// role MUST stop dispatching in-process when ENABLE_EVENT_SHIPPER
+// is true (it'll publish to SQS instead, and the worker tier picks
+// up from there). Expect the gate to become something like
+// `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker`, or for
+// the gateway-side listener to be replaced with a publish-to-SQS
+// shim. Today (PR 11 only), the producer side doesn't exist yet,
+// so combined-mode + flag-on still runs the gateway dispatch path
+// in-process and the worker tier's consumer sits on an empty queue.
+if (isGateway || isWorker) {
   // Handle interactions. Split-dispatch by interaction kind:
   // ChatInputCommand + Autocomplete go through the slash-command
   // path (handleCommand); MessageComponent + ModalSubmit go through
@@ -286,6 +311,20 @@ if (isGateway) {
     });
     return undefined;
   });
+}
+
+// Gateway-only event wiring. HTTP-only replicas skip these because
+// they never login() and so the client never fires these events —
+// but the `.on()` registrations would still leak handler references
+// and register no-op listeners, so gate them for clarity.
+if (isGateway) {
+  // Register commands when ready
+  client.once('ready', async () => {
+    await registerCommands(client);
+  });
+
+  // interactionCreate listener is registered above (isGateway || isWorker
+  // block) so the worker tier shares the same dispatcher.
 
   // Tick the gateway-activity timestamp on every WebSocket frame.
   // Feeds the `activity_age_ms` observability gauge ONLY — does not
@@ -350,6 +389,13 @@ async function gracefulShutdown(code = 0) {
       });
     }
     stopServerIntervals();
+    // SQS consumer drain. Stops new ReceiveMessage calls, then
+    // awaits the current poll iteration's in-flight `processMessage`
+    // promises. Has to run BEFORE db.close() — running handlers may
+    // still be reading/writing flow-state DDB rows on the way to
+    // ACK'ing the interaction. Idempotent + a no-op when the
+    // consumer was never started, so unconditional here.
+    await eventConsumer.stop();
     // Periodic REST refreshCache in http-only mode is .unref()ed so it
     // wouldn't block exit on its own, but clearing explicitly keeps
     // shutdown symmetric with the other intervals (server.js, oauth.js
@@ -478,6 +524,22 @@ async function start() {
   // sweeper across HTTP replicas.
   if (isGateway) {
     startOrphanTokenSweeper();
+  }
+
+  // SQS consumer for the worker tier (zero-downtime Pillar 1).
+  // Started after the HTTP listener is up so the /health endpoint
+  // can accept probes during the consumer's first poll. Gated on
+  // `isWorker` (which already requires ENABLE_EVENT_SHIPPER=true)
+  // so the legacy in-process dispatch path stays untouched when
+  // the flag is off. In combined mode + flag on, the same process
+  // runs both producer (gateway role) and consumer — useful for
+  // local dev and the initial flag-on soak.
+  //
+  // Shutdown-race guard: mirrors the timer guards above. If SIGTERM
+  // landed during the awaits before this point, gracefulShutdown
+  // has already run; skip starting a consumer that no one will stop.
+  if (isWorker && !isShuttingDown) {
+    eventConsumer.start(client);
   }
 
   // Login to Discord with a 30s deadline. client.login() doesn't

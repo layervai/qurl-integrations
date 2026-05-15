@@ -65,6 +65,18 @@ function missingKekRequiredKeys(env) {
   return env.KEY_ENCRYPTION_KEY ? [] : ['KEY_ENCRYPTION_KEY'];
 }
 
+// QURL_BOT_EVENTS_QUEUE_URL is the load-bearing piece of the event-
+// shipper path: producer publishes to it, consumer polls from it. When
+// ENABLE_EVENT_SHIPPER=true and the queue URL isn't set, the producer
+// silently drops every dispatch and the consumer sits dormant — both
+// failure modes are silent enough that they wouldn't surface in
+// monitoring until /qurl interactions start timing out from the user's
+// end. Fail-closed at boot is preferable.
+function missingEventShipperKeys(cfg) {
+  if (!cfg.ENABLE_EVENT_SHIPPER) return [];
+  return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
+}
+
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -106,6 +118,7 @@ module.exports = {
   missingBootKeys,
   missingProdKeys,
   missingKekRequiredKeys,
+  missingEventShipperKeys,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };
