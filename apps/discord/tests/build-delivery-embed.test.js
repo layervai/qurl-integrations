@@ -257,23 +257,35 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
     expect(desc).toContain(`🕐 Closes <t:${Number.MAX_SAFE_INTEGER}:R>`);
   });
 
-  it('throws if expiresAt is missing, non-finite, a float, or non-positive (fail-loud)', () => {
-    // Note on the "beyond MAX_SAFE_INTEGER" boundary: doubles can
-    // exactly represent every integer up to 2^53, so 2^53 itself is
-    // still `Number.isInteger == true`. Above 2^53, additions of 1
-    // round to the nearest representable double (which is also an
-    // integer at that magnitude), so `Number.isInteger` keeps
-    // returning true. There is no clean "finite integer that
-    // Number.isInteger rejects" boundary — the rejection set is
-    // exactly: non-finite + non-integer-floats + non-positive.
-    for (const bad of [
-      undefined, null, NaN, Infinity, -Infinity, 'soon', {},
-      1735689600.5, 0.1,            // floats
-      0, -1, -1735689600,           // non-positive (negative timestamp would render as "55 years ago" in Discord)
-    ]) {
-      expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
-        .toThrow(/expiresAt must be a positive integer Unix-seconds number/);
-    }
+  // Note on the "beyond MAX_SAFE_INTEGER" boundary: doubles can
+  // exactly represent every integer up to 2^53, so 2^53 itself is
+  // still `Number.isInteger == true`. Above 2^53, additions of 1
+  // round to the nearest representable double (which is also an
+  // integer at that magnitude), so `Number.isInteger` keeps returning
+  // true. There is no clean "finite integer that Number.isInteger
+  // rejects" boundary — the rejection set is exactly: non-finite +
+  // non-integer-floats + non-positive.
+  //
+  // it.each() over for-loop: each input gets its own test name so a
+  // regression on one shape doesn't collapse into a single anonymous
+  // failure. Failure output reads e.g. "(1735689600.5) throws fail-loud"
+  // instead of having to dig into the loop body.
+  it.each([
+    [undefined],
+    [null],
+    [NaN],
+    [Infinity],
+    [-Infinity],
+    ['soon'],
+    [{}],
+    [1735689600.5],                  // float
+    [0.1],                           // float
+    [0],                             // non-positive
+    [-1],                            // non-positive (would render as "55 years ago")
+    [-1735689600],                   // non-positive (negative timestamp)
+  ])('throws fail-loud for invalid expiresAt: %p', (bad) => {
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
+      .toThrow(/expiresAt must be a positive integer Unix-seconds number/);
   });
 
   // Locks the operator-facing diagnostic shape: the throw message must

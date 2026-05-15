@@ -583,8 +583,10 @@ function buildDeliveryPayload({ senderAlias, qurlLink, expiresAt, personalMessag
   // does not span newlines, so a multi-line message would render with
   // only the first line styled. Flatten newlines to a space so the
   // recipient sees one tidy quote — matches the design mockup which
-  // shows the message as a single-line styled box. 280-char cap keeps
-  // the embed visually compact.
+  // shows the message as a single-line styled box. 280-codepoint cap
+  // keeps the embed visually compact. Headroom: 280 codepoints ≤ 1120
+  // UTF-8 bytes + ~10 chars of `> *"…"*` wrapper + 64-char sender +
+  // ~30-char expiry line ≪ Discord's 4096-char description cap.
   const descLines = [`**${safeSender}** opened a door for you.`];
   if (personalMessage) {
     // Skip the styled-blockquote line if the input collapses to an
@@ -1275,12 +1277,14 @@ async function executeSendPipeline(interaction, {
   // seconds — Discord's <t:N:R> format requires seconds, not millis).
   // Using send-time + duration rather than reading from the API mint
   // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on the
-  // send-pipeline path; can be a few seconds on handleAddRecipients
-  // which re-downloads + re-uploads + re-mints first). Negligible at
-  // the 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
+  // Drift between this clock and the API's enforcement clock is the
+  // wall-clock gap between THIS compute site and the earlier mint call
+  // (mintLinksInBatches has already returned by the time we land here
+  // on the send-pipeline path; on handleAddRecipients the gap also
+  // covers re-download + re-upload + re-mint). So recipients see
+  // "in 24 hours" measured against send-time, not mint-time. Negligible
+  // at the 30m–7d horizon — even a worst-case 10s gap rounds the same
+  // way in the relative-time display.
   //
   // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
   // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
