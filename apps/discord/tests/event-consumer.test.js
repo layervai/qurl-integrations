@@ -1782,11 +1782,13 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     }
   });
 
-  test('pollOnce: post-streak resets via _resetStateForTest restores base', async () => {
+  test('_resetStateForTest restores currentBackoffMs to base', async () => {
     // _resetStateForTest is the beforeEach harness path. stop()'s
     // finally also resets currentBackoffMs — that branch is asserted
     // in the start()+stop() round-trip test in the start/stop
-    // lifecycle describe block.
+    // lifecycle describe block. The cap-release path (below-cap
+    // transition after a streak) is covered by the next test in this
+    // describe block.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
       const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;

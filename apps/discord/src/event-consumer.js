@@ -757,6 +757,18 @@ async function pollOnce(client) {
     // below-cap observation (and the paired pause-end log) by up to
     // MAX (1.6s). Operators pairing pause-start/pause-end durations
     // in CloudWatch see this as inflated dwell time at the ceiling.
+    //
+    // No jitter: each worker process maintains its own at-cap state
+    // (in-flight handlers are per-process), so synchronized wakes
+    // across workers aren't possible. The downstream wedge isn't
+    // sensitive to wake-time alignment either, so plain doubling is
+    // the right shape.
+    //
+    // stop()-during-sleep race: if signal.abort() fires while we're
+    // parked here, abortableSleep resolves, this line still doubles
+    // currentBackoffMs (one wasted increment), then pollOnce returns,
+    // pollLoop's while-check sees signal.aborted, and stop()'s
+    // finally resets currentBackoffMs to BASE. End state correct.
     currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
     return;
   }
