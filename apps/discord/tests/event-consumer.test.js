@@ -1293,6 +1293,11 @@ describe('event-consumer: start/stop lifecycle', () => {
     await eventConsumer.stop();
     // Stop is idempotent.
     await eventConsumer.stop();
+
+    // stop()'s finally restores currentBackoffMs to BASE alongside
+    // running/loopPromise/stopController. Pins the contract called
+    // out in the at-cap backoff describe block (#390).
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });
 
   // A "start() actually registers pollOnce" companion test was
@@ -1756,12 +1761,11 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
   });
 
-  test('pollOnce: post-restart streak starts at BASE (stop()/_resetStateForTest contract)', async () => {
-    // A start → drive-to-max → stop → start lifecycle must not
-    // inherit the doubled value. stop()'s finally + _resetStateForTest
-    // both clear currentBackoffMs, but the asymmetry between
-    // atCapPauseLogged (gated reset) and currentBackoffMs (unconditional)
-    // makes an inversion regression easy. Lock it down explicitly.
+  test('pollOnce: post-streak resets via _resetStateForTest restore base', async () => {
+    // _resetStateForTest is the beforeEach harness path. stop()'s
+    // finally also resets currentBackoffMs (asserted in the cap-
+    // released test below, where the stop() lifecycle is exercised
+    // by other tests in the start/stop describe block).
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
@@ -1777,9 +1781,6 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     }
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
 
-    // Full reset, mirroring how _resetStateForTest is wired in
-    // beforeEach. Production never restarts after stop(), but the
-    // test path that the helper covers must observe the contract.
     eventConsumer._test._resetStateForTest();
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });

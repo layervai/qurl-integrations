@@ -342,8 +342,9 @@ function validateInflightCap(cap) {
 }
 validateInflightCap(MAX_INFLIGHT_HANDLERS);
 
-// At-cap pause backoff. Exponential decay from BASE to MAX while
-// the cap stays full, resets to BASE on the first below-cap poll.
+// At-cap pause backoff. Exponential backoff (doubling) from BASE to
+// MAX while the cap stays full; resets to BASE on the first below-cap
+// poll. The wake *rate* decays — the sleep duration grows.
 // A short cap streak (handlers draining within a second) keeps the
 // 100ms responsiveness; a sustained streak (slow downstream + bursty
 // arrivals) drops the wake rate to ~0.6/s instead of 10/s, cutting
@@ -749,7 +750,7 @@ async function pollOnce(client) {
     // Steady-state at-cap is intentionally silent — the entry warn
     // + the exit info already bookend the pause for operators.
     await abortableSleep(currentBackoffMs);
-    // Exponential decay: each consecutive at-cap iteration doubles
+    // Exponential backoff: each consecutive at-cap iteration doubles
     // the wait up to MAX, so a sustained streak drops the wake rate
     // from 10/s to ~0.6/s without significantly delaying recovery.
     currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
