@@ -5111,6 +5111,367 @@ describe('handleConfirmPickManual', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+// handleConfirmEveryone — @everyone button click handler
+// ──────────────────────────────────────────────────────────────
+// Workaround for Discord's MentionableSelectMenu filtering @everyone
+// out of its dropdown. Click-time semantics mirror the picker's
+// @everyone-role branch: pre-warm cache → expand to non-bot members →
+// partition → transition flow.
+
+describe('handleConfirmEveryone', () => {
+  const u1 = '100000000000000001';
+  const u2 = '100000000000000002';
+  const bot1 = '100000000000000099';
+
+  function makeEveryoneInteraction({
+    canMentionEveryone = true,
+    guildMembers = {
+      [u1]: {},
+      [u2]: {},
+      [bot1]: { bot: true },
+      [SENDER_ID]: {},
+    },
+    memberCount = 4,
+    ...rest
+  } = {}) {
+    const int = makeInteraction({ guildMembers, ...rest });
+    int.memberPermissions = { has: jest.fn(() => canMentionEveryone) };
+    if (int.guild) int.guild.memberCount = memberCount;
+    return int;
+  }
+
+  const initialPayload = {
+    resourceType: 'file',
+    resourceLabel: 'x.png',
+    recipientIds: [],
+    expiresIn: '24h',
+    selfDestructSeconds: null,
+    personalMessage: null,
+    recipientMode: 'picker',
+  };
+
+  const { handleConfirmEveryone } = require('../src/commands');
+
+  test('happy path → expands to all non-bot members, transitions flow', async () => {
+    const int = makeEveryoneInteraction();
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.deferUpdate).toHaveBeenCalled();
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    expect(payload.recipientIds.sort()).toEqual([u1, u2, SENDER_ID].sort());
+    expect(payload.selfIncluded).toBe(true);
+    // Mode stays in PICKER — @everyone is multi-pick shortcut, not a
+    // mode switch (unlike voice-everyone which moves to VOICE mode).
+    expect(payload.recipientMode).toBe('picker');
+  });
+
+  test('without MENTION_EVERYONE → reject with permission warning, no transition', async () => {
+    // Defense-in-depth re-check against forged interactions. Render-
+    // time gate already hides the button; this branch defends against
+    // an HTTP interaction crafted with the custom_id directly.
+    const int = makeEveryoneInteraction({ canMentionEveryone: false });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/Mention Everyone/);
+    const logger = require('../src/logger');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('without MENTION_EVERYONE'),
+      expect.any(Object),
+    );
+  });
+
+  test('cache stays empty after prewarm despite populated guild → reject with "try again" copy', async () => {
+    // The production-relevant scenario: prewarm completed but landed
+    // zero members in cache (gateway blip, partial chunk delivery,
+    // discord.js cache eviction race). memberCount > 0 distinguishes
+    // this from the degenerate empty-guild case (which can't reach
+    // the click handler at all — slash commands need a guild context).
+    const int = makeEveryoneInteraction({ guildMembers: {}, memberCount: 5 });
+    int.guild.members.fetch = jest.fn().mockResolvedValue(new Map());
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/member cache not ready/i);
+  });
+
+  test('sender-only-in-cache (no other non-bots) → reject with "matched only you" copy', async () => {
+    // Click-intent for 📢 @everyone is "fan out to others." If the
+    // guild has just the sender + bots, falling through to partition
+    // would silently send to just the sender — defensible self-send
+    // semantics, but misleading for an @everyone click. Reject
+    // explicitly; self-send via the picker is still possible.
+    const int = makeEveryoneInteraction({
+      // Sender in cache, only bots otherwise (no other humans).
+      guildMembers: { [SENDER_ID]: {}, [bot1]: { bot: true } },
+      memberCount: 2,
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/matched only you/i);
+  });
+
+  test('valid.length === cap (exactly at boundary) → proceeds (cap-reject is strictly >)', async () => {
+    // Boundary test: the cap-reject is `valid.length > cap`, so exactly
+    // at cap should proceed. Voice-everyone shares the same
+    // partitionRecipients cap surface; cheap insurance against an
+    // off-by-one drift on either handler.
+    const config = require('../src/config');
+    const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+    try {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 3, configurable: true, writable: true });
+      const int = makeEveryoneInteraction({
+        guildMembers: {  // 3 non-bots exactly = cap
+          [SENDER_ID]: {},
+          '100000000000000010': {},
+          '100000000000000011': {},
+        },
+        memberCount: 3,
+      });
+      await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+      expect(mockTransitionFlow).toHaveBeenCalled();
+      const payload = mockTransitionFlow.mock.calls[0][2].payload;
+      expect(payload.recipientIds.length).toBe(3);
+    } finally {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+    }
+  });
+
+  test('forged-interaction warn log includes guild_id for forensics correlation', async () => {
+    // The success info log carries guild_id; the forged warn log
+    // should too, so ops can correlate "is one user forging across
+    // guilds?" without joining lines.
+    const int = makeEveryoneInteraction({ canMentionEveryone: false });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('without MENTION_EVERYONE'),
+      expect.objectContaining({ flow_id: 'fid', guild_id: expect.any(String) }),
+    );
+  });
+
+  test('only bots in cache → reject with bots-dropped copy', async () => {
+    const int = makeEveryoneInteraction({
+      guildMembers: { [bot1]: { bot: true } },
+      memberCount: 1,
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/No usable recipients|bot/i);
+  });
+
+  test('cache size > QURL_SEND_MAX_RECIPIENTS → hard reject (no truncation)', async () => {
+    const config = require('../src/config');
+    const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+    try {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 2, configurable: true, writable: true });
+      const int = makeEveryoneInteraction();  // 3 non-bots > cap 2
+      await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+      expect(mockTransitionFlow).not.toHaveBeenCalled();
+      const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+      expect(reply.content).toMatch(/max 2/);
+      expect(reply.content).toMatch(/picker|@mentions/i);
+    } finally {
+      Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+    }
+  });
+
+  test('corrupt resourceType → deleteFlow + actionable error, no transition', async () => {
+    const int = makeEveryoneInteraction();
+    await handleConfirmEveryone(int, {
+      flow_id: 'fid',
+      row: { payload: { ...initialPayload, resourceType: 'mystery' }, version: 1 },
+    });
+    expect(mockDeleteFlow).toHaveBeenCalledWith('fid', expect.objectContaining({
+      stage: SEND_STAGE_AWAITING_CONFIRM, reason: 'terminal',
+    }));
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/corrupted/i);
+  });
+
+  test('deferUpdate fires before transitionFlow — Discord 3s ack guard', async () => {
+    let deferAckedBeforeTransition = false;
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockImplementationOnce(async () => {
+      deferAckedBeforeTransition = int.deferUpdate.mock.calls.length > 0;
+      return { result: 'ok', version: 2 };
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(deferAckedBeforeTransition).toBe(true);
+  });
+
+  test('transitionFlow returns conflict → "Send was superseded" copy, no followup', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'conflict' });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/superseded/i);
+    expect(reply.components).toEqual([]);
+    expect(int.followUp).not.toHaveBeenCalled();
+  });
+
+  test('transitionFlow returns not_found → "send expired" copy, no followup', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockResolvedValueOnce({ result: 'not_found' });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/expired/i);
+    expect(reply.components).toEqual([]);
+    expect(int.followUp).not.toHaveBeenCalled();
+  });
+
+  test('transitionFlow throws → ephemeral followUp with retry copy', async () => {
+    const int = makeEveryoneInteraction();
+    mockTransitionFlow.mockRejectedValueOnce(new Error('ddb blip'));
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringMatching(/Could not save.*Try again/i),
+      ephemeral: true,
+    }));
+    const logger = require('../src/logger');
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('handleConfirmEveryone: transitionFlow threw'),
+      expect.any(Object),
+    );
+  });
+
+  test('sender row missing from cache + other non-bots present → defensively pushed into recipients', async () => {
+    // Rare race: prewarm completes but the sender's own member entry
+    // happened to be missing from the cache (fresh shard resume).
+    // Without the defensive push, clicking 📢 @everyone would silently
+    // drop the sender (`selfIncluded: false`) — they'd be missing from
+    // the recipient set they explicitly triggered.
+    const otherUser = '100000000000000077';
+    const int = makeEveryoneInteraction({
+      // Sender deliberately ABSENT from cache; one other non-bot present.
+      guildMembers: { [otherUser]: {} },
+      memberCount: 2,  // sender + otherUser
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    // Sender + otherUser should both land in recipients (sender via
+    // defensive push, otherUser via cache).
+    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.selfIncluded).toBe(true);
+  });
+
+  test('sender missing + warm cache with degraded .user-less row + other non-bots → defensive push fires, partial-cache drops counted', async () => {
+    // Positive coverage for the combination of: warm cache with at
+    // least one valid non-bot AND at least one degraded row (`.user`
+    // missing — partial GUILD_MEMBERS_CHUNK shape) AND sender's own
+    // row absent. The defensive push fires (other non-bots present),
+    // the degraded row is counted as partialCacheDrops, and the
+    // success log captures the right shape.
+    const otherUser = '100000000000000088';
+    const int = makeEveryoneInteraction({
+      // Sender absent; one other non-bot present.
+      guildMembers: { [otherUser]: {} },
+      memberCount: 3,  // sender + otherUser + the degraded row below
+    });
+    // Inject a degraded row (no .user) into the warm cache.
+    int.guild.members.cache.set('degraded-1', { /* no .user */ });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    // Sender (defensive push) + otherUser (cache) — degraded row
+    // filtered.
+    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.selfIncluded).toBe(true);
+    const logger = require('../src/logger');
+    // partialCacheDrops debug log fires with `dropped: 1`.
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('partial-cache rows dropped'),
+      expect.objectContaining({ dropped: 1 }),
+    );
+    // Success log carries the cache shape.
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('@everyone expansion succeeded'),
+      expect.objectContaining({
+        valid_count: 2,
+        partial_cache_drops: 1,
+        cache_size: 2,  // otherUser + degraded-1 = 2 entries
+        member_count: 3,
+      }),
+    );
+  });
+
+  test('sender row missing + bots-only cache → still rejects (defensive push gated)', async () => {
+    // Counter-test: the defensive push should NOT fire on a bots-only
+    // cache. Silently expanding @everyone to "send to just me" would
+    // misrepresent the user's all-or-nothing intent. The gate on
+    // `hasOtherNonBotInCache` preserves the bots-only reject path.
+    const bot2 = '100000000000000098';
+    const int = makeEveryoneInteraction({
+      // Sender ABSENT; only bots in cache.
+      guildMembers: { [bot1]: { bot: true }, [bot2]: { bot: true } },
+      memberCount: 3,  // sender + 2 bots
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/No usable recipients|bot/i);
+  });
+
+  test('forged interaction with no guild → reject without crash + permission warning', async () => {
+    // Forged HTTP interaction crafted with the @everyone custom_id but
+    // no guild (DM context). canMentionEveryone derives `false` via
+    // `!!interaction.guild`, so the perm re-check fires and surfaces
+    // the rejection. The reject path re-renders via
+    // renderConfirmCardRows; the @everyone block there dereferences
+    // `interaction.memberPermissions?.has?.(...)` and must not crash
+    // on the null-guild interaction.
+    const int = makeEveryoneInteraction({ guildId: null });  // → guild = null
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/Mention Everyone/);
+  });
+
+  test('success-path emits info-level audit log with counts', async () => {
+    // Successful @everyone expansion is a load-bearing audit signal —
+    // "did someone fan out to N users?" should be findable in logs
+    // without a DDB scan. Pin the structured-log shape so a future
+    // refactor doesn't silently drop the breadcrumb.
+    const int = makeEveryoneInteraction();
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('@everyone expansion succeeded'),
+      expect.objectContaining({
+        flow_id: 'fid',
+        valid_count: expect.any(Number),
+        dropped_bots: expect.any(Number),
+        partial_cache_drops: expect.any(Number),
+        self_included: true,
+      }),
+    );
+  });
+
+  test('partial-cache rows (member without .user) → counted in debug log + filtered from selection', async () => {
+    // Mirror handleConfirmVoiceEveryone's partialCacheDrops telemetry.
+    // Degraded GuildMembersChunk shapes occasionally land entries with
+    // no .user — they're filtered silently, but the count is logged so
+    // a future "@everyone underresolved" report has a forensic hook.
+    const int = makeEveryoneInteraction();
+    // Inject one degraded row alongside the valid ones.
+    int.guild.members.cache.set('degraded-1', { /* no .user */ });
+    int.guild.memberCount = 5;
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('partial-cache rows dropped'),
+      expect.objectContaining({ dropped: 1 }),
+    );
+    // Send still proceeds with the valid subset.
+    expect(mockTransitionFlow).toHaveBeenCalled();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
 // handleConfirmExpirySelect — inline expiry edit on confirm card
 // ──────────────────────────────────────────────────────────────
 
@@ -6318,6 +6679,468 @@ describe('renderConfirmCardRows', () => {
       expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
       expect(lastCall.content).toMatch(/you not included/);
     });
+  });
+
+  // ── @everyone button rendering ──
+  // Workaround for Discord's MentionableSelectMenu filtering @everyone
+  // out of its UI. Render-time gating on MENTION_EVERYONE + picker
+  // mode + guild context. Click-time resolution handled separately
+  // by handleConfirmEveryone tests.
+  describe('@everyone button', () => {
+    test('renders when sender has MENTION_EVERYONE in guild (picker mode)', async () => {
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 5;
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).toContain('qurl_confirm_everyone');
+    });
+
+    test('does NOT render without MENTION_EVERYONE', async () => {
+      // Default permission shape falls through the gate. Symmetric with
+      // Discord's MentionableSelectMenu, which also hides @everyone for
+      // non-permitted users.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+    });
+
+    test('label shows live count from guild.memberCount when cache cold', async () => {
+      // Cold cache (cache.size < memberCount) → label falls back to
+      // memberCount. Overcounts by bot population, but it's the only
+      // reliable number before the click-time pre-warm fires.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },  // cache.size === 1
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 42;  // memberCount > cache.size → cold
+      await handleQurlFile(int);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(42)'));
+    });
+
+    test('label shows non-bot count when cache fully populated', async () => {
+      // Warm cache (cache.size >= memberCount) → filter bots and use
+      // the accurate non-bot count.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: {
+          '100000000000000001': {},
+          '100000000000000002': {},
+          '100000000000000099': { bot: true },
+        },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 3;  // matches cache.size → warm
+      await handleQurlFile(int);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      // 3 cached, 1 is a bot → label shows (2).
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(2)'));
+    });
+
+    test('disabled when memberCount unavailable AND cache cold (displayCount null)', async () => {
+      // Edge case: cold cache + missing memberCount → can't compute a
+      // count → button shows `(?)` label and stays disabled so the
+      // user sees the button can't act rather than getting a silent
+      // no-op click against a count-less label.
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      // Leave memberCount unset → undefined.
+      delete int.guild.memberCount;
+      await handleQurlFile(int);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(?)'));
+      expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+    });
+
+    test('does NOT render in DM context — direct renderer assertion', () => {
+      // Pin the renderer's `interaction.guild` gate directly (not via
+      // handleQurlFile's entry-point DM-rejection). Without a direct
+      // assertion, a future refactor that loosens the renderer gate
+      // would only fail tests via the entry-point guard, leaving the
+      // renderer-only contract under-pinned.
+      const { ButtonBuilder } = require('discord.js');
+      const commands = require('../src/commands');
+      // _test exports are only available in non-production (NODE_ENV !==
+      // 'production'). Jest runs without setting NODE_ENV → test mode.
+      const { renderConfirmCardRows } = commands._test;
+      ButtonBuilder.mockClear();
+      // DM-shaped interaction: no `guild`, but MENTION_EVERYONE is
+      // (defensively) granted on memberPermissions to prove the
+      // renderer doesn't lean on perms alone.
+      const dmInteraction = {
+        guild: null,
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      renderConfirmCardRows({
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction: dmInteraction,
+        recipientIds: [],
+        recipientMode: 'picker',
+      });
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+    });
+
+    test('non-bot count is memoized across re-renders with stable cache', () => {
+      // Confirm cards re-render on every picker change / expiry select /
+      // note edit. For a large guild the per-render O(N) bot filter
+      // would compound; the memo keyed on `cache.size:memberCount` lets
+      // a single flow's re-renders share one count computation. Pin
+      // memoization by counting cache iterations directly — without a
+      // memo, every render would iterate; with the memo, only the
+      // first render does. Behavioral label assertion alone passes
+      // under both implementations, so the iteration counter is
+      // load-bearing.
+      const commands = require('../src/commands');
+      const { renderConfirmCardRows, _everyoneCountMemo } = commands._test;
+      const guildId = 'guild-memo-iter';
+      // Wrap the cache Map to count `[Symbol.iterator]` invocations.
+      // discord.js's `Collection` and a plain `Map` both delegate the
+      // `for ... of` to `[Symbol.iterator]`, so this captures every
+      // full-pass enumeration.
+      const memberCache = new Map([
+        ['u1', { user: { id: 'u1', bot: false } }],
+        ['u2', { user: { id: 'u2', bot: false } }],
+        ['b1', { user: { id: 'b1', bot: true } }],
+      ]);
+      let iterations = 0;
+      const iterCountingCache = new Proxy(memberCache, {
+        get(target, prop) {
+          if (prop === Symbol.iterator) {
+            iterations++;
+            return target[Symbol.iterator].bind(target);
+          }
+          return Reflect.get(target, prop);
+        },
+      });
+      const guild = {
+        id: guildId,
+        members: { cache: iterCountingCache },
+        memberCount: 3,
+        channels: { cache: new Map() },
+      };
+      // Defensive: clear any stale memo entry from previous tests.
+      _everyoneCountMemo.delete(guild);
+      const interaction = {
+        guild,
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      const args = {
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction,
+        recipientIds: [],
+        recipientMode: 'picker',
+      };
+      for (let i = 0; i < 5; i++) renderConfirmCardRows(args);
+      // First render walks the cache to compute non-bot count → 1
+      // iteration. Subsequent renders hit the memo → 0 additional
+      // iterations. Total across 5 renders: 1.
+      expect(iterations).toBe(1);
+    });
+
+    test('memo busts on cache.size change', () => {
+      // Member join/leave changes `cache.size` (or `memberCount`),
+      // which fingerprints the memo entry and forces re-computation.
+      const commands = require('../src/commands');
+      const { renderConfirmCardRows, _everyoneCountMemo } = commands._test;
+      const memberCache = new Map([
+        ['u1', { user: { id: 'u1', bot: false } }],
+        ['u2', { user: { id: 'u2', bot: false } }],
+      ]);
+      const guild = {
+        id: 'guild-memo-bust',
+        members: { cache: memberCache },
+        memberCount: 2,
+        channels: { cache: new Map() },
+      };
+      _everyoneCountMemo.delete(guild);
+      const args = {
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: null,
+        interaction: { guild, memberPermissions: { has: jest.fn(() => true) } },
+        recipientIds: [],
+        recipientMode: 'picker',
+      };
+      renderConfirmCardRows(args);  // memo populated with count=2
+      // Member joins → cache grows + memberCount grows. Fingerprint
+      // flips, memo busts on next render.
+      memberCache.set('u3', { user: { id: 'u3', bot: false } });
+      guild.memberCount = 3;
+      const { ButtonBuilder } = require('discord.js');
+      ButtonBuilder.mockClear();
+      renderConfirmCardRows(args);
+      const everyoneBtn = ButtonBuilder.mock.results.find(
+        (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+      );
+      expect(everyoneBtn).toBeDefined();
+      // Post-bust label reflects the new count (3 non-bots), not the
+      // memoized 2.
+      expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('(3)'));
+    });
+
+    test('disabled with "exceeds cap" suffix when warm-cache non-bot count > cap', async () => {
+      // Render-time over-cap disable fires ONLY when the count is
+      // accurate (warm cache + bot-filtered). Cold-cache over-cap
+      // defers to click-time hard-reject — see counter-test below.
+      const config = require('../src/config');
+      const { ButtonBuilder } = require('discord.js');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      try {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 2, configurable: true, writable: true });
+        ButtonBuilder.mockClear();
+        const int = makeInteraction({
+          options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+          guildMembers: {  // 4 cached, all non-bot → count=4 > cap=2
+            '100000000000000001': {},
+            '100000000000000002': {},
+            '100000000000000003': {},
+            '100000000000000004': {},
+          },
+        });
+        int.memberPermissions = { has: jest.fn(() => true) };
+        int.guild.memberCount = 4;  // matches cache.size → warm + accurate
+        await handleQurlFile(int);
+        const everyoneBtn = ButtonBuilder.mock.results.find(
+          (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+        );
+        expect(everyoneBtn).toBeDefined();
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.stringContaining('exceeds 2 cap'));
+        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(true);
+      } finally {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+      }
+    });
+
+    test('cold-cache memberCount > cap does NOT disable (avoid bot-overcount false-positive)', async () => {
+      // Counter-test: a guild with `memberCount = 500` but only 1
+      // cached member is cold; `displayCount = memberCount` is an
+      // over-count by bot population. Disabling on it would false-
+      // positive on a near-cap guild whose actual non-bot count is
+      // under cap. Defer to click-time hard-reject (which runs against
+      // the prewarmed cache).
+      const config = require('../src/config');
+      const { ButtonBuilder } = require('discord.js');
+      const originalCap = config.QURL_SEND_MAX_RECIPIENTS;
+      try {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: 100, configurable: true, writable: true });
+        ButtonBuilder.mockClear();
+        const int = makeInteraction({
+          options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+          guildMembers: { '100000000000000001': {} },  // cache.size=1
+        });
+        int.memberPermissions = { has: jest.fn(() => true) };
+        int.guild.memberCount = 500;  // cache.size < memberCount → cold
+        await handleQurlFile(int);
+        const everyoneBtn = ButtonBuilder.mock.results.find(
+          (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
+        );
+        expect(everyoneBtn).toBeDefined();
+        // Label shows raw count without "exceeds" suffix; button is
+        // enabled because we don't trust the cold-path number for
+        // disable decisions.
+        expect(everyoneBtn.value.setLabel).toHaveBeenCalledWith(expect.not.stringContaining('exceeds'));
+        expect(everyoneBtn.value.setDisabled).toHaveBeenCalledWith(false);
+      } finally {
+        Object.defineProperty(config, 'QURL_SEND_MAX_RECIPIENTS', { value: originalCap, configurable: true, writable: true });
+      }
+    });
+
+    test('both @everyone AND voice-everyone buttons render together when invoked from voice + MENTION_EVERYONE', async () => {
+      // Pin the 5-component-row invariant in the worst-case render:
+      // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = exactly 5,
+      // hitting Discord's hard ActionRow limit. A future refactor that
+      // shifts any of those into a second row (or adds a 6th) would
+      // break this assertion.
+      const { ButtonBuilder, ChannelType } = require('discord.js');
+      ButtonBuilder.mockClear();
+      const voiceChannelId = 'voice-room-1';
+      const int = makeInteraction({
+        channelId: voiceChannelId,
+        options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
+        guildMembers: { '100000000000000001': {} },
+      });
+      int.memberPermissions = { has: jest.fn(() => true) };
+      int.guild.memberCount = 5;
+      // Drop the slash invocation INTO a voice channel by attaching a
+      // voice-channel shape to the interaction. The slash-entry's
+      // voice-detection branch reads `interaction.channel.type`.
+      int.channel = {
+        id: voiceChannelId, name: 'general', type: ChannelType.GuildVoice,
+        members: new Map([['100000000000000001', { user: makeUser('100000000000000001') }]]),
+      };
+      int.guild.channels.cache.set(voiceChannelId, int.channel);
+      await handleQurlFile(int);
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      // Both affordances present; full bottom row = Voice + @everyone +
+      // Note + Send + Cancel = 5 components (Discord's hard cap).
+      expect(customIds).toContain('qurl_confirm_voice_everyone');
+      expect(customIds).toContain('qurl_confirm_everyone');
+      expect(customIds).toContain('qurl_confirm_note_btn');
+      expect(customIds).toContain('qurl_confirm_send');
+      expect(customIds).toContain('qurl_confirm_cancel');
+      expect(customIds.length).toBe(5);
+    });
+
+    test('does NOT render in voice-mode (recipientMode === RECIPIENT_MODE_VOICE)', () => {
+      // Voice-mode already targets the voice-channel population. The
+      // @everyone button there would confuse "everyone" semantics —
+      // does it mean voice or guild? Gate stays at picker-mode only.
+      // Direct renderer assertion (matches the DM-context test above)
+      // — couples this contract to the renderer's gate, not to expiry-
+      // select's internals.
+      const { ButtonBuilder } = require('discord.js');
+      const { renderConfirmCardRows } = commands._test;
+      ButtonBuilder.mockClear();
+      const memberCache = new Map([['100000000000000001', { user: makeUser('100000000000000001') }]]);
+      const interaction = {
+        guild: {
+          id: 'g-voice', members: { cache: memberCache }, memberCount: 5,
+          channels: { cache: new Map() },
+        },
+        memberPermissions: { has: jest.fn(() => true) },
+      };
+      renderConfirmCardRows({
+        sendDisabled: false,
+        expiresIn: '24h',
+        selfDestructSeconds: null,
+        personalMessage: null,
+        voiceChannelId: 'voice-ch-1',
+        interaction,
+        recipientIds: ['100000000000000001'],
+        recipientMode: 'voice',
+      });
+      const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
+      expect(customIds).not.toContain('qurl_confirm_everyone');
+      // Sanity check: voice-mode renders the "Pick people instead" button.
+      expect(customIds).toContain('qurl_confirm_pick_manual');
+    });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// computeEveryoneDisplayCount — direct unit tests for the helper that
+// drives the @everyone button's label count. Exported via `_test` so
+// the WeakMap+fingerprint contract can be pinned in isolation rather
+// than only through `renderConfirmCardRows`.
+// ──────────────────────────────────────────────────────────────
+
+describe('computeEveryoneDisplayCount', () => {
+  const { computeEveryoneDisplayCount, _everyoneCountMemo } = commands._test;
+
+  test('warm cache (cache.size === memberCount) → accurate non-bot count', () => {
+    const guild = {
+      id: 'g-warm',
+      memberCount: 3,
+      members: {
+        cache: new Map([
+          ['u1', { user: { id: 'u1', bot: false } }],
+          ['u2', { user: { id: 'u2', bot: false } }],
+          ['b1', { user: { id: 'b1', bot: true } }],
+        ]),
+      },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 2, accurate: true });
+  });
+
+  test('cold cache (cache.size < memberCount) → memberCount fallback, NOT accurate', () => {
+    // Fallback to raw memberCount over-counts by bot population; the
+    // `accurate: false` flag tells callers (render-time over-cap
+    // disable) not to trust the number for safety decisions.
+    const guild = {
+      id: 'g-cold',
+      memberCount: 50,
+      members: { cache: new Map([['u1', { user: { id: 'u1', bot: false } }]]) },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 50, accurate: false });
+  });
+
+  test('memberCount undefined + warm-shape cache → cold fallback returns {count: null, accurate: false}', () => {
+    // The `cache.size >= memberCount` test reads as `cache.size >=
+    // undefined`, which evaluates to false → cold branch. memberCount
+    // missing also fails the cold-branch's `typeof === 'number'`
+    // check → final return is `{count: null, accurate: false}`. Pin
+    // this since the comparison's evaluation is non-obvious.
+    const guild = {
+      id: 'g-no-mc',
+      members: { cache: new Map([['u1', { user: { id: 'u1', bot: false } }]]) },
+      // memberCount intentionally absent
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: null, accurate: false });
+  });
+
+  test('cache missing → memberCount fallback when present', () => {
+    const guild = { id: 'g-no-cache', memberCount: 7, members: undefined };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 7, accurate: false });
+  });
+
+  test('cache and memberCount both missing → null', () => {
+    const guild = { id: 'g-bare', members: undefined };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: null, accurate: false });
+  });
+
+  test('partial-cache row (no .user) does not inflate count', () => {
+    // The `m?.user && !isBotMember(m)` guard aligns the render-time
+    // count with the click-time partition filter — a degraded row
+    // counts as 0 here AND lands in `partialCacheDrops` there.
+    const guild = {
+      id: 'g-partial',
+      memberCount: 2,
+      members: {
+        cache: new Map([
+          ['u1', { user: { id: 'u1', bot: false } }],
+          ['degraded', { /* no .user */ }],
+        ]),
+      },
+    };
+    _everyoneCountMemo.delete(guild);
+    expect(computeEveryoneDisplayCount(guild)).toEqual({ count: 1, accurate: true });
   });
 });
 

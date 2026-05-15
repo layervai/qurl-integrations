@@ -2952,6 +2952,15 @@ const CONFIRM_VOICE_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_voice_everyone';
 // restored). Lives on its own customId so flow-dispatch routes
 // directly instead of branching inside the voice-everyone handler.
 const CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID = 'qurl_confirm_pick_manual';
+// Whole-guild `@everyone` button on the confirm card. Workaround for
+// Discord's MentionableSelectMenu omitting the `@everyone` role from
+// its dropdown (platform UI filter), which would otherwise leave
+// MENTION_EVERYONE-bearing users with no in-picker affordance for
+// the "fan out to the whole server" intent. Click-time semantics
+// match a synthetic `@everyone` text-mention pick. Picker-mode only —
+// voice-mode already targets the voice population and rendering the
+// button there would mislead users about what "everyone" means.
+const CONFIRM_EVERYONE_BUTTON_CUSTOM_ID = 'qurl_confirm_everyone';
 
 // Two recipient-source modes carried on `payload.recipientMode`:
 //   - 'picker' (default): MentionableSelect row is the source of
@@ -3692,6 +3701,57 @@ function formatPersonalMessagePreview(message) {
 // `recipientMode` defaults to RECIPIENT_MODE_PICKER for stale rows that
 // existed before this field was introduced; the legacy shape is exactly
 // the picker-mode branch below.
+
+// Memoized non-bot count for the @everyone button label. Confirm cards
+// re-render on every picker change / expiry select / note add+edit; in
+// a single flow the cache typically doesn't change between re-renders,
+// so iterating it on every render is wasted work. The WeakMap is keyed
+// by `guild` and entries auto-evict when the Guild is GC'd.
+//
+// FRESHNESS FINGERPRINT: `cache.size:memberCount` busts the memo when
+// either changes (the common case for member join/leave). KNOWN GAP:
+// a swap event — one human leaves and one bot joins near-simultaneously
+// — keeps both values stable but flips the non-bot count by 1. The
+// memo would return the stale count until the next non-swap churn.
+// Acceptable because (a) the label is documented as a hint, not
+// authoritative, and (b) the click-time `partitionRecipients` is the
+// source of truth. Folding a churn signal into the fingerprint would
+// be cheap if this ever needs tightening.
+//
+// Returns `{ count, accurate }`:
+//   - `accurate: true` when the warm-cache branch fired (cache fully
+//     populated AND bots filtered) — safe to gate render-time disables
+//     on the count
+//   - `accurate: false` for the cold-cache fallback (`memberCount`
+//     includes bots — over-counts by bot population, so a guild near
+//     the cap could false-positive on over-cap disable)
+//   - `count: null` when neither branch can produce a number
+const everyoneCountMemo = new WeakMap();
+function computeEveryoneDisplayCount(guild) {
+  const cache = guild?.members?.cache;
+  const memberCount = guild?.memberCount;
+  if (cache && typeof cache.size === 'number' && memberCount != null && cache.size >= memberCount) {
+    const fingerprint = `${cache.size}:${memberCount}`;
+    const cached = everyoneCountMemo.get(guild);
+    if (cached && cached.fingerprint === fingerprint) return { count: cached.count, accurate: true };
+    let n = 0;
+    for (const [, m] of cache) {
+      // `m?.user &&` aligns the render-time label with the click-time
+      // filter in handleConfirmEveryone — that path tallies rows
+      // without `.user` as `partialCacheDrops` and excludes them from
+      // recipients. Without the guard, a degraded GUILD_MEMBERS_CHUNK
+      // row counts as a non-bot here (isBotMember reads `.user?.bot`,
+      // returning false on missing `.user`) but never reaches the
+      // recipient set, leaving the label over-stated.
+      if (m?.user && !isBotMember(m)) n++;
+    }
+    everyoneCountMemo.set(guild, { fingerprint, count: n });
+    return { count: n, accurate: true };
+  }
+  if (typeof memberCount === 'number') return { count: memberCount, accurate: false };
+  return { count: null, accurate: false };
+}
+
 function renderConfirmCardRows({
   sendDisabled, expiresIn, selfDestructSeconds, personalMessage,
   voiceChannelId, interaction, recipientIds, recipientMode,
@@ -3888,6 +3948,70 @@ function renderConfirmCardRows({
         .setLabel(`\u{1F50A} Everyone in ${labelTarget} (${labelCount})`)
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(connectedCount == null || connectedCount === 0),
+    );
+  }
+  // @everyone button — workaround for Discord's MentionableSelectMenu
+  // filtering @everyone out of its dropdown. Gated on the sender's
+  // MENTION_EVERYONE permission (channel-effective, same as the text-
+  // path #323 gate) AND on picker-mode + guild context. In voice-mode
+  // the card already targets the voice population, so showing the
+  // button there would confuse "everyone" semantics. DM context has
+  // no @everyone meaning.
+  //
+  // Count is render-time non-bot when the cache is fully populated
+  // (`cache.size >= memberCount`); falls back to `guild.memberCount`
+  // (total, includes bots — over-count, but the only reliable number
+  // when the cache is cold). FILTER DRIFT (distinct from voice-
+  // everyone's): voice-everyone's render-time count can drift from
+  // click-time via members joining/leaving the voice channel between
+  // render and click; @everyone's drift is cold-cache-overcounts-by-
+  // bots OR stale-row-inflation (departed members lingering in cache
+  // briefly between gateway events), resolved when the click-time
+  // pre-warm fills the cache. In all cases the label is a hint and
+  // `partitionRecipients` is the click-time authority.
+  if (
+    mode === RECIPIENT_MODE_PICKER
+    && interaction && interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true
+  ) {
+    const guild = interaction.guild;
+    const { count: displayCount, accurate: countIsAccurate } = computeEveryoneDisplayCount(guild);
+    // Disable on three conditions:
+    //  - `null` (memberCount unavailable + cache cold) → `(?)` label
+    //    so the user sees the button can't act vs. silent no-op
+    //  - `0` reachable in degraded cache states (all-bots guild with
+    //    sender's row temporarily missing). The bots-only click-time
+    //    reject still surfaces the right copy, but disabling at render
+    //    avoids the dead-click round trip
+    //  - `> QURL_SEND_MAX_RECIPIENTS` ONLY when `countIsAccurate` —
+    //    the cold-cache fallback returns `memberCount` (over-counts
+    //    by bot population), so disabling on it would false-positive
+    //    on a near-cap guild whose actual non-bot count is under cap
+    //    (e.g., 20100 members with 200 bots → 19900 non-bots, well
+    //    under default 20000 cap, but raw memberCount = 20100). Cold-
+    //    cache over-cap defers to click-time hard-reject in
+    //    handleConfirmEveryone (authoritative — partition runs against
+    //    the prewarmed cache).
+    const overCap = countIsAccurate && displayCount != null && displayCount > config.QURL_SEND_MAX_RECIPIENTS;
+    const labelCount = displayCount == null ? '?' : String(displayCount);
+    const labelSuffix = overCap ? ` — exceeds ${config.QURL_SEND_MAX_RECIPIENTS} cap` : '';
+    // No `VOICE_LABEL_NAME_UTF16_BUDGET`-equivalent here because no
+    // user-controlled string is interpolated: worst-case label is
+    // `📢 @everyone (NNNNN) — exceeds NNNNN cap` ≈ 41 UTF-16 units,
+    // well under Discord's 80-unit button-label cap.
+    //
+    // BOTTOM ROW COMPONENT BUDGET: Discord caps an ActionRow at 5
+    // components. The current worst-case render is
+    // [🔊 Voice] + [📢 @everyone] + Note + Send + Cancel = 5, exactly
+    // at the limit. Adding another button below would silently throw
+    // at discord.js builder time. Re-evaluate the layout (e.g., a
+    // second row for affordances vs. fixed buttons) before adding.
+    bottomRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID)
+        .setLabel(`\u{1F4E2} @everyone (${labelCount})${labelSuffix}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(displayCount == null || displayCount === 0 || overCap),
     );
   }
   bottomRow.addComponents(
@@ -5375,6 +5499,261 @@ async function handleConfirmPickManual(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
+  return rerenderConfirmCard(interaction, newPayload);
+}
+
+// @everyone button — workaround for Discord's MentionableSelectMenu
+// filtering out the @everyone role from its dropdown. Click-time
+// semantics mirror handleConfirmUserSelect's @everyone-role branch:
+// pre-warm cache → expand to all non-bot guild members → partition →
+// transition flow. Permission re-check is defense-in-depth against a
+// forged button click (renderConfirmCardRows already gates button
+// visibility on MENTION_EVERYONE + picker-mode; this defends against
+// a crafted HTTP interaction bypassing the render).
+async function handleConfirmEveryone(interaction, { flow_id, row }) {
+  await interaction.deferUpdate().catch(logIgnoredDiscordErr);
+
+  const payload = row.payload || {};
+  const payloadResource = payload.resourceType;
+  if (payloadResource !== RESOURCE_TYPES.FILE && payloadResource !== RESOURCE_TYPES.MAPS) {
+    logger.error('handleConfirmEveryone: corrupt flow payload (unknown resourceType)', {
+      flow_id, resource_type: payloadResource,
+    });
+    await deleteFlow(flow_id, {
+      stage: SEND_STAGE_AWAITING_CONFIRM,
+      reason: 'terminal',
+    }).catch(logIgnoredDiscordErr);
+    return interaction.editReply({
+      content: '❌ Card data is corrupted — please re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Symmetric with handleConfirmVoiceEveryone's rejectVoice — same
+  // surface shape (warning banner + re-render with needsPicker). The
+  // persisted recipientIds stay unchanged on rejection (no transition-
+  // Flow fires); the picker re-pick is the natural recovery.
+  const rejectEveryone = (warning) => interaction.editReply({
+    content: renderConfirmCardContent({
+      resourceType: payload.resourceType,
+      resourceLabel: payload.resourceLabel,
+      validRecipients: [],
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      warningsBlock: warning,
+      needsPicker: true,
+      interaction,
+      recipientMode: RECIPIENT_MODE_PICKER,
+      voiceChannelId: payload.voiceChannelId,
+    }),
+    components: renderConfirmCardRows({
+      sendDisabled: true,
+      expiresIn: payload.expiresIn,
+      selfDestructSeconds: payload.selfDestructSeconds,
+      personalMessage: payload.personalMessage,
+      voiceChannelId: payload.voiceChannelId,
+      interaction,
+      recipientIds: payload.recipientIds || [],
+      recipientMode: RECIPIENT_MODE_PICKER,
+    }),
+  }).catch(logIgnoredDiscordErr);
+
+  // Defense-in-depth permission re-check. The render-time gate already
+  // hides the button without MENTION_EVERYONE, but a forged HTTP
+  // interaction could carry the custom_id without the underlying perm.
+  // Channel-effective perms (interaction.memberPermissions) — same as
+  // the text-path gate at handleQurlSlashSend.
+  const canMentionEveryone = !!interaction.guild
+    && interaction.memberPermissions?.has?.(PermissionFlagsBits.MentionEveryone) === true;
+  if (!canMentionEveryone) {
+    logger.warn('handleConfirmEveryone: click without MENTION_EVERYONE — likely forged', {
+      flow_id, interaction_id: interaction.id,
+      // `guild_id` for cross-line correlation with the success info
+      // log; `null` in DM context which is itself the forge signal.
+      guild_id: interaction.guildId ?? null,
+    });
+    return rejectEveryone('⚠\u{FE0F} `@everyone` requires the **Mention Everyone** permission.\n\n');
+  }
+
+  await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmEveryone', flow_id });
+
+  // Include bots in selectedUsers and let partitionRecipients filter
+  // them — same pattern as handleConfirmVoiceEveryone. Without this,
+  // the bots-only case would surface as "cache not ready" (misleading)
+  // instead of "all recipients are bots" (accurate); droppedBots count
+  // is also load-bearing for the warning copy.
+  //
+  // NO early break on `selectedUsers.length > cap` (rejected). Such a
+  // break is unsound under bot-clustered iteration order: a 20001-human
+  // guild with bots iterated around the cap boundary would early-exit
+  // before the (cap+1)th HUMAN, producing `valid.length === cap` and
+  // silently bypassing the cap-reject below — the send would proceed
+  // at exactly the cap with the over-cap members invisibly dropped.
+  // Full-cache iteration costs O(cache_size) (~10ms even at 100k),
+  // which is acceptable post-deferUpdate; correctness wins.
+  //
+  // partial-cache rows (member without `.user` — degraded shape from
+  // a partially-loaded `GUILD_MEMBERS_CHUNK`) are silently filtered
+  // and counted for forensics, matching `handleConfirmVoiceEveryone`'s
+  // `partialCacheDrops` telemetry so a future "@everyone under-
+  // resolved on guild X" report has a debug hook.
+  const selectedUsers = [];
+  let partialCacheDrops = 0;
+  let senderInCache = false;
+  let hasOtherNonBotInCache = false;
+  const cache = interaction.guild.members?.cache;
+  // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
+  // which both `Map` and discord.js `Collection` provide. Truthy-check
+  // alone would NPE on a degraded `{}` cache shape from a partial init.
+  if (cache && typeof cache[Symbol.iterator] === 'function') {
+    for (const [, member] of cache) {
+      if (member?.user) {
+        selectedUsers.push(member.user);
+        if (member.user.id === interaction.user.id) senderInCache = true;
+        else if (!member.user.bot) hasOtherNonBotInCache = true;
+      } else {
+        partialCacheDrops++;
+      }
+    }
+  }
+  if (partialCacheDrops > 0) {
+    logger.debug('handleConfirmEveryone: partial-cache rows dropped from @everyone resolution', {
+      flow_id, guild_id: interaction.guildId,
+      dropped: partialCacheDrops, cache_size: cache?.size,
+    });
+  }
+  if (selectedUsers.length === 0) {
+    // "member cache not ready" is the common case (cold cache + non-
+    // zero guild). The degenerate genuinely-empty guild
+    // (`memberCount === 0`) can't reach this branch in production —
+    // handleQurlSlashSend's guild-gate rejects DM at entry and a
+    // guild with zero members can't host a slash command anyway. The
+    // shared copy is acceptable.
+    // Important: gate the defensive sender push below on cache having
+    // members. A truly empty cache should surface "cache not ready"
+    // rather than silently expanding to just the sender — the latter
+    // would mislead the user into thinking @everyone succeeded.
+    return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
+  }
+  // Defensive sender push: cache has OTHER non-bot members but the
+  // sender's row is somehow missing (rare race during shard resume /
+  // partial chunk delivery post-prewarm). Without this, clicking
+  // 📢 `@everyone` could land `selfIncluded: false` and the user
+  // wouldn't be in the recipient set they explicitly triggered.
+  //
+  // Gated on `hasOtherNonBotInCache` so a bots-only cache still
+  // surfaces the bots-only reject below — silently expanding to
+  // "send to just me" from a bots-only guild misrepresents the
+  // @everyone click. `partitionRecipients` does NOT re-dedup
+  // (contract at commands.js:~3077), so the `senderInCache` check is
+  // load-bearing — pushing unconditionally would land the sender
+  // twice in `valid`.
+  if (!senderInCache && hasOtherNonBotInCache) {
+    // `interaction.user.bot` may be undefined depending on interaction
+    // shape (slash commands can't come from bots in production, so
+    // `partitionRecipients`'s `if (u.bot)` is a no-op here regardless).
+    // Falsy `.bot` → kept; the invariant holds across context-menu /
+    // future interaction types too.
+    selectedUsers.push(interaction.user);
+  }
+  // Sender-only degenerate: guild has the sender (+ optionally bots)
+  // but no other non-bot members. @everyone's click intent is "fan out
+  // to OTHERS"; falling through to partition would land `valid=[sender]`
+  // and silently send to just the sender — defensible self-send
+  // semantics, but misleading for a click labeled 📢 @everyone. Reject
+  // with explicit copy so the user can decide (self-send via the
+  // picker is still possible). Reached only when sender's row IS in
+  // cache and no other non-bots are present — the bots-only-no-sender
+  // case lands in `valid.length === 0` below with droppedBots > 0.
+  if (senderInCache && !hasOtherNonBotInCache) {
+    return rejectEveryone('⚠\u{FE0F} `@everyone` matched only you — no other non-bot members to send to.\n\n');
+  }
+  // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
+  // the sender (voice-mode semantic is "everyone else in this voice
+  // channel"). The @everyone button intentionally INCLUDES the sender
+  // — it's the dropdown's "select all" shortcut, not a separate "all
+  // others" affordance. A future contributor aligning the two handlers
+  // would silently flip the self-inclusion behavior; the `selfIncluded`
+  // flag flows through to the card's "Send includes you." notice so
+  // the user sees they're in the recipient list.
+  const { valid, droppedBots, selfIncluded } = partitionRecipients(selectedUsers, interaction.user.id);
+  if (valid.length === 0) {
+    const reasons = [];
+    if (droppedBots > 0) reasons.push(RECIPIENT_REASON_BOTS_DROPPED);
+    const reasonText = reasons.length > 0 ? reasons.join('. ') : 'No usable recipients';
+    return rejectEveryone(`⚠\u{FE0F} ${reasonText}. Pick recipients below.\n\n`);
+  }
+  // Cap rejection mirrors handleConfirmVoiceEveryone: hard-reject past
+  // QURL_SEND_MAX_RECIPIENTS rather than silently truncate — the click
+  // is unambiguous all-or-nothing intent.
+  if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
+    return rejectEveryone(`⚠\u{FE0F} Guild has ${valid.length} non-bot members (max ${config.QURL_SEND_MAX_RECIPIENTS}). Use the picker or @mentions to choose a subset.\n\n`);
+  }
+
+  const newWarningsBlock = renderRecipientWarnings({ droppedBots });
+  const newRecipientAliases = Object.fromEntries(
+    valid.map((u) => [u.id, resolveRecipientAlias(u, interaction)])
+  );
+  // recipientMode stays PICKER — the @everyone button doesn't switch
+  // modes (unlike voice-everyone which moves to RECIPIENT_MODE_VOICE).
+  // Semantically the user is multi-picking from the picker dropdown
+  // via a shortcut; the picker row remains visible for further
+  // adjustment.
+  const newPayload = {
+    ...payload,
+    recipientIds: valid.map((u) => u.id),
+    recipientAliases: newRecipientAliases,
+    warningsBlock: newWarningsBlock,
+    selfIncluded,
+    recipientMode: RECIPIENT_MODE_PICKER,
+  };
+  let result;
+  try {
+    result = await transitionFlow(flow_id, row.version, {
+      stage_to: SEND_STAGE_AWAITING_CONFIRM,
+      payload: newPayload,
+      terminal: false,
+      set_expires_at: Math.floor(Date.now() / 1000) + SEND_FLOW_TTL_SECONDS,
+    });
+  } catch (err) {
+    logger.error('handleConfirmEveryone: transitionFlow threw', {
+      flow_id, error: err && err.message,
+    });
+    return interaction.followUp({
+      content: '❌ Could not save your selection right now. Try again in a moment.',
+      ephemeral: true,
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'conflict') {
+    return interaction.editReply({
+      content: 'Send was superseded — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+  if (result.result === 'not_found') {
+    return interaction.editReply({
+      content: 'This send expired — re-run the command.',
+      components: [],
+    }).catch(logIgnoredDiscordErr);
+  }
+
+  // Success-path telemetry: a successful @everyone expansion is a
+  // load-bearing audit signal (an admin fanned a send to N members
+  // of the guild). Error paths already log; without this, ops can
+  // only see "did someone fan out to 18k users?" via a DDB scan of
+  // qurl_send_configs. Info level matches the cadence of other
+  // confirm-card success signals.
+  logger.info('handleConfirmEveryone: @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: selfIncluded,
+    // Cache shape for "@everyone underresolved on guild X" forensics —
+    // makes the success line self-contained (no need to cross-reference
+    // the partial-cache debug log to know the cache state at click time).
+    cache_size: cache?.size, member_count: interaction.guild.memberCount,
+  });
+
   return rerenderConfirmCard(interaction, newPayload);
 }
 
@@ -7819,6 +8198,13 @@ registerFlow(CONFIRM_PICK_MANUAL_BUTTON_CUSTOM_ID, {
   expectedStage: SEND_STAGE_AWAITING_CONFIRM,
   handler: handleConfirmPickManual,
 });
+// @everyone button — only rendered when sender has MENTION_EVERYONE
+// and recipientMode is PICKER. Same stage + siblingMessage-keyed-by-
+// stage contract as the other CONFIRM_* registrations.
+registerFlow(CONFIRM_EVERYONE_BUTTON_CUSTOM_ID, {
+  expectedStage: SEND_STAGE_AWAITING_CONFIRM,
+  handler: handleConfirmEveryone,
+});
 
 module.exports = {
   commands,
@@ -7838,6 +8224,7 @@ module.exports = {
   handleConfirmNoteModal,
   handleConfirmVoiceEveryone,
   handleConfirmPickManual,
+  handleConfirmEveryone,
   verifyStateBinding,
   // _test is only exported in non-production so live state (sendCooldowns)
   // and internal handlers can't leak into prod consumers. Tests run with
@@ -7854,6 +8241,17 @@ module.exports = {
       batchSettled,
       expiryToISO,
       sendCooldowns,
+      // Renderer exposed so tests can pin the bottom-row button
+      // composition directly (e.g., the DM-context @everyone-gate
+      // assertion) without driving through handleQurlFile's entry path.
+      renderConfirmCardRows,
+      // Memo for the @everyone non-bot count is module-scoped. Tests
+      // that reuse a guild reference across cases could otherwise get
+      // surprising memo hits; exposing the WeakMap lets a beforeEach
+      // hook clear specific entries. Production callers never need
+      // this — the memo busts on cache.size/memberCount changes.
+      _everyoneCountMemo: everyoneCountMemo,
+      computeEveryoneDisplayCount,
       handleAddRecipients,
       buildDeliveryPayload,
       buildRevokedDMPayload,
