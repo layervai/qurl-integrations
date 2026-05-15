@@ -2972,6 +2972,219 @@ describe('handleQurlFile — slash entry', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
+// guild.members cache pre-warm for @everyone / role expansion
+// ──────────────────────────────────────────────────────────────
+// discord.js v14 leaves `guild.members.cache` empty by default (no
+// `chunkOnStartup`, no `ws.large_threshold` override) on our multi-
+// tenant gateway, so the parser's `@everyone` branch and `role.members`
+// filtering for `<@&id>` both silently collapse to just the interacting
+// user. Pre-warming via `members.fetch()` is the fix; these tests pin
+// the trigger conditions so a future refactor that drops the pre-warm
+// regresses here, not in production.
+
+// Identifies the pre-warm call by its options-object shape: a bulk
+// chunk fetch carries `{ time }` ONLY — no `user`/`query`/`limit`/
+// `force`. Disambiguates from the per-ID `members.fetch(id)` calls in
+// resolveRecipientUsers AND from a future bounded per-user fetch like
+// `members.fetch({ user: id, time: 2000 })` that would happen to
+// carry a `time` field. Asserting absence of the per-user keys makes
+// the disambiguation explicit so the helper stays accurate as the
+// discord.js API surface grows.
+const isPrewarmCall = ([arg]) =>
+  arg && typeof arg === 'object'
+  && typeof arg.time === 'number'
+  && arg.user === undefined
+  && arg.query === undefined
+  && arg.limit === undefined;
+
+describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
+  test('@everyone in recipients string → members.fetch() pre-warm fires', async () => {
+    const aliceId = '500000000000000001';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+  });
+
+  test('<@&roleId> in recipients string → members.fetch() pre-warm fires', async () => {
+    // role.members for non-@everyone roles is a filtered view of
+    // guild.members.cache, so the trigger has to include arbitrary
+    // role-mention wire shapes, not just literal @everyone.
+    const aliceId = '500000000000000002';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `<@&7100>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.guild.roles.cache.set('7100', {
+      id: '7100', name: 'team', mentionable: true,
+      members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
+    });
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+  });
+
+  test('plain <@userId> mentions only → members.fetch() pre-warm does NOT fire', async () => {
+    // Defends the common case (a few user mentions) against paying the
+    // pre-warm cost. Gate is the mass-mention shape regex, not the
+    // existence of any mention.
+    const aliceId = '500000000000000003';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `<@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('empty recipients string → members.fetch() pre-warm does NOT fire', async () => {
+    // Defense against a `recipientsRaw` of `null` / `''` triggering the
+    // regex via the `|| ''` fallback. Empty input → no mentions → no fetch.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT }, // no recipients
+    });
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('@everyone WITHOUT MENTION_EVERYONE → pre-warm does NOT fire (parser will deny anyway)', async () => {
+    // Pin the asymmetric gate in handleQurlSlashSend: `@everyone` alone
+    // typed by a sender without MENTION_EVERYONE → the parser hits
+    // `massMentionDenied` and never expands, so the chunk request
+    // would be wasted. A future refactor that drops the perm-gate
+    // would silently regress the chunk-budget defense.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+    });
+    // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('@everyone + <@&roleId> WITHOUT MENTION_EVERYONE → pre-warm STILL fires (role path)', async () => {
+    // Counter-test to the above: when the input ALSO contains a role
+    // mention, the prewarm fires regardless of MENTION_EVERYONE because
+    // role expansion gates on `role.mentionable === true` per-role, not
+    // the global perm. The role-mention path needs the cache.
+    const aliceId = '500000000000000077';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@&7200>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.guild.roles.cache.set('7200', {
+      id: '7200', name: 'team', mentionable: true,
+      members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
+    });
+    // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+  });
+
+  test('@everyonefoo (no word boundary) → pre-warm does NOT fire', async () => {
+    // MASS_MENTION_HINT_RE uses `(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])`
+    // — same word-boundary class as recipient-parser.js's
+    // EVERYONE_TOKEN_RE. Without the boundary, a typo / paste like
+    // `@everyonefoo` would burn a chunk fetch even though the parser
+    // ignores the token. A future simplification to `/@everyone|<@&\d+>/u`
+    // would silently regress the budget defense — this test pins it.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '@everyonefoo' },
+    });
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('cache already at memberCount → members.fetch() pre-warm short-circuits', async () => {
+    // Hot-cache short-circuit defends against re-fetching when a prior
+    // invocation in the same process lifetime already populated the
+    // cache. Without this, every @everyone send burns the full chunk
+    // round-trip.
+    const aliceId = '500000000000000005';
+    const bobId = '500000000000000006';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone` },
+      guildMembers: { [aliceId]: {}, [bobId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.memberCount = 2; // matches cache.size from guildMembers above
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('concurrent invocations in the same guild share one in-flight fetch', async () => {
+    // Two simultaneous /qurl file @everyone calls against a cold cache
+    // should NOT each fire their own chunk request. The prewarm helper's
+    // in-flight Map<guildId, Promise> coalesces them — abuse via
+    // concurrent invocations otherwise burns chunk-request budget
+    // linearly. discord.js may also coalesce GUILD_REQUEST_MEMBERS
+    // internally, but we don't rely on that.
+    const aliceId = '500000000000000010';
+    // A controllable fetch — caller resolves `release` after the
+    // assertion so both handlers complete cleanly. Without the resolve,
+    // the two awaiting `handleQurlFile` calls would leak through to
+    // process exit and Jest's `--detectOpenHandles` would surface them.
+    let release;
+    const fetchGate = new Promise((r) => { release = r; });
+    const sharedFetch = jest.fn(() => fetchGate);
+    const sharedGuild = {
+      id: 'shared-guild',
+      members: { cache: new Map(), fetch: sharedFetch },
+      roles: { cache: new Map() },
+      channels: { cache: new Map() },
+      memberCount: 10,
+    };
+    function makeShared() {
+      const int = makeInteraction({
+        options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+        guildMembers: { [aliceId]: {} },
+      });
+      int.guild = sharedGuild;
+      int.guildId = sharedGuild.id;
+      int.memberPermissions = { has: jest.fn(() => true) };
+      return int;
+    }
+    const p1 = handleQurlFile(makeShared());
+    const p2 = handleQurlFile(makeShared());
+    // Microtask flush so both handlers reach the prewarm await.
+    await new Promise((r) => setImmediate(r));
+    const prewarmCalls = sharedFetch.mock.calls.filter(isPrewarmCall);
+    expect(prewarmCalls.length).toBe(1);
+    // Release the gate so handlers settle and Jest doesn't carry an
+    // open handle past the test.
+    release(new Map());
+    await Promise.all([p1, p2]);
+  });
+
+  test('members.fetch() rejection is swallowed — flow continues in degraded mode', async () => {
+    // 429 / gateway blip on the pre-warm must not crash the handler.
+    // The catch logs a warn and the parser proceeds against whatever
+    // the cache currently holds (potentially empty → @everyone silently
+    // expands to 0). Worst case the user re-runs.
+    const aliceId = '500000000000000004';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${aliceId}>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.memberPermissions = { has: jest.fn(() => true) };
+    int.guild.members.fetch = jest.fn(async (arg) => {
+      if (isPrewarmCall([arg])) {
+        const err = new Error('rate limited'); err.code = 429; throw err;
+      }
+      return { user: makeUser(arg) };
+    });
+    await handleQurlFile(int);
+    expect(mockSupersedeOrCreate).toHaveBeenCalled();
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('members.fetch pre-warm failed'),
+    );
+    expect(warnCall).toBeTruthy();
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
 // handleQurlMap — front half
 // ──────────────────────────────────────────────────────────────
 
@@ -4434,6 +4647,49 @@ describe('handleConfirmUserSelect', () => {
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
     expect(mockTransitionFlow).toHaveBeenCalled();
     expect(mockTransitionFlow.mock.calls[0][2].payload.recipientIds).toEqual([u1.id]);
+  });
+
+  // ── guild.members cache pre-warm (picker path) ──
+  // Symmetric with the text-path pre-warm tests above handleQurlMap:
+  // resolveMentionableSelection reads guild.members.cache for both
+  // `@everyone` (direct iteration) and arbitrary roles (`role.members`
+  // is a filtered view of the same cache). Without the pre-warm, any
+  // role pick silently expands to just the interacting user.
+  test('role pick → members.fetch() pre-warm fires', async () => {
+    const role = { id: 'roleA', name: 'team', mentionable: true, members: new Map([[u1, { user: makeUser(u1) }]]) };
+    const int = makeSelectInteraction({ users: [], roles: [['roleA', role]] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+  });
+
+  test('users-only pick → members.fetch() pre-warm does NOT fire', async () => {
+    // Pure user picks don't touch guild.members.cache — Discord
+    // ships the User object directly in interaction.users. Skipping
+    // the pre-warm keeps the common-case cost at zero.
+    const int = makeSelectInteraction({ users: [makeUser(u1)], roles: [] });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('role pick + members.fetch() rejection is swallowed — flow continues', async () => {
+    // Picker analog of the text-path degraded-mode test: a 429 on the
+    // pre-warm must not crash the handler. Expansion falls back to
+    // whatever the cache currently holds.
+    const role = { id: 'roleB', name: 'team', mentionable: true, members: new Map([[u1, { user: makeUser(u1) }]]) };
+    const int = makeSelectInteraction({ users: [], roles: [['roleB', role]] });
+    int.guild.members.fetch = jest.fn(async (arg) => {
+      if (isPrewarmCall([arg])) {
+        const err = new Error('rate limited'); err.code = 429; throw err;
+      }
+      return { user: makeUser(arg) };
+    });
+    await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const logger = require('../src/logger');
+    const warnCall = logger.warn.mock.calls.find(
+      ([msg]) => typeof msg === 'string' && msg.includes('members.fetch pre-warm failed'),
+    );
+    expect(warnCall).toBeTruthy();
   });
 });
 

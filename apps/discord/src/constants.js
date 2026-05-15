@@ -39,6 +39,13 @@ const TIMEOUTS = {
   BUTTON_INTERACTION: 60000,  // 1 minute
   DEFER_REPLY: 3000,          // 3 seconds
   QURL_REVOKE_WINDOW: 900000, // 15 minutes - button stays active, /qurl revoke works forever
+  // Bound for `guild.members.fetch()` pre-warm before @everyone / role
+  // expansion. discord.js *rejects* on timeout (not "returns partial"),
+  // but chunks update `guild.members.cache` as they arrive — so the
+  // pre-warm helper's catch lands partial state in the cache before the
+  // rejection fires, and the parser proceeds against whatever arrived.
+  // Degraded expansion beats a stuck slash command.
+  MEMBER_PREFETCH: 8000,
 };
 
 // Limits

@@ -238,6 +238,69 @@ function sliceWithEllipsis(s, maxCodepoints, indicator) {
 // can't grow flow rows past the legitimate ceiling.
 const PERSONAL_MESSAGE_INPUT_MAX = 280;
 
+// Triggers `guild.members.fetch()` pre-warm before parsing recipients —
+// any `@everyone` text token OR any `<@&{snowflake}>` role-mention. Both
+// paths read `guild.members.cache`, which discord.js v14 leaves empty
+// (we deliberately skip `chunkOnStartup`/`ws.large_threshold` on the
+// multi-tenant gateway — eagerly fetching every member of every joined
+// guild on connect would blow the rate-limit budget at install spikes).
+// Shape-only — permission gating happens later inside the parser via
+// `allowMassMention` / `role.mentionable`. Word-boundary class is a
+// parallel copy of recipient-parser.js's `EVERYONE_TOKEN_RE` so
+// `@everyonefoo` doesn't false-trigger the fetch (drift between the
+// two would silently cache-warm for inputs the parser then ignores).
+// If `EVERYONE_TOKEN_RE` ever moves to a shared module, derive this
+// from it rather than maintaining the parallel copy.
+const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
+const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
+
+// Helper for the two pre-warm sites. Returns a Promise so the caller
+// can await before reading `guild.members.cache`. Swallows errors —
+// degraded expansion (parser sees a partial cache) is the correct
+// fallback for transient API blips; surfacing the failure to the user
+// would confuse them about a problem they can't act on. Skipped when
+// the cache already reports `memberCount` (defaults to `Infinity` if
+// memberCount is missing so we fail-open and fetch when uncertain) so
+// a hot cache from a prior invocation isn't burned a second time. The
+// populated cache is intentionally retained — discord.js `Collection`
+// has no LRU and eviction relies on `GUILD_MEMBER_REMOVE` gateway
+// events. Acceptable for our scale; revisit if a future regression in
+// gateway event delivery causes drift.
+//
+// In-flight de-duplication via the `prewarmInFlight` map below: two
+// concurrent `/qurl file @everyone` invocations in the same guild from
+// a cold cache share the same underlying `members.fetch()` promise.
+// Without coalescing, abuse via concurrent invocations could burn
+// chunk-request budget linearly. discord.js may also coalesce the
+// `GUILD_REQUEST_MEMBERS` chunks internally, but we don't rely on it
+// — the map is keyed by `guild.id` so cross-guild calls still proceed
+// in parallel.
+const prewarmInFlight = new Map();
+async function prewarmGuildMembersCache(guild, logCtx) {
+  // Uniform Promise return shape regardless of which branch the caller
+  // hits — early-exit paths used to resolve `undefined`, which works
+  // for `await prewarmGuildMembersCache(...)` callers but would surprise
+  // a future caller that does `.then(...)`.
+  if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
+  const cacheSize = guild.members.cache?.size ?? 0;
+  if (cacheSize >= (guild.memberCount ?? Infinity)) return;
+  const existing = prewarmInFlight.get(guild.id);
+  if (existing) return existing;
+  const inFlight = (async () => {
+    try {
+      await guild.members.fetch({ time: TIMEOUTS.MEMBER_PREFETCH });
+    } catch (err) {
+      logger.warn('members.fetch pre-warm failed; @everyone/role expansion may underresolve', {
+        ...logCtx, guild_id: guild.id, error: err && err.message,
+      });
+    } finally {
+      prewarmInFlight.delete(guild.id);
+    }
+  })();
+  prewarmInFlight.set(guild.id, inFlight);
+  return inFlight;
+}
+
 function sanitizeMessage(msg) {
   // Order matters:
   //  1. NFKC-normalize + strip bidi/zero-width/control codepoints first
@@ -3867,6 +3930,17 @@ async function handleQurlSlashSend(interaction, params) {
     // refactor switching to `interaction.member.permissions` would
     // silently lose the channel-overwrite respect — keep this property.
     const canMentionEveryone = interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+    // Skip the fetch when only `@everyone` is in the input AND the
+    // sender lacks MENTION_EVERYONE — the parser will deny the
+    // expansion (massMentionDenied), so the chunk request would be
+    // wasted. Role-mention shapes (`<@&id>`) still trigger the fetch
+    // regardless of permission because role expansion gates on
+    // `role.mentionable === true` per-role, not the global perm.
+    const hasMassMention = MASS_MENTION_HINT_RE.test(recipientsRaw || '');
+    const hasRoleMention = ROLE_MENTION_HINT_RE.test(recipientsRaw || '');
+    if (hasMassMention && (canMentionEveryone || hasRoleMention)) {
+      await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' });
+    }
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
       allowMassMention: canMentionEveryone,
     });
@@ -4569,6 +4643,24 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // the text-path gate in #323.
   const canMentionEveryone = !!interaction.guild
     && interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
+  // Trigger on any role pick (not just @everyone): `role.members` for a
+  // non-@everyone role is a filtered view of `guild.members.cache`, so
+  // both hit the same empty-cache failure mode. Direct user picks skip
+  // the fetch — Discord ships the User object in `interaction.users`.
+  //
+  // DIVERGES from the text-path gate at handleQurlSlashSend, which
+  // additionally requires `canMentionEveryone || hasRoleMention` to
+  // skip the wasted fetch on bare `@everyone` typed without perm. The
+  // picker omits the @everyone role from its UI (Discord platform
+  // filter — out of scope here), so the only roles reaching this gate
+  // are user-deliberately-picked custom roles. A wasted fetch on a
+  // non-mentionable custom role pick (which the per-role
+  // `role.mentionable` gate inside `resolveMentionableSelection` will
+  // ultimately deny) is rare enough that the simpler trigger is worth
+  // the marginal optimization loss.
+  if (interaction.roles?.size > 0) {
+    await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmUserSelect', flow_id });
+  }
   const {
     users: selected,
     massMentionDenied,
