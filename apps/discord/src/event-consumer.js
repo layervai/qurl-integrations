@@ -125,13 +125,14 @@ const RECEIVE_VISIBILITY_SECONDS = 60;
 // already absorb 20s via long-poll wait.
 const POLL_ERROR_BACKOFF_MS = 1000;
 
-// Event-id LRU cap. discord.js dispatches at most ~1k events/s on a
-// busy gateway shard (interaction + member events); 10k entries
-// cover ~10s of dup-detection window, which is a comfortable
-// envelope around SQS Standard's redelivery latency (typically
-// sub-second to a few seconds). Trimmed FIFO on insertion-order
-// eviction — Set (like Map) preserves insertion order in JS, so
-// the oldest entry is always the first key.
+// Event-id LRU cap. 10k entries sized for the burst-traffic worst
+// case (discord.js dispatches at most ~1k events/s on a busy gateway
+// shard), giving ~10s of dup-detection window under sustained load.
+// On a quiet bot, the window stretches to hours; that's fine — the
+// LRU is telemetry-only, OCC at the flow-state layer owns correctness
+// (see module header). Trimmed FIFO on insertion-order eviction —
+// Set (like Map) preserves insertion order in JS, so the oldest
+// entry is always the first key.
 const SEEN_EVENT_ID_CAP = 10_000;
 
 // LRU of recently-seen event_ids (envelope's `event_id` field,
@@ -227,6 +228,24 @@ async function processMessage(client, message) {
     logger.error('Event consumer: malformed message body, deleting', {
       messageId: message.MessageId,
       error: err.message,
+    });
+    await deleteMessage(message.ReceiptHandle);
+    return;
+  }
+
+  // JSON.parse('null') succeeds with `parsed === null`, and
+  // destructuring `null` throws TypeError — which would exit
+  // processMessage BEFORE the DeleteMessage at the bottom, violating
+  // the "delete on every terminal path" invariant (the message
+  // would redrive until DLQ instead). Primitive/array bodies are
+  // valid JSON too and would land in the unhandled-eventType branch
+  // (already a DeleteMessage path), but rejecting them up-front is
+  // simpler than relying on that branch and pins the contract that
+  // the envelope is an object.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    logger.error('Event consumer: envelope is not a JSON object, deleting', {
+      messageId: message.MessageId,
+      bodyType: parsed === null ? 'null' : (Array.isArray(parsed) ? 'array' : typeof parsed),
     });
     await deleteMessage(message.ReceiptHandle);
     return;
@@ -441,11 +460,28 @@ async function stop() {
   }
 }
 
+// Reset every piece of module-level state to its post-construction
+// shape. Tests call this in beforeEach to avoid cross-contamination
+// (the consumer is a process-singleton — see module header — so
+// state would otherwise leak between describe blocks). NOT exposed
+// in production: there's no legitimate runtime caller, only test
+// harnesses that need a clean slate per test.
+function _resetStateForTest() {
+  running = false;
+  stopping = false;
+  loopPromise = null;
+  receiveAbortController = null;
+  inflight.clear();
+  sqsClient = null;
+  seenEventIds.clear();
+}
+
 module.exports = {
   start,
   stop,
   _test: {
     _setSqsClientForTest,
+    _resetStateForTest,
     recordSeen,
     seenEventIds,
     processMessage,

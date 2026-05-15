@@ -52,9 +52,13 @@ const logger = require('../src/logger');
 beforeEach(() => {
   sqsMock.reset();
   jest.clearAllMocks();
-  // Reset the module's seen-set between tests so LRU assertions
-  // start from a known state.
-  eventConsumer._test.seenEventIds.clear();
+  // Full reset of the consumer's module-level singleton state so
+  // each test starts from a known shape. seenEventIds, sqsClient,
+  // running/stopping/loopPromise, receiveAbortController, inflight
+  // — all cleared. Without this, test ordering would matter (e.g.,
+  // a future test before the start/stop round-trip case would
+  // observe whatever `running` was left at).
+  eventConsumer._test._resetStateForTest();
 });
 
 // Make a stub Discord client that exposes only the surface
@@ -175,6 +179,32 @@ describe('event-consumer: processMessage dispatch paths', () => {
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
   });
 
+  // Each entry exercises a parse-succeeds-but-shape-is-wrong path.
+  // Without the non-object guard, `null` would TypeError out of
+  // destructuring and skip DeleteMessage — message would redrive
+  // until DLQ, violating the "delete on every terminal path"
+  // invariant. Pinning every variant here so the guard can't
+  // silently regress.
+  test.each([
+    ['null', 'null'],
+    ['number', '42'],
+    ['string', '"hello"'],
+    ['array', '[1,2,3]'],
+  ])('non-object envelope (%s) → logs error + DeleteMessage', async (label, body) => {
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const message = { Body: body, ReceiptHandle: `rh-${label}`, MessageId: `m-${label}` };
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+
+    expect(client.actions.InteractionCreate.handle).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('envelope is not a JSON object'),
+      expect.objectContaining({ messageId: `m-${label}` }),
+    );
+    expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+  });
+
   test('unknown eventType → logs warn + DeleteMessage', async () => {
     sqsMock.on(DeleteMessageCommand).resolves({});
     const client = makeStubClient();
@@ -213,6 +243,37 @@ describe('event-consumer: processMessage dispatch paths', () => {
       expect.objectContaining({ error: 'unknown interaction subtype' }),
     );
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+  });
+
+  test('seenEventIds not populated on malformed body or unknown eventType', async () => {
+    // recordSeen sits AFTER the eventType gate, so envelope-shape
+    // failures (malformed JSON, non-object, unknown eventType) must
+    // not pollute the dedup LRU. Pins the ordering — a refactor that
+    // hoists recordSeen above the gate would inflate the LRU with
+    // event_ids that never dispatched.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const seen = eventConsumer._test.seenEventIds;
+
+    await withMockedSqs(async () => {
+      await eventConsumer._test.processMessage(client, {
+        Body: 'not-json{{{',
+        ReceiptHandle: 'rh-mal',
+        MessageId: 'm-mal',
+      });
+      await eventConsumer._test.processMessage(client, {
+        Body: JSON.stringify({ eventType: 'GUILD_MEMBER_ADD', event_id: '0:99' }),
+        ReceiptHandle: 'rh-unk',
+        MessageId: 'm-unk',
+      });
+      await eventConsumer._test.processMessage(client, {
+        Body: 'null',
+        ReceiptHandle: 'rh-null',
+        MessageId: 'm-null',
+      });
+    });
+
+    expect(seen.size).toBe(0);
   });
 
   test('duplicate event_id is processed (not skipped) — OCC owns correctness', async () => {
