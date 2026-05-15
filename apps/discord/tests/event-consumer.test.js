@@ -1293,11 +1293,6 @@ describe('event-consumer: start/stop lifecycle', () => {
     await eventConsumer.stop();
     // Stop is idempotent.
     await eventConsumer.stop();
-
-    // stop()'s finally restores currentBackoffMs to BASE alongside
-    // running/loopPromise/stopController. Pins the contract called
-    // out in the at-cap backoff describe block (#390).
-    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });
 
   // A "start() actually registers pollOnce" companion test was
@@ -1707,11 +1702,17 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
   // existing flushMicrotasks() + Promise scheduling stay unaffected.
   //
   // Invariant: pollOnce's at-cap branch awaits exactly one timer
-  // (abortableSleep's setTimeout). runOnlyPendingTimersAsync fires
-  // that timer + drains microtasks. If a future change adds a
-  // second `await abortableSleep` in this branch (e.g., a separate
-  // metrics-flush sleep), this helper would silently advance only
-  // the first and the second would hang — convert to a loop then.
+  // (abortableSleep's setTimeout) and yields ONLY on that timer.
+  // runOnlyPendingTimersAsync fires that timer + drains microtasks.
+  // Two failure modes a future change could introduce:
+  //   1. A second `await abortableSleep` in this branch (e.g., a
+  //      separate metrics-flush sleep) — this helper would advance
+  //      only the first and the second would hang in real time.
+  //   2. An `await` before the setTimeout (e.g., `await
+  //      someMetric.flush()`) — runOnlyPendingTimersAsync would
+  //      execute before the setTimeout was even scheduled, advance
+  //      zero timers, and the test would hang.
+  // Convert to a loop + microtask flushes between if either lands.
   async function pollOnceFast(client) {
     const p = withMockedSqs(() => eventConsumer._test.pollOnce(client));
     await jest.runOnlyPendingTimersAsync();
@@ -1859,6 +1860,52 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
       expect.objectContaining({ cap }),
     );
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+  });
+
+  test('stop() finally resets currentBackoffMs to BASE (load-bearing assertion)', async () => {
+    // cr-r5: the lifecycle test in the start/stop describe block
+    // never drove currentBackoffMs away from BASE before stop(), so
+    // its post-stop() assertion was vacuous (BASE === BASE would
+    // pass even if stop()'s finally-reset line were deleted). This
+    // test drives a non-base value first via fake-timer at-cap
+    // iterations, then exercises the real stop() codepath under
+    // real timers (stop()'s drain uses Promise.race with setTimeout;
+    // fake timers would hang the deadline). Resolvable promises so
+    // drain settles cleanly via the inFlightPromises path.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    const resolvers = [];
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        let resolve;
+        const p = new Promise((r) => { resolve = r; });
+        resolvers.push(resolve);
+        eventConsumer.trackDispatch(p);
+      }
+    });
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // Drive currentBackoffMs to a non-base value via fake-timer
+    // pollOnce. One at-cap iteration: 100 → 200.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    // Resolve in-flight promises so stop()'s drain settles via
+    // inFlightPromises (no need to wait the DRAIN_DEADLINE_MS).
+    resolvers.forEach((r) => r('done'));
+    await flushMicrotasks();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+    // start() + stop() under real timers. stop()'s finally runs the
+    // reset; without that line, currentBackoffMs would still be 200.
+    eventConsumer.start(client);
+    await eventConsumer.stop();
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });
 
