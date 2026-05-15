@@ -335,8 +335,13 @@ if (isGateway || isWorker) {
     // isWorkerDispatch flag is only true during its synchronous emit
     // call); during a consumer-driven emit, the increment runs here
     // and the decrement fires when the handler settles.
+    //
+    // No trailing `return result;` — EventEmitter listeners discard
+    // their return value, and a pre-conversion vestigial return would
+    // imply otherwise to a future reader. The unrouted branch's
+    // `return undefined` IS load-bearing (it short-circuits before
+    // trackDispatch), so the asymmetry is intentional.
     eventConsumer.trackDispatch(result);
-    return result;
   });
 }
 
@@ -373,14 +378,15 @@ if (isGateway) {
 // entire process on any stray rejection (transient Discord timeouts, network
 // blips) which made the bot fragile. Truly fatal errors surface via
 // uncaughtException below.
-// TODO(PR-10): emit `kind: 'unhandledRejection'` here too so a single
-// CloudWatch query filtering on the structured field finds both this
-// gateway-WS-driven path AND the worker-tier path that absorbs
-// rejections in event-consumer.js's trackDispatch .catch (which
-// already emits the kind field). Until both paths agree on the tag,
-// alarms either grep the message text or miss one of the tiers.
+// `kind: 'unhandledRejection'` matches the tag emitted by
+// trackDispatch's .catch in event-consumer.js. A single CloudWatch
+// query filtering on the structured field finds both this gateway-WS-
+// driven path AND the worker-tier path that absorbs rejections in the
+// SQS consumer. Without the parity, dashboards either grep the
+// message text or miss one of the tiers.
 process.on('unhandledRejection', (error, _promise) => {
   logger.error('Unhandled promise rejection (logged, not fatal)', {
+    kind: 'unhandledRejection',
     error: error?.message || error,
     stack: error?.stack,
   });

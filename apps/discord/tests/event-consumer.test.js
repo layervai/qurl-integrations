@@ -1007,6 +1007,11 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     })));
 
     expect(eventConsumer._test.isWorkerDispatching()).toBe(false);
+    // Counter should not have been incremented either — handle()
+    // threw before the listener could fire its return value into
+    // trackDispatch. Pinning this ensures a future refactor that
+    // moves the increment outside the listener can't leak a slot.
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
   test('trackDispatch increments then decrements on promise resolve', async () => {
