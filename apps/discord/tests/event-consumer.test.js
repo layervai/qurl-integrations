@@ -1657,9 +1657,9 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
   test('pollOnce early-returns + backs off when in-flight at cap', async () => {
     // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
-    // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let
-    // handlers drain. Pins that the cap is enforced + the receive
-    // path is bypassed.
+    // skip the receive call and sleep at least the base backoff to
+    // let handlers drain. Pins that the cap is enforced + the
+    // receive path is bypassed.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
 
     // Manually crank inFlightCount up to cap via the tracker. Use
@@ -1694,11 +1694,12 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
   });
 
-  test('pollOnce only warns once per at-cap streak (debug for subsequent polls)', async () => {
-    // Pins the throttle: a sustained at-cap condition produces one
-    // warn at the entry transition and debug lines for the rest of
-    // the streak. Without this, a slow downstream wedge would spam
-    // logger.warn ~10x/s per worker.
+  test('pollOnce stays silent during a sustained at-cap streak (one warn at entry, no per-iteration noise)', async () => {
+    // The entry warn + the eventual exit info already bookend the
+    // pause for operators — steady-state at-cap is intentionally
+    // silent. Pre-#390, this test asserted a per-iteration debug
+    // log; that pattern is gone now (it spammed ~10×/s per worker
+    // with no operational value beyond what entry+exit convey).
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
     withWorkerDispatch(() => {
       for (let i = 0; i < cap; i += 1) {
@@ -1708,23 +1709,51 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const client = makeStubClient();
+    const warnBaseline = logger.warn.mock.calls.length;
+    const debugBaseline = logger.debug.mock.calls.length;
 
-    // First poll: warn fires.
+    // Three consecutive at-cap polls.
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.debug).not.toHaveBeenCalledWith(
-      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
-      expect.anything(),
-    );
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
 
-    // Subsequent polls in the same streak: debug only, no extra warn.
+    // Exactly one warn fired (the entry), no debugs across the streak.
+    expect(logger.warn.mock.calls.length - warnBaseline).toBe(1);
+    expect(logger.debug.mock.calls.length - debugBaseline).toBe(0);
+  });
+
+  test('pollOnce: at-cap backoff doubles each iteration up to the ceiling', async () => {
+    // Exponential decay: 100ms → 200 → 400 → 800 → 1600 (max). Cuts
+    // wake rate from 10/s to ~0.6/s under sustained at-cap without
+    // significantly delaying recovery (a release in the middle of a
+    // backoff still wakes via the next iteration's below-cap check).
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        eventConsumer.trackDispatch(new Promise(() => {}));
+      }
+    });
+
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
-    expect(logger.warn).toHaveBeenCalledTimes(1); // still 1
-    expect(logger.debug).toHaveBeenCalledWith(
-      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
-      expect.objectContaining({ inFlight: cap, cap }),
-    );
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(400);
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(800);
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+
+    // One more iteration past the ceiling: still pinned at MAX.
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
   });
 
   test('pollOnce logs cap-released info on transition back to below-cap', async () => {
@@ -1747,9 +1776,10 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const client = makeStubClient();
 
-    // Enter at-cap state (warn fires, gate is set).
+    // Enter at-cap state (warn fires, gate set, backoff doubled).
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
 
     // Drain all handlers: resolve every tracked promise, then let
     // the .finally microtask chain flush so inFlightCount drops to 0.
@@ -1757,13 +1787,15 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     await flushMicrotasks();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
 
-    // Below-cap poll: release-info fires, gate clears.
+    // Below-cap poll: release-info fires, gate clears, backoff
+    // resets to base so the next at-cap entry starts responsive.
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(logger.info).toHaveBeenCalledWith(
       eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
       expect.objectContaining({ cap }),
     );
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });
 
   test('pollOnce proceeds with receive when below cap', async () => {

@@ -342,12 +342,17 @@ function validateInflightCap(cap) {
 }
 validateInflightCap(MAX_INFLIGHT_HANDLERS);
 
-// Brief pause when at-cap. Short enough that handlers draining
-// quickly resume normal polling; long enough that we don't burn
-// CPU re-checking the cap on every microtask. abortableSleep
-// honors the abort signal so a SIGTERM during a backpressure pause
-// still exits inside the graceful-shutdown budget.
-const INFLIGHT_BACKOFF_MS = 100;
+// At-cap pause backoff. Exponential decay from BASE to MAX while
+// the cap stays full, resets to BASE on the first below-cap poll.
+// A short cap streak (handlers draining within a second) keeps the
+// 100ms responsiveness; a sustained streak (slow downstream + bursty
+// arrivals) drops the wake rate to ~0.6/s instead of 10/s, cutting
+// CPU + log noise without significantly delaying recovery.
+// abortableSleep honors the abort signal so a SIGTERM during a
+// backpressure pause still exits inside the graceful-shutdown budget.
+const INFLIGHT_BACKOFF_BASE_MS = 100;
+const INFLIGHT_BACKOFF_MAX_MS = 1600;
+let currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
 
 // Maximum time stop() waits for in-flight handler promises to
 // settle before proceeding past `await loopPromise`. Stays well
@@ -389,20 +394,17 @@ let DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 const inFlightPromises = new Set();
 let isWorkerDispatch = false;
 
-// State-machine rate-limit on the at-cap log. Sustained at-cap
-// (slow downstream + bursty arrivals) wakes pollOnce every
-// INFLIGHT_BACKOFF_MS, so without throttling a single backlog
-// produces ~10 lines/sec/worker. Pattern matches
-// `lastMissingEventIdWarnMs`: the *transition* into at-cap is the
-// loud signal (warn), steady-state at-cap is debug, and the
-// transition back to below-cap is info. atCapPauseLogged is the
-// "we've already logged the warn for this streak" gate; cleared
-// when pollOnce next observes a below-cap state. Log messages
-// pulled into constants so monitoring alerts that grep for them
-// stay in sync with the call site even if the wording drifts.
+// State-machine rate-limit on the at-cap log. The *transition* into
+// at-cap is the loud signal (warn-on-entry), the transition back to
+// below-cap is the info-on-release. Steady-state at-cap is silent —
+// pairing entry+exit gives the duration of the pause without
+// per-iteration noise. atCapPauseLogged is the "we've logged the
+// warn for this streak" gate; cleared when pollOnce next observes a
+// below-cap state. Log messages live in constants so monitoring
+// alerts that grep for them stay in sync with the call site if the
+// wording drifts.
 let atCapPauseLogged = false;
 const AT_CAP_PAUSE_WARN_MSG = 'Event consumer: in-flight cap reached, pausing receive until handlers drain';
-const AT_CAP_PAUSE_DEBUG_MSG = 'Event consumer: still at in-flight cap, continuing pause';
 const AT_CAP_RELEASED_INFO_MSG = 'Event consumer: in-flight cap released, resuming receive';
 
 // Hook for unit tests: lets the test inject a mock SQSClient
@@ -743,20 +745,26 @@ async function pollOnce(client) {
     if (!atCapPauseLogged) {
       logger.warn(AT_CAP_PAUSE_WARN_MSG, capPayload);
       atCapPauseLogged = true;
-    } else {
-      logger.debug(AT_CAP_PAUSE_DEBUG_MSG, capPayload);
     }
-    await abortableSleep(INFLIGHT_BACKOFF_MS);
+    // Steady-state at-cap is intentionally silent — the entry warn
+    // + the exit info already bookend the pause for operators.
+    await abortableSleep(currentBackoffMs);
+    // Exponential decay: each consecutive at-cap iteration doubles
+    // the wait up to MAX, so a sustained streak drops the wake rate
+    // from 10/s to ~0.6/s without significantly delaying recovery.
+    currentBackoffMs = Math.min(currentBackoffMs * 2, INFLIGHT_BACKOFF_MAX_MS);
     return;
   }
   // Below-cap path: if we just transitioned out of at-cap, log the
   // release so operators can match "pause started" with "pause ended"
-  // pairs in CloudWatch. Reset the gate so the next at-cap entry
-  // re-fires the warn (each streak gets exactly one warn).
+  // pairs in CloudWatch. Reset both the warn gate and the backoff so
+  // the next at-cap entry re-fires the warn AND starts at the base
+  // wait (each streak gets exactly one warn and starts responsive).
   if (atCapPauseLogged) {
     logger.info(AT_CAP_RELEASED_INFO_MSG, capPayload);
     atCapPauseLogged = false;
   }
+  currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
   const queueUrl = config.QURL_BOT_EVENTS_QUEUE_URL;
   const cmd = new ReceiveMessageCommand({
     QueueUrl: queueUrl,
@@ -1234,6 +1242,7 @@ async function stop() {
     // but integration tests that exercise the lifecycle would
     // otherwise see a phantom suppressed warn.
     atCapPauseLogged = false;
+    currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
     // Intentionally do NOT null `sqsClient`. Production never calls
     // start() after stop() — gracefulShutdown runs once at SIGTERM,
     // then process.exit. Reusing the client across a hypothetical
@@ -1263,6 +1272,7 @@ function _resetStateForTest() {
   inFlightPromises.clear();
   isWorkerDispatch = false;
   atCapPauseLogged = false;
+  currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
   DRAIN_DEADLINE_MS = INITIAL_DRAIN_DEADLINE_MS;
 }
 
@@ -1290,14 +1300,15 @@ module.exports = {
     SEEN_EVENT_ID_CAP,
     MAX_INFLIGHT_HANDLERS,
     validateInflightCap,
-    INFLIGHT_BACKOFF_MS,
+    INFLIGHT_BACKOFF_BASE_MS,
+    INFLIGHT_BACKOFF_MAX_MS,
+    getCurrentBackoffMs: () => currentBackoffMs,
     // DRAIN_DEADLINE_MS is mutable (so tests can shrink it), so
     // expose as a getter — a snapshot-at-module-load export would
     // silently read 3000 even after _setDrainDeadlineForTest(50)
     // mutated the live value.
     getDrainDeadlineMs: () => DRAIN_DEADLINE_MS,
     AT_CAP_PAUSE_WARN_MSG,
-    AT_CAP_PAUSE_DEBUG_MSG,
     AT_CAP_RELEASED_INFO_MSG,
     // Live getter for the lifetime abort controller. Was previously
     // `getReceiveAbortController` (per-iteration); the AbortSignal
