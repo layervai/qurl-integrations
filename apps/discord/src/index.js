@@ -270,6 +270,12 @@ if (eventShipperMissing.length > 0) {
 // consumer-startup and event-listener registration sites stay in sync.
 const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 
+// Log isWorker on its own so an operator triaging a no-dispatch
+// incident sees the full picture without having to mentally combine
+// the role log (line 86) with the flag. Distinct line so a grep for
+// `isWorker=true` lands directly.
+logger.info('Worker tier configured', { isWorker, eventShipperEnabled: config.ENABLE_EVENT_SHIPPER });
+
 // Interaction routing. Same dispatcher whether the source is the
 // Gateway WS (isGateway) or an SQS message reconstructed via
 // client.actions.InteractionCreate.handle (isWorker, see

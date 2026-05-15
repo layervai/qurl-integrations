@@ -125,15 +125,19 @@ const RECEIVE_VISIBILITY_SECONDS = 60;
 // already absorb 20s via long-poll wait.
 const POLL_ERROR_BACKOFF_MS = 1000;
 
-// Event-id LRU cap. 10k entries sized for the burst-traffic worst
-// case (discord.js dispatches at most ~1k events/s on a busy gateway
-// shard), giving ~10s of dup-detection window under sustained load.
-// On a quiet bot, the window stretches to hours; that's fine — the
-// LRU is telemetry-only, OCC at the flow-state layer owns correctness
-// (see module header). Trimmed FIFO on insertion-order eviction —
+// Event-id LRU cap. 100k entries chosen to cover the SQS-redrive
+// window (>= 60s after receive) at sustained ~1k events/s on a busy
+// gateway shard — i.e., the failure mode this telemetry exists to
+// surface. With a 10k cap, redrives ≥10s out under sustained load
+// would fall outside the window and the dup-rate gauge would lie
+// during the exact incident it's meant to expose. On a quiet bot,
+// the window stretches to hours; that's fine — the LRU is telemetry-
+// only, OCC at the flow-state layer owns correctness (see module
+// header). Memory cost: ~100k * (~16-char string + Set overhead) ≈
+// a few MB worst case. Trimmed FIFO on insertion-order eviction —
 // Set (like Map) preserves insertion order in JS, so the oldest
 // entry is always the first key.
-const SEEN_EVENT_ID_CAP = 10_000;
+const SEEN_EVENT_ID_CAP = 100_000;
 
 // LRU of recently-seen event_ids (envelope's `event_id` field,
 // format `<shardId>:<sequence>`). `Set` rather than `Map<id, 1>`
@@ -353,16 +357,21 @@ async function pollOnce(client) {
 
 // AbortController surfaces aborted requests with err.name === 'AbortError'
 // at the AWS SDK layer; some runtimes also expose the same condition
-// via err.code. Recognize both shapes so a stop()-triggered abort
-// doesn't get logged as a real failure or trigger the error backoff.
-// Deliberately does NOT match err.name === 'TimeoutError': that's the
-// SDK's own request-timeout, NOT our abort. A sustained AWS-side
+// via err.code. Different @aws-sdk minor versions have also been
+// observed to wrap aborts as `CanceledError` (smithy client). Match
+// both shapes so a stop()-triggered abort doesn't get logged as a
+// real failure or trigger the error backoff.
+//
+// Deliberately does NOT match err.name === 'TimeoutError': that's
+// the SDK's own request-timeout, NOT our abort. A sustained AWS-side
 // flaky endpoint that keeps tripping client-side timeouts MUST land
 // in the error-backoff path so an operator sees the log line and the
 // loop doesn't spin without a backoff.
 function isAbortError(err) {
   if (!err) return false;
-  return err.name === 'AbortError' || err.code === 'AbortError';
+  return err.name === 'AbortError'
+    || err.name === 'CanceledError'
+    || err.code === 'AbortError';
 }
 
 // Sleep that resolves either when the timeout fires OR when stop()
@@ -370,15 +379,27 @@ function isAbortError(err) {
 // the error-backoff would block for the full POLL_ERROR_BACKOFF_MS
 // before the while-check exits — on top of the 10s graceful-shutdown
 // budget, the abort-the-receive savings would be partly undone.
+//
+// Both timers MUST clear each other on resolve. The setInterval
+// would otherwise keep firing every 50 ms forever after the
+// setTimeout wins the race (the common case: a single transient
+// AWS error → backoff completes → loop continues). Under sustained
+// failure, every iteration adds an orphan interval. .unref() lets
+// the process exit cleanly but doesn't stop the ticks; clearing
+// inside the resolve handler does.
 function abortableSleep(ms) {
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
+    let check;
+    const t = setTimeout(() => {
+      if (check) clearInterval(check);
+      resolve();
+    }, ms);
     // stop() doesn't expose a Promise we can await; poll the
     // `stopping` flag at a coarse interval so the sleep returns
     // promptly when shutdown lands. 50 ms is fine — well under the
     // 1 s POLL_ERROR_BACKOFF_MS and well above the cost of a
     // setInterval tick.
-    const check = setInterval(() => {
+    check = setInterval(() => {
       if (stopping) {
         clearTimeout(t);
         clearInterval(check);
@@ -523,6 +544,7 @@ module.exports = {
     processMessage,
     pollOnce,
     isAbortError,
+    abortableSleep,
     SEEN_EVENT_ID_CAP,
     getReceiveAbortController: () => receiveAbortController,
   },

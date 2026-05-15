@@ -385,6 +385,78 @@ describe('event-consumer: pollOnce', () => {
   });
 });
 
+describe('event-consumer: data: undefined envelope shape', () => {
+  test('INTERACTION_CREATE with missing data → reconstruction throws → still deletes', async () => {
+    // Pins the contract that an envelope with eventType=INTERACTION_CREATE
+    // but `data` missing falls through to client.actions.InteractionCreate.handle,
+    // which throws inside discord.js when destructuring an undefined
+    // `data`. The try/catch in processMessage catches the throw, logs
+    // 'dispatch reconstruction failed', and DeleteMessage still fires —
+    // preserving the every-terminal-path-deletes invariant for the
+    // poison-pill containment shape.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    client.actions.InteractionCreate.handle.mockImplementation((data) => {
+      // Mirror discord.js's behavior: destructuring undefined.data
+      // throws TypeError inside InteractionCreateAction.handle's
+      // switch on `data.type`.
+      if (!data) throw new TypeError("Cannot read properties of undefined (reading 'type')");
+    });
+    const message = makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      // data: undefined (missing field)
+      event_id: '0:7',
+    });
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, message));
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('dispatch reconstruction failed'),
+      expect.objectContaining({ eventId: '0:7' }),
+    );
+    expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
+  });
+});
+
+describe('event-consumer: abortableSleep', () => {
+  test('timeout-wins-race path clears the polling interval (no leak)', async () => {
+    // Pins the fix for the setInterval leak: when setTimeout fires
+    // first (the common case — backoff completes without a stop()),
+    // the polling setInterval MUST be cleared inside the resolve
+    // handler. Without the fix, every error-backoff iteration would
+    // accumulate one orphan interval ticking every 50 ms forever.
+    //
+    // Spy on clearInterval and assert it was called for the handle
+    // that setInterval returned. Real timers (not jest fake) so the
+    // 30 ms sleep completes on its own; smaller than POLL_ERROR_BACKOFF_MS
+    // (1000) to keep the test fast.
+    const setIntervalSpy = jest.spyOn(global, 'setInterval');
+    const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+    try {
+      await eventConsumer._test.abortableSleep(30);
+      // Count the abortableSleep-created intervals (50ms polling
+      // tick) and assert each was cleared. Other intervals in the
+      // test runtime may also be present — filter by the 50ms tick.
+      const created = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50);
+      expect(created.length).toBeGreaterThanOrEqual(1);
+      const intervalHandles = setIntervalSpy.mock.results
+        .filter((_r, i) => setIntervalSpy.mock.calls[i][1] === 50)
+        .map((r) => r.value);
+      for (const handle of intervalHandles) {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(handle);
+      }
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
+  });
+
+  // The stopping-wins-race path is exercised end-to-end by the
+  // pollLoop error-backoff test below (which asserts stop() returns
+  // in < 500 ms while a 1 s abortableSleep is in flight). No
+  // separate unit test needed here.
+});
+
 describe('event-consumer: pollLoop error backoff', () => {
   test('pollLoop catches ReceiveMessage errors, logs, sleeps, then continues', async () => {
     // Make the first ReceiveMessage call throw; the second + onward
