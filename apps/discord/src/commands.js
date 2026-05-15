@@ -497,11 +497,12 @@ const EXPIRY_LABELS = {
 const EXPIRY_CHOICES = Object.entries(EXPIRY_LABELS).map(([value, name]) => ({ name, value }));
 
 // Pure predicate. The 5 call sites (failGate at executeSendPipeline,
-// entry gate at handleAddRecipients, expiry-select handlers, voice-
-// everyone select-menu fallback) all need different error rendering
-// shapes — `failGate`, return-error-obj, fallback-with-warn — so
-// only the membership check is DRY'd here; the per-site error
-// surface stays inline.
+// entry gate at handleAddRecipients, renderConfirmCardRows default-
+// selection guard, slash-command forged-interaction guard,
+// handleConfirmExpirySelect forged-value guard) all need different
+// error rendering shapes — `failGate` throws, return-error-obj,
+// fallback-with-warn — so only the membership check is DRY'd here;
+// the per-site error surface stays inline.
 // `Object.prototype.hasOwnProperty.call` (not `EXPIRY_LABELS[v]`) is
 // load-bearing for prototype-pollution safety AND because a
 // caller-supplied `toString`/`constructor` key could otherwise pass
@@ -2019,10 +2020,14 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Hoist payload-shared inputs to the top of the dispatch block so
   // the entire batch shares one expiry timestamp and one resolved
   // sender alias. Mirrors executeSendPipeline's structure — both
-  // pipelines now compute expiresAt once per call, eliminating
-  // Date.now() drift between recipients in the same batch.
-  // resolveSenderAlias is a pure function of originalInteraction so
-  // hoisting also avoids re-resolving the
+  // pipelines now compute the Unix-seconds expiresAt once per call,
+  // eliminating Date.now() drift between recipients in the same
+  // batch. (The ISO-string `expiresAt` inside the file/location prep
+  // branches calls expiryToISO independently for mintLinks — that's
+  // a separate type for a separate consumer; sub-second drift between
+  // the minted-link expiry and the DM-payload expiry is negligible
+  // at the 30m–7d horizon.) resolveSenderAlias is a pure function of
+  // originalInteraction so hoisting also avoids re-resolving the
   // nickname/globalName/username chain per dispatch.
   //
   // Computed BEFORE recordQURLSendBatch so a malformed
@@ -2050,7 +2055,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
       });
     }
   }
-
   // Same guarantee as executeSendPipeline: if the DB write fails, abort
   // BEFORE any DMs go out so we don't leave live QURL links with no
   // local record.
