@@ -187,6 +187,10 @@ func Parse(text string) (*Command, error) {
 		return &Command{Subcommand: SubcmdHelp, Raw: text, Flags: map[string]string{}}, nil
 	}
 
+	// Invariant: Flags is initialized here so every sub-parser can
+	// call applyFlag without nil-check. Adding a new sub-parser that
+	// builds its own *Command must preserve this — applyFlag writes
+	// to cmd.Flags directly and will panic on a nil map.
 	cmd := &Command{Raw: text, Flags: map[string]string{}}
 	first := strings.ToLower(tokens[0])
 	rest := tokens[1:]
@@ -229,6 +233,14 @@ func Parse(text string) (*Command, error) {
 // single token. We don't need shell-grade quoting (no escapes, no single
 // quotes) — Slack's form already collapses surrounding control characters
 // before we see the body.
+//
+// `inQuotes` is a parity toggle, not a balanced-pair matcher: every `"`
+// flips the state. Adversarial input like `"a"b"c"` toggles four times
+// and produces a single token. Slack's slash-command box can't realistically
+// emit such input, but a future caller swapping in a different source
+// should be aware the contract is "even count of `"` → quoted runs
+// behave as expected; odd count → falls back to the unbalanced-tolerance
+// path below."
 //
 // Balanced outer double quotes around a positional token are stripped so
 // `setalias $a "https://x"` produces `Target = "https://x"` rather than
@@ -486,8 +498,11 @@ func matchChannel(tok string) (string, bool) {
 // set to empty" by absence in [Command.Flags] alone.
 func applyFlag(cmd *Command, tok string) error {
 	colonIdx := strings.IndexByte(tok, ':')
-	if colonIdx <= 0 {
+	if colonIdx < 0 {
 		return fmt.Errorf("invalid flag: %q (expected key:value)", tok)
+	}
+	if colonIdx == 0 {
+		return fmt.Errorf("invalid flag: %q (missing key before colon)", tok)
 	}
 	// Lowercase only the key portion so `Reason:"On Call"` keeps
 	// its mixed-case value intact.
