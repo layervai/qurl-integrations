@@ -9,7 +9,7 @@
 // the gateway role uses today.
 //
 // Process-singleton: every piece of state in this module — the poll
-// loop's running/stopping flags, the AbortController, the SQS
+// loop's running flag, the lifetime AbortController, the SQS
 // client, the dedup LRU — lives in module-level scope. There is at
 // most one consumer per process by design.
 // A future caller that tries to `start()` two consumers in one
@@ -246,11 +246,24 @@ function recordSeen(eventId) {
   return false;
 }
 
-// Worker state. start() flips `running` true and kicks off the poll
-// loop; stop() flips `stopping` true and awaits loopPromise.
-// pollOnce uses Promise.all over the per-message wrappers, which
-// serializes "all messages in this batch were dispatched (emit +
-// DeleteMessage attempted)" against loopPromise resolution.
+// Worker state. start() constructs a fresh `stopController` and
+// flips `running` true; stop() calls `stopController.abort()` and
+// awaits loopPromise. pollOnce uses Promise.all over the per-message
+// wrappers, which serializes "all messages in this batch were
+// dispatched (emit + DeleteMessage attempted)" against loopPromise
+// resolution.
+//
+// stopController drives three shutdown paths from a single signal:
+//   1. SDK long-poll cancellation — the receive's abortSignal option
+//      reads stopController.signal directly, so a SIGTERM landing
+//      mid-receive rejects with AbortError within tens of ms instead
+//      of waiting the full RECEIVE_WAIT_SECONDS (20s). Critical for
+//      fitting inside gracefulShutdown's 10s force-exit budget.
+//   2. abortableSleep wake-up — backpressure pauses and error
+//      backoffs register an 'abort' listener on stopController.signal
+//      and resolve on a microtask when stop() fires.
+//   3. pollLoop terminator — the while-loop reads signal.aborted.
+// Multiple listeners on one AbortSignal is a standard pattern.
 //
 // What stop() awaits: the poll loop (loopPromise) AND a
 // deadline-capped drain of detached handlers tracked by
@@ -270,18 +283,9 @@ function recordSeen(eventId) {
 // deadline races db.close() the same way the pre-PR gateway path
 // always has (since the gateway also emits + runs detached). The
 // drain is a *probability improvement*, not a correctness change.
-//
-// receiveAbortController is set per-poll-iteration and used by stop()
-// to cancel an in-flight long-poll ReceiveMessage. Without this, a
-// SIGTERM arriving while the consumer is parked in its (typical)
-// 20-second long-poll wait would block stop() for the remainder of
-// the wait — past the 10-second force-exit in gracefulShutdown
-// (index.js), so process.exit(1) would fire before discordShutdown
-// + db.close had a chance to run.
 let running = false;
-let stopping = false;
 let loopPromise = null;
-let receiveAbortController = null;
+let stopController = null;
 let sqsClient = null;
 
 // Backpressure cap (see module header). pollOnce early-returns
@@ -329,8 +333,8 @@ validateInflightCap(MAX_INFLIGHT_HANDLERS);
 // Brief pause when at-cap. Short enough that handlers draining
 // quickly resume normal polling; long enough that we don't burn
 // CPU re-checking the cap on every microtask. abortableSleep
-// honors `stopping` so a SIGTERM during a backpressure pause still
-// exits inside the graceful-shutdown budget.
+// honors the abort signal so a SIGTERM during a backpressure pause
+// still exits inside the graceful-shutdown budget.
 const INFLIGHT_BACKOFF_MS = 100;
 
 // Maximum time stop() waits for in-flight handler promises to
@@ -701,9 +705,10 @@ async function pollOnce(client) {
   // Backpressure check: if too many handlers are in-flight, pause
   // receives until they drain. Returns from this iteration without
   // pulling messages; pollLoop will call us again, and the
-  // `while (!stopping)` check naturally exits if stop() lands during
-  // the pause. abortableSleep also honors stopping so the pause
-  // doesn't blow the graceful-shutdown budget.
+  // `while (!stopController.signal.aborted)` check naturally exits
+  // if stop() lands during the pause. abortableSleep also wakes on
+  // signal abort so the pause doesn't blow the graceful-shutdown
+  // budget.
   //
   // Log throttling: only the transition into at-cap is loud (warn);
   // subsequent at-cap polls in the same streak are debug. The
@@ -729,13 +734,6 @@ async function pollOnce(client) {
     } else {
       logger.debug(AT_CAP_PAUSE_DEBUG_MSG, capPayload);
     }
-    // Clear the previous iteration's controller before sleeping —
-    // there's no in-flight ReceiveMessage during a backpressure
-    // pause, so the invariant "non-null iff a receive is in flight"
-    // holds. A stop() landing during the sleep would otherwise call
-    // .abort() on a settled controller (safe no-op today, but the
-    // null-during-sleep shape is the cleaner contract).
-    receiveAbortController = null;
     await abortableSleep(INFLIGHT_BACKOFF_MS);
     return;
   }
@@ -754,14 +752,16 @@ async function pollOnce(client) {
     WaitTimeSeconds: RECEIVE_WAIT_SECONDS,
     VisibilityTimeout: RECEIVE_VISIBILITY_SECONDS,
   });
-  // Fresh abort controller per iteration. stop() aborts the active
-  // one to cancel an in-flight long-poll. The AWS SDK rejects the
-  // send() promise with an AbortError when this fires; pollLoop's
-  // catch handles it (cleared as a non-fatal interruption) and the
-  // `while (!stopping)` check exits the loop.
-  receiveAbortController = new AbortController();
+  // Share stopController's signal directly with the AWS SDK. stop()
+  // calls abort() once on the lifetime controller, which both
+  // cancels the in-flight long-poll AND wakes any in-flight
+  // abortableSleep — no per-iteration controller, no separate flag
+  // polling. The AWS SDK rejects send() with AbortError when the
+  // signal fires; pollLoop's catch handles it (cleared as a
+  // non-fatal interruption) and the `signal.aborted` check exits
+  // the loop.
   const { Messages = [] } = await sqsClient.send(cmd, {
-    abortSignal: receiveAbortController.signal,
+    abortSignal: stopController.signal,
   });
   if (Messages.length === 0) return;
 
@@ -836,53 +836,73 @@ function isAbortError(err) {
   return false;
 }
 
-// Sleep that resolves either when the timeout fires OR when stop()
-// flips `stopping` true. Without the early-out, a stop() call during
-// the error-backoff would block for the full POLL_ERROR_BACKOFF_MS
-// before the while-check exits — on top of the 10s graceful-shutdown
-// budget, the abort-the-receive savings would be partly undone.
+// Sleep that resolves either when the timeout fires OR when
+// stopController.signal fires. Without the early-out, a stop() call
+// during the error-backoff would block for the full
+// POLL_ERROR_BACKOFF_MS before the while-check exits — on top of the
+// 10s graceful-shutdown budget, the abort-the-receive savings would
+// be partly undone.
 //
-// Both timers MUST clear each other on resolve. The setInterval
-// would otherwise keep firing every 50 ms forever after the
-// setTimeout wins the race (the common case: a single transient
-// AWS error → backoff completes → loop continues). Under sustained
-// failure, every iteration adds an orphan interval. .unref() lets
-// the process exit cleanly but doesn't stop the ticks; clearing
-// inside the resolve handler does.
+// Event-driven (no polling tick): stopController.signal's 'abort'
+// event fires synchronously on stop()'s abort() call, so an
+// in-flight shutdown wakes the sleep within a microtask rather than
+// the 50ms polling interval the previous version used. The setTimeout is
+// cleared on the abort path so it doesn't fire spuriously after
+// resolution.
+//
+// Defensive: if start() hasn't run (stopController is null) the
+// sleep degrades to a pure setTimeout — abortableSleep is also
+// reachable from the at-cap backpressure pause, and we don't want
+// a missing controller to throw and crash the loop.
 function abortableSleep(ms) {
   return new Promise((resolve) => {
-    let check;
+    // Capture once so addEventListener and removeEventListener target
+    // the same controller by identity, even if module-level
+    // stopController is swapped during the sleep.
+    const ctrl = stopController;
+    // Already-aborted fast path: a stop() that landed before this
+    // sleep started returns immediately.
+    if (ctrl?.signal.aborted) {
+      resolve();
+      return;
+    }
+    let onAbort;
     const t = setTimeout(() => {
-      if (check) clearInterval(check);
+      if (ctrl && onAbort) {
+        ctrl.signal.removeEventListener('abort', onAbort);
+      }
       resolve();
     }, ms);
-    // stop() doesn't expose a Promise we can await; poll the
-    // `stopping` flag at a coarse interval so the sleep returns
-    // promptly when shutdown lands. 50 ms is fine — well under the
-    // 1 s POLL_ERROR_BACKOFF_MS and well above the cost of a
-    // setInterval tick.
-    check = setInterval(() => {
-      if (stopping) {
-        clearTimeout(t);
-        clearInterval(check);
-        resolve();
-      }
-    }, 50);
-    // .unref()ed so a stray timer doesn't pin the event loop if
-    // the loop exits via a different path mid-sleep.
+    // .unref()ed so a stray timer can't pin the event loop if the
+    // loop exits via a different path mid-sleep.
     t.unref?.();
-    check.unref?.();
+    if (ctrl) {
+      onAbort = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      // Timeout-wins branch (above) removes the listener explicitly;
+      // { once: true } here is defensive — AbortSignal fires 'abort'
+      // at most once per spec. If timeout and abort fire near-
+      // simultaneously, both resolve() calls may run; the second is
+      // a Promise no-op (resolve is idempotent).
+      ctrl.signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
 }
 
 async function pollLoop(client) {
-  while (!stopping) {
+  // Null-guard symmetric with abortableSleep + stop(). Paranoia, not
+  // a real path: start() always assigns stopController before invoking
+  // pollLoop, and stop() nulls it only after `await loopPromise`
+  // resolves (by which point pollLoop has already exited).
+  while (stopController && !stopController.signal.aborted) {
     try {
       await pollOnce(client);
     } catch (err) {
       if (isAbortError(err)) {
         // stop() aborted the in-flight receive. The while-loop's
-        // !stopping check exits next iteration; no logging or
+        // signal.aborted check exits next iteration; no logging or
         // backoff (this is a clean interruption, not a failure).
         continue;
       }
@@ -935,7 +955,7 @@ function start(client) {
     sqsClient = createSqsClient();
   }
   running = true;
-  stopping = false;
+  stopController = new AbortController();
   logger.info('Event consumer: starting', {
     queueUrl: config.QURL_BOT_EVENTS_QUEUE_URL,
     waitSeconds: RECEIVE_WAIT_SECONDS,
@@ -969,32 +989,26 @@ function start(client) {
  * graceful-shutdown budget in `gracefulShutdown` (index.js).
  */
 async function stop() {
-  // Idempotent on both not-running AND already-stopping: two
-  // concurrent stop() calls (e.g., SIGTERM racing an uncaughtException
-  // both routing through gracefulShutdown) would otherwise both
-  // pass !running, both abort, both await loopPromise. Harmless but
-  // racy on the running=false reset; the stopping check makes the
-  // single-stopper invariant explicit. A second caller during drain
-  // returns immediately (without awaiting drain completion) —
-  // theoretical today since gracefulShutdown only calls stop() once.
-  if (!running || stopping) return;
-  stopping = true;
-  // Cancel the in-flight long-poll so stop() returns within tens of
-  // ms instead of waiting up to RECEIVE_WAIT_SECONDS (20s) for the
-  // current receive to time out. The pollLoop's catch recognizes
-  // the abort and exits cleanly without backoff or error logging.
+  // Idempotent guards. The first caller through passes both checks;
+  // the second caller (e.g., SIGTERM racing an uncaughtException, both
+  // routing through gracefulShutdown) hits either !running (if it
+  // arrives after the first cleared running below) or signal.aborted
+  // (if it arrives after abort() fired) and short-circuits. The OR is
+  // belt-and-suspenders against ordering across the await below.
+  if (!running || stopController.signal.aborted) return;
+  // Single abort() call wakes:
+  //   1. The in-flight ReceiveMessage long-poll (SDK consumes the
+  //      same signal and rejects send() with AbortError) — stop()
+  //      returns within tens of ms instead of waiting up to
+  //      RECEIVE_WAIT_SECONDS (20s).
+  //   2. Any in-flight abortableSleep — backpressure pauses + error
+  //      backoffs return on a microtask rather than burning the
+  //      remainder of their interval.
+  //   3. The pollLoop's `while (!signal.aborted)` terminator —
+  //      after the current iteration unwinds, the next check exits.
   // Critical for graceful-shutdown: index.js's 10s force-exit fires
   // before a synchronously-waiting receive could complete on its own.
-  //
-  // Narrow race: if stop() lands BETWEEN iterations (after pollOnce
-  // returned, before the next iteration assigned a fresh controller)
-  // we abort the already-completed previous controller, which is a
-  // no-op. That's benign — the next `while (!stopping)` check exits
-  // the loop without starting another receive. The abort fires
-  // every other time and is the load-bearing path.
-  if (receiveAbortController) {
-    receiveAbortController.abort();
-  }
+  stopController.abort();
   logger.info('Event consumer: stopping');
   try {
     // Isolate the loopPromise wait from the drain: if pollLoop
@@ -1068,17 +1082,13 @@ async function stop() {
     }
   } finally {
     running = false;
-    // Reset stopping alongside running so a caller introspecting
-    // state between stop+start (or never restarting) sees a clean
-    // post-condition that matches the pre-start() shape. start()
-    // also resets stopping=false, so the happy path is unaffected.
-    stopping = false;
     loopPromise = null;
-    // Null the abort controller too — keeps the post-stop shape
-    // identical to the _resetStateForTest spec, and a stop()-before-
-    // start() (no-op today via the running guard) wouldn't abort a
-    // stale controller.
-    receiveAbortController = null;
+    // Null the controller so a caller introspecting state between
+    // stop+start (or never restarting) sees the pre-start() shape.
+    // start() constructs a fresh controller, so the happy path is
+    // unaffected; clearing here also ensures _resetStateForTest's
+    // null contract holds without a second branch.
+    stopController = null;
     // Reset the at-cap log gate so a `start → at-cap → stop → start`
     // round-trip doesn't inherit a stale `true` and miss the next
     // streak's transition warn. Production never restarts after stop,
@@ -1105,9 +1115,8 @@ async function stop() {
 // harnesses that need a clean slate per test.
 function _resetStateForTest() {
   running = false;
-  stopping = false;
   loopPromise = null;
-  receiveAbortController = null;
+  stopController = null;
   sqsClient = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
@@ -1149,7 +1158,17 @@ module.exports = {
     AT_CAP_PAUSE_WARN_MSG,
     AT_CAP_PAUSE_DEBUG_MSG,
     AT_CAP_RELEASED_INFO_MSG,
-    getReceiveAbortController: () => receiveAbortController,
+    // Live getter for the lifetime abort controller. Was previously
+    // `getReceiveAbortController` (per-iteration); the AbortSignal
+    // refactor consolidated to a single lifetime controller, so the
+    // name now matches its actual scope.
+    getStopController: () => stopController,
+    // Test-only initializer for the stop controller. Tests that
+    // exercise pollOnce directly (bypassing start()) need a
+    // controller to exist so the SDK send() call can read its
+    // signal. Always constructs fresh — to clear, use
+    // _resetStateForTest. Production code only sets this via start().
+    _setStopControllerForTest: () => { stopController = new AbortController(); },
     // Returns the in-flight count by reading `.size` on the live
     // Set. Kept under the historical name for test-site stability;
     // semantically still "how many handlers are tracked right now."
@@ -1173,10 +1192,10 @@ module.exports = {
     // actually crashing the loop. CAVEAT: if the test already
     // called start(), the REAL pollLoop is still running in the
     // background — overwriting the promise reference here doesn't
-    // halt it. Tests relying on this helper should either rely on
-    // `stopping=true` + `abort()` to retire the real loop within
-    // their assertions, or accept that `_resetStateForTest` in
-    // beforeEach is the cleanup point. `_resetStateForTest` itself
+    // halt it. Tests relying on this helper should either call
+    // stop() (which aborts the signal and retires the real loop)
+    // within their assertions, or accept that `_resetStateForTest`
+    // in beforeEach is the cleanup point. `_resetStateForTest` itself
     // sets loopPromise back to null.
     _setLoopPromiseForTest: (p) => { loopPromise = p; },
   },
