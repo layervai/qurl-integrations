@@ -255,9 +255,11 @@ async function handleFlowInteraction(interaction) {
 //     clicking; the interaction token is still live so a fresh reply
 //     is the right recovery.
 async function supersededRoutingFailureReply(interaction) {
-  const isComponent = typeof interaction.isMessageComponent === 'function'
-    && interaction.isMessageComponent();
-  if (isComponent && !interaction.replied && !interaction.deferred) {
+  // `isMessageComponent` is guaranteed to exist — `index.js` only
+  // routes here when `isMessageComponent() || isModalSubmit()` is
+  // true (interactionCreate listener), and discord.js declares both
+  // methods on the base Interaction class.
+  if (interaction.isMessageComponent() && !interaction.replied && !interaction.deferred) {
     try {
       await interaction.update({ content: SUPERSEDED_MSG, components: [] });
       return;
