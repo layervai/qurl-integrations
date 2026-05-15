@@ -6134,11 +6134,9 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
   // recipient, even if multiple resources fanned out to them) — keep
-  // the first VALID row per recipient_discord_id (passes all the skip
-  // guards below). The de-dup check fires before the validity checks
-  // intentionally: if the first row for a recipient is invalid the
-  // de-dup misses, the validity guards correctly skip it, and the
-  // next valid row for the same recipient is still considered.
+  // the first VALID row per recipient_discord_id. De-dup check fires
+  // first so the first valid row wins; an earlier invalid row (no
+  // refs / wrong status) doesn't poison the de-dup slot.
   //
   // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
   // Reversing the order would create a window where the recipient sees

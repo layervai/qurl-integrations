@@ -1317,10 +1317,11 @@ async function getSendItems(sendId, senderDiscordId) {
   return items.map(item => ({
     resource_id: item.resource_id,
     recipient_discord_id: item.recipient_discord_id,
-    // dm_channel_id / dm_message_id are set by updateSendDMRefs after a
-    // successful sendDM; legacy rows predating that wire-up have them
-    // unset, in which case the revoke path skips the DM edit. dm_status
-    // gates the same skip — failed deliveries have nothing to edit.
+    // dm_channel_id / dm_message_id are written by markSendDMDelivered
+    // after a successful sendDM; legacy rows predating that wire-up
+    // have them unset, in which case the revoke path skips the DM
+    // edit. dm_status gates the same skip — failed deliveries have
+    // nothing to edit.
     dm_channel_id: item.dm_channel_id,
     dm_message_id: item.dm_message_id,
     dm_status: item.dm_status,
