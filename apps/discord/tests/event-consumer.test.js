@@ -245,6 +245,56 @@ describe('event-consumer: processMessage dispatch paths', () => {
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(1);
   });
 
+  test('seenEventIds IS populated when dispatch reconstruction throws', async () => {
+    // recordSeen runs BEFORE the dispatch try/catch — by design,
+    // because the event has reached the worker (was "attempted-to-
+    // dispatch"). A poison message that throws on reconstruction
+    // still populates the LRU; the dup-debug log carries
+    // `dispatchOk: false` so ops can disambiguate real dups from
+    // poison-pill retries. Pin this contract so a refactor that
+    // hoists recordSeen past the try/catch can't quietly invert it.
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    client.actions.InteractionCreate.handle.mockImplementation(() => {
+      throw new Error('unknown subtype');
+    });
+    const seen = eventConsumer._test.seenEventIds;
+
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage({
+      eventType: 'INTERACTION_CREATE',
+      data: { type: 99 },
+      event_id: '0:throw',
+    })));
+
+    expect(seen.has('0:throw')).toBe(true);
+
+    // Re-deliver the same event_id; the dup-debug log should fire
+    // with dispatchOk: false (because reconstruction still throws).
+    await withMockedSqs(() => eventConsumer._test.processMessage(client, makeMessage(
+      { eventType: 'INTERACTION_CREATE', data: { type: 99 }, event_id: '0:throw' },
+      { receiptHandle: 'rh-dup' },
+    )));
+
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('event_id seen recently'),
+      expect.objectContaining({ eventId: '0:throw', dispatchOk: false }),
+    );
+  });
+
+  test('dup-debug log carries dispatchOk: true on the success-after-dup path', async () => {
+    sqsMock.on(DeleteMessageCommand).resolves({});
+    const client = makeStubClient();
+    const ok = { eventType: 'INTERACTION_CREATE', data: { id: 'i' }, event_id: '0:ok' };
+    await withMockedSqs(async () => {
+      await eventConsumer._test.processMessage(client, makeMessage(ok, { receiptHandle: 'rh-a' }));
+      await eventConsumer._test.processMessage(client, makeMessage(ok, { receiptHandle: 'rh-b' }));
+    });
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('event_id seen recently'),
+      expect.objectContaining({ eventId: '0:ok', dispatchOk: true }),
+    );
+  });
+
   test('seenEventIds not populated on malformed body or unknown eventType', async () => {
     // recordSeen sits AFTER the eventType gate, so envelope-shape
     // failures (malformed JSON, non-object, unknown eventType) must

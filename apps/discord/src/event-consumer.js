@@ -286,20 +286,6 @@ async function processMessage(client, message) {
   }
 
   const isDup = recordSeen(eventId);
-  if (isDup) {
-    // Debug log only — at-least-once delivery means a "dup" might
-    // actually be the first real attempt that an earlier worker
-    // received but didn't ACK, so we still process. Correctness is
-    // owned by Discord's interaction-token uniqueness and OCC at
-    // the flow-state layer. If ops wants an aggregatable dup-rate
-    // metric, add a `qurl_bot_event_dup_total{shardId}` counter
-    // alongside this log (reservation slot for the observability
-    // Phase 1.0 follow-on PR).
-    logger.debug('Event consumer: event_id seen recently', {
-      eventId,
-      shardId: parsed.shardId,
-    });
-  }
 
   // Reconstruct + emit via discord.js's internal dispatch path.
   // client.actions.InteractionCreate.handle is the same function the
@@ -311,9 +297,11 @@ async function processMessage(client, message) {
   // InteractionClass(client, data)`, and emits 'interactionCreate'.
   // The shared listener registered in src/index.js (gated on
   // isGateway || isWorker) handles routing.
+  let dispatchOk = true;
   try {
     client.actions.InteractionCreate.handle(data);
   } catch (err) {
+    dispatchOk = false;
     // Reconstruction failure (e.g., data shape we don't know how to
     // handle). Log but still delete — a poison message that throws
     // every time would otherwise loop until DLQ; logging surfaces
@@ -322,6 +310,26 @@ async function processMessage(client, message) {
       error: err.message,
       eventId,
       messageId: message.MessageId,
+    });
+  }
+
+  if (isDup) {
+    // Debug log only — at-least-once delivery means a "dup" might
+    // actually be the first real attempt that an earlier worker
+    // received but didn't ACK, so we still process. Correctness is
+    // owned by Discord's interaction-token uniqueness and OCC at
+    // the flow-state layer. `dispatchOk` lets ops disambiguate
+    // "this was actually delivered twice" from "this is a poison-
+    // pill we tried to dispatch on a prior receive and threw" —
+    // both show up as dups in the LRU because recordSeen runs
+    // before the dispatch try/catch. If ops wants an aggregatable
+    // dup-rate metric, add a `qurl_bot_event_dup_total{shardId,
+    // dispatchOk}` counter alongside this log (reservation slot
+    // for the observability Phase 1.0 follow-on PR).
+    logger.debug('Event consumer: event_id seen recently', {
+      eventId,
+      shardId: parsed.shardId,
+      dispatchOk,
     });
   }
 
@@ -539,6 +547,11 @@ async function stop() {
     // also resets stopping=false, so the happy path is unaffected.
     stopping = false;
     loopPromise = null;
+    // Null the abort controller too — keeps the post-stop shape
+    // identical to the _resetStateForTest spec, and a stop()-before-
+    // start() (no-op today via the running guard) wouldn't abort a
+    // stale controller.
+    receiveAbortController = null;
   }
 }
 

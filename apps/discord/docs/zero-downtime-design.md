@@ -222,6 +222,35 @@ the LRU will incorrectly drop legitimate events from sibling shards.
 Migrate the producer-side `event_id` to `${shard_id}:${s}` in the
 sharding PR; the worker-side LRU shape doesn't change.
 
+#### Trust boundary — SQS queue policy + envelope authenticity
+
+The worker tier treats every SQS message body as trusted input to
+`client.actions.InteractionCreate.handle`. Anyone who can
+`sqs:SendMessage` on `qurl-bot-events` can spoof an interaction
+payload (including `user.id`, `member.permissions`, etc.) and route
+it through the same dispatcher path as a real Discord-originated
+event. This is acceptable ONLY because the queue is locked down at
+the IAM layer:
+
+- The queue policy on `qurl-bot-events` (defined in the infra PR B
+  module) grants `sqs:SendMessage` exclusively to the gateway task
+  role's principal. No human IAM users have publish rights, and no
+  cross-account access is granted.
+- The gateway task role is itself locked to the gateway service's
+  ECS task definition; it can't be assumed from outside that
+  execution context.
+- `sqs:ReceiveMessage` + `sqs:DeleteMessage` are granted to the
+  worker task role only.
+
+If any of those constraints loosen (e.g., adding a queue publisher
+to a sibling service for shared event-shipping), the worker MUST
+gain envelope-shape validation + signature verification before the
+new publisher's messages reach `handle()`. Today's "trust the
+queue" shape is contingent on the closed publisher set.
+
+Tracked in the infra-side `qurl-bot-events` module README; this
+section is the consumer-side reminder of the contract.
+
 ### Pillar 2 — Cross-process Gateway session resume
 
 `@discordjs/ws` (the underlying library that `discord.js` wraps) exposes
