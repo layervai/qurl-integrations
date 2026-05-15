@@ -253,21 +253,17 @@ function recordSeen(eventId) {
 // dispatched (emit + DeleteMessage attempted)" against loopPromise
 // resolution.
 //
-// stopController unifies three previously-separate concerns:
-//   1. The per-iteration `receiveAbortController` that cancelled the
-//      in-flight long-poll ReceiveMessage on SIGTERM (without this,
-//      a SIGTERM arriving while the consumer is parked in the typical
-//      20-second long-poll wait would block stop() past the 10-second
-//      force-exit in gracefulShutdown).
-//   2. The `stopping` boolean polled by abortableSleep (which is now
-//      AbortSignal-event-driven, so a stop() during error backoff
-//      returns within a microtask rather than waiting on a 50ms tick).
-//   3. The pollLoop's while-loop terminator.
-// A single AbortController serves all three: the SDK consumes
-// `stopController.signal` for the SDK's abortSignal option, our
-// sleep wires `signal.addEventListener('abort', ...)`, and the
-// while-loop checks `signal.aborted`. Multiple listeners on one
-// AbortSignal is a supported standard pattern.
+// stopController drives three shutdown paths from a single signal:
+//   1. SDK long-poll cancellation — the receive's abortSignal option
+//      reads stopController.signal directly, so a SIGTERM landing
+//      mid-receive rejects with AbortError within tens of ms instead
+//      of waiting the full RECEIVE_WAIT_SECONDS (20s). Critical for
+//      fitting inside gracefulShutdown's 10s force-exit budget.
+//   2. abortableSleep wake-up — backpressure pauses and error
+//      backoffs register an 'abort' listener on stopController.signal
+//      and resolve on a microtask when stop() fires.
+//   3. pollLoop terminator — the while-loop reads signal.aborted.
+// Multiple listeners on one AbortSignal is a standard pattern.
 //
 // What stop() awaits: the poll loop (loopPromise) AND a
 // deadline-capped drain of detached handlers tracked by
@@ -860,33 +856,34 @@ function isAbortError(err) {
 // a missing controller to throw and crash the loop.
 function abortableSleep(ms) {
   return new Promise((resolve) => {
+    // Capture once so addEventListener and removeEventListener target
+    // the same controller by identity, even if module-level
+    // stopController is swapped during the sleep.
+    const ctrl = stopController;
     // Already-aborted fast path: a stop() that landed before this
-    // sleep started should return immediately (e.g., consecutive
-    // pollLoop iterations after stop() flipped the signal — the
-    // outer `while (!signal.aborted)` exit is the load-bearing
-    // path, but defense in depth keeps the contract sharp).
-    if (stopController?.signal.aborted) {
+    // sleep started returns immediately.
+    if (ctrl?.signal.aborted) {
       resolve();
       return;
     }
     let onAbort;
     const t = setTimeout(() => {
-      if (stopController && onAbort) {
-        stopController.signal.removeEventListener('abort', onAbort);
+      if (ctrl && onAbort) {
+        ctrl.signal.removeEventListener('abort', onAbort);
       }
       resolve();
     }, ms);
     // .unref()ed so a stray timer can't pin the event loop if the
     // loop exits via a different path mid-sleep.
     t.unref?.();
-    if (stopController) {
+    if (ctrl) {
       onAbort = () => {
         clearTimeout(t);
         resolve();
       };
       // Timeout-wins branch above removeEventListener's; { once: true }
       // here is defensive — AbortSignal fires 'abort' at most once per spec.
-      stopController.signal.addEventListener('abort', onAbort, { once: true });
+      ctrl.signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
@@ -986,21 +983,13 @@ function start(client) {
  * graceful-shutdown budget in `gracefulShutdown` (index.js).
  */
 async function stop() {
-  // Idempotent guards. The first caller through passes all three
-  // checks; the second caller (e.g., SIGTERM racing an
-  // uncaughtException, both routing through gracefulShutdown) hits
-  // either !running (if it arrives after the first cleared running
-  // below) or signal.aborted (if it arrives after abort() fired) and
-  // short-circuits. Either branch is sufficient — the OR is
+  // Idempotent guards. The first caller through passes both checks;
+  // the second caller (e.g., SIGTERM racing an uncaughtException, both
+  // routing through gracefulShutdown) hits either !running (if it
+  // arrives after the first cleared running below) or signal.aborted
+  // (if it arrives after abort() fired) and short-circuits. The OR is
   // belt-and-suspenders against ordering across the await below.
-  // This is NOT a hard single-stopper lock: two callers passing the
-  // gate in the same synchronous tick (impossible today since
-  // gracefulShutdown only calls stop() once) would both proceed.
-  // The `!stopController` middle check defends a theoretical state
-  // mismatch (running=true with controller=null is unreachable via
-  // start(), but matters under hot-reload or a _resetStateForTest
-  // call mid-run).
-  if (!running || !stopController || stopController.signal.aborted) return;
+  if (!running || stopController.signal.aborted) return;
   // Single abort() call wakes:
   //   1. The in-flight ReceiveMessage long-poll (SDK consumes the
   //      same signal and rejects send() with AbortError) — stop()

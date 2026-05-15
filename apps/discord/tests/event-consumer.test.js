@@ -742,9 +742,12 @@ describe('event-consumer: abort silently exits pollLoop', () => {
       expect.stringContaining('poll iteration failed'),
       expect.anything(),
     );
-    // No abortableSleep call — no further setInterval activity from
-    // the consumer beyond the baseline.
-    const finalIntervals = setIntervalSpy.mock.calls.length;
+    // No abortableSleep call — and even if there were, abortableSleep
+    // would not register a 50ms setInterval (it uses setTimeout +
+    // addEventListener). Filter both sides on ms===50 so Jest internals
+    // or other helpers that may register non-50ms setIntervals don't
+    // contaminate the assertion.
+    const finalIntervals = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50).length;
     expect(finalIntervals).toBe(baselineIntervals);
 
     setIntervalSpy.mockRestore();
@@ -752,19 +755,14 @@ describe('event-consumer: abort silently exits pollLoop', () => {
 });
 
 describe('event-consumer: abortableSleep (AbortSignal-driven)', () => {
-  // The pre-refactor (#387 item 1) implementation polled a `stopping`
-  // boolean every 50 ms via setInterval. The refactor replaced that
-  // with `stopController.signal.addEventListener('abort', ...)` so
-  // there is no longer a polling tick to leak. These tests pin the
-  // new contract: timeout-wins path returns on its own; abort-wins
-  // path returns on a microtask after abort() fires; the controller
-  // listener is cleaned up on either path.
+  // Tests pin abortableSleep's contract: timeout-wins path returns
+  // on its own; abort-wins path returns on a microtask after abort()
+  // fires; controller listener cleaned up on either path.
 
   test('timeout-wins-race path resolves without any setInterval polling tick', async () => {
-    // The previous version called setInterval(..., 50) every sleep —
-    // this test pins the absence of that pattern. A 50ms-tick
-    // setInterval re-introduction would regress shutdown latency
-    // (50ms granular wakes) and add per-sleep timer pressure.
+    // Pin the absence of 50ms-tick setInterval polling. A regression
+    // re-introducing it would coarsen shutdown latency (50ms granular
+    // wakes) and add per-sleep timer pressure.
     const setIntervalSpy = jest.spyOn(global, 'setInterval');
     try {
       eventConsumer._test._setStopControllerForTest();
@@ -792,10 +790,10 @@ describe('event-consumer: abortableSleep (AbortSignal-driven)', () => {
     eventConsumer._test.getStopController().abort();
     await sleepPromise;
     const elapsed = Date.now() - start;
-    // Generous bound: the abort path should resolve well under
-    // 1 second; failing here would mean the listener wasn't wired or
-    // the timeout outran the abort.
-    expect(elapsed).toBeLessThan(1000);
+    // Tight bound: the abort path resolves on a microtask, so this
+    // should be near-zero. Anything larger than ~50ms would indicate
+    // the listener wasn't wired or the timeout outran the abort.
+    expect(elapsed).toBeLessThan(50);
   });
 
   test('already-aborted signal: abortableSleep resolves immediately (fast path)', async () => {
@@ -972,13 +970,9 @@ describe('event-consumer: start/stop lifecycle', () => {
     // to inspect the second arg. Without this assertion, a refactor
     // that drops `{ abortSignal: ... }` from `sqsClient.send(cmd, options)`
     // wouldn't fail any test — and the graceful-shutdown latency
-    // guarantee would silently regress.
-    //
-    // The AbortSignal refactor (#387 item 1) consolidated the
-    // per-iteration `receiveAbortController` into a single lifetime
-    // `stopController`. The SDK now reads `stopController.signal`
-    // directly; this test pins THAT signal is passed, not a fresh
-    // per-iteration one.
+    // guarantee would silently regress. The signal passed must be
+    // the lifetime stopController's signal, not a fresh per-iteration
+    // controller.
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const realClient = new SQSClient({ region: 'us-east-2' });
     const sendSpy = jest.spyOn(realClient, 'send');
