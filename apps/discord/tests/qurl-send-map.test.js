@@ -5116,6 +5116,30 @@ describe('handleConfirmVoiceEveryone', () => {
       }),
     );
   });
+
+  test('success-log: voice_member_count tracks channel.members.size, NOT valid.length, under partial-cache drops', async () => {
+    // Locks down the voice_member_count semantic: it's the *raw* size
+    // of channel.members BEFORE the partial-cache + bot filter drop
+    // members. A regression that swaps it to `valid.length` would
+    // pass the happy-path test (counts match when no drops) but lose
+    // the audit signal — operators would no longer see the shrinkage
+    // gap (voice_member_count - valid_count = drops).
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    // Inject a partial-cache row so channel.members.size = 3 but
+    // valid.length stays at 2 after the partial-cache drop.
+    const channel = int.guild.channels.cache.get(VOICE_CH);
+    channel.members.set('partial-cache-id', {});
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.objectContaining({
+        valid_count: 2,
+        partial_cache_drops: 1,
+        voice_member_count: 3,
+      }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
