@@ -99,6 +99,21 @@ function withMockedSqs(fn) {
   return fn();
 }
 
+// Run `fn` with isWorkerDispatch flipped true (matches the
+// synchronous flag-wrap processMessage performs around handle()),
+// then restore. Used by tests that exercise trackDispatch directly
+// rather than going through processMessage. Lives at module scope
+// so both the start/stop lifecycle and backpressure describe blocks
+// share one definition.
+function withWorkerDispatch(fn) {
+  eventConsumer._test._setWorkerDispatchingForTest(true);
+  try {
+    return fn();
+  } finally {
+    eventConsumer._test._setWorkerDispatchingForTest(false);
+  }
+}
+
 describe('event-consumer: recordSeen LRU', () => {
   const { recordSeen, seenEventIds, SEEN_EVENT_ID_CAP } = eventConsumer._test;
 
@@ -912,17 +927,6 @@ describe('event-consumer: start/stop lifecycle', () => {
   // that pollLoop's loop body actually runs (asserts receiveCount
   // ≥ 1), which covers the underlying concern.
 
-  // Helpers reused across the drain tests below. Local rather than
-  // module-level because they assume the start/stop lifecycle setup.
-  function withWorkerDispatchHelper(fn) {
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      return fn();
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
-    }
-  }
-
   test('stop() drains in-flight handlers before resolving (settled within deadline)', async () => {
     // Pins the drain contract: stop() should await the in-flight
     // handler promises captured by trackDispatch before returning,
@@ -943,7 +947,7 @@ describe('event-consumer: start/stop lifecycle', () => {
 
     // Register two resolvable promises via trackDispatch.
     const resolvers = [];
-    withWorkerDispatchHelper(() => {
+    withWorkerDispatch(() => {
       for (let i = 0; i < 2; i += 1) {
         let resolve;
         const p = new Promise((r) => { resolve = r; });
@@ -979,7 +983,7 @@ describe('event-consumer: start/stop lifecycle', () => {
     eventConsumer.start(client);
 
     // Register a never-resolving promise so the drain hits its deadline.
-    withWorkerDispatchHelper(() => {
+    withWorkerDispatch(() => {
       eventConsumer.trackDispatch(new Promise(() => {}));
     });
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
@@ -1051,19 +1055,6 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     for (let i = 0; i < n; i += 1) {
       // eslint-disable-next-line no-await-in-loop -- sequential by design
       await new Promise((r) => setImmediate(r));
-    }
-  }
-
-  // Run `fn` with isWorkerDispatch flipped true (matches the
-  // synchronous flag-wrap processMessage performs around handle()),
-  // then restore. Six tests repeat this pattern; helper keeps the
-  // setup intent visible and the flag flip impossible to miss.
-  function withWorkerDispatch(fn) {
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      return fn();
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
     }
   }
 
