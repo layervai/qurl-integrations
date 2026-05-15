@@ -4307,16 +4307,12 @@ async function handleQurlSlashSend(interaction, params) {
     // Correct behavior (you can't subtract from "everyone") but
     // worth knowing if support asks.
     //
-    // Gated on `valid.length > 0` as defense-in-depth. Structurally
-    // redundant today: the early-return at the top of this function
-    // already rejects `!recipientsOmitted && valid.length === 0`, and
-    // `massMentionExpanded` implies `recipientsOmitted === false`
-    // (no @everyone token without a recipients arg). So the only
-    // arrival shape here has `valid.length > 0`. Keeping the gate
-    // pins the EVERYONE-mode invariant locally — a future refactor
-    // that loosens or moves the upstream early-return can't silently
-    // land us in EVERYONE-mode with an empty recipient set (which
-    // would render a card with no recipients and no picker).
+    // Gated on `valid.length > 0` as defense-in-depth — pins the
+    // EVERYONE-mode invariant locally so a future refactor that
+    // loosens the upstream `!recipientsOmitted && valid.length === 0`
+    // early-return can't silently land us in EVERYONE-mode with no
+    // recipients (which would render a card with no recipients AND
+    // no picker).
     //
     // ORDERING: this branch deliberately precedes the voice-mode
     // auto-default below. `massMentionExpanded` requires
