@@ -2877,9 +2877,13 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     // linearly. discord.js may also coalesce GUILD_REQUEST_MEMBERS
     // internally, but we don't rely on that.
     const aliceId = '500000000000000010';
-    // Pin the same guild object across both invocations — keyed by
-    // guild.id, the in-flight map only coalesces same-guild calls.
-    const sharedFetch = jest.fn(() => new Promise(() => { /* never resolves */ }));
+    // A controllable fetch — caller resolves `release` after the
+    // assertion so both handlers complete cleanly. Without the resolve,
+    // the two awaiting `handleQurlFile` calls would leak through to
+    // process exit and Jest's `--detectOpenHandles` would surface them.
+    let release;
+    const fetchGate = new Promise((r) => { release = r; });
+    const sharedFetch = jest.fn(() => fetchGate);
     const sharedGuild = {
       id: 'shared-guild',
       members: { cache: new Map(), fetch: sharedFetch },
@@ -2897,18 +2901,16 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       int.memberPermissions = { has: jest.fn(() => true) };
       return int;
     }
-    const int1 = makeShared();
-    const int2 = makeShared();
-    // Fire both concurrently. handleQurlFile awaits the pre-warm, but
-    // because sharedFetch never resolves we don't actually need to
-    // await the full handlers — just trigger them and assert the
-    // fetch was called at most once across both.
-    handleQurlFile(int1);
-    handleQurlFile(int2);
+    const p1 = handleQurlFile(makeShared());
+    const p2 = handleQurlFile(makeShared());
     // Microtask flush so both handlers reach the prewarm await.
     await new Promise((r) => setImmediate(r));
     const prewarmCalls = sharedFetch.mock.calls.filter(isPrewarmCall);
     expect(prewarmCalls.length).toBe(1);
+    // Release the gate so handlers settle and Jest doesn't carry an
+    // open handle past the test.
+    release(new Map());
+    await Promise.all([p1, p2]);
   });
 
   test('members.fetch() rejection is swallowed — flow continues in degraded mode', async () => {

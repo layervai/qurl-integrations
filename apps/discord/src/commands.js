@@ -245,11 +245,14 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 // multi-tenant gateway — eagerly fetching every member of every joined
 // guild on connect would blow the rate-limit budget at install spikes).
 // Shape-only — permission gating happens later inside the parser via
-// `allowMassMention` / `role.mentionable`. Word-boundary class matches
-// recipient-parser.js's `EVERYONE_TOKEN_RE` so `@everyonefoo` doesn't
-// false-trigger the fetch (and a drift between the two would silently
-// cache-warm for inputs the parser then ignores).
+// `allowMassMention` / `role.mentionable`. Word-boundary class is a
+// parallel copy of recipient-parser.js's `EVERYONE_TOKEN_RE` so
+// `@everyonefoo` doesn't false-trigger the fetch (drift between the
+// two would silently cache-warm for inputs the parser then ignores).
+// If `EVERYONE_TOKEN_RE` ever moves to a shared module, derive this
+// from it rather than maintaining the parallel copy.
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
+const ROLE_MENTION_HINT_RE = /<@&\d+>/;
 
 // Helper for the two pre-warm sites. Returns a Promise so the caller
 // can await before reading `guild.members.cache`. Swallows errors —
@@ -274,6 +277,10 @@ const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d
 // in parallel.
 const prewarmInFlight = new Map();
 async function prewarmGuildMembersCache(guild, logCtx) {
+  // Uniform Promise return shape regardless of which branch the caller
+  // hits — early-exit paths used to resolve `undefined`, which works
+  // for `await prewarmGuildMembersCache(...)` callers but would surprise
+  // a future caller that does `.then(...)`.
   if (!guild || !guild.members || typeof guild.members.fetch !== 'function') return;
   const cacheSize = guild.members.cache?.size ?? 0;
   if (cacheSize >= (guild.memberCount ?? Infinity)) return;
@@ -3826,7 +3833,15 @@ async function handleQurlSlashSend(interaction, params) {
     // refactor switching to `interaction.member.permissions` would
     // silently lose the channel-overwrite respect — keep this property.
     const canMentionEveryone = interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone) === true;
-    if (MASS_MENTION_HINT_RE.test(recipientsRaw || '')) {
+    // Skip the fetch when only `@everyone` is in the input AND the
+    // sender lacks MENTION_EVERYONE — the parser will deny the
+    // expansion (massMentionDenied), so the chunk request would be
+    // wasted. Role-mention shapes (`<@&id>`) still trigger the fetch
+    // regardless of permission because role expansion gates on
+    // `role.mentionable === true` per-role, not the global perm.
+    const hasMassMention = MASS_MENTION_HINT_RE.test(recipientsRaw || '');
+    const hasRoleMention = ROLE_MENTION_HINT_RE.test(recipientsRaw || '');
+    if (hasMassMention && (canMentionEveryone || hasRoleMention)) {
       await prewarmGuildMembersCache(interaction.guild, { caller: 'handleQurlSlashSend' });
     }
     const parsed = parseRecipientMentions(recipientsRaw, interaction, {
