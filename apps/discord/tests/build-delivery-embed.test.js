@@ -522,7 +522,7 @@ describe('buildRevokedDMPayload — post-revoke recipient-side render', () => {
     capturedEmbeds.length = 0;
     buildRevokedDMPayload({ senderAlias: 'Vik' });
     expect(capturedEmbeds[0]._description).toContain('**Vik** closed the door.');
-    expect(capturedEmbeds[0]._description).toContain('This link is no longer active.');
+    expect(capturedEmbeds[0]._description).toContain('This qURL is no longer active.');
   });
 
   it('passes components: [] explicitly so the Step Through button is cleared on edit', () => {

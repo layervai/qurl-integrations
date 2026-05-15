@@ -805,7 +805,7 @@ function buildRevokedDMPayload({ senderAlias }) {
   const safeSender = sanitizeDisplayName(senderAlias);
   const embed = new EmbedBuilder()
     .setColor(COLORS.QURL_BRAND)
-    .setDescription(`🚪 **${safeSender}** closed the door.\nThis link is no longer active.`);
+    .setDescription(`🚪 **${safeSender}** closed the door.\nThis qURL is no longer active.`);
   return { embeds: [embed], components: [] };
 }
 
