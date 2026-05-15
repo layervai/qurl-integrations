@@ -790,12 +790,16 @@ function packBulkDeliveryComponents(qurlLinks) {
 // trimming a trailing lone high surrogate if the cap lands mid-pair
 // so the result is never an invalid UTF-16 sequence. Discord renders
 // a lone surrogate as tofu; the trim ensures a clean cut.
-function capUtf16Codepoints(s, maxUtf16Units) {
+function capUtf16Units(s, maxUtf16Units) {
   if (s.length <= maxUtf16Units) return s;
   let truncated = s.slice(0, maxUtf16Units);
   const lastCharCode = truncated.charCodeAt(truncated.length - 1);
   // High-surrogate range (U+D800..U+DBFF): if the cap split a pair,
-  // drop the orphan so the result decodes cleanly.
+  // drop the orphan so the result decodes cleanly. The low-surrogate
+  // case (U+DC00..U+DFFF at the boundary) is unreachable by
+  // construction — `slice(0, n)` would have excluded a low surrogate
+  // at position n, so the high half is the only orphan possible at
+  // position n-1. The asymmetric check is correct, not a bug.
   if (lastCharCode >= 0xD800 && lastCharCode <= 0xDBFF) {
     truncated = truncated.slice(0, -1);
   }
@@ -845,7 +849,7 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   // units codepoint-aware so the API never rejects the embed.
   const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
   const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
-  const authorName = capUtf16Codepoints(
+  const authorName = capUtf16Units(
     safeGuildName ? `${safeSenderPlain} · ${safeGuildName}` : safeSenderPlain,
     256,
   );

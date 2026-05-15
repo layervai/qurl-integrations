@@ -1848,6 +1848,26 @@ describe('handleAddRecipients — happy path (location)', () => {
     if (typeof payload.embeds[0].toJSON === 'function') {
       expect(payload.embeds[0].toJSON()).toEqual(payload.embeds[1].toJSON());
     }
+    // Link-ordering contract: the two minted qURLs (file then location,
+    // per the mintLinks mock sequencing above) must map positionally
+    // onto the Step Through buttons in the assembled payload. A future
+    // refactor that shuffles recipientLinks[recipient.id] between
+    // population and the packBulkDeliveryComponents call would
+    // silently mis-route recipients to the wrong qURL otherwise.
+    // discord.js mock here is the lightweight chainable variant —
+    // setURL.mock.calls captures the URL each button was built with;
+    // pull the URL via the first call's first arg.
+    const urls = payload.components
+      .flatMap(row => row.components)
+      .map(b => b.setURL.mock.calls[0]?.[0])
+      .filter(Boolean);
+    // The two step-throughs (file then location) precede the trust
+    // button; the trust button's URL is the hardcoded brand landing.
+    expect(urls).toEqual([
+      'https://q.test/share-file',
+      'https://q.test/share-loc',
+      'https://layerv.ai/qurl/',
+    ]);
   });
 
   // Locks the single-emission contract: a sendConfig with both file
