@@ -7899,10 +7899,11 @@ const commands = [
       if (sub === 'file') return handleQurlFile(interaction);
       if (sub === 'map') {
         if (!config.MAP_COMMAND_ENABLED) {
-          // Debug (not warn) because Discord caches command defs for
-          // ~1h after a registration change — this is expected
-          // post-deploy traffic, not an error. Grep this line to see
-          // when stale-client traffic has decayed.
+          // Debug (not warn) — expected post-deploy traffic from
+          // clients with cached command defs, not an error. Cache
+          // TTL depends on registration mode: up to 1h on global
+          // (multi-tenant) registration, near-instant on guild-
+          // scoped (single-GUILD_ID). Grep this line to see decay.
           logger.debug('qurl_map_disabled_reply: stale-client /qurl map submission caught by toggle gate', {
             user_id: interaction.user?.id,
             guild_id: interaction.guildId,
