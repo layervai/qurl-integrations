@@ -229,25 +229,90 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // A future refactor that goes back to baking a static label into the
   // embed ("Door closes in **24 hours**" forever) would silently
   // regress this UX — the assertion below catches it.
-  it('renders Discord native relative-time <t:N:R> for the Door-closes line', () => {
+  it('renders Discord native relative-time <t:N:R> in the description (Closes line)', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
-    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(call => call);
-    const doorField = fields.find(f => typeof f.value === 'string' && f.value.includes('Door closes'));
-    expect(doorField).toBeDefined();
-    expect(doorField.value).toBe('\ud83d\udd50 Door closes <t:1735689600:R>');
+    // Closes line is folded into the embed description alongside the
+    // sender line (tightened layout \u2014 was a separate addFields() row,
+    // which Discord padded with extra vertical whitespace and pushed
+    // the button further away).
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toMatch(/🕐 Closes <t:1735689600:R>/);
     // Locks against accidental reversion to a static label
-    expect(doorField.value).not.toMatch(/Door closes in \*\*\d/);
+    expect(desc).not.toMatch(/Closes in \*\*\d/);
   });
 
   // Defensive guard: a future caller that drops `expiresAt` (or passes
-  // null/undefined/NaN) would otherwise render literal "<t:undefined:R>"
-  // or "<t:NaN:R>" to recipients. The fail-loud throw matches the
-  // contract guard in handleAddRecipients.
-  it('throws if expiresAt is missing or non-finite (fail-loud)', () => {
-    for (const bad of [undefined, null, NaN, Infinity, 'soon', {}]) {
-      expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
-        .toThrow(/expiresAt must be a finite Unix-seconds number/);
-    }
+  // null/undefined/NaN/a float) would otherwise render a malformed
+  // "<t:undefined:R>" / "<t:NaN:R>" / "<t:1735689600.5:R>" to recipients.
+  // Discord's <t:N:R> markdown accepts only integer Unix seconds, which
+  // is what the lone call site produces via `Math.floor`; the
+  // `Number.isInteger` guard tightens the contract from any-finite-number
+  // to exactly-what-the-markdown-accepts. Matches the contract guard in
+  // handleAddRecipients.
+  // Positive counterpart to the "no clean upper bound" reasoning in
+  // the adjacent throw test — MAX_SAFE_INTEGER itself is a valid
+  // integer that Number.isInteger accepts, so the validator passes it
+  // through unchanged.
+  it('accepts Number.MAX_SAFE_INTEGER as a positive integer (no synthetic upper bound)', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: Number.MAX_SAFE_INTEGER });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toContain(`🕐 Closes <t:${Number.MAX_SAFE_INTEGER}:R>`);
+  });
+
+  // Note on the "beyond MAX_SAFE_INTEGER" boundary: doubles can
+  // exactly represent every integer up to 2^53, so 2^53 itself is
+  // still `Number.isInteger == true`. Above 2^53, additions of 1
+  // round to the nearest representable double (which is also an
+  // integer at that magnitude), so `Number.isInteger` keeps returning
+  // true. There is no clean "finite integer that Number.isInteger
+  // rejects" boundary — the rejection set is exactly: non-finite +
+  // non-integer-floats + non-positive.
+  //
+  // it.each() over for-loop: each input gets its own test name so a
+  // regression on one shape doesn't collapse into a single anonymous
+  // failure. Failure output reads e.g. "(1735689600.5) throws fail-loud"
+  // instead of having to dig into the loop body.
+  it.each([
+    [undefined],
+    [null],
+    [NaN],
+    [Infinity],
+    [-Infinity],
+    ['soon'],
+    [{}],
+    [1735689600.5],                  // float
+    [0.1],                           // float
+    [0],                             // non-positive
+    [-1],                            // non-positive (would render as "55 years ago")
+    [-1735689600],                   // non-positive (negative timestamp)
+  ])('throws fail-loud for invalid expiresAt: %p', (bad) => {
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: bad }))
+      .toThrow(/expiresAt must be a positive integer Unix-seconds number/);
+  });
+
+  // Locks the operator-facing diagnostic shape: the throw message must
+  // include both the stringified value AND its typeof so an oncall
+  // doesn't have to guess whether the bad input was an object, a
+  // function, or a stringified number. `${{}}` would otherwise coerce
+  // to `[object Object]` via valueOf (acceptable), but the typeof tag
+  // is what makes the distinction loud.
+  it('error message exposes both String(value) and typeof for diagnosis', () => {
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: {} }))
+      .toThrow(/got \[object Object\], typeof=object/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 'soon' }))
+      .toThrow(/got soon, typeof=string/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600.5 }))
+      .toThrow(/got 1735689600\.5, typeof=number/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: -1 }))
+      .toThrow(/got -1, typeof=number/);
+    // null vs undefined surfaces matter for triage: `typeof null` is
+    // `'object'` (a longstanding JS oddity), so `got null, typeof=object`
+    // is what the operator should see — different shape from
+    // `got undefined, typeof=undefined`. Pin both.
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: null }))
+      .toThrow(/got null, typeof=object/);
+    expect(() => buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: undefined }))
+      .toThrow(/got undefined, typeof=undefined/);
   });
 
 
@@ -255,27 +320,167 @@ describe('buildDeliveryPayload — senderAlias sanitization', () => {
   // `.setURL(qurlLink)` (or downgrades to a non-Link style) would leave
   // recipients with a button that doesn't navigate anywhere. This test
   // asserts the button is built as Link-style with the supplied qURL,
-  // and that the 🔗 emoji prefix survives — Link buttons render gray
-  // and the emoji is what carries the "this is a button" affordance.
+  // and that the 🚪 emoji survives — Link buttons render gray, and the
+  // door emoji ties the "opened a door for you" copy to the action so
+  // the button reads as intentional rather than generic-CTA-grey.
   it('builds the Step Through button as a Link-style button with the qURL as its URL', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', qurlLink: 'https://qurl.link/#at_unique_token' });
     // Last button constructed in the buildDeliveryPayload call is the Step Through.
     const stepThrough = capturedButtons[capturedButtons.length - 1];
     expect(stepThrough).toBeDefined();
     expect(stepThrough._label).toBe('Step Through');
-    expect(stepThrough._emoji).toBe('🔗');
+    expect(stepThrough._emoji).toBe('🚪');
     expect(stepThrough._style).toBe(5); // ButtonStyle.Link
     expect(stepThrough._url).toBe('https://qurl.link/#at_unique_token');
     expect(stepThrough.setURL).toHaveBeenCalledWith('https://qurl.link/#at_unique_token');
   });
 
+  // Contract pin: buildDeliveryPayload does NOT escape markdown in
+  // personalMessage. By contract (documented at commands.js:631-639),
+  // the call sites pipe raw input through sanitizeMessage before
+  // passing it here. This test pins that the function renders the
+  // string as-is — so a future refactor that adds an internal escape
+  // pass (changing the contract) will surface the change loudly via
+  // this test, not silently double-escape sanitized input.
+  //
+  // The senderAlias path is the opposite: sanitizeDisplayName is called
+  // inside buildDeliveryPayload and DOES escape, pinned by the
+  // 'escapes markdown chars in alias' test above.
+  it('renders personalMessage as-is (no internal markdown escape — by contract)', () => {
+    const raw = '[click](https://evil.com) **bold**';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: raw });
+    const desc = capturedEmbeds[0]._description;
+    // Brackets, parens, and asterisks are NOT backslash-escaped —
+    // verifies buildDeliveryPayload passes them through verbatim.
+    expect(desc).toContain(`> *"${raw}"*`);
+    expect(desc).not.toContain('\\[click');
+    expect(desc).not.toContain('\\*\\*bold');
+  });
+
+  // Regression net for the codepoint-aware cap (closes #345): a 281-
+  // codepoint string ending in a 4-byte emoji at the boundary must
+  // NOT split the emoji into a lone high surrogate. Array.from + slice
+  // is the codepoint-aware pattern (one array element per codepoint,
+  // including surrogate pairs), mirroring sanitizeDisplayName's cap.
+  //
+  // 🎉 (U+1F389) is a high+low surrogate pair: 2 UTF-16 units, 1
+  // codepoint. The string below has 279 ASCII chars + 🎉 = 280
+  // codepoints exactly, then an extra ASCII tail at codepoint 281
+  // that must NOT make it through the cap.
+  it('does not split surrogate pairs at the 280-codepoint personalMessage boundary (#345)', () => {
+    const message = 'A'.repeat(279) + '🎉' + 'X';  // 281 codepoints; codepoint 280 = 🎉
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: message });
+    const desc = capturedEmbeds[0]._description;
+    // The full 🎉 survives at the boundary (intact codepoint, not split).
+    expect(desc).toContain('🎉');
+    // No lone high surrogate (\uD83C is the high half of 🎉).
+    expect(desc).not.toMatch(/\uD83C(?![\uDC00-\uDFFF])/);
+    // The trailing 'X' beyond codepoint 280 is dropped.
+    expect(desc).not.toMatch(/🎉X/);
+  });
+
+  // `> ` line-prefix is the most natural blockquote-injection attempt
+  // at this surface — a personalMessage that looks like it embeds its
+  // own blockquote should still be wrapped in the outer `> *"..."*`,
+  // not "fixed up" by the function. Pinned alongside [](), ** to
+  // round out the attack-shape coverage of the no-internal-escape
+  // contract. The `\n` inside the input is flattened to a space by
+  // the newline-flatten pass, so the second `>` lands inline rather
+  // than starting a new blockquote — that's the expected behavior.
+  it('renders personalMessage with `> ` prefixes verbatim (no auto-fix of nested blockquote)', () => {
+    const raw = '> faux quote\n> still faux';
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: raw });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).toContain('> *"> faux quote > still faux"*');
+  });
+
   it('flattens newlines in personal message so the styled blockquote stays single-line', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', personalMessage: 'line one\nline two\r\nline three' });
-    const fields = capturedEmbeds[0].addFields.mock.calls.flatMap(c => c);
-    const msgField = fields.find(f => typeof f.value === 'string' && f.value.includes('line one'));
-    expect(msgField).toBeDefined();
-    expect(msgField.value).toBe('> *"line one line two line three"*');
-    expect(msgField.value).not.toMatch(/\n/);
+    const desc = capturedEmbeds[0]._description;
+    // Personal-message line sits inside the description block (folded
+    // alongside sender + expiry so all three render in design order —
+    // sender → message → expiry).
+    expect(desc).toContain('> *"line one line two line three"*');
+    // Both \n and \r inside the message itself are flattened to spaces;
+    // any newline remaining on the message line would mean the
+    // [\r\n]+ → ' ' collapse regressed.
+    const messageLine = desc.split('\n').find(l => l.includes('line one'));
+    expect(messageLine).toBeDefined();
+    expect(messageLine).not.toMatch(/[\n\r]/);
+  });
+
+  // Ordering depends on which Embed slot each piece lands in: Discord
+  // renders the description block above any fields, so a personal
+  // message split into addFields would land AFTER the expiry line, not
+  // between sender and expiry. Folding all three into one
+  // setDescription is what guarantees the design ordering. Pin the
+  // relative order so a future refactor that splits any of the three
+  // back into addFields would be caught.
+  it('renders sender → personal message → expiry in that order when all three are present', () => {
+    buildDeliveryPayload({
+      ...baseArgs,
+      senderAlias: 'Vik',
+      personalMessage: 'Quarterly numbers — for your eyes only.',
+      expiresAt: 1735689600,
+    });
+    const desc = capturedEmbeds[0]._description;
+    // split-then-index-by-line over indexOf-substring-position: an
+    // `indexOf` check would false-pass if a future personalMessage
+    // happened to contain the literal substring `"Closes <t:"`,
+    // ordering both indices the same way. Pin position by line.
+    const lines = desc.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toContain('Quarterly numbers');
+    expect(lines[2]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    // And no addFields call — folded entirely into description.
+    expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
+  });
+
+  // When personalMessage is absent, the description still renders
+  // sender → expiry in order (no orphaned blank line between them).
+  it('renders sender → expiry with no gap when personalMessage is omitted', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', expiresAt: 1735689600 });
+    const desc = capturedEmbeds[0]._description;
+    const lines = desc.split('\n');
+    // EXACTLY 2 lines — guards against an orphan blank line creeping
+    // in between sender and expiry when personalMessage is absent.
+    // Do NOT loosen to `toBeGreaterThanOrEqual(2)`: a 3-line desc
+    // would mean someone re-introduced `descLines.push('')` for
+    // padding, which renders as a visible empty row in Discord.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
+    // Mirror the all-three-pieces ordering test: also assert addFields
+    // is never called on the no-personalMessage path. Belt-and-braces
+    // against a future regression that adds a field only when one of
+    // the slots is empty (e.g. a "no message attached" placeholder).
+    expect(capturedEmbeds[0].addFields).not.toHaveBeenCalled();
+  });
+
+  // Belt-and-braces: a personalMessage that collapses to "" after
+  // newline-flatten + trim must not render a visible-but-empty
+  // `> *""*` blockquote between sender and expiry. The call sites
+  // pass `sanitizeMessage(...) || null` so an empty input short-
+  // circuits at the outer `if (personalMessage)` today, but a
+  // future caller that bypasses that contract would otherwise hit
+  // the empty-quote regression.
+  it('omits the blockquote line when personalMessage collapses to empty after trim', () => {
+    buildDeliveryPayload({
+      ...baseArgs,
+      senderAlias: 'Vik',
+      personalMessage: '  \n \n  ',
+      expiresAt: 1735689600,
+    });
+    const desc = capturedEmbeds[0]._description;
+    expect(desc).not.toContain('> *""*');
+    const lines = desc.split('\n');
+    // EXACTLY 2 lines — same orphan-blank-line guard as the no-
+    // personalMessage path above; an empty blockquote line creeping
+    // back in would push this to 3 and render visibly in Discord.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('**Vik** opened a door for you.');
+    expect(lines[1]).toMatch(/^🕐 Closes <t:1735689600:R>$/);
   });
 });
 

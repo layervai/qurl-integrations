@@ -180,24 +180,6 @@ jest.mock('../src/qurl', () => ({
 
 jest.mock('../src/places', () => ({ searchPlaces: jest.fn().mockResolvedValue([]) }));
 
-// Mock `expiryToMs` as a jest.fn that defaults to the real implementation,
-// so the #352 "hoist throws before recordQURLSendBatch" tests can
-// `mockImplementationOnce(() => { throw ... })` and have the override
-// reach the commands.js call site. CommonJS destructure in commands.js
-// (`const { expiryToMs } = require('./utils/time')`) captures the
-// jest.fn reference at module-load time — without the jest.mock here,
-// post-hoc reassignment of `time.expiryToMs` would NOT replace the
-// local binding inside commands.js, and the throw-tests would pass
-// vacuously (the file-prep code throws first because
-// `mockDownloadAndUpload` returns undefined by default).
-jest.mock('../src/utils/time', () => {
-  const actual = jest.requireActual('../src/utils/time');
-  return {
-    ...actual,
-    expiryToMs: jest.fn(actual.expiryToMs),
-  };
-});
-
 // Stub flow-state so loading commands.js doesn't reach into DDB.
 // These tests target the back-half (monitorLinkStatus, revokeAllLinks,
 // handleAddRecipients) — none of which touch flow_state — but
@@ -209,6 +191,21 @@ jest.mock('../src/flow-state', () => ({
   transitionFlow: jest.fn(),
   deleteFlow: jest.fn(),
 }));
+
+// Partial-mock time.js so individual tests can force `expiryToMs` to
+// throw without affecting the rest of the suite. Real implementation
+// falls back to DEFAULT_EXPIRY_MS for malformed input (never throws),
+// so the audit-blackhole / orphan-DDB-row failure mode this test pins
+// against is unreachable today — the mock is the only way to exercise
+// the validate-before-DB-write invariant.
+jest.mock('../src/utils/time', () => {
+  const actual = jest.requireActual('../src/utils/time');
+  return {
+    ...actual,
+    expiryToMs: jest.fn(actual.expiryToMs),
+  };
+});
+const mockTime = require('../src/utils/time');
 
 // ---------------------------------------------------------------------------
 // Require modules under test
@@ -1341,6 +1338,44 @@ describe('handleAddRecipients — file path failure modes', () => {
     );
 
     expect(result.msg).toMatch(/pool exhausted/i);
+  });
+});
+
+describe('handleAddRecipients — validate expires_in BEFORE recordQURLSendBatch (#352)', () => {
+  // Pins the invariant that a thrown `expiryToMs` aborts the dispatch
+  // BEFORE any DDB rows are written. Today's `expiryToMs` falls back
+  // to DEFAULT_EXPIRY_MS for malformed input and never throws, so this
+  // path is unreachable in practice — but a future regression in
+  // time.js (or a future caller that swaps the helper for one that
+  // does throw) would otherwise leave orphan DDB rows + audit-blackhole
+  // for the batch. The mock forces the throw to exercise the ordering.
+  afterEach(() => { mockTime.expiryToMs.mockImplementation(jest.requireActual('../src/utils/time').expiryToMs); });
+
+  it('does not write to DB if expiryToMs throws (no orphan rows, no audit-blackhole)', async () => {
+    // Fixture uses a VALID expires_in so the entry-level allowed-set
+    // gate (added on top of the hoist) passes — we want the synthetic
+    // throw to fire at the hoist site, not be short-circuited by the
+    // pre-flight gate above.
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-1', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({ resource_id: 'res-new', fileBuffer: new ArrayBuffer(10) });
+    mockMintLinks.mockResolvedValueOnce([{ qurl_link: 'https://q.test/1', resource_id: 'res-new' }]);
+    mockTime.expiryToMs.mockImplementationOnce(() => { throw new Error('synthetic expiryToMs failure'); });
+
+    await expect(handleAddRecipients(
+      'send-1', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    )).rejects.toThrow(/synthetic expiryToMs failure/);
+
+    // The structural invariant: recordQURLSendBatch must NOT have been
+    // reached, so no orphan DDB rows for the QURL links minted above.
+    expect(mockDb.recordQURLSendBatch).not.toHaveBeenCalled();
+    // sendDM also unreached — defense-in-depth that nothing actually
+    // dispatched downstream of the bad expiry.
+    expect(mockSendDM).not.toHaveBeenCalled();
   });
 });
 
