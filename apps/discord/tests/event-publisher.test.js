@@ -43,6 +43,28 @@ const sqsMock = mockClient(SQSClient);
 const eventPublisher = require('../src/event-publisher');
 const logger = require('../src/logger');
 
+// AWS_REGION setup: event-publisher's createSqsClient() throws if
+// AWS_REGION isn't set, and `start()` calls it lazily. Most tests
+// inject a mock client via `_setSqsClientForTest` BEFORE start(),
+// but the start/stop lifecycle tests call start() directly. Seed a
+// fake region so the suite passes locally without depending on CI
+// env. Restore the original value in afterAll so cross-suite state
+// stays clean (jest --runInBand shares the process env).
+let originalAwsRegion;
+beforeAll(() => {
+  originalAwsRegion = process.env.AWS_REGION;
+  if (!process.env.AWS_REGION) {
+    process.env.AWS_REGION = 'us-east-2';
+  }
+});
+afterAll(() => {
+  if (originalAwsRegion === undefined) {
+    delete process.env.AWS_REGION;
+  } else {
+    process.env.AWS_REGION = originalAwsRegion;
+  }
+});
+
 beforeEach(() => {
   sqsMock.reset();
   jest.clearAllMocks();
@@ -70,8 +92,15 @@ function rawPacket({ op = 0, t = 'INTERACTION_CREATE', s = 1, d = {} } = {}) {
 // publish() awaits no promise but submits a detached SendMessage.
 // Tests that assert against SendMessage must yield the event loop
 // once for the .send() promise to settle. One macrotask flush
-// (setImmediate) is enough for both the .send() resolve and the
-// .finally() that removes from inFlightSends.
+// (setImmediate) is enough for the current 1-deep promise chain:
+// the .send() resolve, the .finally() that removes from
+// inFlightSends, and the .catch() that would fire on rejection.
+// If a future change adds another `.then(...).then(...)` layer
+// inside publish() (e.g., post-send metric emission), tests
+// asserting against the deepest layer's effect will need a second
+// flush — or convert to a `flushPromises` helper that drains in
+// a loop. Today's depth-1 assumption is pinned by the assertion
+// shapes below.
 function flushMicro() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -287,6 +316,32 @@ describe('event-publisher: send-failure logging', () => {
         eventId: '0:7',
       }),
     );
+  });
+
+  test('synchronous throw from sqsClient.send routes through the same kind tag (no error-emitter divergence)', async () => {
+    // Pins the closed-blind-spot: a sync throw from the AWS SDK
+    // (rare with v3 but possible on malformed input) must NOT
+    // propagate out of the EventEmitter listener as a different
+    // error shape — the unified CloudWatch query that filters on
+    // `kind: 'unhandledRejection'` would lose this site otherwise.
+    // Simulate with a mock client whose .send throws synchronously.
+    const throwingClient = {
+      send: () => { throw new Error('sync-throw: malformed input'); },
+    };
+    eventPublisher._test._setSqsClientForTest(throwingClient);
+    eventPublisher.start();
+    expect(() => eventPublisher.publish(rawPacket({ s: 11 }))).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('threw synchronously'),
+      expect.objectContaining({
+        kind: 'unhandledRejection',
+        error: 'sync-throw: malformed input',
+        eventId: '0:11',
+      }),
+    );
+    // No promise enters inFlightSends on the sync-throw path —
+    // otherwise stop() would await a promise that doesn't exist.
+    expect(eventPublisher._test.getInFlightCount()).toBe(0);
   });
 
   test('failed send still removes promise from inFlightSends (no leak)', async () => {

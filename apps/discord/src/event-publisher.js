@@ -64,6 +64,22 @@
 // hosts is the noise floor; bounded by the fleet's clock-skew SLO
 // (~tens of ms in practice on ECS Fargate).
 //
+// Envelope size cap: the producer does NOT enforce a local size
+// limit on `JSON.stringify(envelope)`. SQS Standard caps message
+// bodies at 256 KB on the wire; an over-cap envelope triggers a
+// SendMessage rejection that lands in the same `kind:
+// unhandledRejection` log path as any other failure (the
+// interaction is lost). The consumer-side `MAX_BODY_BYTES = 200 KB`
+// cap (event-consumer.js) is the defense-in-depth on the receive
+// path; the producer-side cap is implicit because the trust
+// boundary (IAM-locked publisher set) keeps the realistic upper
+// bound on `packet.d` well under 256 KB for INTERACTION_CREATE
+// payloads (a /qurl invocation with full member/guild/data is
+// ~5-10 KB). If the worker tier ever consumes a higher-volume
+// event class (MESSAGE_CREATE with attachments, etc.), an explicit
+// producer-side cap with a structured log on rejection becomes
+// load-bearing.
+//
 // Drain on stop(): stop() awaits in-flight SendMessage promises
 // up to DRAIN_DEADLINE_MS before returning. After that, any
 // unsettled sends race the process exit. The pattern mirrors
@@ -91,6 +107,13 @@ const { GATEWAY_DISPATCH_TYPES, LOG_KINDS } = require('./constants');
 // tolerates the collision because (a) interactions from the prior
 // session are already expired by Discord (3s TTL), and (b)
 // flow-state OCC owns correctness.
+//
+// TODO(sharding-pr): replace the literal '0' with the per-shard
+// value supplied by `@discordjs/ws`'s dispatch callback once PR 13
+// migrates the gateway tier off discord.js. `git grep TODO(sharding-pr)`
+// from that branch surfaces the call sites that need updating; the
+// LRU key shape on the consumer side stays unchanged so this
+// remains a producer-only change.
 const SHARD_ID = '0';
 
 // Hot-path filter constants. `op === 0` (GATEWAY_OP_DISPATCH) is a
@@ -196,10 +219,31 @@ function publish(packet) {
     event_id: `${SHARD_ID}:${packet.s}`,
     published_at_ms: Date.now(),
   };
-  const cmd = new SendMessageCommand({
-    QueueUrl: config.QURL_BOT_EVENTS_QUEUE_URL,
-    MessageBody: JSON.stringify(envelope),
-  });
+  // Wrap envelope-building + send-dispatch in try/catch so a
+  // synchronous throw (rare with @aws-sdk/client-sqs v3 but possible
+  // on malformed input, an invalid QueueUrl, or a future SDK
+  // tightening) routes through the SAME `kind: 'unhandledRejection'`
+  // log tag the async-rejection path uses. Without this wrap, a sync
+  // throw would propagate out of the EventEmitter listener and
+  // surface via discord.js's `client.on('error')` channel under a
+  // different shape — breaking the unified CloudWatch query that
+  // pivots on the structured `kind` field.
+  let sendPromise;
+  try {
+    const cmd = new SendMessageCommand({
+      QueueUrl: config.QURL_BOT_EVENTS_QUEUE_URL,
+      MessageBody: JSON.stringify(envelope),
+    });
+    sendPromise = sqsClient.send(cmd);
+  } catch (err) {
+    logger.error('Event publisher: SendMessage threw synchronously (interaction lost)', {
+      kind: LOG_KINDS.UNHANDLED_REJECTION,
+      error: err?.message || String(err),
+      stack: err?.stack,
+      eventId: envelope.event_id,
+    });
+    return;
+  }
   // Detached send. Adding `.finally` to the original send promise
   // counts as a handler for Node's unhandled-rejection bookkeeping,
   // so the `.catch` below is required to actually log the error
@@ -207,7 +251,6 @@ function publish(packet) {
   // `kind: 'unhandledRejection'` matches the consumer's
   // trackDispatch tag + index.js's global handler tag — one
   // CloudWatch query covers all three sites.
-  const sendPromise = sqsClient.send(cmd);
   inFlightSends.add(sendPromise);
   sendPromise.finally(() => {
     inFlightSends.delete(sendPromise);
