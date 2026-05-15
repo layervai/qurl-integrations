@@ -22,6 +22,7 @@ import (
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal"
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -144,6 +145,32 @@ func run() error {
 		}
 	}
 
+	// AdminStore is the DDB-direct facade for workspace_mappings +
+	// channel_policies + bootstrap_codes. When all three QURL_*_TABLE
+	// env vars are set, we construct it; otherwise the /qurl admin
+	// verbs reply "Admin features are not configured" rather than
+	// crashing. Failure during construction (AWS config load, etc.)
+	// degrades the bot to no-admin mode rather than failing startup,
+	// so the OAuth + create/list surface stays available.
+	var adminStore *slackdata.Store
+	if os.Getenv(slackdata.EnvWorkspaceMappingsTable) != "" &&
+		os.Getenv(slackdata.EnvChannelPoliciesTable) != "" &&
+		os.Getenv(slackdata.EnvBootstrapCodesTable) != "" {
+		s, err := slackdata.NewStore(signalCtx)
+		if err != nil {
+			slog.Error("slackdata.NewStore failed; /qurl admin will be disabled", "error", err)
+		} else {
+			adminStore = s
+			slog.Info("admin store wired", //nolint:gosec // G706: env-var values are operator-controlled; slog's JSON handler escapes any control bytes the same way as the request-path slog sites.
+				"workspace_mappings_table", os.Getenv(slackdata.EnvWorkspaceMappingsTable),
+				"channel_policies_table", os.Getenv(slackdata.EnvChannelPoliciesTable),
+				"bootstrap_codes_table", os.Getenv(slackdata.EnvBootstrapCodesTable))
+		}
+	} else {
+		slog.Warn("admin store NOT configured — /qurl admin will reply 'not configured'",
+			"missing_env", missingAdminStoreEnvVars())
+	}
+
 	// signalCtx is hoisted above so the DDB-provider constructor can
 	// observe shutdown during AWS config load. It feeds two seams: the
 	// main goroutine (to detect SIGTERM and trigger srv.Shutdown) and
@@ -158,6 +185,7 @@ func run() error {
 		SlackSigningSecret: slackSigningSecret,
 		BaseContext:        signalCtx,
 		MaxConcurrentAsync: maxConcurrentAsync,
+		AdminStore:         adminStore,
 		NewClient: func(apiKey string) *client.Client {
 			return client.New(qurlEndpoint, apiKey,
 				// The async worker has up to 25s before its context fires;
@@ -435,4 +463,23 @@ func buildOAuthConfig(ctx context.Context, provider *auth.DDBProvider, tracker o
 		// SlackClient left nil for now — DM-after-success Slack-API
 		// wiring is a follow-up; the success-page HTML still renders.
 	}, true, nil
+}
+
+// missingAdminStoreEnvVars returns the slackdata table env-var names
+// that are empty so the warn log surfaces exactly what's missing.
+// Mirrors missingOAuthEnvVars's stable-order shape so the slog
+// attribute is diff-friendly across runs.
+func missingAdminStoreEnvVars() []string {
+	keys := []string{
+		slackdata.EnvWorkspaceMappingsTable,
+		slackdata.EnvChannelPoliciesTable,
+		slackdata.EnvBootstrapCodesTable,
+	}
+	var missing []string
+	for _, k := range keys {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }

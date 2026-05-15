@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/layervai/qurl-integrations/apps/slack/internal/oauth"
+	"github.com/layervai/qurl-integrations/apps/slack/internal/slackdata"
 	"github.com/layervai/qurl-integrations/shared/auth"
 	"github.com/layervai/qurl-integrations/shared/client"
 )
@@ -124,6 +125,29 @@ type Config struct {
 	// messages to Slack's response_url. Nil means "use a default *http.Client
 	// with responseURLTimeout"; tests inject one to assert payloads.
 	ResponseURLClient *http.Client
+
+	// AdminStore is the DDB-direct facade for workspace_mappings +
+	// channel_policies + bootstrap_codes. When nil, `/qurl get`'s
+	// policy + rate-limit checks short-circuit to a graceful "admin
+	// features are not configured" reply rather than crashing — fine
+	// for sandbox / no-DDB tests. Production wires one in cmd/main.go
+	// from the three QURL_*_TABLE env vars (see slackdata.NewStore).
+	AdminStore *slackdata.Store
+
+	// OpenView posts a `views.open` Slack web API call to display a
+	// modal in response to a slash command. Production wires this in
+	// cmd/main.go using the workspace bot token; tests inject a stub
+	// that records the call. Nil disables the modal-opening surface
+	// (`/qurl admin claim` replies "modal cannot be opened").
+	OpenView func(ctx context.Context, triggerID string, viewJSON []byte) error
+
+	// PostDM is the `chat.postMessage` web API for the `dm:true` flag
+	// on `/qurl get` and the admin-claim success path. Production
+	// wires this in cmd/main.go; tests inject a stub. Empty (nil) on
+	// the production path until cmd/main.go ships the bot-token
+	// plumbing; `/qurl get dm:true` surfaces a friendly fallback in
+	// that case.
+	PostDM func(ctx context.Context, slackUserID, text string) error
 }
 
 // Handler processes Slack events and commands.
@@ -196,7 +220,14 @@ func (h *Handler) SetOAuthSetup(cfg oauth.SetupConfig) {
 	h.oauthSetup = &cfg
 }
 
-// NewHandler creates a new Slack handler.
+// NewHandler creates a new Slack handler. Config is intentionally
+// passed by value rather than pointer despite gocritic's hugeParam
+// warning: the call site is once at process startup (cmd/main.go)
+// or once per t.Run in tests, so the copy is amortized to zero
+// against the bot's lifetime. Pass-by-value keeps callers from
+// mutating fields out from under the handler.
+//
+//nolint:gocritic // hugeParam: Config copied once per Handler at startup; pass-by-value is intentional.
 func NewHandler(cfg Config) *Handler {
 	baseCtx := cfg.BaseContext
 	if baseCtx == nil {
@@ -472,6 +503,19 @@ func (h *Handler) handleSlashCommand(w http.ResponseWriter, body []byte) {
 		// falls through to the unknown-subcommand branch and gets a
 		// help nudge.
 		h.handleList(w, values)
+	case strings.HasPrefix(text, "get ") || text == "get":
+		// Exact-token boundary so `getter`, `get-foo` fall through
+		// to the unknown-subcommand branch instead of silently
+		// routing here. The parser then produces ErrEmptyResource
+		// for a bare `get`.
+		h.handleGet(w, values)
+	case text == "aliases":
+		h.handleAliases(w, values)
+	case text == "admin claim" || strings.HasPrefix(text, "admin claim "):
+		// `admin claim` opens a modal — it cannot run async because
+		// the trigger_id rotates after one use. Sync dispatch via
+		// views.open is the only correct shape.
+		h.handleAdminClaim(w, values)
 	default:
 		// Surfaced to telemetry so a workspace using a stale slash-command
 		// spec is visible in dashboards (rather than only via user reports).
@@ -567,12 +611,6 @@ func (h *Handler) handleEvent(w http.ResponseWriter, body []byte) {
 	respondJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
-func (h *Handler) handleInteraction(w http.ResponseWriter, body []byte) {
-	// TODO: Handle interactive components (buttons, modals).
-	slog.Info("interaction received", "body_length", len(body))
-	respondJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-}
-
 func helpMessage() string {
 	return `*/qurl* — Create and manage qURLs from Slack
 
@@ -580,6 +618,11 @@ func helpMessage() string {
 • ` + "`/qurl setup`" + ` — Connect qURL to your Slack workspace (workspace admin only)
 • ` + "`/qurl create <url>`" + ` — Create a qURL for the given URL
 • ` + "`/qurl list`" + ` — Show your 5 most recent qURLs
+• ` + "`/qurl get $alias`" + ` — Mint an access link for an alias-bound resource
+• ` + "`/qurl get $alias dm:true`" + ` — DM the link to you instead of channel ephemeral
+• ` + "`/qurl get $alias reason:\"…\"`" + ` — Annotate the audit log with a reason
+• ` + "`/qurl aliases`" + ` — List the aliases allowed in this channel
+• ` + "`/qurl admin claim`" + ` — Open the bootstrap-code modal to claim this workspace
 • ` + "`/qurl help`" + ` — Show this help message`
 }
 
