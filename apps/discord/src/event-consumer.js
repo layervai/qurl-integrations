@@ -295,6 +295,10 @@ let running = false;
 let loopPromise = null;
 let stopController = null;
 let sqsClient = null;
+// onFatal callback supplied at start() — invoked when pollLoop hits a
+// permanent AWS error. Default (null) crashes via process.exit(1);
+// index.js wires `() => gracefulShutdown(1)` so cleanup runs first.
+let onFatalCb = null;
 
 // Backpressure cap (see module header). pollOnce early-returns
 // when inFlightCount >= MAX_INFLIGHT_HANDLERS and waits
@@ -856,6 +860,15 @@ function isAbortError(err) {
 // error.Code on some SDK paths) and SDK-v3 error class names
 // (error.name). Walking err.cause matches the isAbortError pattern
 // for parity with how @aws-sdk wraps errors across versions.
+//
+// Intentionally NOT classified as permanent (kept in the transient
+// path):
+//   - ExpiredToken / ExpiredTokenException — IRSA/ECS task-role STS
+//     creds rotate every ~6h; a brief gap during refresh self-heals.
+//   - SignatureDoesNotMatch — usually clock skew, which also self-heals
+//     once chrony catches up.
+// Re-classify if prod data shows these recur past a fail-fast threshold;
+// today they belong with throttling.
 const PERMANENT_AWS_ERROR_CODES = new Set([
   // Queue doesn't exist (typo'd URL or wrong region in queue URL).
   'QueueDoesNotExist',
@@ -959,17 +972,39 @@ async function pollLoop(client) {
       const permanentCode = permanentAwsErrorCode(err);
       if (permanentCode) {
         // Permanent AWS misconfig (typo'd queue URL, missing IAM
-        // perm, region drift, bad creds). Crash so ECS surfaces it
-        // as a high task-restart rate in deploy-time monitoring —
-        // retrying would just spam logs and bleed the misconfig
-        // into runtime noise. The boot check catches the missing-
-        // URL case; this catches the misconfigured-but-set ones.
+        // perm, region drift, bad creds). Surface to the caller so
+        // ECS sees a high task-restart rate in deploy-time monitoring
+        // — retrying would spam logs and bleed the misconfig into
+        // runtime noise. The boot check catches the missing-URL
+        // case; this catches the misconfigured-but-set ones.
+        //
+        // Routing: if start() received an onFatal callback (index.js
+        // wires `() => gracefulShutdown(1)`), call it so in-flight
+        // handlers, the WAL checkpoint, and the WebSocket session
+        // get torn down before exit. Otherwise fall back to direct
+        // process.exit(1) — keeps the standalone-test contract and
+        // is the safer default if a future caller forgets to wire
+        // onFatal.
         logger.error('Event consumer: permanent AWS failure, exiting', {
           error: err.message, code: permanentCode,
         });
-        process.exit(1);
-        // Defensive return: test mocks process.exit, so without this
-        // the loop would iterate again into the same failure.
+        if (onFatalCb) {
+          try {
+            onFatalCb();
+          } catch (cbErr) {
+            // If gracefulShutdown itself throws, fall through to
+            // direct exit so a misconfig still terminates the task.
+            logger.error('Event consumer: onFatal threw, falling back to process.exit', {
+              error: cbErr?.message,
+            });
+            process.exit(1);
+          }
+        } else {
+          process.exit(1);
+        }
+        // Defensive return: stops the loop from iterating again into
+        // the same failure under test mocks AND during the async
+        // gap before gracefulShutdown's drain awaits this loop.
         return;
       }
       // ReceiveMessage failure (transient AWS, throttling, etc.) —
@@ -991,8 +1026,14 @@ async function pollLoop(client) {
  * @param {import('discord.js').Client} client - Discord client with
  *   .actions.InteractionCreate.handle available (i.e., a real
  *   discord.js Client, not a stub).
+ * @param {object} [opts]
+ * @param {() => void} [opts.onFatal] - Invoked when pollLoop hits a
+ *   permanent AWS error. index.js wires `() => gracefulShutdown(1)`
+ *   so in-flight handlers, WAL checkpoints, and WebSocket sessions
+ *   get torn down before exit. Default (no callback) crashes via
+ *   `process.exit(1)` directly — keeps the standalone-test contract.
  */
-function start(client) {
+function start(client, { onFatal } = {}) {
   if (running) {
     logger.warn('Event consumer: start() called while already running — no-op');
     return;
@@ -1022,6 +1063,7 @@ function start(client) {
   }
   running = true;
   stopController = new AbortController();
+  onFatalCb = typeof onFatal === 'function' ? onFatal : null;
   logger.info('Event consumer: starting', {
     queueUrl: config.QURL_BOT_EVENTS_QUEUE_URL,
     waitSeconds: RECEIVE_WAIT_SECONDS,
@@ -1155,6 +1197,7 @@ async function stop() {
     // unaffected; clearing here also ensures _resetStateForTest's
     // null contract holds without a second branch.
     stopController = null;
+    onFatalCb = null;
     // Reset the at-cap log gate so a `start → at-cap → stop → start`
     // round-trip doesn't inherit a stale `true` and miss the next
     // streak's transition warn. Production never restarts after stop,
@@ -1184,6 +1227,7 @@ function _resetStateForTest() {
   loopPromise = null;
   stopController = null;
   sqsClient = null;
+  onFatalCb = null;
   seenEventIds.clear();
   lastMissingEventIdWarnMs = 0;
   inFlightPromises.clear();

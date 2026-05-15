@@ -892,7 +892,11 @@ describe('event-consumer: pollLoop error backoff', () => {
       // Yield so pollOnce throws + catch routes through exit().
       await new Promise((r) => setImmediate(r));
 
+      // toHaveBeenCalledTimes(1) — if the defensive return after exit
+      // ever gets dropped, the test mock would let the loop iterate
+      // into the same failure and exit would be called repeatedly.
       expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(exitSpy).toHaveBeenCalledTimes(1);
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('permanent AWS failure'),
         expect.objectContaining({ code: 'QueueDoesNotExist' }),
@@ -905,6 +909,101 @@ describe('event-consumer: pollLoop error backoff', () => {
       );
       // stop() returns cleanly even though pollLoop already returned
       // on its own (running is still true; stop() flips it + aborts).
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('pollLoop exits on err.cause-wrapped permanent error (SDK wrapping)', async () => {
+    // The unit test for permanentAwsErrorCode pins the cause-walk
+    // shape; this pins that the integration path actually invokes
+    // the walk, not just the top-level name check. A future SDK
+    // refresh that wraps errors in an extra layer must still trip
+    // fail-fast — without this, the regression would only surface
+    // in prod when the misconfig fires.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const inner = Object.assign(new Error('access denied'), {
+        name: 'AccessDeniedException',
+      });
+      const outer = new Error('SDK wrapper');
+      outer.cause = inner;
+      throw outer;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client);
+      await new Promise((r) => setImmediate(r));
+
+      expect(exitSpy).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('permanent AWS failure'),
+        expect.objectContaining({ code: 'AccessDeniedException' }),
+      );
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal callback routes permanent-error path away from process.exit', async () => {
+    // index.js wires `onFatal: () => gracefulShutdown(1)` so the
+    // permanent-error path runs the same teardown SIGTERM does
+    // (in-flight handler drain, db.close() WAL checkpoint, WebSocket
+    // close). Without this, a direct process.exit truncates all of
+    // it. Pin that an onFatal callback intercepts; process.exit is
+    // NOT called.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn();
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).not.toHaveBeenCalled();
+      await eventConsumer.stop();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  test('onFatal throw falls back to process.exit(1)', async () => {
+    // Defense in depth: if gracefulShutdown itself throws (rare —
+    // its own try/catch covers routine errors), we still want the
+    // task to terminate so ECS surfaces the misconfig. Pin the
+    // fallback so a future onFatal regression doesn't silently
+    // leave the process running after the fatal log.
+    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined);
+    const onFatal = jest.fn(() => { throw new Error('shutdown failed'); });
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      const err = new Error('q gone');
+      err.name = 'QueueDoesNotExist';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+
+    try {
+      eventConsumer.start(client, { onFatal });
+      await new Promise((r) => setImmediate(r));
+
+      expect(onFatal).toHaveBeenCalledTimes(1);
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('onFatal threw, falling back to process.exit'),
+        expect.objectContaining({ error: 'shutdown failed' }),
+      );
       await eventConsumer.stop();
     } finally {
       exitSpy.mockRestore();

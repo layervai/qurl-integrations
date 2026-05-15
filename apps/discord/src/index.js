@@ -637,7 +637,13 @@ async function start() {
   // landed during the awaits before this point, gracefulShutdown
   // has already run; skip starting a consumer that no one will stop.
   if (isWorker && !isShuttingDown) {
-    eventConsumer.start(client);
+    // onFatal routes pollLoop's permanent-AWS-error path through
+    // gracefulShutdown(1) so in-flight handler drain, db.close() WAL
+    // checkpoint, and the discord WebSocket close all run before
+    // exit. Without this, a direct process.exit(1) from event-consumer
+    // would leak the same partial state the `start().catch()` comment
+    // below explicitly calls out.
+    eventConsumer.start(client, { onFatal: () => gracefulShutdown(1) });
   }
 
   // SQS publisher for the gateway tier (zero-downtime Pillar 1).
