@@ -483,10 +483,16 @@ function resolveSenderAlias(interaction) {
 // production). `iconURL()` returns `string | null`; coalesce to
 // `undefined` because some discord.js versions stringify null into
 // the iconURL slot.
+//
+// `size: 64` matches Discord's embed-author iconURL rendering
+// (~24×24px on most clients, 2× retina ≈ 48px). The default size
+// is the guild-icon-store resolution (up to 4096px), which would
+// ship a much larger asset than gets rendered. Per-DM bandwidth
+// savings × the dispatch loop = a real win at scale.
 function resolveGuildProvenance(interaction) {
   return {
     guildName: interaction?.guild?.name,
-    guildIconUrl: interaction?.guild?.iconURL() ?? undefined,
+    guildIconUrl: interaction?.guild?.iconURL({ size: 64 }) ?? undefined,
   };
 }
 
@@ -751,16 +757,22 @@ function buildStepThroughButton(qurlLink) {
 // followed by /qurl add-recipients renders identically on the
 // recipient side.
 //
-// PRECONDITION: qurlLinks.length >= 1. An empty list would produce
-// a single row containing only the trust button — Discord rejects
-// a component-only payload with no embeds. The caller in
-// handleAddRecipients guards via the `if (!links || links.length
-// === 0)` early return at the batchSettled callback; the throw
-// below pins the same contract for any future caller that misses
-// the docstring.
+// PRECONDITION: 1 <= qurlLinks.length <= 10.
+//   - Empty: a single row containing only the trust button would
+//     ship without any embeds, which Discord rejects.
+//   - >10: N + 1 buttons across 5-per-row chunks exceeds Discord's
+//     5-ActionRow message cap (e.g. N=11 → 3 rows, N=24 → 5 rows,
+//     N=25 → 6 rows = API rejection). The upstream caller in
+//     handleAddRecipients already caps via `links.slice(0, 10)` to
+//     match Discord's 10-embed-per-message limit; the throw below
+//     pins both ends of the contract for any future caller that
+//     misses the docstring.
 function packBulkDeliveryComponents(qurlLinks) {
   if (!Array.isArray(qurlLinks) || qurlLinks.length === 0) {
     throw new Error('packBulkDeliveryComponents: qurlLinks must be a non-empty array');
+  }
+  if (qurlLinks.length > 10) {
+    throw new Error(`packBulkDeliveryComponents: qurlLinks length ${qurlLinks.length} exceeds the 10-link cap`);
   }
   const allButtons = [
     ...qurlLinks.map(buildStepThroughButton),
@@ -805,6 +817,13 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
   // the nonsense `Vik · Someone` that the DISPLAY_NAME_FALLBACK
   // default would produce, degrading the trust signal on the exact
   // hostile input the strip exists to defend.
+  //
+  // Combined-length budget: 64 (sender cap) + 3 (` · `) + 64 (guild
+  // cap) = 131 codepoints — well under Discord's 256-char
+  // author.name limit. A future bump of the per-half cap past
+  // ~126 codepoints would push the combined value over that limit
+  // and the API would reject the embed; revisit the math here if
+  // the per-half cap changes.
   const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
   const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
   const authorName = safeGuildName

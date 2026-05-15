@@ -1804,6 +1804,43 @@ describe('handleAddRecipients — happy path (location)', () => {
     // row, not a separate trust row, in the 1-link case.
   });
 
+  // The bulk-path shared-embed optimization: at N>1, the EmbedBuilder
+  // is built once and the same reference repeated via Array(N).fill.
+  // discord.js' .toJSON() is a pure read of internal state, so the
+  // optimization is safe — but a future discord.js bump that
+  // introduces a mutating serialize hook (or a buildDeliveryEmbed
+  // change that turns the embed mutation-aware) would break the
+  // pattern silently. This test pins the reference-equality contract.
+  it('shares one EmbedBuilder reference across N>1 embeds in the payload', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: 'res-file-shared', expires_in: '30m',
+      attachment_url: 'https://cdn.discordapp.com/x.png',
+      attachment_name: 'x.png', attachment_content_type: 'image/png',
+      actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower',
+    });
+    mockDownloadAndUpload.mockResolvedValueOnce({
+      resource_id: 'res-file-shared-new', fileBuffer: Buffer.from('x'),
+    });
+    mockMintLinks
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-file', resource_id: 'res-file-shared-new' }])
+      .mockResolvedValueOnce([{ qurl_link: 'https://q.test/share-loc', resource_id: 'res-loc-shared-new' }]);
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-shared-new' });
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+
+    await handleAddRecipients(
+      'send-share', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    const [, payload] = mockSendDM.mock.calls[0];
+    // file + location → 2 links to the one recipient.
+    expect(payload.embeds).toHaveLength(2);
+    // The optimization: same EmbedBuilder reference, not two copies.
+    expect(payload.embeds[0]).toBe(payload.embeds[1]);
+  });
+
   // Locks the single-emission contract: a sendConfig with both file
   // AND location must NOT fire upload_success twice (would double-count
   // UploadCount in CloudWatch). The kind field must be 'mixed'.

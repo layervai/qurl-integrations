@@ -567,6 +567,18 @@ describe('buildDeliveryPayload — author row provenance', () => {
     expect(capturedEmbeds[0]._author.name).toBe('Vik · Acme');
   });
 
+  // Both halves all-strip simultaneously: sender falls back to the
+  // default "Someone" (DISPLAY_NAME_FALLBACK), guildName falls back
+  // to "" (the empty fallback the author row passes), so the
+  // composed result is bare "Someone" — no trailing separator,
+  // no "Someone · Someone". Pins that the two fallbacks compose
+  // correctly against a future regression that swaps either
+  // fallback ordering or strips the empty-string short-circuit.
+  it('both-halves-hostile: composes to bare "Someone" (no Someone · Someone, no trailing separator)', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '‮​', guildName: '‮​' });
+    expect(capturedEmbeds[0]._author.name).toBe('Someone');
+  });
+
   // Mirrors the senderAlias 64-codepoint cap. The same defensive upper
   // bound applies to the guild name — Discord caps guild names at 100
   // chars natively, but a forged interaction / future API shape change
@@ -704,6 +716,18 @@ describe('packBulkDeliveryComponents — 5-per-row chunking', () => {
     expect(() => packBulkDeliveryComponents([])).toThrow(/non-empty array/);
     expect(() => packBulkDeliveryComponents(null)).toThrow(/non-empty array/);
     expect(() => packBulkDeliveryComponents(undefined)).toThrow(/non-empty array/);
+  });
+
+  it('throws when qurlLinks length exceeds the 10-link cap', () => {
+    // Symmetric with the empty-array throw: N+1 buttons across
+    // 5-per-row chunks for N>10 would exceed Discord's 5-ActionRow
+    // message cap (N=24 → 5 rows is the upper boundary; N=25 → 6
+    // rows = API rejection). The upstream caller in
+    // handleAddRecipients already does `links.slice(0, 10)`, but
+    // the throw pins the contract for any future caller that
+    // misses the docstring.
+    const eleven = Array.from({ length: 11 }, (_, i) => `https://q.test/u${i}`);
+    expect(() => packBulkDeliveryComponents(eleven)).toThrow(/exceeds the 10-link cap/);
   });
 
   it('N=10 (Discord embed cap): three rows of [s1..s5], [s6..s10], [trust]', () => {
