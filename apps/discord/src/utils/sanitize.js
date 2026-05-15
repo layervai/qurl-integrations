@@ -111,11 +111,20 @@ function sanitizeDisplayName(s) {
 /**
  * Like sanitizeDisplayName but skips markdown escaping. Use for
  * plain-text contexts where backslash-escapes would render literally
- * (e.g. inside a `.txt` file attachment). NFKC + bidi/zero-width/
- * control strip + 64-codepoint cap still apply.
+ * (e.g. inside a `.txt` file attachment, or a Discord embed's
+ * setAuthor `name` slot). NFKC + bidi/zero-width/control strip +
+ * 64-codepoint cap still apply.
+ *
+ * `fallback` is what's substituted on null/undefined input or when
+ * the strip + cap chain collapses to empty (all-strip hostile
+ * input). Defaults to 'Someone' for the historical caller; surfaces
+ * that would degrade if the fallback string leaked into the rendered
+ * output (e.g. the per-DM author-row guildName, which would render
+ * the nonsense `Vik · Someone` on all-strip hostile input) pass
+ * `{ fallback: '' }` to opt out and handle the empty case themselves.
  */
-function sanitizeDisplayNamePlain(s) {
-  return stripControlAndBidi(s);
+function sanitizeDisplayNamePlain(s, { fallback = DISPLAY_NAME_FALLBACK } = {}) {
+  return stripControlAndBidi(s, 64, fallback);
 }
 
 /**

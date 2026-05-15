@@ -171,7 +171,7 @@ function isGoogleMapsURL(url) {
 
 
 
-const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls, stripControlAndBidi } = require('./utils/sanitize');
+const { DISPLAY_NAME_FALLBACK, sanitizeFilename, escapeDiscordMarkdown, sanitizeDisplayName, sanitizeDisplayNamePlain, sanitizeContentLabel, stripBidiAndControls } = require('./utils/sanitize');
 
 // Best-effort host extraction for log lines. URL parsing throws on
 // pathological input (no scheme, embedded null, etc.) — swallow and
@@ -746,6 +746,13 @@ function buildStepThroughButton(qurlLink) {
 // What is qURL?] shape executeSendPipeline emits, so a /qurl send
 // followed by /qurl add-recipients renders identically on the
 // recipient side.
+//
+// PRECONDITION: qurlLinks.length >= 1. An empty list would produce
+// a single row containing only the trust button — Discord rejects
+// a component-only payload with no embeds. The caller in
+// handleAddRecipients guards via the `if (!links || links.length
+// === 0)` early return at the batchSettled callback; new callers
+// must guarantee the same.
 function packBulkDeliveryComponents(qurlLinks) {
   const allButtons = [
     ...qurlLinks.map(buildStepThroughButton),
@@ -780,19 +787,18 @@ function buildDeliveryEmbed({ senderAlias, guildName, guildIconUrl, expiresAt, p
     );
   }
 
-  // Sender lives in the description's markdown context indirectly via
-  // the author row (plaintext slot, no markdown rendering), so the
-  // PLAIN sanitization variant is the right tool — backslash-escapes
-  // would render literally in the author surface, but the bidi/zero-
-  // width spoof defense still applies.
-  const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
-  // guildName uses the lower-level stripControlAndBidi with an empty
-  // fallback: an all-strip hostile guildName (RLO/ZWSP/BOM only) must
-  // collapse to "" so the author row falls back to sender-only, not
+  // Author row is plaintext (no markdown rendering), so the PLAIN
+  // sanitization variant is the right tool for both sender and
+  // guildName halves — backslash-escapes would render literally
+  // here, but the bidi/zero-width spoof defense still applies.
+  // guildName opts into an empty fallback ({ fallback: '' }) so an
+  // all-strip hostile name (RLO/ZWSP/BOM only) collapses to "" and
+  // the author row falls back to sender-only — rather than rendering
   // the nonsense `Vik · Someone` that the DISPLAY_NAME_FALLBACK
-  // default would produce — degrading the trust signal on the exact
+  // default would produce, degrading the trust signal on the exact
   // hostile input the strip exists to defend.
-  const safeGuildName = stripControlAndBidi(guildName, 64, '');
+  const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
+  const safeGuildName = sanitizeDisplayNamePlain(guildName, { fallback: '' });
   const authorName = safeGuildName
     ? `${safeSenderPlain} · ${safeGuildName}`
     : safeSenderPlain;

@@ -554,6 +554,19 @@ describe('buildDeliveryPayload — author row provenance', () => {
     expect(capturedEmbeds[0]._author.name).not.toContain('Someone');
   });
 
+  // The sender + guild halves sanitize through independent
+  // sanitizeDisplayNamePlain calls (default vs. empty-fallback
+  // option). Hostile input on one half must NOT influence the
+  // sanitization result of the other — pin that the cross-half
+  // independence holds at the contract level.
+  it('sanitizes sender and guildName independently (hostile half does not influence the other)', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: '‮Vik', guildName: 'Acme Discord' });
+    expect(capturedEmbeds[0]._author.name).toBe('Vik · Acme Discord');
+    capturedEmbeds.length = 0;
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName: '‮Acme' });
+    expect(capturedEmbeds[0]._author.name).toBe('Vik · Acme');
+  });
+
   // Mirrors the senderAlias 64-codepoint cap. The same defensive upper
   // bound applies to the guild name — Discord caps guild names at 100
   // chars natively, but a forged interaction / future API shape change
