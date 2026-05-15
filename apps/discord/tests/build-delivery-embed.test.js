@@ -158,13 +158,10 @@ const baseArgs = {
 beforeEach(() => { capturedEmbeds.length = 0; capturedButtons.length = 0; });
 
 describe('buildDeliveryPayload — senderAlias sanitization (author row)', () => {
-  // Sender provenance now lives in setAuthor's plaintext `name` slot
-  // (the embed's "address bar"), so these assertions target the author
-  // row, not the description. Description-injection is unreachable here
-  // by construction — the author row doesn't render markdown — but the
-  // bidi/zero-width spoof defense still applies (an RLO-prefixed name
-  // would flip the visible direction of the author line just as it
-  // would have inside the old `**Vik**` description slot).
+  // Author row is plaintext (no markdown rendering), so description
+  // markdown-injection vectors are unreachable here — but the bidi /
+  // zero-width spoof defense still applies (an RLO-prefixed name
+  // flips visible direction whether the slot is markdown or plain).
   it('renders a normal alias unchanged in the author row name', () => {
     buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik' });
     expect(capturedEmbeds[0]._author.name).toContain('Vik');
@@ -456,10 +453,6 @@ describe('buildDeliveryPayload — senderAlias sanitization (author row)', () =>
     // `indexOf` check would false-pass if a future personalMessage
     // happened to contain the literal substring `"Closes <t:"`,
     // ordering both indices the same way. Pin position by line.
-    //
-    // Sender no longer appears in the description — it's in the
-    // author row (asserted separately). Line 0 is now the action
-    // statement: "opened a door for you."
     const lines = desc.split('\n');
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe('opened a door for you.');

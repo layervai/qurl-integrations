@@ -48,16 +48,19 @@ const DISPLAY_NAME_FALLBACK = 'Someone';
 // `maxCodepoints` defaults to 64 (display-name budget). Larger
 // surfaces (locationName, attachment.name → 256) pass their own
 // cap; the strip + NFKC + codepoint-slice contract is identical.
-// Empty / undefined input returns the display-name fallback for the
-// display-name caller; surface-specific callers should branch on
-// the empty case themselves rather than render the fallback.
-function stripControlAndBidi(s, maxCodepoints = 64) {
-  const cleaned = String(s ?? DISPLAY_NAME_FALLBACK).normalize('NFKC').replace(STRIP_RE, '');
+// `fallback` is the string substituted when input is null/undefined
+// AND when the strip + cap chain collapses to empty. Defaults to
+// the display-name fallback for the historical caller; non-display
+// surfaces (e.g. the per-DM guildName provenance row) pass `''`
+// to opt out — surfacing "Someone" on an all-strip hostile guild
+// name would degrade the trust signal the strip exists to defend.
+function stripControlAndBidi(s, maxCodepoints = 64, fallback = DISPLAY_NAME_FALLBACK) {
+  const cleaned = String(s ?? fallback).normalize('NFKC').replace(STRIP_RE, '');
   // Codepoint-aware slice. `String.prototype.slice` operates on UTF-16
   // code units, so a cap on a name like `'A'.repeat(63) + emoji`
   // would split a surrogate pair and Discord would render the lone high
   // surrogate as tofu. `Array.from(str)` iterates by codepoint.
-  return Array.from(cleaned).slice(0, maxCodepoints).join('') || DISPLAY_NAME_FALLBACK;
+  return Array.from(cleaned).slice(0, maxCodepoints).join('') || fallback;
 }
 
 /**
@@ -140,4 +143,5 @@ module.exports = {
   sanitizeDisplayNamePlain,
   sanitizeContentLabel,
   stripBidiAndControls,
+  stripControlAndBidi,
 };
