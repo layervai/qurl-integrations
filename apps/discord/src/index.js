@@ -297,6 +297,10 @@ logger.info('Worker tier configured', { isWorker, eventShipperEnabled: config.EN
 // Today (PR 11 only), the producer side doesn't exist yet, so
 // combined-mode + flag-on still runs the gateway dispatch path
 // in-process and the worker tier's consumer sits on an empty queue.
+// TODO(PR-10): change the gate to `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker`
+// (or replace the gateway-side path with a publish-to-SQS shim) per the
+// PR 10 PRE-MERGE REQUIREMENT comment above. `git grep TODO(PR-10)` from
+// the PR 10 branch surfaces every gate that needs flipping.
 if (isGateway || isWorker) {
   // Handle interactions. Split-dispatch by interaction kind:
   // ChatInputCommand + Autocomplete go through the slash-command

@@ -82,17 +82,16 @@ const logger = require('./logger');
 // would otherwise silently land in whichever region the SDK defaults to,
 // which is exactly the misconfiguration we want to surface at boot).
 //
-// Lazy-check intentional: createSqsClient() throws at start() time
-// rather than at module load. Why not match flow-state.js's
-// module-load throw? Because event-consumer is required by index.js
-// unconditionally, but only `.start()` is called when ENABLE_EVENT_SHIPPER
-// is on. A module-load throw would block boot for non-worker roles
-// that don't need SQS at all. In practice the asymmetry is moot:
-// flow-state.js's own module-load throw already enforces AWS_REGION
-// for any bot that boots (flow-state is on the universal load path),
-// so a misconfigured deploy fails closed there before ever reaching
-// this throw. Defense-in-depth, but later than the first guard.
-const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
+// Read fresh inside createSqsClient() rather than captured at module
+// load. Two reasons: (a) consistent with how the SDK clients are
+// constructed elsewhere — flow-state.js captures at load but throws
+// at module load too; we throw lazily, so we should read lazily; and
+// (b) defensive against shim bootstrappers that set
+// `process.env.AWS_REGION` after the bot's modules are required.
+// In practice flow-state.js's universal-load-path throw fires first
+// for any boot, so the lazy read here is defense-in-depth, but the
+// asymmetry-with-where-we-read becomes load-bearing if that load-
+// path assumption ever changes.
 
 // SQS polling parameters. Hardcoded module constants — see the
 // rationale below for each. If an operator needs to tune these in
@@ -167,8 +166,23 @@ function recordSeen(eventId) {
 // Worker state. start() flips `running` true and kicks off the poll
 // loop; stop() flips `stopping` true and awaits loopPromise.
 // pollOnce uses Promise.all over the per-message wrappers, which
-// already serializes "all messages in this batch done" against
-// loopPromise resolution — no separate inflight set needed.
+// serializes "all messages in this batch were dispatched (emit +
+// DeleteMessage attempted)" against loopPromise resolution.
+//
+// What stop() does NOT await: the async handlers registered on
+// `interactionCreate` (handleCommand / handleFlowInteraction) run
+// detached after the synchronous `client.actions.InteractionCreate.handle`
+// emit. Their promises aren't captured anywhere we can await. A
+// handler still mid-DDB-write when SIGTERM lands could race
+// gracefulShutdown's eventual `db.close()` — same race the
+// pre-existing in-process gateway path has, since the gateway also
+// emits + runs detached. Not worse here than today.
+//
+// If a tighter "drain handlers before db close" guarantee is ever
+// needed, options are: (a) capture handler promises via a WeakMap
+// registry the listener populates and the consumer reads; (b) call
+// the dispatcher functions directly instead of going through the
+// emit path. Both are PR-10-or-later refactors.
 //
 // receiveAbortController is set per-poll-iteration and used by stop()
 // to cancel an in-flight long-poll ReceiveMessage. Without this, a
@@ -192,10 +206,11 @@ function _setSqsClientForTest(client) {
 }
 
 function createSqsClient() {
-  if (!AWS_REGION) {
+  const region = (process.env.AWS_REGION ?? '').trim();
+  if (!region) {
     throw new Error('AWS_REGION is required to use the event consumer. Set it in the deployment template (e.g. `us-east-2`).');
   }
-  return new SQSClient({ region: AWS_REGION });
+  return new SQSClient({ region });
 }
 
 // Every terminal path in processMessage deletes the message (success,
@@ -473,14 +488,18 @@ function start(client) {
 }
 
 /**
- * Signal the poll loop to stop and await in-flight handlers + the
- * loop itself. Idempotent.
+ * Signal the poll loop to stop, abort any in-flight long-poll, and
+ * await `loopPromise`. Awaits the poll loop's *dispatch + delete*
+ * cycle — NOT the async handlers fired via emit, which run detached
+ * (see "What stop() does NOT await" in the module header for the
+ * full contract).
  *
- * The poll loop checks `stopping` between iterations, so a
- * mid-flight ReceiveMessage will run to completion (up to
- * WaitTimeSeconds) before the loop exits. That's intentional:
- * processing whatever messages we already pulled is preferable to
- * letting them roll back to visible and re-deliver to a sibling.
+ * Idempotent on both not-running and already-stopping.
+ *
+ * The mid-flight ReceiveMessage is aborted via the AbortController
+ * (rather than allowed to time out at WaitTimeSeconds) so stop()
+ * returns within tens of ms — critical for fitting inside the 10 s
+ * graceful-shutdown budget in `gracefulShutdown` (index.js).
  */
 async function stop() {
   // Idempotent on both not-running AND already-stopping: two

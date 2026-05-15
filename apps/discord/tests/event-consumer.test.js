@@ -545,6 +545,38 @@ describe('event-consumer: start/stop lifecycle', () => {
     expect(isAbortError(e3)).toBe(false);
   });
 
+  test('pollOnce passes an abortSignal in the SDK send options', async () => {
+    // Pins the contract that the receive call carries an abort signal.
+    // aws-sdk-client-mock doesn't propagate HttpHandlerOptions to the
+    // mock handler, so we spy on the underlying client.send directly
+    // to inspect the second arg. Without this assertion, a refactor
+    // that drops `{ abortSignal: ... }` from `sqsClient.send(cmd, options)`
+    // wouldn't fail any test — and the graceful-shutdown latency
+    // guarantee would silently regress.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const realClient = new SQSClient({ region: 'us-east-2' });
+    const sendSpy = jest.spyOn(realClient, 'send');
+    eventConsumer._test._setSqsClientForTest(realClient);
+
+    await eventConsumer._test.pollOnce(makeStubClient());
+
+    expect(sendSpy).toHaveBeenCalled();
+    // First call is the ReceiveMessageCommand. Find it explicitly so
+    // we don't false-positive on a future change that adds prior
+    // commands.
+    const receiveCall = sendSpy.mock.calls.find(
+      ([cmd]) => cmd instanceof ReceiveMessageCommand,
+    );
+    expect(receiveCall).toBeDefined();
+    const [, options] = receiveCall;
+    expect(options).toBeDefined();
+    expect(options.abortSignal).toBeDefined();
+    // The signal must be live (not pre-aborted) at the time of send.
+    expect(options.abortSignal.aborted).toBe(false);
+
+    sendSpy.mockRestore();
+  });
+
   test('pollOnce sets receiveAbortController; stop() aborts it', async () => {
     // aws-sdk-client-mock doesn't pass HttpHandlerOptions (incl.
     // abortSignal) through to callsFake handlers, so we can't easily
@@ -585,6 +617,16 @@ describe('event-consumer: start/stop lifecycle', () => {
       expect.stringContaining('start() called while already running'),
     );
 
+    // No event-loop yield between start() and stop() here on purpose.
+    // start() returns the pollLoop's promise synchronously but pollLoop's
+    // body doesn't begin executing until the microtask queue runs.
+    // stop() flips stopping=true synchronously, THEN awaits loopPromise.
+    // By the time pollLoop's body finally runs in the microtask queue
+    // after stop()'s await, stopping is already true and the
+    // while-check exits immediately — no pollOnce iteration, no
+    // accumulating commandCalls in the SDK mock. The behavior under
+    // test is "start + double-start warn + stop idempotent", not the
+    // full poll cycle (that's covered by other tests in this file).
     await eventConsumer.stop();
     // Stop is idempotent.
     await eventConsumer.stop();
