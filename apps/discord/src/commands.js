@@ -3657,7 +3657,14 @@ function computeEveryoneDisplayCount(guild) {
     if (cached && cached.fingerprint === fingerprint) return { count: cached.count, accurate: true };
     let n = 0;
     for (const [, m] of cache) {
-      if (!isBotMember(m)) n++;
+      // `m?.user &&` aligns the render-time label with the click-time
+      // filter in handleConfirmEveryone — that path tallies rows
+      // without `.user` as `partialCacheDrops` and excludes them from
+      // recipients. Without the guard, a degraded GUILD_MEMBERS_CHUNK
+      // row counts as a non-bot here (isBotMember reads `.user?.bot`,
+      // returning false on missing `.user`) but never reaches the
+      // recipient set, leaving the label over-stated.
+      if (m?.user && !isBotMember(m)) n++;
     }
     everyoneCountMemo.set(guild, { fingerprint, count: n });
     return { count: n, accurate: true };
@@ -5513,14 +5520,19 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
   // resolved on guild X" report has a debug hook.
   const selectedUsers = [];
   let partialCacheDrops = 0;
+  let senderInCache = false;
   const cache = interaction.guild.members?.cache;
   // Guard matches the operation: `for ... of` reads `[Symbol.iterator]`,
   // which both `Map` and discord.js `Collection` provide. Truthy-check
   // alone would NPE on a degraded `{}` cache shape from a partial init.
   if (cache && typeof cache[Symbol.iterator] === 'function') {
     for (const [, member] of cache) {
-      if (member?.user) selectedUsers.push(member.user);
-      else partialCacheDrops++;
+      if (member?.user) {
+        selectedUsers.push(member.user);
+        if (member.user.id === interaction.user.id) senderInCache = true;
+      } else {
+        partialCacheDrops++;
+      }
     }
   }
   if (partialCacheDrops > 0) {
@@ -5535,7 +5547,30 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
     // handleQurlSlashSend's guild-gate rejects DM at entry and a
     // guild with zero members can't host a slash command anyway. The
     // shared copy is acceptable.
+    // Important: gate the defensive sender push below on cache having
+    // members. A truly empty cache should surface "cache not ready"
+    // rather than silently expanding to just the sender — the latter
+    // would mislead the user into thinking @everyone succeeded.
     return rejectEveryone('⚠\u{FE0F} `@everyone` expanded to 0 recipients — member cache not ready. Try again in a moment.\n\n');
+  }
+  // Defensive sender push: cache has OTHER non-bot members but the
+  // sender's row is somehow missing (rare race during shard resume /
+  // partial chunk delivery post-prewarm). Without this, clicking
+  // 📢 `@everyone` could land `selfIncluded: false` and the user
+  // wouldn't be in the recipient set they explicitly triggered.
+  //
+  // Gated on `hasOtherNonBotInCache` so a bots-only cache still
+  // surfaces the bots-only reject below — silently expanding to
+  // "send to just me" from a bots-only guild misrepresents the
+  // @everyone click. `partitionRecipients` does NOT re-dedup
+  // (contract at commands.js:~3077), so the `senderInCache` check is
+  // load-bearing — pushing unconditionally would land the sender
+  // twice in `valid`.
+  if (!senderInCache) {
+    const hasOtherNonBotInCache = selectedUsers.some(
+      (u) => u && !u.bot && u.id !== interaction.user.id,
+    );
+    if (hasOtherNonBotInCache) selectedUsers.push(interaction.user);
   }
   // DIVERGENCE FROM handleConfirmVoiceEveryone: that handler excludes
   // the sender (voice-mode semantic is "everyone else in this voice
@@ -5605,6 +5640,18 @@ async function handleConfirmEveryone(interaction, { flow_id, row }) {
       components: [],
     }).catch(logIgnoredDiscordErr);
   }
+
+  // Success-path telemetry: a successful @everyone expansion is a
+  // load-bearing audit signal (an admin fanned a send to N members
+  // of the guild). Error paths already log; without this, ops can
+  // only see "did someone fan out to 18k users?" via a DDB scan of
+  // qurl_send_configs. Info level matches the cadence of other
+  // confirm-card success signals.
+  logger.info('handleConfirmEveryone: @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: selfIncluded,
+  });
 
   return rerenderConfirmCard(interaction, newPayload);
 }

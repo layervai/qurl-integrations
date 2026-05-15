@@ -5277,6 +5277,64 @@ describe('handleConfirmEveryone', () => {
     );
   });
 
+  test('sender row missing from cache + other non-bots present → defensively pushed into recipients', async () => {
+    // Rare race: prewarm completes but the sender's own member entry
+    // happened to be missing from the cache (fresh shard resume).
+    // Without the defensive push, clicking 📢 @everyone would silently
+    // drop the sender (`selfIncluded: false`) — they'd be missing from
+    // the recipient set they explicitly triggered.
+    const otherUser = '100000000000000077';
+    const int = makeEveryoneInteraction({
+      // Sender deliberately ABSENT from cache; one other non-bot present.
+      guildMembers: { [otherUser]: {} },
+      memberCount: 2,  // sender + otherUser
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).toHaveBeenCalled();
+    const payload = mockTransitionFlow.mock.calls[0][2].payload;
+    // Sender + otherUser should both land in recipients (sender via
+    // defensive push, otherUser via cache).
+    expect(payload.recipientIds.sort()).toEqual([SENDER_ID, otherUser].sort());
+    expect(payload.selfIncluded).toBe(true);
+  });
+
+  test('sender row missing + bots-only cache → still rejects (defensive push gated)', async () => {
+    // Counter-test: the defensive push should NOT fire on a bots-only
+    // cache. Silently expanding @everyone to "send to just me" would
+    // misrepresent the user's all-or-nothing intent. The gate on
+    // `hasOtherNonBotInCache` preserves the bots-only reject path.
+    const bot2 = '100000000000000098';
+    const int = makeEveryoneInteraction({
+      // Sender ABSENT; only bots in cache.
+      guildMembers: { [bot1]: { bot: true }, [bot2]: { bot: true } },
+      memberCount: 3,  // sender + 2 bots
+    });
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    expect(mockTransitionFlow).not.toHaveBeenCalled();
+    const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
+    expect(reply.content).toMatch(/No usable recipients|bot/i);
+  });
+
+  test('success-path emits info-level audit log with counts', async () => {
+    // Successful @everyone expansion is a load-bearing audit signal —
+    // "did someone fan out to N users?" should be findable in logs
+    // without a DDB scan. Pin the structured-log shape so a future
+    // refactor doesn't silently drop the breadcrumb.
+    const int = makeEveryoneInteraction();
+    await handleConfirmEveryone(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('@everyone expansion succeeded'),
+      expect.objectContaining({
+        flow_id: 'fid',
+        valid_count: expect.any(Number),
+        dropped_bots: expect.any(Number),
+        partial_cache_drops: expect.any(Number),
+        self_included: true,
+      }),
+    );
+  });
+
   test('partial-cache rows (member without .user) → counted in debug log + filtered from selection', async () => {
     // Mirror handleConfirmVoiceEveryone's partialCacheDrops telemetry.
     // Degraded GuildMembersChunk shapes occasionally land entries with
