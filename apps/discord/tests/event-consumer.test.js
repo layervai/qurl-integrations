@@ -418,6 +418,57 @@ describe('event-consumer: data: undefined envelope shape', () => {
   });
 });
 
+describe('event-consumer: abort silently exits pollLoop', () => {
+  test('AbortError from pollOnce produces no error log + no backoff', async () => {
+    // Pins the contract that a stop()-triggered abort is silent in
+    // operator logs (no "poll iteration failed" line) and bypasses
+    // abortableSleep (no 1s backoff). This is a quietly load-bearing
+    // UX detail on every routine deploy — log noise during graceful
+    // shutdown would mask real failures.
+    //
+    // Strategy: mock throws AbortError every call; on the SECOND
+    // call we also fire-and-forget call stop() so stopping=true is
+    // set synchronously (stop() flips it before any await). pollLoop's
+    // next while-check exits cleanly. Total: 2 mock calls, 2 catches,
+    // both go through the silent continue branch.
+    const setIntervalSpy = jest.spyOn(global, 'setInterval');
+    const baselineIntervals = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50).length;
+
+    let receiveCount = 0;
+    sqsMock.on(ReceiveMessageCommand).callsFake(() => {
+      receiveCount += 1;
+      if (receiveCount === 2) {
+        // Fire-and-forget; stop() sets stopping=true synchronously
+        // before any await, so by the time pollLoop's catch handles
+        // this iteration's AbortError and re-checks while, the
+        // loop exits.
+        eventConsumer.stop();
+      }
+      const err = new Error('Request aborted');
+      err.name = 'AbortError';
+      throw err;
+    });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+
+    eventConsumer.start(makeStubClient());
+    // Give the loop + stop time to settle.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(receiveCount).toBe(2);
+    // Silent: no "poll iteration failed" log.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('poll iteration failed'),
+      expect.anything(),
+    );
+    // No abortableSleep call — its 50 ms-tick setInterval count
+    // unchanged from baseline.
+    const finalIntervals = setIntervalSpy.mock.calls.filter(([, ms]) => ms === 50).length;
+    expect(finalIntervals).toBe(baselineIntervals);
+
+    setIntervalSpy.mockRestore();
+  });
+});
+
 describe('event-consumer: abortableSleep', () => {
   test('timeout-wins-race path clears the polling interval (no leak)', async () => {
     // Pins the fix for the setInterval leak: when setTimeout fires
@@ -634,12 +685,16 @@ describe('event-consumer: start/stop lifecycle', () => {
 });
 
 describe('event-consumer: discord.js@14.25.1 internal-API smoke', () => {
-  test('package.json pins discord.js to an exact version (no ~/^)', () => {
+  test('package.json pins discord.js to a single exact version', () => {
     const pkg = require('../package.json');
     const decl = pkg.dependencies['discord.js'];
-    // Exact-pin assertion: leading char must be a digit.
-    expect(decl).toMatch(/^\d/);
-    expect(decl).not.toMatch(/^[~^]/);
+    // Single triple-numeric version only — rejects ranges (`14.25.1
+    // - 14.25.9`), `||` lists, hyphen ranges, x-spec (`14.x`), and
+    // prefix specifiers (`~14.25.1`, `^14.25.1`). The consumer
+    // depends on `client.actions.InteractionCreate.handle` internal
+    // API; any matcher loose enough to admit a minor bump silently
+    // is the regression we're guarding against.
+    expect(decl).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   test('client.actions.InteractionCreate.handle is a function', () => {

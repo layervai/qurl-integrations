@@ -533,6 +533,11 @@ async function stop() {
     logger.error('Event consumer: error during stop', { error: err.message });
   } finally {
     running = false;
+    // Reset stopping alongside running so a caller introspecting
+    // state between stop+start (or never restarting) sees a clean
+    // post-condition that matches the pre-start() shape. start()
+    // also resets stopping=false, so the happy path is unaffected.
+    stopping = false;
     loopPromise = null;
   }
 }
