@@ -3908,24 +3908,7 @@ function renderConfirmCardRows({
     // Count is render-time, not click-time — members can join/leave
     // voice between renders. Click-time resolution in
     // handleConfirmVoiceEveryone is the authoritative recipient set;
-    // the label is a freshness hint that re-derives on every other
-    // confirm-card interaction (picker / expiry / note edits all flow
-    // through renderConfirmCardRows again).
-    // Filter-drift contract: the render-time count below uses
-    // `isBotMember(m)` to compute (N), while click-time resolution
-    // in handleConfirmVoiceEveryone routes channel.members through
-    // `partitionRecipients` for the authoritative recipient set.
-    // Both apply the same bot filter today, so the count is honest.
-    // If `partitionRecipients` ever picks up additional drops (role-
-    // blocklist, self-filter toggle, etc.), the render-time `(N)`
-    // will silently overstate the click-time set — keep the two
-    // filter sources aligned, or accept a stale label and document
-    // the drift here.
-    // Live connected-non-bot count is still computed so the button
-    // can be disabled when the channel is empty or unreadable — it
-    // just doesn't surface in the label anymore (kept terse per
-    // product UX call). `connectedCount == null` is the single
-    // sentinel for "render the disabled button shell."
+    // the count here only drives the disable state.
     let connectedCount = null;
     if (interaction) {
       const channel = interaction.guild?.channels?.cache?.get?.(voiceChannelId);
