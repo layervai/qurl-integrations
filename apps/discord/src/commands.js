@@ -1271,6 +1271,28 @@ async function executeSendPipeline(interaction, {
     return interaction.editReply({ content: 'Failed to create any links. Please try again.' });
   }
 
+  // Compute the absolute expiry instant once for this dispatch (Unix
+  // seconds — Discord's <t:N:R> format requires seconds, not millis).
+  // Using send-time + duration rather than reading from the API mint
+  // response since `mintLinks` doesn't currently surface `expires_at`.
+  // Drift between this clock and the API's enforcement clock is bounded
+  // by the time between this line and the mint call (sub-second on the
+  // send-pipeline path; can be a few seconds on handleAddRecipients
+  // which re-downloads + re-uploads + re-mints first). Negligible at
+  // the 30m–7d horizon — recipients see "in 24 hours" instead of
+  // "in 23h 59m 56s" on the worst-case path.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
+  // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
+  // are written — otherwise the DB writes would happen, then the throw
+  // would bubble out with no DMs sent, leaving orphan QURL records with
+  // no recipient. The buildDeliveryPayload `Number.isInteger` guard at
+  // the per-recipient render step also runs against this value; if a
+  // future expiryToMs returns a non-integer (e.g. fractional ms / 1000),
+  // it throws here, before the DB write, not at dispatch time. Closes
+  // #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
+
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
   // still exist on the QURL side but there's no local record to revoke them
   // later — abort the send and surface the error instead of continuing to DMs.
@@ -1312,18 +1334,6 @@ async function executeSendPipeline(interaction, {
   let failed = 0;
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
-
-  // Compute the absolute expiry instant once for this dispatch (Unix
-  // seconds — Discord's <t:N:R> format requires seconds, not millis).
-  // Using send-time + duration rather than reading from the API mint
-  // response since `mintLinks` doesn't currently surface `expires_at`.
-  // Drift between this clock and the API's enforcement clock is bounded
-  // by the time between this line and the mint call (sub-second on the
-  // send-pipeline path; can be a few seconds on handleAddRecipients
-  // which re-downloads + re-uploads + re-mints first). Negligible at
-  // the 30m–7d horizon — recipients see "in 24 hours" instead of
-  // "in 23h 59m 56s" on the worst-case path.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
@@ -1875,6 +1885,29 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
     return { msg: 'Failed to create any links.', newResourceIds: [], delivered: 0, failed: 0, newRecipients: resolvedRecipients };
   }
 
+  // Hoist payload-shared inputs to the top of the dispatch block so
+  // the entire batch shares one expiry timestamp and one resolved
+  // sender alias. Mirrors executeSendPipeline's structure — both
+  // pipelines now compute expiresAt once per call, eliminating
+  // Date.now() drift between recipients in the same batch.
+  // resolveSenderAlias is a pure function of originalInteraction so
+  // hoisting also avoids re-resolving the
+  // nickname/globalName/username chain per dispatch.
+  //
+  // Computed BEFORE recordQURLSendBatch so a malformed
+  // `sendConfig.expires_in` throwing in `expiryToMs` aborts the
+  // dispatch BEFORE any DDB rows are written — otherwise the DB
+  // writes would happen, then the throw would bubble out with no DMs
+  // sent, leaving orphan QURL records with no recipient. The
+  // `handleAddRecipients` path is especially exposed here because
+  // sendConfig.expires_in is read from DDB (rather than validated
+  // upstream like executeSendPipeline's slash-command param), so a
+  // stale/regressed row predating the current validation would slip
+  // through. Throwing pre-write makes the failure mode visible at
+  // the function level rather than as orphan rows. Closes #352.
+  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
+  const senderAlias = resolveSenderAlias(originalInteraction);
+
   // Persist to DB before DMs
   const batchSends = [];
   for (const [rid, links] of Object.entries(recipientLinks)) {
@@ -1906,30 +1939,6 @@ async function handleAddRecipients(sendId, usersCollection, originalInteraction,
   // Send DMs — one message per recipient with all their links
   let delivered = 0;
   let failed = 0;
-
-  // Hoist payload-shared inputs outside batchSettled so the entire
-  // batch shares one expiry timestamp and one resolved sender alias.
-  // Mirrors executeSendPipeline's structure — both pipelines now
-  // compute expiresAt once per call rather than once per recipient,
-  // eliminating Date.now() drift between recipients in the same
-  // batch (negligible at the 30m–7d horizon, but it's the unifying
-  // shape). resolveSenderAlias is a pure function of
-  // originalInteraction so hoisting is safe and avoids re-resolving
-  // the nickname/globalName/username chain per dispatch.
-  //
-  // AUDIT TRADE-OFF: hoisting `expiresAt` outside the per-recipient
-  // try/finally means an `expiryToMs` throw on malformed
-  // `sendConfig.expires_in` bubbles out of handleAddRecipients
-  // entirely — ZERO `DISPATCH_FAILED` audits are emitted for the
-  // batch. The prior code computed expiresAt per-recipient inside the
-  // try, so the same throw would have produced N audits. The hoist is
-  // the correct shape (sendConfig.expires_in is validated upstream
-  // and the per-recipient audits would have been N-failed-for-one-
-  // root-cause noise), but the contract is intentional: an upstream
-  // expires_in regression is invisible at the dispatch-metric layer
-  // and surfaces only via the function-level throw.
-  const expiresAt = Math.floor((Date.now() + expiryToMs(sendConfig.expires_in)) / 1000);
-  const senderAlias = resolveSenderAlias(originalInteraction);
 
   const dmResults = await batchSettled(newRecipients, async (recipient) => {
     const links = recipientLinks[recipient.id];
