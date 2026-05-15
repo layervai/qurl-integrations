@@ -1756,6 +1756,34 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
   });
 
+  test('pollOnce: post-restart streak starts at BASE (stop()/_resetStateForTest contract)', async () => {
+    // A start → drive-to-max → stop → start lifecycle must not
+    // inherit the doubled value. stop()'s finally + _resetStateForTest
+    // both clear currentBackoffMs, but the asymmetry between
+    // atCapPauseLogged (gated reset) and currentBackoffMs (unconditional)
+    // makes an inversion regression easy. Lock it down explicitly.
+    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+    withWorkerDispatch(() => {
+      for (let i = 0; i < cap; i += 1) {
+        eventConsumer.trackDispatch(new Promise(() => {}));
+      }
+    });
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    // Drive to MAX (4 doublings: 100 → 200 → 400 → 800 → 1600).
+    for (let i = 0; i < 4; i += 1) {
+      await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    }
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+
+    // Full reset, mirroring how _resetStateForTest is wired in
+    // beforeEach. Production never restarts after stop(), but the
+    // test path that the helper covers must observe the contract.
+    eventConsumer._test._resetStateForTest();
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+  });
+
   test('pollOnce logs cap-released info on transition back to below-cap', async () => {
     // Pins the recovery path: after an at-cap streak, dropping
     // below cap fires the release-info log so operators can pair
