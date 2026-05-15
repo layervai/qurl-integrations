@@ -6164,14 +6164,19 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // through without setting, so editTargets.has() stays false until a
   // valid row lands, which then wins the slot.
   //
-  // INVARIANT: "first valid wins" is safe because each recipient has
-  // at most one DM channel (the bot opens one DM thread per user via
-  // sendDM's POST /users/@me/channels). Multi-resource fan-out reuses
-  // the same dm_channel_id / dm_message_id pair across rows for that
-  // recipient, so picking the first one isn't lossy. If a future
-  // change ever sends a recipient two SEPARATE DMs for one send_id,
-  // the second one becomes silently un-editable — flip to a
-  // per-message-id Map at that point.
+  // INVARIANT(one-dm-per-recipient): "first valid wins" is safe
+  // because each recipient has at most one DM channel (the bot opens
+  // one DM thread per user via sendDM's POST /users/@me/channels).
+  // Multi-resource fan-out reuses the same dm_channel_id /
+  // dm_message_id pair across rows for that recipient, so picking
+  // the first one isn't lossy.
+  //
+  // INVARIANT-BREAKER: if a future change ever sends a recipient two
+  // SEPARATE DMs for one send_id (e.g., multi-message dispatch when
+  // the embed/component count exceeds Discord's limits), the second
+  // DM becomes silently un-editable. Grep for `INVARIANT-BREAKER`
+  // from that PR to find this site, and flip to a per-message-id
+  // Map keyed by `(recipient_discord_id, dm_message_id)`.
   //
   // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
   // Reversing the order would create a window where the recipient sees

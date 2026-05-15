@@ -1307,6 +1307,14 @@ async function getSendResourceIds(sendId, senderDiscordId) {
 // recipients can exceed the 1MB Query page cap. Without queryAll,
 // resource_ids on later pages would silently drop and the revoke
 // path would skip them.
+//
+// RETURN SHAPE: { resource_id, recipient_discord_id, dm_channel_id?,
+// dm_message_id?, dm_status? }. The dm_* fields are written by
+// markSendDMDelivered after a successful sendDM and consumed by the
+// revoke loop's editTargets builder (commands.js) to PATCH the
+// recipient's DM to "closed the door". Legacy rows predating the
+// ref-capture wire-up have those fields unset — the revoke loop's
+// missing-refs guard skips the edit naturally.
 async function getSendItems(sendId, senderDiscordId) {
   const items = await queryAll({
     TableName: TABLES.qurl_sends,
