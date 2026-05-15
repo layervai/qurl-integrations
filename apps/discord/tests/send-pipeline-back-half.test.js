@@ -743,6 +743,24 @@ describe('revokeAllLinks', () => {
     expect(events).not.toContain('revoke_failed');
   });
 
+  it('propagates a getSendItems failure to the caller (no DELETE attempted, no audit emitted)', async () => {
+    // DDB outage during getSendItems means the function can't safely
+    // run revokes (no items to iterate) — propagate the error so the
+    // button-click handler surfaces a generic failure to the operator
+    // rather than reporting 0/0 success. Pinned for symmetry with the
+    // other "DDB throws" cases inside persistDispatchResult.
+    mockDb.getSendItems.mockRejectedValueOnce(new Error('DDB throttled'));
+
+    await expect(
+      revokeAllLinks('send-throw', 'sender-1', 'apikey'),
+    ).rejects.toThrow('DDB throttled');
+
+    expect(mockDeleteLink).not.toHaveBeenCalled();
+    const events = logger.audit.mock.calls.map(c => c[0]);
+    expect(events).not.toContain('revoke_success');
+    expect(events).not.toContain('revoke_failed');
+  });
+
   // mintLinksInBatches packs up to TOKENS_PER_RESOURCE recipients onto
   // a single resource_id. Without grouping, the 2nd…Nth DELETE for a
   // shared resource throws 404 and would mis-classify N-1 recipients

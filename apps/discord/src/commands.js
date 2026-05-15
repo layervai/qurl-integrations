@@ -6160,9 +6160,18 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // so they see immediately that the link is dead rather than tapping a
   // Step Through button that now 404s. Per-recipient (one DM per
   // recipient, even if multiple resources fanned out to them) — keep
-  // the first VALID row per recipient_discord_id. The de-dup guard
-  // runs first, but invalid rows `continue` before reaching `.set()`,
-  // so a later valid row for the same recipient still wins the slot.
+  // the first VALID row per recipient_discord_id. Invalid rows fall
+  // through without setting, so editTargets.has() stays false until a
+  // valid row lands, which then wins the slot.
+  //
+  // INVARIANT: "first valid wins" is safe because each recipient has
+  // at most one DM channel (the bot opens one DM thread per user via
+  // sendDM's POST /users/@me/channels). Multi-resource fan-out reuses
+  // the same dm_channel_id / dm_message_id pair across rows for that
+  // recipient, so picking the first one isn't lossy. If a future
+  // change ever sends a recipient two SEPARATE DMs for one send_id,
+  // the second one becomes silently un-editable — flip to a
+  // per-message-id Map at that point.
   //
   // ORDERING: DELETEs ran above; the edit fires AFTER they settle.
   // Reversing the order would create a window where the recipient sees
