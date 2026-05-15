@@ -2838,6 +2838,39 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
+  test('@everyone WITHOUT MENTION_EVERYONE → pre-warm does NOT fire (parser will deny anyway)', async () => {
+    // Pin the asymmetric gate in handleQurlSlashSend: `@everyone` alone
+    // typed by a sender without MENTION_EVERYONE → the parser hits
+    // `massMentionDenied` and never expands, so the chunk request
+    // would be wasted. A future refactor that drops the perm-gate
+    // would silently regress the chunk-budget defense.
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
+    });
+    // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
+  });
+
+  test('@everyone + <@&roleId> WITHOUT MENTION_EVERYONE → pre-warm STILL fires (role path)', async () => {
+    // Counter-test to the above: when the input ALSO contains a role
+    // mention, the prewarm fires regardless of MENTION_EVERYONE because
+    // role expansion gates on `role.mentionable === true` per-role, not
+    // the global perm. The role-mention path needs the cache.
+    const aliceId = '500000000000000077';
+    const int = makeInteraction({
+      options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@&7200>` },
+      guildMembers: { [aliceId]: {} },
+    });
+    int.guild.roles.cache.set('7200', {
+      id: '7200', name: 'team', mentionable: true,
+      members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
+    });
+    // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
+    await handleQurlFile(int);
+    expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
+  });
+
   test('@everyonefoo (no word boundary) → pre-warm does NOT fire', async () => {
     // MASS_MENTION_HINT_RE uses `(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])`
     // — same word-boundary class as recipient-parser.js's

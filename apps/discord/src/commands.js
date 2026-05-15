@@ -252,7 +252,7 @@ const PERSONAL_MESSAGE_INPUT_MAX = 280;
 // If `EVERYONE_TOKEN_RE` ever moves to a shared module, derive this
 // from it rather than maintaining the parallel copy.
 const MASS_MENTION_HINT_RE = /(?<![\p{L}\p{N}_])@everyone(?![\p{L}\p{N}_])|<@&\d+>/u;
-const ROLE_MENTION_HINT_RE = /<@&\d+>/;
+const ROLE_MENTION_HINT_RE = /<@&\d+>/u;
 
 // Helper for the two pre-warm sites. Returns a Promise so the caller
 // can await before reading `guild.members.cache`. Swallows errors —
@@ -4425,6 +4425,17 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
   // non-@everyone role is a filtered view of `guild.members.cache`, so
   // both hit the same empty-cache failure mode. Direct user picks skip
   // the fetch — Discord ships the User object in `interaction.users`.
+  //
+  // DIVERGES from the text-path gate at handleQurlSlashSend, which
+  // additionally requires `canMentionEveryone || hasRoleMention` to
+  // skip the wasted fetch on bare `@everyone` typed without perm. The
+  // picker omits the @everyone role from its UI (Discord platform
+  // filter — out of scope here), so the only roles reaching this gate
+  // are user-deliberately-picked custom roles. A wasted fetch on a
+  // non-mentionable custom role pick (which the per-role
+  // `role.mentionable` gate inside `resolveMentionableSelection` will
+  // ultimately deny) is rare enough that the simpler trigger is worth
+  // the marginal optimization loss.
   if (interaction.roles?.size > 0) {
     await prewarmGuildMembersCache(interaction.guild, { caller: 'handleConfirmUserSelect', flow_id });
   }
