@@ -2201,14 +2201,12 @@ describe('handleSetupModal (dispatcher path)', () => {
 });
 
 describe('handleCommand — autocomplete', () => {
-  it('responds empty for short focused-location values (below min-length)', async () => {
-    // /qurl map's location: option is now autocomplete-enabled.
-    // handleCommand routes the interaction to handleAutocomplete,
-    // which gates on a minimum partial-input length (2 chars). 'Eif'
-    // exceeds the gate, so Places gets called — but since the test
-    // mocks searchPlaces to return [], the dropdown stays empty.
-    // The contract here is that respond() IS called (with []), where
-    // previously it was a silent drop.
+  it('responds empty for /qurl map location autocomplete (flag-off short-circuit)', async () => {
+    // This file's config mock leaves MAP_COMMAND_ENABLED unset — the
+    // bot's production default. handleAutocomplete's flag-off guard
+    // short-circuits to respond([]) before searchPlaces. The contract
+    // here is that respond() IS called (with []), where pre-flag this
+    // path would have invoked Places.
     const interaction = makeInteraction({
       commandName: 'qurl',
       isAutocomplete: jest.fn(() => true),
@@ -2223,6 +2221,86 @@ describe('handleCommand — autocomplete', () => {
     await handleCommand(interaction);
 
     expect(interaction.respond).toHaveBeenCalledWith([]);
+  });
+});
+
+// Flag-off coverage. The config mock at the top of this file does NOT
+// set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
+// resolves it to false — matching the production default. Every test
+// in this block verifies a surface that should be inert when the flag
+// is off. The flag-on path is covered by qurl-file-map.test.js (whose
+// config mock sets MAP_COMMAND_ENABLED: true).
+describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
+  const { mockSearchPlaces } = require('./helpers/places-mock');
+
+  it('SETUP_SUCCESS_MSG omits /qurl map', () => {
+    // Built at module load with the flag snapshot. Pin against the
+    // production string via _test so a future copy edit can't drift
+    // this assertion from reality.
+    expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
+    expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl file');
+  });
+
+  it('/qurl help reply omits /qurl map references', async () => {
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'help'),
+      },
+    });
+    await handleCommand(interaction);
+    const replyArg = interaction.reply.mock.calls.find(([arg]) => typeof arg?.content === 'string')?.[0];
+    expect(replyArg).toBeDefined();
+    expect(replyArg.content).not.toContain('/qurl map');
+    // Sanity: the help reply is still rendered (we want absence of
+    // map, not absence of help). Catches a regression where the
+    // entire help branch goes silent.
+    expect(replyArg.content).toContain('/qurl file');
+    expect(replyArg.content).toContain('qURL Bot — Help');
+  });
+
+  it('dispatcher replies with QURL_MAP_DISABLED_REPLY for /qurl map (stale-client safety net)', async () => {
+    // Discord won't normally route a `map` submission when the
+    // subcommand isn't registered, but a stale client carrying the
+    // pre-flip command definition can still submit one. The
+    // dispatcher's defensive branch turns that into a clean ephemeral
+    // instead of falling through to handleQurlMap → Places.
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'map'),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: _test.QURL_MAP_DISABLED_REPLY,
+      ephemeral: true,
+    });
+    // handleQurlMap defers + then hits Places; if the dispatcher ever
+    // routed through it by mistake, deferReply would fire. Negative
+    // assertion guards against that regression.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('autocomplete for /qurl map location does NOT call searchPlaces (Places quota safety)', async () => {
+    // The earlier "responds empty for /qurl map location" test pins
+    // the user-visible contract (respond([])). This one pins the
+    // operator-cost contract: we don't burn the GOOGLE_MAPS_API_KEY
+    // quota on a submit that the dispatcher will reject anyway.
+    mockSearchPlaces.mockClear();
+    const interaction = makeInteraction({
+      commandName: 'qurl',
+      isAutocomplete: jest.fn(() => true),
+      isChatInputCommand: jest.fn(() => false),
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'map'),
+        getFocused: jest.fn(() => ({ name: 'location', value: 'Eiffel Tower' })),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.respond).toHaveBeenCalledWith([]);
+    expect(mockSearchPlaces).not.toHaveBeenCalled();
   });
 });
 

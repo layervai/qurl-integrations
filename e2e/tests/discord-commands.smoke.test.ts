@@ -130,8 +130,22 @@ describe('Discord command registration (smoke)', () => {
         .sort();
       // Prepend scope to the expectation so a mismatch surfaces which
       // scope regressed in the Jest failure header.
+      //
+      // `'map'` is conditional on the deploy-time MAP_COMMAND_ENABLED
+      // toggle (see apps/discord/src/config.js + the commands.js IIFE).
+      // The smoke runner has to read the same flag the bot reads, or
+      // a flag-on deploy would fail the smoke (no map in expected
+      // set) while a flag-off deploy with a stale workflow env would
+      // pass-with-map and silently miss a regression. Plumb
+      // MAP_COMMAND_ENABLED into the smoke step's `env:` block in
+      // .github/workflows/e2e-smoke.yml in lockstep with the bot
+      // task-definition env.
+      const mapEnabled = process.env.MAP_COMMAND_ENABLED === 'true';
+      const expectedSubcommands = mapEnabled
+        ? ['file', 'help', 'map', 'revoke', 'setup', 'status']
+        : ['file', 'help', 'revoke', 'setup', 'status'];
       expect({ scope: qurl._scope, subcommands })
-        .toEqual({ scope: qurl._scope, subcommands: ['file', 'help', 'map', 'revoke', 'setup', 'status'] });
+        .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
     }
   });
 
