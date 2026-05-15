@@ -5598,6 +5598,18 @@ async function handleConfirmVoiceEveryone(interaction, { flow_id, row }) {
     }).catch(logIgnoredDiscordErr);
   }
 
+  // Mirrors the audit log in handleConfirmEveryone — a successful
+  // voice-channel fan-out is comparably load-bearing for ops ("did
+  // someone fan to N members of #voice-channel?") and shouldn't
+  // require a DDB scan of qurl_send_configs to surface in logs.
+  logger.info('handleConfirmVoiceEveryone: voice @everyone expansion succeeded', {
+    flow_id, guild_id: interaction.guildId, user_id: interaction.user.id,
+    voice_channel_id: voiceChannelId,
+    valid_count: valid.length, dropped_bots: droppedBots,
+    partial_cache_drops: partialCacheDrops, self_included: false,
+    voice_member_count: channel.members.size,
+  });
+
   const content = renderConfirmCardContent({
     resourceType: payload.resourceType,
     resourceLabel: payload.resourceLabel,

@@ -5086,6 +5086,28 @@ describe('handleConfirmVoiceEveryone', () => {
     const lastCall = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastCall.content).toMatch(/Card data is corrupted/);
   });
+
+  test('success-path emits info-level audit log with counts', async () => {
+    // Mirror handleConfirmEveryone's success-log test (#376) — a
+    // successful voice-channel fan-out is a load-bearing audit signal
+    // ("did someone fan to N members of #voice-channel?") and should
+    // be findable in logs without a DDB scan of qurl_send_configs.
+    const int = makeVoiceInteraction({ members: [u1, u2] });
+    await handleConfirmVoiceEveryone(int, { flow_id: 'fid', row: { payload: basePayload, version: 1 } });
+    const logger = require('../src/logger');
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('voice @everyone expansion succeeded'),
+      expect.objectContaining({
+        flow_id: 'fid',
+        voice_channel_id: VOICE_CH,
+        valid_count: 2,
+        dropped_bots: expect.any(Number),
+        partial_cache_drops: expect.any(Number),
+        self_included: false,
+        voice_member_count: expect.any(Number),
+      }),
+    );
+  });
 });
 
 // ──────────────────────────────────────────────────────────────
