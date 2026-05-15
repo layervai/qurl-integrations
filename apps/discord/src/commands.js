@@ -737,11 +737,22 @@ function buildDeliveryPayload({ senderAlias, guildName, guildIconUrl, qurlLink, 
   // surface but the bidi/zero-width spoof defense still applies.
   const safeSenderPlain = sanitizeDisplayNamePlain(senderAlias);
   // guildName lives in setAuthor's plaintext `name` slot, same as
-  // safeSenderPlain. Missing/empty guild (commands are guild-only so
-  // this should never happen in production; defended for the edge
-  // case where interaction.guild is null) → omit the server suffix
-  // rather than render a stray ` · ` separator.
-  const safeGuildName = guildName ? sanitizeDisplayNamePlain(guildName) : '';
+  // safeSenderPlain. Two cases must fall through to "sender only"
+  // (no ` · ` separator):
+  //   1. Missing/empty/null guild — interaction.guild is null (commands
+  //      are guild-only so this shouldn't happen in production).
+  //   2. A truthy guildName composed entirely of strip-eligible chars
+  //      (RLO, ZWSP, BOM, soft-hyphen, etc.) — the exact hostile input
+  //      the bidi-strip exists to defend against. sanitizeDisplayName*
+  //      would substitute the "Someone" fallback here, producing the
+  //      nonsense `Vik · Someone` author row. Use stripBidiAndControls
+  //      directly (no fallback), then re-check truthiness, then apply
+  //      the 64-codepoint cap codepoint-aware. Mirrors the cap pattern
+  //      sanitizeDisplayNamePlain uses for senderAlias.
+  const strippedGuild = guildName ? stripBidiAndControls(guildName) : '';
+  const safeGuildName = strippedGuild
+    ? Array.from(strippedGuild).slice(0, 64).join('')
+    : '';
   const authorName = safeGuildName
     ? `${safeSenderPlain} · ${safeGuildName}`
     : safeSenderPlain;

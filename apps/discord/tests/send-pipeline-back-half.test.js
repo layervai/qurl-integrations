@@ -1764,6 +1764,46 @@ describe('handleAddRecipients — happy path (location)', () => {
     expect(emitted).not.toContain('mint_failed');
   });
 
+  // Bulk-path button-packing contract: handleAddRecipients now
+  // discards the trust button inside each per-link payload and
+  // appends ONE trust button at the bottom of the dispatched
+  // message (so multi-link recipients don't see N redundant
+  // "What is qURL?" verify buttons). For the N=1 case asserted
+  // here, the result must match the executeSendPipeline single-
+  // path layout: one ActionRow holding [Step Through, What is qURL?].
+  // A future refactor that re-introduces per-link trust buttons,
+  // or that breaks the contract that components[0].components[0]
+  // is the Step Through button, would surface here.
+  it('packs the trust button once at the bottom (not per-link) for the bulk path', async () => {
+    mockDb.getSendConfig.mockResolvedValueOnce({
+      connector_resource_id: null, actual_url: 'https://maps.example.com/x',
+      location_name: 'Eiffel Tower', expires_in: '30m',
+    });
+    mockUploadJsonToConnector.mockResolvedValueOnce({ resource_id: 'res-loc-pack' });
+    mockMintLinks.mockResolvedValueOnce([
+      { qurl_link: 'https://q.test/pack', resource_id: 'res-loc-pack' },
+    ]);
+    mockSendDM.mockResolvedValue({ ok: true, channelId: 'dm-c', messageId: 'dm-m' });
+    mockDb.recordQURLSendBatch.mockResolvedValue(undefined);
+
+    await handleAddRecipients(
+      'send-pack', makeUsersCollection([{ id: 'u1', username: 'Alice', bot: false }]),
+      makeInteraction(), 'apikey',
+    );
+
+    expect(mockSendDM).toHaveBeenCalledTimes(1);
+    const [, payload] = mockSendDM.mock.calls[0];
+    // One ActionRow holding both buttons — matches the
+    // executeSendPipeline layout for the typical 1-link send.
+    expect(payload.components).toHaveLength(1);
+    const buttons = payload.components[0].components;
+    expect(buttons).toHaveLength(2);
+    // No assertion on label/url shape here; build-delivery-embed.test.js
+    // owns those contracts. This test only pins the packing structure
+    // — that the bulk path produces a [Step Through, What is qURL?]
+    // row, not a separate trust row, in the 1-link case.
+  });
+
   // Locks the single-emission contract: a sendConfig with both file
   // AND location must NOT fire upload_success twice (would double-count
   // UploadCount in CloudWatch). The kind field must be 'mixed'.

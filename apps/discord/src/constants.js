@@ -25,6 +25,15 @@ const RESOURCE_TYPES = {
 // host qurl-service returns from POST /v1/qurls. The landing URL is the
 // public brand page first-time recipients can hit to verify qURL is a
 // real service before clicking Step Through.
+//
+// TODO(branded-domain): DESTINATION_DOMAIN is a brand-default literal.
+// qurl-service already supports a `branded_domain` concept (tenant-
+// custom hosts on minted links — see qurl-service api.gen.go). Discord
+// doesn't consume that field today, but the moment it does, the footer
+// "opens qurl.link" becomes factually wrong while Step Through opens
+// e.g. `door.acme.com`. When qurl-integrations starts honoring
+// branded_domain in the minted-link response, derive the footer text
+// from link.qurlLink's host rather than this literal.
 const TRUST = {
   LANDING_URL: 'https://layerv.ai/qurl/',
   DESTINATION_DOMAIN: 'qurl.link',

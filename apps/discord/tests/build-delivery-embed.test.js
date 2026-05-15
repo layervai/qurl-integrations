@@ -538,6 +538,34 @@ describe('buildDeliveryPayload — author row provenance', () => {
     }
   });
 
+  // The exact hostile input the bidi-strip exists to defend against:
+  // a truthy guild name composed ENTIRELY of strip-eligible chars
+  // (RLO, ZWSP, soft-hyphen, etc.). sanitizeDisplayName* helpers
+  // substitute the "Someone" display-name fallback on all-strip
+  // input, which would produce the nonsense author row `Vik · Someone`
+  // — degrading the trust signal on the exact input the strip exists
+  // to neutralize. The implementation routes guildName through
+  // stripBidiAndControls (no fallback) so all-strip collapses to ''
+  // and the author row falls back to sender-only.
+  it('falls back to sender-only when guildName is entirely strip-eligible chars (no "Someone" leak)', () => {
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName: '‮​­' });
+    expect(capturedEmbeds[0]._author.name).toBe('Vik');
+    expect(capturedEmbeds[0]._author.name).not.toContain('Someone');
+  });
+
+  // Mirrors the senderAlias 64-codepoint cap. The same defensive upper
+  // bound applies to the guild name — Discord caps guild names at 100
+  // chars natively, but a forged interaction / future API shape change
+  // could exceed that. 64 codepoints keeps the combined `sender · guild`
+  // author line well under Discord's 256-char author.name limit even
+  // when both halves max out.
+  it('caps long guildName at 64 codepoints', () => {
+    const long = 'G'.repeat(200);
+    buildDeliveryPayload({ ...baseArgs, senderAlias: 'Vik', guildName: long });
+    const authorName = capturedEmbeds[0]._author.name;
+    expect(authorName).toBe('Vik · ' + 'G'.repeat(64));
+  });
+
   it('applies plain (non-markdown-escaping) sanitization to guildName', () => {
     // Same bidi/zero-width spoof defense the senderAlias path gets — an
     // attacker controlling guild name could RLO-flip the author row.
