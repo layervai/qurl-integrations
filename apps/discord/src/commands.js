@@ -4009,14 +4009,21 @@ async function handleQurlSlashSend(interaction, params) {
           // config (20k cap vs 99-member voice cap) unreachable, but a
           // shrunk env override could trip this — silent fallback would
           // leave the user wondering why voice-mode didn't take.
+          //
+          // Wording note: `voicePart.valid.length` is the POST-filter
+          // count (sender + bots excluded). The Discord client's voice
+          // panel shows raw connections, so phrasing this as "eligible
+          // recipients" avoids a confusing cross-check (e.g., panel
+          // shows 100 / banner says "39 connected"). The log field
+          // stays `eligible` for consistency.
           logger.info('handleQurlSlashSend: voice-mode skipped — exceeds QURL_SEND_MAX_RECIPIENTS', {
             user_id: interaction.user.id,
             voice_channel_id: voiceChannelId,
-            connected: voicePart.valid.length,
+            eligible: voicePart.valid.length,
             cap: config.QURL_SEND_MAX_RECIPIENTS,
           });
           finalWarningsBlock = warningsBlock
-            + `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} connected `
+            + `⚠\u{FE0F} Voice channel has ${voicePart.valid.length} eligible recipients `
             + `(max ${config.QURL_SEND_MAX_RECIPIENTS}) — pick recipients below.\n\n`;
         }
       }

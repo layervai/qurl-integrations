@@ -2887,7 +2887,11 @@ describe('handleQurlFile — slash entry', () => {
         expect(payload.recipientMode).toBe('picker');
         expect(payload.recipientIds).toEqual([]);
         // User sees the "why" rather than a silent voice→picker switch.
-        expect(payload.warningsBlock).toMatch(/Voice channel has 2 connected/);
+        // Wording is "eligible recipients" (post-filter count) not raw
+        // "connected" — sender + bots are already filtered out by this
+        // point, so phrasing as "connected" would diverge from what
+        // Discord's voice panel shows.
+        expect(payload.warningsBlock).toMatch(/Voice channel has 2 eligible recipients/);
         expect(payload.warningsBlock).toMatch(/max 1/);
       } finally {
         config.QURL_SEND_MAX_RECIPIENTS = originalCap;
