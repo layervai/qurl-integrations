@@ -73,6 +73,18 @@
 // `handle()` and `DeleteMessage` — those are bounded by maxReceiveCount
 // and end up in the DLQ for operator triage.
 //
+// TODO(infra-publisher-set): the consumer trusts every field in the
+// envelope (including data.user.id and data.member.permissions)
+// because the SQS queue policy locks sqs:SendMessage to the gateway
+// task role's principal. If the infra-side `qurl-bot-events` module
+// ever grants publish rights to a sibling service, this trust shape
+// MUST be replaced with envelope schema validation + signature
+// verification before that publisher's first message lands. See
+// docs/zero-downtime-design.md → "Trust boundary — SQS queue policy
+// + envelope authenticity" for the full contract; `git grep
+// TODO(infra-publisher-set)` from any infra-side change surfaces
+// this requirement.
+//
 // No backpressure between the consumer and detached handlers: the
 // poll loop keeps pulling 10-message batches as long as the queue
 // has work, but `handleCommand` / `handleFlowInteraction` run
@@ -272,16 +284,6 @@ async function deleteMessage(receiptHandle) {
   }));
 }
 
-// TODO(infra-publisher-set): the consumer trusts every field in
-// the envelope (including data.user.id and data.member.permissions)
-// because the SQS queue policy locks sqs:SendMessage to the gateway
-// task role's principal. If the infra-side `qurl-bot-events` module
-// ever grants publish rights to a sibling service, this trust shape
-// MUST be replaced with envelope schema validation + signature
-// verification before that publisher's first message lands. See
-// docs/zero-downtime-design.md → "Trust boundary — SQS queue
-// policy + envelope authenticity" for the full contract.
-
 /**
  * Process one SQS message: parse the envelope, dispatch via
  * client.actions.InteractionCreate.handle, delete on success.
@@ -298,9 +300,9 @@ async function deleteMessage(receiptHandle) {
 // not chars). We cap ours conservatively at ~200 KB to leave SQS
 // attribute-header headroom. Anything over this is rejected before
 // JSON.parse — cheap defense if the publisher set ever loosens
-// (today the trust boundary is IAM-locked, see
-// TODO(infra-publisher-set) above). Also the natural place a
-// future envelope-signature check would land.
+// (today the trust boundary is IAM-locked, see the
+// TODO(infra-publisher-set) marker in the module header). Also the
+// natural place a future envelope-signature check would land.
 //
 // Measured via Buffer.byteLength(_, 'utf8') rather than
 // `String.length` because String.length is a UTF-16 code-unit
