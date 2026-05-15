@@ -1097,6 +1097,37 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     );
   });
 
+  test('trackDispatch decrement logs loud and skips when underflow would occur', async () => {
+    // Replaces the previous silent `Math.max(0, ...)` clamp: if a
+    // promise settles after `_resetStateForTest` zeroed the count
+    // (or hot-reload swapped modules), the decrement would underflow.
+    // Production cannot reach this — every increment is paired with
+    // exactly one decrement on the same promise — so this firing
+    // means a test or external caller broke the invariant. Pin that
+    // we log the underflow at error level (so the suite surfaces the
+    // bug) and skip the decrement (so subsequent tests see 0, not -1).
+    let resolveHandler;
+    const handlerPromise = new Promise((r) => { resolveHandler = r; });
+    withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+
+    // Simulate the test-pollution scenario: reset state (zeros the
+    // count) BEFORE the registered promise settles, then resolve.
+    // The .finally fires against the zeroed counter and trips the
+    // underflow guard.
+    eventConsumer._test._resetStateForTest();
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+    resolveHandler('done');
+    await flushMicrotasks();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('trackDispatch decrement would underflow'),
+      expect.objectContaining({ inFlightCount: 0 }),
+    );
+    // Count stayed at 0 — the decrement was skipped, not applied.
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
   test('pollOnce early-returns + backs off when in-flight at cap', async () => {
     // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
     // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let
