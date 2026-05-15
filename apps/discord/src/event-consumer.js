@@ -352,6 +352,12 @@ validateInflightCap(MAX_INFLIGHT_HANDLERS);
 // abortableSleep honors the abort signal so a SIGTERM during a
 // backpressure pause still exits inside the graceful-shutdown budget.
 const INFLIGHT_BACKOFF_BASE_MS = 100;
+// 1600 = 4 doublings from BASE (100→200→400→800→1600). Chosen to
+// keep the worst-case stop()-during-backoff wake (a SIGTERM that
+// lands right after entering the ceiling sleep) well inside the
+// gracefulShutdown budget — leaves >8s of the 10s budget for
+// downstream cleanup. Halving to 800ms gives back half the wake-rate
+// win; doubling to 3200ms approaches the shutdown ceiling.
 const INFLIGHT_BACKOFF_MAX_MS = 1600;
 let currentBackoffMs = INFLIGHT_BACKOFF_BASE_MS;
 
