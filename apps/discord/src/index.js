@@ -13,6 +13,7 @@ const {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingMapCommandKeys,
   unsupportedRoleShipperCombo,
   shouldRegisterInteractionListener,
   resolveProcessRole,
@@ -281,6 +282,19 @@ if (eventShipperMissing.length > 0) {
 const roleShipperConflict = unsupportedRoleShipperCombo(PROCESS_ROLE, config.ENABLE_EVENT_SHIPPER);
 if (roleShipperConflict) {
   logger.error(roleShipperConflict);
+  process.exit(1);
+}
+
+// Symmetric with the eventShipper check above — fail fast on
+// inconsistent flag-vs-secret state. The error message is the
+// operator-facing source of truth for the remediation steps.
+const mapCommandMissing = missingMapCommandKeys(config);
+if (mapCommandMissing.length > 0) {
+  logger.error(
+    `MAP_COMMAND_ENABLED=true but ${mapCommandMissing.join(', ')} is missing or still the literal "PLACEHOLDER" sentinel. ` +
+    'Seed a real Google Maps Platform API key (Places API enabled, no HTTP-referrer restriction) into the ' +
+    '/qurl-bot-discord/GOOGLE_MAPS_API_KEY SSM parameter before re-flipping the toggle.'
+  );
   process.exit(1);
 }
 

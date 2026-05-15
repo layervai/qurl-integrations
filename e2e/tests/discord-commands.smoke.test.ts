@@ -130,8 +130,35 @@ describe('Discord command registration (smoke)', () => {
         .sort();
       // Prepend scope to the expectation so a mismatch surfaces which
       // scope regressed in the Jest failure header.
+      //
+      // `'map'` is conditional on the deploy-time MAP_COMMAND_ENABLED
+      // toggle (see apps/discord/src/config.js + the commands.js IIFE).
+      // The smoke runner has to read the same flag the bot reads.
+      // Strict shape check: require the env var to be exactly "true"
+      // or "false" — if a workflow regression drops the "Resolve
+      // MAP_COMMAND_ENABLED" step (see e2e-smoke.yml in
+      // qurl-integrations-infra), the env would be unset and the
+      // smoke would silently default to a flag-off expectation,
+      // masking a flag-on deploy as a regression. Failing the test
+      // up front with a named workflow step is louder than chasing a
+      // mystery subcommand-set diff. Resolved value also logged so
+      // CI output shows what the smoke actually asserted.
+      const rawMapFlag = process.env.MAP_COMMAND_ENABLED;
+      if (rawMapFlag !== 'true' && rawMapFlag !== 'false') {
+        throw new Error(
+          `MAP_COMMAND_ENABLED must be set to "true" or "false" before this smoke runs (got: ${JSON.stringify(rawMapFlag)}). `
+          + 'In CI it is set by the e2e-smoke workflow from the deploy env\'s tfvars; '
+          + 'locally, run with e.g. `MAP_COMMAND_ENABLED=false npm test`.',
+        );
+      }
+      const mapEnabled = rawMapFlag === 'true';
+      // eslint-disable-next-line no-console
+      console.log(`smoke: MAP_COMMAND_ENABLED resolved to "${rawMapFlag}" (mapEnabled=${mapEnabled})`);
+      const expectedSubcommands = mapEnabled
+        ? ['file', 'help', 'map', 'revoke', 'setup', 'status']
+        : ['file', 'help', 'revoke', 'setup', 'status'];
       expect({ scope: qurl._scope, subcommands })
-        .toEqual({ scope: qurl._scope, subcommands: ['file', 'help', 'map', 'revoke', 'setup', 'status'] });
+        .toEqual({ scope: qurl._scope, subcommands: expectedSubcommands });
     }
   });
 
