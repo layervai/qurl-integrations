@@ -1357,9 +1357,11 @@ async function executeSendPipeline(interaction, {
 
   // #352 ordering invariant: expiresAt computed BEFORE any DDB
   // write. Defense-in-depth — the failGate above already rejects
-  // malformed expiresIn before reaching here. Clock drift vs. the
-  // API's enforcement clock is sub-second on this path; negligible
-  // at the 30m–7d horizon.
+  // malformed expiresIn before reaching here. Using send-time +
+  // duration (rather than reading `expires_at` from the API's mint
+  // response) since `mintLinks` doesn't currently surface that
+  // field. Clock drift vs. the API's enforcement clock is sub-second
+  // on this path; negligible at the 30m–7d horizon.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
@@ -3491,7 +3493,7 @@ function renderConfirmCardRows({
   // option's label, misrepresenting the actual stored value. Falls
   // back to defaulting the codebase-default '24h' option so the card
   // still shows SOMETHING meaningful.
-  const hasExpiryMatch = EXPIRY_CHOICES.some((c) => c.value === expiresIn);
+  const hasExpiryMatch = isValidExpiry(expiresIn);
   if (!hasExpiryMatch && expiresIn != null) {
     // Log so corrupted rows surface in forensics rather than just
     // getting papered over by the 24h fallback.
