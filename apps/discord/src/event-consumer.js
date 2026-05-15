@@ -8,6 +8,15 @@
 // through handleCommand / handleFlowInteraction — same dispatcher
 // the gateway role uses today.
 //
+// Process-singleton: every piece of state in this module — the poll
+// loop's running/stopping flags, the AbortController, the SQS
+// client, the in-flight Set, the dedup LRU — lives in module-level
+// scope. There is at most one consumer per process by design.
+// A future caller that tries to `start()` two consumers in one
+// process will hit the second-start warn in `start()` and the
+// duplicate poll won't take. If multi-consumer is ever needed,
+// promote the state to an instance/closure shape.
+//
 // Reconstruction path: `client.actions.InteractionCreate.handle(data)`.
 // This is discord.js@14.25.1 internal API (not exported by the
 // package's public surface) — same function the library uses on a
@@ -72,10 +81,23 @@ const logger = require('./logger');
 // patterns — no `|| 'us-east-2'` fallback because a missing AWS_REGION
 // would otherwise silently land in whichever region the SDK defaults to,
 // which is exactly the misconfiguration we want to surface at boot).
+//
+// Lazy-check intentional: createSqsClient() throws at start() time
+// rather than at module load. Why not match flow-state.js's
+// module-load throw? Because event-consumer is required by index.js
+// unconditionally, but only `.start()` is called when ENABLE_EVENT_SHIPPER
+// is on. A module-load throw would block boot for non-worker roles
+// that don't need SQS at all. In practice the asymmetry is moot:
+// flow-state.js's own module-load throw already enforces AWS_REGION
+// for any bot that boots (flow-state is on the universal load path),
+// so a misconfigured deploy fails closed there before ever reaching
+// this throw. Defense-in-depth, but later than the first guard.
 const AWS_REGION = (process.env.AWS_REGION ?? '').trim();
 
-// SQS polling parameters. Tunables exposed via env so an operator
-// triaging a queue-depth incident can adjust without a redeploy.
+// SQS polling parameters. Hardcoded module constants — see the
+// rationale below for each. If an operator needs to tune these in
+// flight, add env overrides via the intEnv pattern in config.js
+// (matches REFRESH_INTERVAL_MS in src/http-only-init.js).
 //
 // MaxNumberOfMessages (10) — SQS's API cap. We accept whatever the
 // queue serves and process them in parallel.
@@ -390,6 +412,13 @@ async function stop() {
   // the abort and exits cleanly without backoff or error logging.
   // Critical for graceful-shutdown: index.js's 10s force-exit fires
   // before a synchronously-waiting receive could complete on its own.
+  //
+  // Narrow race: if stop() lands BETWEEN iterations (after pollOnce
+  // returned, before the next iteration assigned a fresh controller)
+  // we abort the already-completed previous controller, which is a
+  // no-op. That's benign — the next `while (!stopping)` check exits
+  // the loop without starting another receive. The abort fires
+  // every other time and is the load-bearing path.
   if (receiveAbortController) {
     receiveAbortController.abort();
   }

@@ -269,6 +269,28 @@ describe('event-consumer: pollOnce', () => {
     expect(sqsMock.commandCalls(DeleteMessageCommand)).toHaveLength(3);
   });
 
+  test('pollOnce passes the load-bearing SQS parameters (MaxNumberOfMessages, WaitTimeSeconds, VisibilityTimeout)', async () => {
+    // These three values are operationally load-bearing:
+    //   - WaitTimeSeconds=20 minimizes empty-receive cost on an idle queue.
+    //   - VisibilityTimeout=60 must be < Discord interaction-token TTL.
+    //   - MaxNumberOfMessages=10 is the SQS API cap.
+    // Pin them against an accidental edit. If a future change wants
+    // to retune, this test goes with it as the deliberate signal.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    const client = makeStubClient();
+
+    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
+
+    const receiveCalls = sqsMock.commandCalls(ReceiveMessageCommand);
+    expect(receiveCalls).toHaveLength(1);
+    expect(receiveCalls[0].args[0].input).toMatchObject({
+      QueueUrl: 'https://sqs.us-east-2.amazonaws.com/123/qurl-bot-events',
+      MaxNumberOfMessages: 10,
+      WaitTimeSeconds: 20,
+      VisibilityTimeout: 60,
+    });
+  });
+
   test('per-message error does not block siblings', async () => {
     const messages = [
       makeMessage({ eventType: 'INTERACTION_CREATE', data: { id: 'good1' }, event_id: '0:1' }, { receiptHandle: 'rh-1', messageId: 'm-1' }),

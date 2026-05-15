@@ -276,14 +276,20 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // src/event-consumer.js). Registered once, gated on either flag, so
 // combined-mode + flag-on doesn't double-register.
 //
-// PR 10 evolution note: once the producer side lands, the gateway
-// role MUST stop dispatching in-process when ENABLE_EVENT_SHIPPER
-// is true (it'll publish to SQS instead, and the worker tier picks
-// up from there). Expect the gate to become something like
-// `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker`, or for
-// the gateway-side listener to be replaced with a publish-to-SQS
-// shim. Today (PR 11 only), the producer side doesn't exist yet,
-// so combined-mode + flag-on still runs the gateway dispatch path
+// **PR 10 PRE-MERGE REQUIREMENT** — the gate below MUST be updated
+// to `(isGateway && !config.ENABLE_EVENT_SHIPPER) || isWorker` (or
+// the gateway-side listener replaced with a publish-to-SQS shim) in
+// THE SAME PR that introduces the producer. Without that change,
+// combined-mode + flag-on after PR 10 ships will dispatch every
+// interaction twice — once via the gateway WS frame, once via the
+// SQS roundtrip — silently doubling DM fan-outs, side-effecting
+// every flow-state transition twice, and corrupting telemetry.
+// PR 11 alone is safe (producer doesn't exist → queue stays empty
+// → consumer is a no-op); the hazard activates the instant the
+// producer side starts publishing.
+//
+// Today (PR 11 only), the producer side doesn't exist yet, so
+// combined-mode + flag-on still runs the gateway dispatch path
 // in-process and the worker tier's consumer sits on an empty queue.
 if (isGateway || isWorker) {
   // Handle interactions. Split-dispatch by interaction kind:
