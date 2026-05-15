@@ -99,6 +99,21 @@ function withMockedSqs(fn) {
   return fn();
 }
 
+// Run `fn` with isWorkerDispatch flipped true (matches the
+// synchronous flag-wrap processMessage performs around handle()),
+// then restore. Used by tests that exercise trackDispatch directly
+// rather than going through processMessage. Lives at module scope
+// so both the start/stop lifecycle and backpressure describe blocks
+// share one definition.
+function withWorkerDispatch(fn) {
+  eventConsumer._test._setWorkerDispatchingForTest(true);
+  try {
+    return fn();
+  } finally {
+    eventConsumer._test._setWorkerDispatchingForTest(false);
+  }
+}
+
 describe('event-consumer: recordSeen LRU', () => {
   const { recordSeen, seenEventIds, SEEN_EVENT_ID_CAP } = eventConsumer._test;
 
@@ -911,6 +926,159 @@ describe('event-consumer: start/stop lifecycle', () => {
   // The "abort silently exits pollLoop" test above already pins
   // that pollLoop's loop body actually runs (asserts receiveCount
   // ≥ 1), which covers the underlying concern.
+
+  test('stop() drains in-flight handlers before resolving (settled within deadline)', async () => {
+    // Pins the drain contract: stop() should await the in-flight
+    // handler promises captured by trackDispatch before returning,
+    // so gracefulShutdown's subsequent db.close() doesn't race a
+    // handler's mid-DDB-write. Resolution is deferred to a setTimeout
+    // so the .finally microtasks haven't fired by the time stop()
+    // reaches its drain branch — the drain enters with promises
+    // still pending, awaits them via allSettled, logs "drain
+    // complete" before stop() resolves.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    // Tight deadline so the test stays fast even if a CI host is
+    // slow — the resolution timer below fires well inside this
+    // budget, so the deadline-elapsed branch shouldn't trigger.
+    eventConsumer._test._setDrainDeadlineForTest(500);
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Register two resolvable promises via trackDispatch.
+    const resolvers = [];
+    withWorkerDispatch(() => {
+      for (let i = 0; i < 2; i += 1) {
+        let resolve;
+        const p = new Promise((r) => { resolve = r; });
+        resolvers.push(resolve);
+        eventConsumer.trackDispatch(p);
+      }
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(2);
+
+    // Schedule resolution to fire DURING the drain wait. setTimeout
+    // (not a synchronous resolve) so the .finally microtasks haven't
+    // already run by the time stop()'s drain branch executes.
+    setTimeout(() => resolvers.forEach((r) => r('done')), 20);
+    await eventConsumer.stop();
+
+    expect(logger.info).toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.objectContaining({ count: 2 }),
+    );
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+  });
+
+  test('stop() returns within deadline when handlers do not settle', async () => {
+    // Pins the deadline contract: stop() must NOT block indefinitely
+    // on a never-resolving handler. Shrink the deadline so the test
+    // doesn't wait the full 3s default; assert the warn log fires
+    // and stop() resolves within a margin of the deadline.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    eventConsumer._test._setDrainDeadlineForTest(50);
+
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Register a never-resolving promise so the drain hits its deadline.
+    withWorkerDispatch(() => {
+      eventConsumer.trackDispatch(new Promise(() => {}));
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+
+    const start = Date.now();
+    await eventConsumer.stop();
+    const elapsed = Date.now() - start;
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Event consumer: drain deadline elapsed, proceeding with handlers still in-flight',
+      expect.objectContaining({ unsettled: 1, settled: 0 }),
+    );
+    // Stop() returned even though the handler never settled. Allow
+    // a generous upper bound for CI flakiness; the assertion is
+    // "stop didn't hang past the deadline by an order of magnitude."
+    expect(elapsed).toBeLessThan(50 * 20);
+  });
+
+  test('getDrainDeadlineMs reflects live value after _setDrainDeadlineForTest', () => {
+    // The deadline is mutable so tests can shrink it without
+    // polluting prod with a config knob. The `_test` export is a
+    // getter (not a value-snapshot) so introspection reflects the
+    // live variable — pin that contract so a future refactor back
+    // to a value-export trips this test.
+    expect(eventConsumer._test.getDrainDeadlineMs()).toBe(3000);
+    eventConsumer._test._setDrainDeadlineForTest(50);
+    expect(eventConsumer._test.getDrainDeadlineMs()).toBe(50);
+  });
+
+  test('stop() drains even when loopPromise rejects (loop crash does not skip drain)', async () => {
+    // Pin the round-3 cr fix: a pollLoop crash (rare — its own catch
+    // covers routine errors) used to skip the drain because the
+    // drain block was inside the same try as `await loopPromise`.
+    // Restructured so the loop-crash log and the drain are
+    // independent: the trackDispatch set's state is coherent after
+    // a loop crash (additions are synchronous around emits), so
+    // draining is meaningful regardless of loop outcome.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    eventConsumer._test._setDrainDeadlineForTest(500);
+    const client = makeStubClient();
+    eventConsumer.start(client);
+
+    // Replace the loopPromise with one that rejects so the inner
+    // try/catch fires (simulating a pollLoop crash). The drain
+    // should still run because it's outside that inner try.
+    eventConsumer._test._setLoopPromiseForTest(Promise.reject(new Error('loop crashed')));
+
+    const resolvers = [];
+    withWorkerDispatch(() => {
+      let resolve;
+      const p = new Promise((r) => { resolve = r; });
+      resolvers.push(resolve);
+      eventConsumer.trackDispatch(p);
+    });
+    expect(eventConsumer._test.getInFlightCount()).toBe(1);
+
+    setTimeout(() => resolvers.forEach((r) => r('done')), 20);
+    await eventConsumer.stop();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Event consumer: error during stop',
+      expect.objectContaining({ error: 'loop crashed' }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.objectContaining({ count: 1 }),
+    );
+  });
+
+  test('stop() skips drain branch when no handlers are in-flight (no spurious logs)', async () => {
+    // Pins the no-op path: an idle worker stop()s without firing the
+    // drain logs (drainCount > 0 gate). Common case in production —
+    // most stops will land between bursts when no handlers are pending.
+    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+    eventConsumer._test._setSqsClientForTest(new SQSClient({ region: 'us-east-2' }));
+    const client = makeStubClient();
+    eventConsumer.start(client);
+    expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+    await eventConsumer.stop();
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      'Event consumer: draining in-flight handlers',
+      expect.anything(),
+    );
+    expect(logger.info).not.toHaveBeenCalledWith(
+      'Event consumer: drain complete',
+      expect.anything(),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      'Event consumer: drain deadline elapsed, proceeding with handlers still in-flight',
+      expect.anything(),
+    );
+  });
 });
 
 describe('event-consumer: backpressure (in-flight handler cap)', () => {
@@ -928,19 +1096,6 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     for (let i = 0; i < n; i += 1) {
       // eslint-disable-next-line no-await-in-loop -- sequential by design
       await new Promise((r) => setImmediate(r));
-    }
-  }
-
-  // Run `fn` with isWorkerDispatch flipped true (matches the
-  // synchronous flag-wrap processMessage performs around handle()),
-  // then restore. Six tests repeat this pattern; helper keeps the
-  // setup intent visible and the flag flip impossible to miss.
-  function withWorkerDispatch(fn) {
-    eventConsumer._test._setWorkerDispatchingForTest(true);
-    try {
-      return fn();
-    } finally {
-      eventConsumer._test._setWorkerDispatchingForTest(false);
     }
   }
 
@@ -1097,34 +1252,28 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     );
   });
 
-  test('trackDispatch decrement logs loud and skips when underflow would occur', async () => {
-    // Replaces the previous silent `Math.max(0, ...)` clamp: if a
-    // promise settles after `_resetStateForTest` zeroed the count
-    // (or hot-reload swapped modules), the decrement would underflow.
-    // Production cannot reach this — every increment is paired with
-    // exactly one decrement on the same promise — so this firing
-    // means a test or external caller broke the invariant. Pin that
-    // we log the underflow at error level (so the suite surfaces the
-    // bug) and skip the decrement (so subsequent tests see 0, not -1).
+  test('trackDispatch tolerates _resetStateForTest mid-flight (Set.delete is a no-op on non-member)', async () => {
+    // PR #391 replaced the counter+underflow-guard pattern with a
+    // Set<Promise>. Set.delete on a non-member is a no-op, so a
+    // stale .finally callback firing AFTER _resetStateForTest cleared
+    // the set silently does nothing — no error log, no negative size.
+    // This pins the "set semantics absorb test pollution" property
+    // that justified removing the fail-loud underflow guard.
     let resolveHandler;
     const handlerPromise = new Promise((r) => { resolveHandler = r; });
     withWorkerDispatch(() => eventConsumer.trackDispatch(handlerPromise));
     expect(eventConsumer._test.getInFlightCount()).toBe(1);
 
-    // Simulate the test-pollution scenario: reset state (zeros the
-    // count) BEFORE the registered promise settles, then resolve.
-    // The .finally fires against the zeroed counter and trips the
-    // underflow guard.
     eventConsumer._test._resetStateForTest();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
     resolveHandler('done');
     await flushMicrotasks();
 
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('trackDispatch decrement would underflow'),
-      expect.objectContaining({ inFlightCount: 0 }),
+    // No "underflow" log fired — the new path can't reach that branch.
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('underflow'),
+      expect.anything(),
     );
-    // Count stayed at 0 — the decrement was skipped, not applied.
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
   });
 
@@ -1388,6 +1537,84 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     test('unset env var resolves to default without warning', () => {
       withIsolatedEnv(undefined, (fresh, warns) => {
         expect(fresh._test.MAX_INFLIGHT_HANDLERS).toBe(100);
+        expect(warns).toHaveLength(0);
+      });
+    });
+  });
+
+  describe('DRAIN_DEADLINE_MS env validation (module-load IIFE)', () => {
+    // Mirrors the MAX_INFLIGHT_HANDLERS validation block. The
+    // drain deadline is range-clamped (not just positive-integer)
+    // because a too-large value would push past gracefulShutdown's
+    // 10s budget and a too-small value would be operationally a
+    // disabled-drain knob.
+    function withIsolatedEnv(envValue, run) {
+      jest.isolateModules(() => {
+        const prev = process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+        const origConsoleWarn = console.warn;
+        const warns = [];
+        console.warn = (...args) => warns.push(args.join(' '));
+        try {
+          if (envValue === undefined) {
+            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+          } else {
+            process.env.QURL_BOT_DRAIN_DEADLINE_MS = envValue;
+          }
+          const fresh = require('../src/event-consumer');
+          run(fresh, warns);
+        } finally {
+          console.warn = origConsoleWarn;
+          if (prev === undefined) {
+            delete process.env.QURL_BOT_DRAIN_DEADLINE_MS;
+          } else {
+            process.env.QURL_BOT_DRAIN_DEADLINE_MS = prev;
+          }
+        }
+      });
+    }
+
+    test.each([
+      ['100abc', 'trailing garbage'],
+      ['-5', 'negative integer'],
+      ['0', 'zero'],
+      ['1.5', 'non-integer'],
+      ['abc', 'non-numeric'],
+    ])('rejects %p (%s) and falls back to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
+        expect(
+          warns.some((w) => w.includes('QURL_BOT_DRAIN_DEADLINE_MS') && w.includes('rejected'))
+        ).toBe(true);
+      });
+    });
+
+    test.each([
+      ['99', 'just below the floor'],
+      ['8001', 'just above the ceiling'],
+      ['50000', 'order of magnitude over'],
+    ])('clamps out-of-range %p (%s) to default', (envValue) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
+        expect(
+          warns.some((w) => w.includes('out of range'))
+        ).toBe(true);
+      });
+    });
+
+    test.each([
+      ['100', 100], // exact floor
+      ['1500', 1500],
+      ['8000', 8000], // exact ceiling
+    ])('accepts in-range %p as %i', (envValue, expected) => {
+      withIsolatedEnv(envValue, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(expected);
+        expect(warns).toHaveLength(0);
+      });
+    });
+
+    test('unset env var resolves to default without warning', () => {
+      withIsolatedEnv(undefined, (fresh, warns) => {
+        expect(fresh._test.getDrainDeadlineMs()).toBe(3000);
         expect(warns).toHaveLength(0);
       });
     });
