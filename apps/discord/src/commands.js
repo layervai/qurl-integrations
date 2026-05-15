@@ -2731,10 +2731,6 @@ const SETUP_API_KEY_MAX_LENGTH = 64;
 // User-visible success message on successful setup. Exported via
 // _test so test assertions read the production string instead of
 // hardcoding a copy that drifts.
-// Built at module load with the same MAP_COMMAND_ENABLED snapshot
-// the SlashCommandBuilder IIFE uses, so the help/setup copy and the
-// actual slash registration can't disagree about whether /qurl map
-// is reachable.
 const SETUP_SUCCESS_MSG =
   '✅ **qURL is now configured for this server!**\n\n'
   + (config.MAP_COMMAND_ENABLED
@@ -3181,28 +3177,18 @@ const CANCEL_SOFTEN_RESIDUAL_MS = 5000;
 // requires touching this set, not the dispatcher fall-through.
 //
 // `'map'` joins the set only when MAP_COMMAND_ENABLED is on. The
-// conditional inclusion is load-bearing — NOT cosmetic. The gate runs
-// BEFORE the dispatch in execute() below, so if `'map'` stayed in the
-// set with the flag off, a stale-client /qurl map in a guild that
-// hasn't run /qurl setup would hit "qURL is not configured for this
-// server" instead of the QURL_MAP_DISABLED_REPLY the dispatch routes
-// to. Removing it lets the gate skip and the dispatcher's `sub === 'map'`
-// branch surface the right message.
-//
-// IMPORTANT BEFORE FLIPPING MAP_COMMAND_ENABLED=true: seed
-// `/qurl-bot-discord/GOOGLE_MAPS_API_KEY` in SSM. The parameter
-// shipped as the literal string "PLACEHOLDER"; without a real key,
-// Places returns REQUEST_DENIED and every /qurl map invocation fails
-// with the generic "Location lookup failed" reply.
+// conditional removal is load-bearing — the gate runs BEFORE the
+// dispatch in execute() below, so if `'map'` stayed in the set with
+// the flag off, a stale-client /qurl map in an unconfigured guild
+// would hit "qURL is not configured for this server" instead of
+// QURL_MAP_DISABLED_REPLY.
 const API_KEY_GATED_SUBCOMMANDS = new Set(
   config.MAP_COMMAND_ENABLED ? ['file', 'map', 'revoke'] : ['file', 'revoke'],
 );
 
 // User-facing reply for stale /qurl map submissions when the toggle
-// is off. Discord clients can carry a cached command definition for
-// a few minutes after the registration drops `map`, so a defensive
-// dispatch path lands them here instead of routing into the
-// (now-unreachable) handleQurlMap → Places pipeline.
+// is off. Reached when a Discord client routes a cached `map`
+// submission after the registration has dropped it.
 const QURL_MAP_DISABLED_REPLY = '❌ `/qurl map` is currently disabled. Use `/qurl file` to share resources securely.';
 
 // Slash-option choice arrays. The same wording flows into both the
@@ -7905,11 +7891,15 @@ const commands = [
       // fail-fast presence check.
       if (sub === 'file') return handleQurlFile(interaction);
       if (sub === 'map') {
-        // When MAP_COMMAND_ENABLED is off, map isn't registered with
-        // Discord, but a stale client can still route a cached
-        // submission to us — reply with the disabled message instead
-        // of running the handler.
         if (!config.MAP_COMMAND_ENABLED) {
+          // Debug (not warn) because Discord caches command defs for
+          // ~1h after a registration change — this is expected
+          // post-deploy traffic, not an error. Grep this line to see
+          // when stale-client traffic has decayed.
+          logger.debug('qurl_map_disabled_reply: stale-client /qurl map submission caught by toggle gate', {
+            user_id: interaction.user?.id,
+            guild_id: interaction.guildId,
+          });
           return interaction.reply({ content: QURL_MAP_DISABLED_REPLY, ephemeral: true });
         }
         return handleQurlMap(interaction);
@@ -7934,26 +7924,28 @@ const commands = [
           : '**Setting up (for Admins):**\n'
             + '  `/qurl setup` — configure your API key (admin only)\n'
             + '  `/qurl status` — check if qURL is configured (admin only)\n\n';
-        // /qurl map mentions are flagged on config.MAP_COMMAND_ENABLED
-        // so the help copy matches what's actually registered. Flipping
-        // the env var rewrites every surface from one source.
-        const mapEnabled = config.MAP_COMMAND_ENABLED;
-        const mapBullet = mapEnabled
-          ? '  `/qurl map` — share a Google Maps location via one-time qURL links\n'
-          : '';
-        const howItWorksRunLine = mapEnabled
-          ? '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n'
-          : '\t1. Run `/qurl file` and attach the file you want to share\n';
-        const termsResource = mapEnabled ? 'the file or location' : 'the file';
-        // Used in two places (Terms paragraph + Large servers note) —
-        // the bullet rendering is identical in both, so a single token
-        // keeps them in lockstep.
-        const fileOrMapCommand = mapEnabled ? '`/qurl file` or `/qurl map`' : '`/qurl file`';
+        // Flag-on and flag-off help-copy variants kept side-by-side
+        // so a future edit to one branch is obviously checked against
+        // the other. `cmd` is referenced twice (Terms + Large servers);
+        // single token keeps them in lockstep.
+        const mapCopy = config.MAP_COMMAND_ENABLED
+          ? {
+            bullet: '  `/qurl map` — share a Google Maps location via one-time qURL links\n',
+            runLine: '\t1. Run `/qurl file` (attach a file) or `/qurl map` (paste a Google Maps URL or address)\n',
+            resource: 'the file or location',
+            cmd: '`/qurl file` or `/qurl map`',
+          }
+          : {
+            bullet: '',
+            runLine: '\t1. Run `/qurl file` and attach the file you want to share\n',
+            resource: 'the file',
+            cmd: '`/qurl file`',
+          };
         return interaction.reply({
           content: '**qURL Bot — Help**\n\n' +
             '**Getting started — Share resources securely via one-time links:**\n' +
             '  `/qurl file` — share a file with users via one-time qURL links\n' +
-            mapBullet +
+            mapCopy.bullet +
             '  `/qurl revoke` — revoke links from a previous send\n' +
             '  `/qurl help` — show this message\n\n' +
             '**How it works:**\n' +
@@ -7963,16 +7955,16 @@ const commands = [
             // misalign "1." with "2.", "3.", "4."). The tab indent now
             // matches the two-space indent below, but bypasses the list
             // auto-formatter.
-            howItWorksRunLine +
+            mapCopy.runLine +
             '  2. Optionally `recipients:@a @b @role` (up to 25 users via @mentions or role expansion) — '
               + 'leave blank to pick from a menu (up to 10 at a time)\n' +
             '  3. Confirm the card, then click **Send**\n' +
             '  4. Recipients get a one-time link by DM that self-destructs on first access (or when the expiry elapses)\n\n' +
             oauthSetupSection +
-            `**Terms:** a *protected resource* is ${termsResource} you're sharing. ` +
+            `**Terms:** a *protected resource* is ${mapCopy.resource} you're sharing. ` +
             'A *qurl* (or *access link*) is the single-use URL that delivers it. ' +
-            `You create a qurl for a protected resource each time you run ${fileOrMapCommand}.\n\n` +
-            `**Large servers (~1000+ members):** ${fileOrMapCommand} with role @mentions ` +
+            `You create a qurl for a protected resource each time you run ${mapCopy.cmd}.\n\n` +
+            `**Large servers (~1000+ members):** ${mapCopy.cmd} with role @mentions ` +
             'may skip members the bot has not yet cached locally (the bot fetches members lazily, ' +
             'and very large servers may not be fully populated). ' +
             'If you need to reach a specific person for sure, use an explicit user @mention instead of a role.\n\n' +

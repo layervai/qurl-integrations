@@ -14,6 +14,13 @@ jest.mock('../src/config', () => ({
   QURL_ENDPOINT: 'https://api.test.local',
   CONNECTOR_URL: 'https://connector.test.local',
   GOOGLE_MAPS_API_KEY: 'test-google-key',
+  // /qurl map feature toggle — explicitly false here so the flag-off
+  // describe block below tests the documented production default. A
+  // missing key would *also* read as falsy (the bot's `=== 'true'`
+  // parser), but a future refactor that flipped the default-on
+  // semantics would silently keep these tests green; the explicit
+  // value pins the contract.
+  MAP_COMMAND_ENABLED: false,
   QURL_SEND_COOLDOWN_MS: 30000,
   QURL_SEND_MAX_RECIPIENTS: 50,
   DATABASE_PATH: ':memory:',
@@ -2301,6 +2308,49 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.respond).toHaveBeenCalledWith([]);
     expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  it('stale /qurl map in an unconfigured guild hits disabled reply BEFORE the API-key gate (routing order)', async () => {
+    // The most subtle invariant of this PR: API_KEY_GATED_SUBCOMMANDS
+    // intentionally OMITS 'map' when the flag is off. If 'map' had
+    // stayed in the set, the dispatcher's gate (commands.js:7882)
+    // would fire "qURL is not configured for this server" BEFORE the
+    // dispatch could route to QURL_MAP_DISABLED_REPLY — a stale
+    // client in a never-configured guild would see the wrong copy.
+    //
+    // Setup: empty per-guild key (mockDb default) AND empty global
+    // fallback (mutated config). The gate would otherwise fire if
+    // 'map' were still in API_KEY_GATED_SUBCOMMANDS; the disabled
+    // reply firing instead is the load-bearing assertion.
+    const configMock = require('../src/config');
+    const origQurlApiKey = configMock.QURL_API_KEY;
+    configMock.QURL_API_KEY = '';
+    mockDb.getGuildApiKey.mockResolvedValueOnce(null);
+    try {
+      const interaction = makeInteraction({
+        options: {
+          ...makeInteraction().options,
+          getSubcommand: jest.fn(() => 'map'),
+        },
+      });
+      await handleCommand(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith({
+        content: _test.QURL_MAP_DISABLED_REPLY,
+        ephemeral: true,
+      });
+      // Negative assertion: NONE of the reply calls should be the
+      // "qURL is not configured" gate copy. If a future refactor
+      // accidentally re-adds 'map' to API_KEY_GATED_SUBCOMMANDS, the
+      // dispatcher would reply with the not-configured message
+      // first (and either skip the disabled reply entirely or call
+      // reply twice — both regressions covered by this check).
+      const allReplies = interaction.reply.mock.calls.map(([arg]) => arg?.content || '');
+      for (const content of allReplies) {
+        expect(content).not.toContain('qURL is not configured');
+      }
+    } finally {
+      configMock.QURL_API_KEY = origQurlApiKey;
+    }
   });
 });
 

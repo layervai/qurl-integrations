@@ -84,6 +84,21 @@ function missingEventShipperKeys(cfg) {
   return cfg.QURL_BOT_EVENTS_QUEUE_URL ? [] : ['QURL_BOT_EVENTS_QUEUE_URL'];
 }
 
+// Mirrors missingEventShipperKeys: parsed cfg in, missing-keys
+// array out. PLACEHOLDER is treated as missing because the SSM
+// parameter ships with that literal sentinel value — the
+// remediation ("seed a real key") is identical to the
+// missing-key case.
+const GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL = 'PLACEHOLDER';
+function missingMapCommandKeys(cfg) {
+  if (!cfg.MAP_COMMAND_ENABLED) return [];
+  const key = cfg.GOOGLE_MAPS_API_KEY;
+  if (!key || key === GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL) {
+    return ['GOOGLE_MAPS_API_KEY'];
+  }
+  return [];
+}
+
 // Process-role parsing for the gateway/HTTP split. Lifted out of
 // index.js so the invalid-value path is testable without spawning a
 // child process — same shape as missingBootKeys above. See
@@ -126,6 +141,8 @@ module.exports = {
   missingProdKeys,
   missingKekRequiredKeys,
   missingEventShipperKeys,
+  missingMapCommandKeys,
+  GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
   VALID_PROCESS_ROLES,
   resolveProcessRole,
 };
