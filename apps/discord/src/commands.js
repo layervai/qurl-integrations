@@ -1285,12 +1285,13 @@ async function executeSendPipeline(interaction, {
   // Computed BEFORE recordQURLSendBatch so a malformed `expiresIn`
   // throwing in `expiryToMs` aborts the dispatch BEFORE any DDB rows
   // are written — otherwise the DB writes would happen, then the throw
-  // would bubble out with no DMs sent, leaving orphan QURL records with
-  // no recipient. The buildDeliveryPayload `Number.isInteger` guard at
-  // the per-recipient render step also runs against this value; if a
-  // future expiryToMs returns a non-integer (e.g. fractional ms / 1000),
-  // it throws here, before the DB write, not at dispatch time. Closes
-  // #352.
+  // would bubble out with no DMs sent, leaving orphan QURL records
+  // with no recipient. The throw fires HERE (at the hoisted compute
+  // site below, function-scoped) rather than at the per-recipient
+  // render step inside batchSettled — that distinction matters for
+  // the failure-mode bookkeeping: a thrown expiryToMs surfaces as a
+  // single uncaught error at the function level, not as N
+  // `DISPATCH_FAILED` audit emissions. Closes #352.
   const expiresAt = Math.floor((Date.now() + expiryToMs(expiresIn)) / 1000);
 
   // Persist ALL links to DB BEFORE sending DMs. If the write fails the links
@@ -1335,6 +1336,14 @@ async function executeSendPipeline(interaction, {
   const failedUsers = [];
   const recipientMap = new Map(recipients.map(r => [r.id, r]));
 
+  // Mirror handleAddRecipients: hoist resolveSenderAlias out of the
+  // per-recipient batchSettled callback. The function is a pure
+  // resolution of nickname > globalName > username from `interaction`,
+  // so the per-link call inside the callback was N redundant
+  // resolutions of the same string. Both pipelines now share the same
+  // hoist pattern for both expiresAt AND senderAlias.
+  const senderAlias = resolveSenderAlias(interaction);
+
   const dmResults = await batchSettled(qurlLinks, async (link) => {
     const recipient = recipientMap.get(link.recipientId);
     // Audit in `finally` so the metric fires for every recipient regardless
@@ -1350,10 +1359,7 @@ async function executeSendPipeline(interaction, {
     let sent = false;
     try {
       const dmPayload = buildDeliveryPayload({
-        // member.displayName resolves to nickname || globalName || username,
-        // so it works whether the sender has a per-guild nickname, only a
-        // global display name, or just the legacy @-handle.
-        senderAlias: resolveSenderAlias(interaction),
+        senderAlias,
         qurlLink: link.qurlLink,
         expiresAt,
         personalMessage,
