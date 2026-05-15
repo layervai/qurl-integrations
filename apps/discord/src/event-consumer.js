@@ -1274,7 +1274,11 @@ async function stop() {
     // stale `true`/ceiling and miss the next streak's transition warn
     // or start the next streak at MAX. Production never restarts
     // after stop, but integration tests that exercise the lifecycle
-    // would otherwise see a phantom suppressed warn.
+    // would otherwise see a phantom suppressed warn. Also: the
+    // post-await doubling line at pollOnce's at-cap branch runs on
+    // an abort-wake (the await resolves, the next line executes
+    // before the loop signal check), so without this reset, the
+    // post-shutdown state would be `currentBackoffMs = prev * 2`.
     clearAtCapState();
     // Intentionally do NOT null `sqsClient`. Production never calls
     // start() after stop() — gracefulShutdown runs once at SIGTERM,

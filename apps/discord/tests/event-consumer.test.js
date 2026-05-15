@@ -1864,49 +1864,57 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
   });
 
   test('stop() finally resets currentBackoffMs to BASE (load-bearing assertion)', async () => {
-    // cr-r5: the lifecycle test in the start/stop describe block
-    // never drove currentBackoffMs away from BASE before stop(), so
-    // its post-stop() assertion was vacuous (BASE === BASE would
-    // pass even if stop()'s finally-reset line were deleted). This
-    // test drives a non-base value first via fake-timer at-cap
-    // iterations, then exercises the real stop() codepath under
-    // real timers (stop()'s drain uses Promise.race with setTimeout;
-    // fake timers would hang the deadline). Resolvable promises so
-    // drain settles cleanly via the inFlightPromises path.
-    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
-    const resolvers = [];
-    withWorkerDispatch(() => {
-      for (let i = 0; i < cap; i += 1) {
-        let resolve;
-        const p = new Promise((r) => { resolve = r; });
-        resolvers.push(resolve);
-        eventConsumer.trackDispatch(p);
-      }
-    });
-    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
-    const client = makeStubClient();
-
-    // Drive currentBackoffMs to a non-base value via fake-timer
-    // pollOnce. One at-cap iteration: 100 → 200.
-    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    // cr-r5/r10: the cr-r5 fix drove currentBackoffMs to 200 before
+    // stop() but then drained the in-flight handlers, so start()'s
+    // pollLoop took pollOnce's BELOW-cap branch first, which itself
+    // calls clearAtCapState() — meaning stop()'s finally reset was
+    // a no-op by the time it ran. Deleting stop()'s clearAtCapState()
+    // still passed the test (cr-r10 traced this empirically).
+    //
+    // To make the assertion actually load-bearing on stop()'s
+    // finally, the in-flight handlers must STAY at cap throughout
+    // start(): pollLoop enters pollOnce → AT-cap branch → sleeps →
+    // stop() aborts the sleep → doubling runs → pollLoop exits via
+    // signal check → stop()'s finally is the ONLY reset path. Pair
+    // with _setDrainDeadlineForTest(50) so stop()'s drain race
+    // resolves on the deadline-timer side without waiting the full
+    // DRAIN_DEADLINE_MS (handlers never resolve in this test).
+    const originalDeadline = eventConsumer._test.getDrainDeadlineMs();
+    eventConsumer._test._setDrainDeadlineForTest(50);
     try {
-      await pollOnceFast(client);
-      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          // Never-resolving promises: keep inFlightCount at cap for
+          // the entire test so pollOnce stays in the at-cap branch.
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      // Drive currentBackoffMs to a non-base value via one fake-timer
+      // at-cap iteration (100 → 200).
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+      try {
+        await pollOnceFast(client);
+        expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+      } finally {
+        jest.useRealTimers();
+      }
+
+      // start() + stop() under real timers. Handlers are at cap, so
+      // pollLoop's first pollOnce takes the at-cap branch, sleeps,
+      // stop()'s abort wakes the sleep, the post-sleep doubling line
+      // runs (currentBackoffMs = 400), pollLoop exits on the signal
+      // check. stop()'s finally is the ONLY reset path remaining:
+      // delete its clearAtCapState() call and this assertion fails.
+      eventConsumer.start(client);
+      await eventConsumer.stop();
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
     } finally {
-      jest.useRealTimers();
+      eventConsumer._test._setDrainDeadlineForTest(originalDeadline);
     }
-
-    // Resolve in-flight promises so stop()'s drain settles via
-    // inFlightPromises (no need to wait the DRAIN_DEADLINE_MS).
-    resolvers.forEach((r) => r('done'));
-    await flushMicrotasks();
-    expect(eventConsumer._test.getInFlightCount()).toBe(0);
-
-    // start() + stop() under real timers. stop()'s finally runs the
-    // reset; without that line, currentBackoffMs would still be 200.
-    eventConsumer.start(client);
-    await eventConsumer.stop();
-    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
   });
 
   test('pollOnce: MAX → BASE reset via production below-cap path (not just one doubling)', async () => {
