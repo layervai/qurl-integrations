@@ -1022,18 +1022,27 @@ describe('persistDispatchResult — divergence guard', () => {
     expect(logger.audit).not.toHaveBeenCalledWith('dispatch_sent_no_refs', expect.anything());
   });
 
-  it('emits DISPATCH_SENT_NO_REFS + warns + records FAILED on ok-but-missing-refs divergence', async () => {
-    // discord.js's user.send() resolves to a Message with channelId/id;
-    // if that contract drifts, DISPATCH_SENT would fire while DDB
-    // records `failed`. The dedicated dispatch_sent_no_refs audit event
-    // makes the divergence queryable from CloudWatch so dashboards can
-    // reconcile against DDB without a mystery gap.
+  it('records SENT + emits DISPATCH_SENT_NO_REFS + warns on ok-but-missing-refs divergence', async () => {
+    // The DM was actually delivered (sendDM said ok), so DDB records
+    // SENT to keep delivery-rate metrics faithful. The dedicated
+    // dispatch_sent_no_refs audit event is the canary if discord.js's
+    // user.send() response shape ever drifts; the revoke path's
+    // missing-refs guard naturally skips the DM edit for these rows.
     await persistDispatchResult('s', 'r', { ok: true });
     expect(mockDb.markSendDMDelivered).not.toHaveBeenCalled();
-    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'failed');
+    expect(mockDb.updateSendDMStatus).toHaveBeenCalledWith('s', 'r', 'sent');
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('missing channelId/messageId'),
-      expect.objectContaining({ sendId: 's', recipientDiscordId: 'r' }),
+      // hasChannelId / hasMessageId pinned so a future refactor that
+      // drops the diagnostic fields fails loudly — they're the only
+      // way for an operator to tell which side of the response shape
+      // drifted.
+      expect.objectContaining({
+        sendId: 's',
+        recipientDiscordId: 'r',
+        hasChannelId: false,
+        hasMessageId: false,
+      }),
     );
     expect(logger.audit).toHaveBeenCalledWith('dispatch_sent_no_refs', { send_id: 's' });
   });

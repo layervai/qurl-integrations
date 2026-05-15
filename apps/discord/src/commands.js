@@ -755,17 +755,29 @@ async function persistDispatchResult(sendId, recipientDiscordId, result) {
     await db.markSendDMDelivered(sendId, recipientDiscordId, result.channelId, result.messageId);
     return;
   }
-  // Defensive: ok:true but missing refs would diverge DISPATCH_SENT
-  // from the DDB record (failed). Emit DISPATCH_SENT_NO_REFS so the
-  // dashboard can reconcile the gap without a mystery, plus a warn
-  // log for grep-ability. Record as failed for DDB safety.
   if (result.ok === true) {
+    // Defensive: the DM was actually delivered (sendDM said ok), but
+    // discord.js silently omitted channelId / messageId. Record SENT
+    // so DDB matches observable reality — `count(dm_status='sent')`
+    // stays a faithful delivery-rate metric. The revoke path's
+    // missing-refs guard (see editTargets builder) naturally skips
+    // the DM edit for these rows. Emit DISPATCH_SENT_NO_REFS so the
+    // gap between DISPATCH_SENT and the editable-on-revoke subset is
+    // queryable from CloudWatch.
+    //
+    // CANONICAL DELIVERY-RATE METRIC: DDB `count(dm_status='sent')`
+    // or CloudWatch `dispatch_sent` (they should agree). The
+    // `dispatch_sent_no_refs` event is a CANARY, not a subtractor —
+    // if it fires, oncall investigates the discord.js response shape;
+    // don't auto-subtract it from DISPATCH_SENT in dashboards.
     logger.audit(AUDIT_EVENTS.DISPATCH_SENT_NO_REFS, { send_id: sendId });
-    logger.warn('sendDM resolved ok but missing channelId/messageId — recording as failed', {
+    logger.warn('sendDM resolved ok but missing channelId/messageId — recording as sent (revoke edit will skip)', {
       sendId, recipientDiscordId,
       hasChannelId: Boolean(result.channelId),
       hasMessageId: Boolean(result.messageId),
     });
+    await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.SENT);
+    return;
   }
   await db.updateSendDMStatus(sendId, recipientDiscordId, DM_STATUS.FAILED);
 }
