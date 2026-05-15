@@ -6181,10 +6181,12 @@ async function revokeAllLinks(sendId, senderDiscordId, apiKey, senderAlias = DIS
   // feature, minus the post-revoke rewrite.
   //
   // Skips:
-  //   - recipients not in successUserIds (their revoke failed; either
-  //     the link was already opened, or a mixed-outcome recipient with
-  //     some links failed — either way the door isn't fully closed for
-  //     them, so the "closed the door" copy would be misleading)
+  //   - recipients not in successUserIds (their revoke didn't fully
+  //     succeed — the link may have been already opened, a transient
+  //     qURL API error during DELETE, or a mixed-outcome recipient
+  //     with some links failed. Either way the door isn't fully
+  //     closed for them, so the "closed the door" copy would be
+  //     misleading)
   //   - rows with dm_status !== 'sent' (DM never made it; no message
   //     exists to edit)
   //   - rows lacking dm_channel_id / dm_message_id (legacy, pre-
