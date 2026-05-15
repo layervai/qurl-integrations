@@ -588,11 +588,11 @@ function isValidExpiry(v) {
   return Object.prototype.hasOwnProperty.call(EXPIRY_LABELS, v);
 }
 
-// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Discord's hard
-// limit is 25; capping at 10 bounds the UX. The initial confirm-card
-// UserSelectMenu AND the post-send "Add Recipients" flow both use this
-// — keep them in lockstep so a future bump doesn't drift.
-const USER_SELECT_PER_PICK_CAP = 10;
+// Per-pick cap on UserSelectMenuBuilder.setMaxValues. Set to Discord's
+// hard limit so the picker exposes the full per-pick budget. The initial
+// confirm-card UserSelectMenu AND the post-send "Add Recipients" flow
+// both use this — keep them in lockstep so a future change doesn't drift.
+const USER_SELECT_PER_PICK_CAP = 25;
 
 // Shared render caps for warnings-block bullets that surface user-
 // or admin-controlled strings (invalidTokens, roleMentionsDeniedNames).
@@ -3942,16 +3942,21 @@ function renderConfirmCardRows({
 }) {
   const rows = [];
   const mode = normalizeRecipientMode(recipientMode);
-  const baseCap = Math.min(USER_SELECT_PER_PICK_CAP, config.QURL_SEND_MAX_RECIPIENTS);
-  // When text-resolved recipients are already present, widen max_values
-  // so we can pre-check them via addDefaultUsers (Discord requires
-  // default_values.length ≤ max_values). Widen clamps at the hard cap;
-  // recipientIds past the hard cap are still in payload.recipientIds and
-  // get the send — only the visual pre-check truncates.
+  // Picker opens at the smallest of the per-pick UX cap, the system
+  // recipient cap, and Discord's max_values hard cap. With
+  // USER_SELECT_PER_PICK_CAP set to Discord's hard cap (25) and
+  // QURL_SEND_MAX_RECIPIENTS ≥ 25 in every deployed config, this lands
+  // on 25; the three-way min stays so a future lowering of
+  // USER_SELECT_PER_PICK_CAP (or a tighter QURL_SEND_MAX_RECIPIENTS via
+  // env) continues to clamp correctly. Pre-resolved recipientIds past
+  // maxValues stay in payload.recipientIds and get the send — only the
+  // visual pre-check via addDefaultUsers truncates.
   const defaults = Array.isArray(recipientIds) ? recipientIds : [];
-  const maxValues = defaults.length > 0
-    ? Math.min(DISCORD_SELECT_MAX_VALUES_HARD_CAP, config.QURL_SEND_MAX_RECIPIENTS, Math.max(baseCap, defaults.length))
-    : baseCap;
+  const maxValues = Math.min(
+    USER_SELECT_PER_PICK_CAP,
+    config.QURL_SEND_MAX_RECIPIENTS,
+    DISCORD_SELECT_MAX_VALUES_HARD_CAP,
+  );
   if (mode === RECIPIENT_MODE_PICKER) {
     const picker = new MentionableSelectMenuBuilder()
       .setCustomId(CONFIRM_USER_SELECT_CUSTOM_ID)
@@ -5214,10 +5219,11 @@ async function handleConfirmUserSelect(interaction, { flow_id, row }) {
     return rejectPick(`⚠\u{FE0F} ${reasonText}. Re-pick recipients below.\n\n`);
   }
   // Defense-in-depth — unreachable in production today: the picker's
-  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
-  // QURL_SEND_MAX_RECIPIENTS=25) = 10, so the user physically can't
-  // pick more than 25. Kept against a future bump to either constant
-  // (or a forged interaction) so the cap stays honored.
+  // setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=25,
+  // QURL_SEND_MAX_RECIPIENTS) and Discord's own hard cap on max_values
+  // is 25, so the user physically can't pick more than 25. Kept against
+  // a future change to either constant (or a forged interaction) so the
+  // cap stays honored.
   if (valid.length > config.QURL_SEND_MAX_RECIPIENTS) {
     return rejectPick(`⚠\u{FE0F} Pick at most ${config.QURL_SEND_MAX_RECIPIENTS} recipients.\n\n`);
   }

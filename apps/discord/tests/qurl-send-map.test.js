@@ -4171,13 +4171,13 @@ describe('handleConfirmUserSelect', () => {
   });
 
   test('defense-in-depth: cap-exceeded pick rejected even though picker setMaxValues makes it unreachable today', async () => {
-    // The picker's setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=10,
-    // QURL_SEND_MAX_RECIPIENTS=25) = 10, so production users physically
-    // can't pick more than 25. But a future bump to either constant
-    // (or a forged interaction) could trip this branch — pin the
-    // guard so a refactor that drops it produces a visible failure.
-    // QURL_SEND_MAX_RECIPIENTS = 25 in the mocked config; build a
-    // pick of 26 to exceed it.
+    // The picker's setMaxValues caps at min(USER_SELECT_PER_PICK_CAP=25,
+    // QURL_SEND_MAX_RECIPIENTS) and Discord's own max_values hard cap of
+    // 25, so production users physically can't pick more than 25. But a
+    // future change to either constant (or a forged interaction) could
+    // trip this branch — pin the guard so a refactor that drops it
+    // produces a visible failure. QURL_SEND_MAX_RECIPIENTS = 25 in the
+    // mocked config; build a pick of 26 to exceed it.
     const users = Array.from({ length: 26 }, (_, i) => makeUser(`1000000000000000${String(i).padStart(2, '0')}`));
     const int = makeSelectInteraction({ users });
     await handleConfirmUserSelect(int, { flow_id: 'fid', row: { payload: initialPayload, version: 1 } });
@@ -6540,12 +6540,11 @@ describe('renderConfirmCardRows', () => {
     expect(builder.addDefaultUsers).not.toHaveBeenCalled();
   });
 
-  test('slash-entry with >USER_SELECT_PER_PICK_CAP recipients widens max_values to fit all defaults', async () => {
+  test('slash-entry with pre-resolved recipients opens picker at full per-pick cap with all defaults pre-checked', async () => {
     // Discord requires default_values.length ≤ max_values. The picker's
-    // default per-pick cap is 10; if the user text-resolved 12 valid
-    // recipients, the initial render must widen max_values to 12 so
-    // addDefaultUsers(12 ids) is accepted (bounded by Discord's 25 hard
-    // cap on select-menu max_values).
+    // per-pick cap equals Discord's hard max_values cap (25), so the
+    // initial render always opens at 25 and any pre-resolved defaults
+    // (≤25) get fully pre-checked via addDefaultUsers.
     const { MentionableSelectMenuBuilder } = require('discord.js');
     MentionableSelectMenuBuilder.mockClear();
     const ids = Array.from({ length: 12 }, (_, i) => `1000000000000000${String(i + 10)}`);
@@ -6557,7 +6556,7 @@ describe('renderConfirmCardRows', () => {
     });
     await handleQurlSend(int);
     const builder = MentionableSelectMenuBuilder.mock.results[0].value;
-    expect(builder.setMaxValues).toHaveBeenCalledWith(12);
+    expect(builder.setMaxValues).toHaveBeenCalledWith(25);
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
   });
 
