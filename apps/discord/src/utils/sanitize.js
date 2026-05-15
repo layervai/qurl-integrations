@@ -70,7 +70,7 @@ function stripControlAndBidi(s, maxCodepoints = 64, fallback = DISPLAY_NAME_FALL
  * `maxCodepoints`, then escape markdown so a crafted label can't
  * inject `**bold**` / `[masked-link](https://evil)` / spoilers.
  *
- * Callers: /qurl map's `locationName`, /qurl file's
+ * Callers: /qurl map's `locationName`, /qurl send's
  * `attachment.name`-derived `resourceLabel`. Returns '' on empty /
  * all-strip-char input (NOT the 'Someone' display-name fallback) so
  * the caller can render its own empty-state.

@@ -1,7 +1,8 @@
 /**
- * Tests for /qurl file + /qurl map slash commands (PR 7b.2).
+ * Tests for /qurl send + /qurl map slash commands (PR 7b.2;
+ * `/qurl file` renamed to `/qurl send` in a later PR).
  *
- * Covers the new handlers from src/commands.js — handleQurlFile,
+ * Covers the new handlers from src/commands.js — handleQurlSend,
  * handleQurlMap, the shared confirm-card pipeline, the flow-dispatch
  * handlers (UserSelect / Send / Cancel) — plus the pure helpers
  * (resolveRecipientUsers, partitionRecipients, selfDestructOptionToSeconds,
@@ -180,7 +181,7 @@ const commands = require('../src/commands');
 const { _test } = commands;
 const logger = require('../src/logger');
 const {
-  handleQurlFile,
+  handleQurlSend,
   handleQurlMap,
   resolveRecipientUsers,
   partitionRecipients,
@@ -297,7 +298,7 @@ function makeInteraction({
     options: {
       getString: optGetString,
       getAttachment: optGetAttachment,
-      getSubcommand: () => options._sub || 'file',
+      getSubcommand: () => options._sub || 'send',
     },
     reply: jest.fn().mockResolvedValue(undefined),
     editReply: jest.fn().mockResolvedValue(undefined),
@@ -1451,8 +1452,8 @@ describe('handleAutocomplete', () => {
     expect(mockSearchPlaces).not.toHaveBeenCalled();
   });
 
-  test('responds empty for /qurl file (only /qurl map has suggestions)', async () => {
-    const int = makeAutocompleteInteraction({ subcommand: 'file' });
+  test('responds empty for /qurl send (only /qurl map has suggestions)', async () => {
+    const int = makeAutocompleteInteraction({ subcommand: 'send' });
     await handleAutocomplete(int);
     expect(int.respond).toHaveBeenCalledWith([]);
     expect(mockSearchPlaces).not.toHaveBeenCalled();
@@ -1749,7 +1750,7 @@ describe('safeDecodeURIComponent', () => {
 });
 
 describe('cross-command cooldown contract', () => {
-  // /qurl file and /qurl map share the sendCooldowns Map. setCooldown
+  // /qurl send and /qurl map share the sendCooldowns Map. setCooldown
   // from one MUST block the other — without this contract, a user
   // could bypass the per-user throttle by alternating entry points.
   beforeEach(() => sendCooldowns.clear());
@@ -2229,16 +2230,16 @@ describe('renderConfirmCardContent', () => {
 });
 
 // ──────────────────────────────────────────────────────────────
-// handleQurlFile — front half
+// handleQurlSend — front half
 // ──────────────────────────────────────────────────────────────
 
-describe('handleQurlFile — slash entry', () => {
+describe('handleQurlSend — slash entry', () => {
   test('rejects in DM context', async () => {
     const int = makeInteraction({
       guildId: null,
       options: { attachment: VALID_ATTACHMENT },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/in a server/),
       ephemeral: true,
@@ -2256,7 +2257,7 @@ describe('handleQurlFile — slash entry', () => {
     try {
       setActiveFileSends(99);  // any value ≥ MAX_CONCURRENT_FILE_SENDS
       const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringMatching(/too many file sends/i),
         ephemeral: true,
@@ -2274,7 +2275,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, url: 'https://evil.com/x.png' } },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/source not allowed/),
       ephemeral: true,
@@ -2288,7 +2289,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, contentType: 'application/x-evil-macroenabled' } },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/File type not allowed/),
     }));
@@ -2301,7 +2302,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: { ...VALID_ATTACHMENT, size: 999_999_999 } },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/too large/),
     }));
@@ -2318,7 +2319,7 @@ describe('handleQurlFile — slash entry', () => {
       },
       guildMembers: { [u1]: {}, [u2]: {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.deferReply).toHaveBeenCalled();
     expect(mockSupersedeOrCreate).toHaveBeenCalledWith(expect.objectContaining({
       stage: SEND_STAGE_AWAITING_CONFIRM,
@@ -2346,7 +2347,7 @@ describe('handleQurlFile — slash entry', () => {
     expect(reply.components.length).toBeGreaterThan(0);
   });
 
-  test('/qurl map slash entry persists recipientAliases (parity with /qurl file)', async () => {
+  test('/qurl map slash entry persists recipientAliases (parity with /qurl send)', async () => {
     // Both entry points share handleQurlSlashSend's payload-construction
     // path. This sanity test pins that the alias-persistence guarantee
     // covers /qurl map as well — without it, a regression that only
@@ -2375,7 +2376,7 @@ describe('handleQurlFile — slash entry', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Pick recipients/);
@@ -2391,7 +2392,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${u1}> <@${u2}>` },
       guildMembers: { [u1]: { bot: true }, [u2]: { bot: true } },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
@@ -2406,7 +2407,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${SENDER_ID}>` },
       guildMembers: { [SENDER_ID]: {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Send includes you/);
@@ -2429,7 +2430,7 @@ describe('handleQurlFile — slash entry', () => {
       guildId: null, // → guild = null in makeInteraction
       options: { attachment: VALID_ATTACHMENT, recipients: `@everyone <@${SENDER_ID}>` },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     // Whatever editReply lands, the @everyone permission warning
     // must not appear. (The flow itself may hard-fail downstream
     // because resolveRecipientUsers needs guild context — that's a
@@ -2455,7 +2456,7 @@ describe('handleQurlFile — slash entry', () => {
     // Default memberPermissions is undefined (no Mention Everyone) —
     // matches the existing "no permission" assumption across this
     // test suite.
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(lastEdit.content).toMatch(/Mention Everyone\b/);
@@ -2484,7 +2485,7 @@ describe('handleQurlFile — slash entry', () => {
       mentionable: false,
       members: new Map([[bobId, { user: { id: bobId, bot: false } }]]),
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     // Alice (directly mentioned) IS in recipients; Bob (role member) is NOT.
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
@@ -2516,7 +2517,7 @@ describe('handleQurlFile — slash entry', () => {
       mentionable: false,
       members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     // Permission-specific copy present.
@@ -2552,7 +2553,7 @@ describe('handleQurlFile — slash entry', () => {
       ]),
     });
     int.memberPermissions = { has: jest.fn(() => true) };
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.recipientIds.sort()).toEqual([aliceId, bobId].sort());
@@ -2574,7 +2575,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { [aliceId]: {}, [bobId]: {} },
     });
     int.memberPermissions = { has: jest.fn(() => true) };
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const lastEdit = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     // Permission warning must NOT fire.
@@ -2596,7 +2597,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: {},
       guildFetchByID: { [flaky1]: 'ratelimit', [flaky2]: 'ratelimit' },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Could not look up recipients right now.*Try again/i);
@@ -2611,7 +2612,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { [known]: {} },
       guildFetchByID: { [gone]: 'unknown' },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.recipientIds).toEqual([known]);
@@ -2627,7 +2628,7 @@ describe('handleQurlFile — slash entry', () => {
     // Force cooldown
     sendCooldowns.set(SENDER_ID, Date.now());
     expect(isOnCooldown(SENDER_ID)).toBe(true);
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({
       content: expect.stringMatching(/wait before sending/),
     }));
@@ -2643,7 +2644,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/revoke.*menu open/);
   });
@@ -2659,7 +2660,7 @@ describe('handleQurlFile — slash entry', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
     expect(payload.expiresIn).toBe('7d');
@@ -2672,7 +2673,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>', 'expires-in': '99y' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Unrecognized expiry/);
@@ -2705,7 +2706,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: {},  // ALL cache-miss
       guildFetchByID: fetchByID,
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/No valid recipients/);
@@ -2724,7 +2725,7 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(isOnCooldown(SENDER_ID)).toBe(false);
     const reply = int.editReply.mock.calls[int.editReply.mock.calls.length - 1][0];
     expect(reply.content).toMatch(/Could not start a send/);
@@ -2747,7 +2748,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     int.deferReply.mockRejectedValueOnce(new Error('token expired'));
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(isOnCooldown(SENDER_ID)).toBe(false);
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringMatching(/unexpected throw/),
@@ -2760,7 +2761,7 @@ describe('handleQurlFile — slash entry', () => {
     // (renderConfirmCardContent, renderConfirmCardRows, the final
     // editReply, etc.) throws, the DDB row we just claimed would
     // sit orphaned until TTL eviction — blocking the user's next
-    // /qurl file or /qurl map under the sibling-flow guard.
+    // /qurl send or /qurl map under the sibling-flow guard.
     //
     // Reproduce: let supersedeOrCreate resolve `created: true`, then
     // force editReply to throw on its first call (the
@@ -2772,7 +2773,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     int.editReply.mockRejectedValueOnce(new Error('Discord 500'));
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     expect(mockDeleteFlow).toHaveBeenCalledWith(
       expect.any(String),
@@ -2801,7 +2802,7 @@ describe('handleQurlFile — slash entry', () => {
       guildMembers: { '100000000000000001': {} },
     });
     int.deferReply.mockRejectedValueOnce(new Error('token expired'));
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).not.toHaveBeenCalled();
     expect(mockDeleteFlow).not.toHaveBeenCalled();
   });
@@ -2818,13 +2819,13 @@ describe('handleQurlFile — slash entry', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     expect(mockDeleteFlow).not.toHaveBeenCalled();
   });
 
   describe('voice-channel slash entry (auto voice-everyone default)', () => {
-    // When `/qurl file` is invoked from a voice channel WITHOUT a
+    // When `/qurl send` is invoked from a voice channel WITHOUT a
     // `recipients:` value, the front half auto-resolves the voice-
     // connected members (minus sender + bots) and lands in voice-mode.
     // These tests pin (a) the recipient set excludes the sender,
@@ -2858,7 +2859,7 @@ describe('handleQurlFile — slash entry', () => {
 
     test('happy path: voice members minus sender land in payload, recipientMode:"voice"', async () => {
       const int = makeVoiceEntryInteraction({ members: [SENDER_ID, u1, u2] });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('voice');
       expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
@@ -2871,7 +2872,7 @@ describe('handleQurlFile — slash entry', () => {
         members: [u1, bot, u2],
         botIds: [bot],
       });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('voice');
       expect(payload.recipientIds.sort()).toEqual([u1, u2].sort());
@@ -2888,7 +2889,7 @@ describe('handleQurlFile — slash entry', () => {
         members: [bot],
         botIds: [bot],
       });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.recipientIds).toEqual([]);
@@ -2900,7 +2901,7 @@ describe('handleQurlFile — slash entry', () => {
       // warning; the user didn't ask for voice-everyone, so falling
       // back to the picker UX is the quiet path.
       const int = makeVoiceEntryInteraction({ members: [SENDER_ID] });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.recipientIds).toEqual([]);
@@ -2908,7 +2909,7 @@ describe('handleQurlFile — slash entry', () => {
 
     test('empty voice channel → falls back to picker-mode', async () => {
       const int = makeVoiceEntryInteraction({ members: [] });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.recipientIds).toEqual([]);
@@ -2925,7 +2926,7 @@ describe('handleQurlFile — slash entry', () => {
       config.QURL_SEND_MAX_RECIPIENTS = 1;  // force over-cap with 2 members
       try {
         const int = makeVoiceEntryInteraction({ members: [u1, u2] });
-        await handleQurlFile(int);
+        await handleQurlSend(int);
         const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
         expect(payload.recipientMode).toBe('picker');
         expect(payload.recipientIds).toEqual([]);
@@ -2951,7 +2952,7 @@ describe('handleQurlFile — slash entry', () => {
       // Inject the channel id WITHOUT registering it in the cache —
       // makes guild.channels.cache.get(id) return undefined, the cache-
       // miss shape.
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.warningsBlock).toMatch(/Couldn't read voice channel members/);
@@ -2968,7 +2969,7 @@ describe('handleQurlFile — slash entry', () => {
       int.options.getString.mockImplementation((key) =>
         (key === 'recipients' ? `<@${u1}>` : null)
       );
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('picker');
       expect(payload.recipientIds).toEqual([u1]);
@@ -2992,7 +2993,7 @@ describe('handleQurlFile — slash entry', () => {
       });
       int.memberPermissions = { has: jest.fn(() => true) };
       int.guild.memberCount = 3;
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('everyone');
       // Fan-out includes the sender (selfIncluded=true), matching
@@ -3026,7 +3027,7 @@ describe('handleQurlFile — slash entry', () => {
       });
       int.memberPermissions = { has: jest.fn(() => true) };
       int.guild.memberCount = 3;
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const payload = mockSupersedeOrCreate.mock.calls[0][0].payload;
       expect(payload.recipientMode).toBe('everyone');
       expect(payload.selfIncluded).toBe(false);
@@ -3044,7 +3045,7 @@ describe('handleQurlFile — slash entry', () => {
         guildMembers: { [SENDER_ID]: {} },
       });
       // Default permission shape → no MENTION_EVERYONE.
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const supersedeCalls = mockSupersedeOrCreate.mock.calls;
       // No confirm card persisted (recipientsOmitted=false + valid=0 →
       // the "no valid recipients" early-return fires before
@@ -3091,7 +3092,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       guildMembers: { [aliceId]: {} },
     });
     int.memberPermissions = { has: jest.fn(() => true) };
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
@@ -3108,7 +3109,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       id: '7100', name: 'team', mentionable: true,
       members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
@@ -3121,7 +3122,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: `<@${aliceId}>` },
       guildMembers: { [aliceId]: {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
@@ -3131,7 +3132,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT }, // no recipients
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
@@ -3145,7 +3146,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '@everyone' },
     });
     // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
@@ -3164,7 +3165,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       members: new Map([[aliceId, { user: { id: aliceId, bot: false } }]]),
     });
     // No memberPermissions set → has(MentionEveryone) returns undefined → falsy.
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.find(isPrewarmCall)).toBeTruthy();
   });
 
@@ -3178,7 +3179,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT, recipients: '@everyonefoo' },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
@@ -3195,12 +3196,12 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     });
     int.memberPermissions = { has: jest.fn(() => true) };
     int.guild.memberCount = 2; // matches cache.size from guildMembers above
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(int.guild.members.fetch.mock.calls.filter(isPrewarmCall)).toEqual([]);
   });
 
   test('concurrent invocations in the same guild share one in-flight fetch', async () => {
-    // Two simultaneous /qurl file @everyone calls against a cold cache
+    // Two simultaneous /qurl send @everyone calls against a cold cache
     // should NOT each fire their own chunk request. The prewarm helper's
     // in-flight Map<guildId, Promise> coalesces them — abuse via
     // concurrent invocations otherwise burns chunk-request budget
@@ -3209,7 +3210,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
     const aliceId = '500000000000000010';
     // A controllable fetch — caller resolves `release` after the
     // assertion so both handlers complete cleanly. Without the resolve,
-    // the two awaiting `handleQurlFile` calls would leak through to
+    // the two awaiting `handleQurlSend` calls would leak through to
     // process exit and Jest's `--detectOpenHandles` would surface them.
     let release;
     const fetchGate = new Promise((r) => { release = r; });
@@ -3231,8 +3232,8 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       int.memberPermissions = { has: jest.fn(() => true) };
       return int;
     }
-    const p1 = handleQurlFile(makeShared());
-    const p2 = handleQurlFile(makeShared());
+    const p1 = handleQurlSend(makeShared());
+    const p2 = handleQurlSend(makeShared());
     // Microtask flush so both handlers reach the prewarm await.
     await new Promise((r) => setImmediate(r));
     const prewarmCalls = sharedFetch.mock.calls.filter(isPrewarmCall);
@@ -3260,7 +3261,7 @@ describe('handleQurlSlashSend — guild.members cache pre-warm', () => {
       }
       return { user: makeUser(arg) };
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(mockSupersedeOrCreate).toHaveBeenCalled();
     const logger = require('../src/logger');
     const warnCall = logger.warn.mock.calls.find(
@@ -3485,7 +3486,7 @@ describe('handleQurlMap — slash entry', () => {
     }));
     // Honest user error (whitespace-only paste) — don't strand them
     // for 30s. Same shape as the file-type / size-cap branches in
-    // handleQurlFile.
+    // handleQurlSend.
     expect(isOnCooldown(SENDER_ID)).toBe(false);
   });
 
@@ -3705,7 +3706,7 @@ describe('handleConfirmSendClick', () => {
     );
   });
 
-  test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy (/qurl file)', async () => {
+  test('partial transient lookup at Send click — Send proceeds with remaining, transient drop surfaced with retry copy (/qurl send)', async () => {
     // transientFailureIds must be surfaced with retry-encouraging
     // copy (NOT "left the server" wording) — the buckets are split
     // + threaded so a 429/gateway blip doesn't read as "they're gone".
@@ -3723,7 +3724,7 @@ describe('handleConfirmSendClick', () => {
     // followUp distinguishes transient from "left" — retry copy. The
     // rerun command name is derived from payload.resourceType.
     expect(int.followUp).toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/1 couldn't be looked up.*rerun \/qurl file/),
+      content: expect.stringMatching(/1 couldn't be looked up.*rerun \/qurl send/),
       ephemeral: true,
     }));
     expect(logger.info).toHaveBeenCalledWith(
@@ -3733,8 +3734,8 @@ describe('handleConfirmSendClick', () => {
   });
 
   test('partial transient lookup at Send click — /qurl map payload produces /qurl map rerun hint', async () => {
-    // The same handler serves /qurl file and /qurl map. A user who
-    // invoked /qurl map should NOT be told to "rerun /qurl file" in
+    // The same handler serves /qurl send and /qurl map. A user who
+    // invoked /qurl map should NOT be told to "rerun /qurl send" in
     // the transient-lookup followUp. resourceType=MAPS in the payload
     // drives the hint.
     const flaky = '100000000000000099';
@@ -3757,9 +3758,9 @@ describe('handleConfirmSendClick', () => {
       content: expect.stringMatching(/rerun \/qurl map/),
       ephemeral: true,
     }));
-    // Must NOT say /qurl file when the user invoked /qurl map.
+    // Must NOT say /qurl send when the user invoked /qurl map.
     expect(int.followUp).not.toHaveBeenCalledWith(expect.objectContaining({
-      content: expect.stringMatching(/rerun \/qurl file/),
+      content: expect.stringMatching(/rerun \/qurl send/),
     }));
   });
 
@@ -3963,7 +3964,7 @@ describe('handleConfirmSendClick', () => {
 describe('handleConfirmCancelClick', () => {
   test('happy path → version-gated deleteFlow + cooldown softened to ~5s residual + update', async () => {
     // softenCooldown leaves 5s of throttle so a user can't spam
-    // /qurl file → Cancel → /qurl file → Cancel and rack up
+    // /qurl send → Cancel → /qurl send → Cancel and rack up
     // supersedeOrCreate DDB writes with zero cost. A legitimate
     // "I changed my mind" still has the cooldown softened from full
     // QURL_SEND_COOLDOWN_MS down to 5s.
@@ -3992,7 +3993,7 @@ describe('handleConfirmCancelClick', () => {
   test('deleteFlow dedup loser → ephemeral message + cooldown PRESERVED (no soften)', async () => {
     // Critical: when Send won the race, we must NOT touch the cooldown
     // — Send is fanning out DMs and a soften would let the user
-    // re-fire /qurl file within 5s of clicking Cancel, before the
+    // re-fire /qurl send within 5s of clicking Cancel, before the
     // first send finishes. The Cancel-loser branch leaves the
     // original cooldown timestamp intact (no softening).
     mockDeleteFlow.mockResolvedValueOnce({ deleted: false });
@@ -4156,7 +4157,7 @@ describe('handleConfirmUserSelect', () => {
     // keeps the pick prompt and the picker stays attached. Replacing
     // the content with just the warning string would strip the
     // "Sending file: report.pdf / Expires: 24h" header the user
-    // chose at /qurl file time.
+    // chose at /qurl send time.
     const int = makeSelectInteraction({
       users: [makeUser(u1, { bot: true })],
     });
@@ -6399,7 +6400,7 @@ describe('renderConfirmCardRows', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },  // no `recipients` → needsPicker
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const editReplyCalls = int.editReply.mock.calls;
     const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
     expect(lastCall.components).toHaveLength(4);
@@ -6429,7 +6430,7 @@ describe('renderConfirmCardRows', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const editReplyCalls = int.editReply.mock.calls;
     const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
     expect(lastCall.components).toHaveLength(4);
@@ -6447,7 +6448,7 @@ describe('renderConfirmCardRows', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     // 3 buttons constructed for the bottom row of the confirm card.
     expect(ButtonBuilder).toHaveBeenCalledTimes(3);
     const customIds = ButtonBuilder.mock.results.map(
@@ -6467,7 +6468,7 @@ describe('renderConfirmCardRows', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Add a note/));
   });
@@ -6488,7 +6489,7 @@ describe('renderConfirmCardRows', () => {
       },
       guildMembers: { '100000000000000001': {} },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const noteBtn = ButtonBuilder.mock.results[0].value;
     expect(noteBtn.setLabel).toHaveBeenCalledWith(expect.stringMatching(/Edit note/));
   });
@@ -6514,7 +6515,7 @@ describe('renderConfirmCardRows', () => {
         '100000000000000002': {},
       },
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
     const builder = MentionableSelectMenuBuilder.mock.results[0].value;
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(
@@ -6533,7 +6534,7 @@ describe('renderConfirmCardRows', () => {
     const int = makeInteraction({
       options: { attachment: VALID_ATTACHMENT },  // no recipients → needsPicker
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     expect(MentionableSelectMenuBuilder).toHaveBeenCalledTimes(1);
     const builder = MentionableSelectMenuBuilder.mock.results[0].value;
     expect(builder.addDefaultUsers).not.toHaveBeenCalled();
@@ -6554,7 +6555,7 @@ describe('renderConfirmCardRows', () => {
       options: { attachment: VALID_ATTACHMENT, recipients: mentionList },
       guildMembers,
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const builder = MentionableSelectMenuBuilder.mock.results[0].value;
     expect(builder.setMaxValues).toHaveBeenCalledWith(12);
     expect(builder.addDefaultUsers).toHaveBeenCalledWith(...ids);
@@ -6582,7 +6583,7 @@ describe('renderConfirmCardRows', () => {
       id: 'voice-fixed', name: adversarialName, type: 2,
       members: new Map([['111', { user: { id: '111', bot: false } }]]),
     });
-    await handleQurlFile(int);
+    await handleQurlSend(int);
     const voiceBtn = ButtonBuilder.mock.results.find(
       (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_voice_everyone'
     );
@@ -6604,7 +6605,7 @@ describe('renderConfirmCardRows', () => {
   });
 
   describe('voice-mode layout (recipientMode:"voice")', () => {
-    // Round-trip the render layout via handleQurlFile invoked from a
+    // Round-trip the render layout via handleQurlSend invoked from a
     // voice channel WITHOUT `recipients:`. The slash-entry voice-mode
     // auto-default lands the card in voice-mode, which:
     //   - HIDES the MentionableSelect picker row
@@ -6633,7 +6634,7 @@ describe('renderConfirmCardRows', () => {
       MentionableSelectMenuBuilder.mockClear();
       const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
       setupVoice(int);
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       // The literal "one or the other" contract — voice-mode kills the
       // picker. A test that asserted on `editReply.components.length`
       // alone would silently drift if rows were added/removed elsewhere.
@@ -6645,7 +6646,7 @@ describe('renderConfirmCardRows', () => {
       ButtonBuilder.mockClear();
       const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
       setupVoice(int);
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const customIds = ButtonBuilder.mock.results.map(
         (r) => r.value.setCustomId.mock.calls[0]?.[0]
       );
@@ -6663,7 +6664,7 @@ describe('renderConfirmCardRows', () => {
       ButtonBuilder.mockClear();
       const int = makeInteraction({ options: { attachment: VALID_ATTACHMENT } });
       setupVoice(int);
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const customIds = ButtonBuilder.mock.results.map(
         (r) => r.value.setCustomId.mock.calls[0]?.[0]
       );
@@ -6689,7 +6690,7 @@ describe('renderConfirmCardRows', () => {
         name: '**inject** _under_ ||hide||',
         members: new Map([[u1, member]]),
       });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const editReplyCalls = int.editReply.mock.calls;
       const lastCall = editReplyCalls[editReplyCalls.length - 1][0];
       expect(lastCall.content).toContain(`<#${VOICE_CH}>`);
@@ -6882,7 +6883,7 @@ describe('renderConfirmCardRows', () => {
       });
       int.memberPermissions = { has: jest.fn(() => true) };
       int.guild.memberCount = 5;
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
       expect(customIds).toContain('qurl_confirm_everyone');
     });
@@ -6897,7 +6898,7 @@ describe('renderConfirmCardRows', () => {
         options: { attachment: VALID_ATTACHMENT, recipients: '<@100000000000000001>' },
         guildMembers: { '100000000000000001': {} },
       });
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
       expect(customIds).not.toContain('qurl_confirm_everyone');
     });
@@ -6921,7 +6922,7 @@ describe('renderConfirmCardRows', () => {
       });
       int.memberPermissions = { has: jest.fn(() => true) };
       int.guild.memberCount = 3;
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const everyoneBtn = ButtonBuilder.mock.results.find(
         (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
       );
@@ -6950,7 +6951,7 @@ describe('renderConfirmCardRows', () => {
       int.memberPermissions = { has: jest.fn(() => true) };
       // Leave memberCount unset → undefined.
       delete int.guild.memberCount;
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const everyoneBtn = ButtonBuilder.mock.results.find(
         (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
       );
@@ -6960,7 +6961,7 @@ describe('renderConfirmCardRows', () => {
 
     test('does NOT render in DM context — direct renderer assertion', () => {
       // Pin the renderer's `interaction.guild` gate directly (not via
-      // handleQurlFile's entry-point DM-rejection). Without a direct
+      // handleQurlSend's entry-point DM-rejection). Without a direct
       // assertion, a future refactor that loosens the renderer gate
       // would only fail tests via the entry-point guard, leaving the
       // renderer-only contract under-pinned.
@@ -7127,7 +7128,7 @@ describe('renderConfirmCardRows', () => {
         });
         int.memberPermissions = { has: jest.fn(() => true) };
         int.guild.memberCount = 4;  // matches cache.size → warm + accurate
-        await handleQurlFile(int);
+        await handleQurlSend(int);
         const everyoneBtn = ButtonBuilder.mock.results.find(
           (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
         );
@@ -7158,7 +7159,7 @@ describe('renderConfirmCardRows', () => {
         });
         int.memberPermissions = { has: jest.fn(() => true) };
         int.guild.memberCount = 500;  // cache.size < memberCount → cold
-        await handleQurlFile(int);
+        await handleQurlSend(int);
         const everyoneBtn = ButtonBuilder.mock.results.find(
           (r) => r.value.setCustomId.mock.calls[0]?.[0] === 'qurl_confirm_everyone'
         );
@@ -7197,7 +7198,7 @@ describe('renderConfirmCardRows', () => {
         members: new Map([['100000000000000001', { user: makeUser('100000000000000001') }]]),
       };
       int.guild.channels.cache.set(voiceChannelId, int.channel);
-      await handleQurlFile(int);
+      await handleQurlSend(int);
       const customIds = ButtonBuilder.mock.results.map((r) => r.value.setCustomId.mock.calls[0]?.[0]);
       // Both affordances present; full bottom row = Voice + @everyone +
       // Note + Send + Cancel = 5 components (Discord's hard cap).
@@ -7486,7 +7487,7 @@ describe('constants + exports', () => {
     // accidentally keys siblingMessage by customId breaks here.
     const { siblingMessageForStage } = require('../src/flow-dispatch');
     const msg = siblingMessageForStage(SEND_STAGE_AWAITING_CONFIRM);
-    expect(msg).toMatch(/qurl file.*qurl map.*confirm card/i);
+    expect(msg).toMatch(/qurl send.*qurl map.*confirm card/i);
     // Defense-in-depth: confirm-card customIds for SEND + CANCEL,
     // although registered without their own siblingMessage, still
     // reach the same registered message through the stage lookup.

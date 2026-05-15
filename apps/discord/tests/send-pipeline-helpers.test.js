@@ -1,5 +1,5 @@
 /**
- * Tests for shared send-pipeline helpers used by /qurl file + /qurl map:
+ * Tests for shared send-pipeline helpers used by /qurl send + /qurl map:
  * helper functions, the qURL client, connector client, places client, and
  * database methods. The polling/back-half coverage lives in
  * send-pipeline-back-half.test.js.

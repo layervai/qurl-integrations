@@ -291,7 +291,7 @@ function makeInteraction(overrides = {}) {
   const base = {
     user: { id: 'user-1', username: 'TestUser' },
     options: {
-      getSubcommand: jest.fn(() => 'file'),
+      getSubcommand: jest.fn(() => 'send'),
       getString: jest.fn(() => null),
       getUser: jest.fn(() => null),
       getAttachment: jest.fn(() => null),
@@ -2211,7 +2211,7 @@ describe('handleSetupModal (dispatcher path)', () => {
 // set MAP_COMMAND_ENABLED, so the bot's strict `=== 'true'` parser
 // resolves it to false — matching the production default. Every test
 // in this block verifies a surface that should be inert when the flag
-// is off. The flag-on path is covered by qurl-file-map.test.js (whose
+// is off. The flag-on path is covered by qurl-send-map.test.js (whose
 // config mock sets MAP_COMMAND_ENABLED: true).
 describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
   const { mockSearchPlaces } = require('./helpers/places-mock');
@@ -2221,7 +2221,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     // production string via _test so a future copy edit can't drift
     // this assertion from reality.
     expect(_test.SETUP_SUCCESS_MSG).not.toContain('/qurl map');
-    expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl file');
+    expect(_test.SETUP_SUCCESS_MSG).toContain('/qurl send');
   });
 
   it('/qurl help reply omits /qurl map references', async () => {
@@ -2238,7 +2238,7 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     // Sanity: the help reply is still rendered (we want absence of
     // map, not absence of help). Catches a regression where the
     // entire help branch goes silent.
-    expect(replyArg.content).toContain('/qurl file');
+    expect(replyArg.content).toContain('/qurl send');
     expect(replyArg.content).toContain('qURL Bot — Help');
     // Pin the flag-off `sectionVerb` swap — a regression that drops
     // the conditional verb would render "Share resources" against a
@@ -2290,6 +2290,31 @@ describe('MAP_COMMAND_ENABLED=false (flag-off behavior)', () => {
     await handleCommand(interaction);
     expect(interaction.respond).toHaveBeenCalledWith([]);
     expect(mockSearchPlaces).not.toHaveBeenCalled();
+  });
+
+  it('dispatcher replies with rename hint for stale `/qurl file` submissions (post-rename to /qurl send)', async () => {
+    // Discord won't normally route a `file` submission after the
+    // rename propagates, but a stale client carrying the pre-rename
+    // command definition can still submit one for up to ~1h (global
+    // registration cache TTL). The dispatcher's defensive branch
+    // turns that into an ephemeral rename hint instead of falling
+    // through to an unknown-subcommand void.
+    const interaction = makeInteraction({
+      options: {
+        ...makeInteraction().options,
+        getSubcommand: jest.fn(() => 'file'),
+      },
+    });
+    await handleCommand(interaction);
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: expect.stringMatching(/`\/qurl file` has been renamed to `\/qurl send`/),
+      ephemeral: true,
+    });
+    // The hint must fire BEFORE handleQurlSend's defer path; if the
+    // dispatcher ever routed through it by mistake, deferReply would
+    // fire and the user would see a spurious "thinking..." then the
+    // rename hint. Negative assertion guards against that regression.
+    expect(interaction.deferReply).not.toHaveBeenCalled();
   });
 
   it('stale /qurl map in an unconfigured guild hits disabled reply BEFORE the API-key gate (routing order)', async () => {

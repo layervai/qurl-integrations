@@ -1,7 +1,7 @@
 /**
  * Send-pipeline back-half tests — monitorLinkStatus polling,
  * revokeAllLinks direct path, and handleAddRecipients flow. Covers the
- * code paths exercised after `/qurl file` or `/qurl map` reaches the
+ * code paths exercised after `/qurl send` or `/qurl map` reaches the
  * "Sent to N" confirmation:
  *   - monitorLinkStatus's setInterval body (init, status diff, pending →
  *     opened/expired transitions, addRecipients() generation bump,
@@ -2135,7 +2135,7 @@ describe('executeSendPipeline — personalMessage shape gate', () => {
 });
 
 // Defensive guards for the `recipients` invariants — non-empty and
-// ≤ config.QURL_SEND_MAX_RECIPIENTS. The `/qurl file` + `/qurl map`
+// ≤ config.QURL_SEND_MAX_RECIPIENTS. The `/qurl send` + `/qurl map`
 // front-half already enforces these before the pipeline call; the
 // gates are defense-in-depth for a future caller (deserialized
 // payload, programmatic retry) that skips those checks. Without

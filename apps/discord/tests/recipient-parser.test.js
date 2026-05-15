@@ -1,6 +1,6 @@
 /**
  * Unit tests for src/recipient-parser.js — the `recipients:` slash-
- * option mention parser used by /qurl file and /qurl map.
+ * option mention parser used by /qurl send and /qurl map.
  *
  * Mocks config (just QURL_SEND_MAX_RECIPIENTS) and uses synthetic
  * `interaction` objects with the guild.members.cache / guild.roles.cache
@@ -394,7 +394,7 @@ describe('parseRecipientMentions — role-mention permission gate (#326)', () =>
   // Issue #326 parity: <@&roleId> for a non-mentionable role requires
   // MENTION_EVERYONE (allowMassMention). Mirrors Discord's in-chat
   // gate; closes the privilege-escalation surface where a non-admin
-  // could `/qurl file recipients:<@&adminRoleId>` to fan-out to an
+  // could `/qurl send recipients:<@&adminRoleId>` to fan-out to an
   // admin-only role.
 
   test('mentionable: false WITHOUT allowMassMention → roleMentionsDenied entry, NOT expanded', () => {

@@ -6,7 +6,7 @@
  * file mocks it, but the mock contract has crept up over time —
  * encode/decode, shape regex, buildPlaceUrl — and the duplicate
  * implementations across `commands-comprehensive.test.js`,
- * `coverage-boost.test.js`, and `qurl-file-map.test.js` were a real
+ * `coverage-boost.test.js`, and `qurl-send-map.test.js` were a real
  * drift risk (one file's regex tightens, the other two silently
  * accept the looser shape).
  *

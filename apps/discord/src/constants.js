@@ -156,7 +156,7 @@ const AUDIT_EVENTS = {
   // both file and location prep paths. The meta `kind` field carries
   // the composition: 'file' | 'location' | 'mixed'. Collapsing to one
   // event prevents UploadCount from double-counting mixed sends if the
-  // CloudWatch filter doesn't dimension on kind. /qurl file and
+  // CloudWatch filter doesn't dimension on kind. /qurl send and
   // /qurl map are mutually exclusive so 'mixed' only ever shows up
   // from handleAddRecipients on a sendConfig that has both file +
   // location.
