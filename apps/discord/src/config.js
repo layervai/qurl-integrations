@@ -41,7 +41,12 @@ const os = require('os');
 // Fargate boot (which would surface as a misleading "no IPv4 found"
 // diagnostic at 3am).
 function deriveInstanceId() {
-  return process.env.INSTANCE_ID?.trim() || os.hostname();
+  // `|| null` normalizes the rare empty-hostname case (chroot or
+  // misconfigured init namespace) for symmetry with deriveInstanceIp.
+  // missingHotStandbyKeys catches both null and '' via its falsy
+  // check, so behavior is unchanged — the symmetry is for callers
+  // reading config.INSTANCE_ID and reasoning about its possible shapes.
+  return process.env.INSTANCE_ID?.trim() || os.hostname() || null;
 }
 
 function isIPv4(addr) {
@@ -529,8 +534,11 @@ module.exports = {
   // every handoff; the peer-heartbeat row keys on it. Derived from
   // `os.hostname()` (Fargate sets this to a short alphanumeric per
   // task — distinct across replicas in the same service); env override
-  // wins. When hot-standby is off, the leader code path doesn't run,
-  // so the value is never read. LOAD-BEARING INVARIANT (full rationale
+  // wins. Populated unconditionally at module-load (even when
+  // hot-standby is off) — safe because every consumer in index.js
+  // lives inside `startHotStandby()`, which only runs when the flag
+  // is on. A non-null `config.INSTANCE_ID` is NOT a hot-standby
+  // indicator on its own. LOAD-BEARING INVARIANT (full rationale
   // above `deriveInstanceId`): two replicas in the same ECS service
   // MUST see different values, or the DDB lock short-circuits.
   INSTANCE_ID: deriveInstanceId(),
