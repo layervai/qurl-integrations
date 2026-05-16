@@ -12,6 +12,11 @@ const { createControlClient } = require('./gateway-control-client');
 const { createConnectionWatchdog } = require('./gateway-connection-watchdog');
 const { startControlChannelServer } = require('./gateway-control-channel');
 const { loadGatewayHmacSecret } = require('./gateway-hmac-secret-loader');
+const {
+  shouldUsePushHandoffShutdown,
+  selectGatewayReadinessProbe,
+  tryStop,
+} = require('./gateway-shutdown-helpers');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
@@ -640,20 +645,6 @@ let gatewayHeartbeatTimer = null;
 let activeGuildCountTimer = null;
 let isShuttingDown = false;
 
-// Best-effort stop() invoker for shutdown teardown. Null-safe so
-// callers can pass a handle that was never constructed (e.g.
-// hot-standby off). Failures log at warn and resolve — teardown is
-// already on the failure path; a stop() error shouldn't stall the
-// rest of the drain.
-async function tryStop(name, handle) {
-  if (!handle) return;
-  try {
-    await handle.stop();
-  } catch (err) {
-    logger.warn(`${name} stop failed`, { error: err.message });
-  }
-}
-
 async function gracefulShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
@@ -719,8 +710,8 @@ async function gracefulShutdown(code = 0) {
     // ECS rolling deploy). Neither is on the SIGTERM critical path
     // for Discord-session continuity because the active peer (if
     // any) owns the WS.
-    await tryStop('connection-watchdog', connectionWatchdog);
-    await tryStop('gateway-leader', gatewayLeader);
+    await tryStop('connection-watchdog', connectionWatchdog, logger);
+    await tryStop('gateway-leader', gatewayLeader, logger);
     if (controlChannelServer) {
       await new Promise(resolve => {
         controlChannelServer.close(err => {
@@ -796,8 +787,13 @@ async function pushHandoffShutdown(code = 0) {
   isShuttingDown = true;
   logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
   const hardExit = setTimeout(() => {
+    // Force exit(1) on timeout — even when the SIGTERM that triggered
+    // us was code 0. A timed-out pushHandoff is a deploy-time failure
+    // (peer unreachable, hung connect, HMAC mismatch); dashboards and
+    // ECS observability need to distinguish "clean transfer" from
+    // "timeout, standby cold-acquired" via the exit code.
     logger.error('PushHandoff shutdown timed out, forcing exit');
-    process.exit(code);
+    process.exit(1);
   }, 12_000);
   hardExit.unref();
   try {
@@ -816,14 +812,16 @@ async function pushHandoffShutdown(code = 0) {
   process.exit(code);
 }
 
-// Handle shutdown signals. The hot-standby active replica takes the
-// pushHandoff path (transfer-then-exit); every other shape runs the
-// legacy gracefulShutdown drain. The branch reads the lock state at
-// signal time so an inbound handoff that already moved the lock onto
-// our peer doesn't drag us through pushHandoff when we have nothing
-// to push.
+// Handle shutdown signals. Branches between the pushHandoff path
+// (active replica with the lock) and the legacy gracefulShutdown
+// drain (every other shape). Decision is made via the pure helper
+// in gateway-shutdown-helpers so the branching contract is unit-
+// testable independent of the boot-state mutations here.
 function signalShutdown(code) {
-  if (config.ENABLE_GATEWAY_HOT_STANDBY && gatewayLeader && gatewayLeader.isHoldingLock()) {
+  if (shouldUsePushHandoffShutdown({
+    enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
+    gatewayLeader,
+  })) {
     pushHandoffShutdown(code);
   } else {
     gracefulShutdown(code);
@@ -938,6 +936,18 @@ async function startHotStandby() {
     controlChannelServer.once('error', reject);
   });
 
+  // SIGTERM-during-boot race guard. If a signal landed while we were
+  // awaiting the `listening` event, gracefulShutdown has already
+  // started tearing down the partial state (it sees a non-null
+  // gatewayLeader + controlChannelServer because they're assigned
+  // synchronously above). Continuing past this point would call
+  // .start() on the leader / watchdog after their gracefulShutdown
+  // .stop() already ran, leaving an unsupervised tick loop that
+  // process.exit() doesn't reap until SIGKILL.
+  if (isShuttingDown) {
+    return;
+  }
+
   // Watchdog drives the active path's manager.connect() on lock
   // acquisition + monitors the connection during the active lifetime.
   // `releaseLock` is wired to leader.releaseLockForImmediateExit
@@ -1032,25 +1042,13 @@ async function start() {
     // (cold-start path) or on the first RESUMED dispatch (cross-
     // process resume path); both are equivalent for "health check
     // should pass."
-    // Hot-standby probe handles the active/standby split per-request
-    // so a lock flip (acquire / lose to a peer's pushHandoff) doesn't
-    // need a re-wire. Standby has no WS by design — tick-loop liveness
-    // is its readiness signal; without it, ECS would replace the
-    // standby on the first --start-period lapse.
-    let isReadyFn;
-    if (config.ENABLE_GATEWAY_HOT_STANDBY) {
-      isReadyFn = () => {
-        if (!gatewayLeader) return false; // Pre-startHotStandby window.
-        if (gatewayLeader.isHoldingLock()) {
-          return gatewayShim.isReady();
-        }
-        return gatewayLeader.hasStartedTickLoop();
-      };
-    } else if (config.ENABLE_GATEWAY_RESUME && gatewayShim) {
-      isReadyFn = () => gatewayShim.isReady();
-    } else {
-      isReadyFn = () => client.isReady();
-    }
+    const isReadyFn = selectGatewayReadinessProbe({
+      enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
+      enableGatewayResume: config.ENABLE_GATEWAY_RESUME,
+      gatewayShim,
+      getGatewayLeader: () => gatewayLeader,
+      client,
+    });
     httpServer = startGatewayHealthServer(isReadyFn, () => {
       // Null out so gracefulShutdown doesn't try to .close() a server
       // that's in an error state. Covers both the listen-window race

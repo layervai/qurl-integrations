@@ -51,11 +51,13 @@ function loadGatewayHmacSecret(raw) {
   let parsed;
   try {
     parsed = JSON.parse(raw);
-  } catch (err) {
-    // The raw value is a secret — never echo it into the error
-    // string. We surface ONLY the JSON.parse error message, which
-    // discloses the parse-failure position but not the bytes.
-    fail(`GATEWAY_HANDOFF_HMAC is not valid JSON: ${err.message}`);
+  } catch (_err) {
+    // The raw value is a secret — never echo it (or any prefix of it)
+    // into the error string. Node 19+ V8 JSON.parse error messages
+    // include a truncated snippet of the source: a misconfig where an
+    // operator pasted raw hex without JSON wrapping would otherwise
+    // leak the first ~13 hex chars of a 64-char key into CloudWatch.
+    fail('GATEWAY_HANDOFF_HMAC is not valid JSON (raw value omitted to avoid leaking the secret)');
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

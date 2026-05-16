@@ -136,16 +136,21 @@ describe('loadGatewayHmacSecret', () => {
       }
     });
 
-    it('does not echo the raw secret in the JSON-parse-failure path', () => {
-      // The secret is the env var contents — never log it verbatim.
-      // We mention "not valid JSON" + the JSON.parse error message
-      // (which discloses the parse position, not the bytes).
-      const raw = 'SECRET_SHOULD_NOT_APPEAR_HERE';
+    it('does not leak any prefix of the raw secret in the JSON-parse-failure path', () => {
+      // V8's JSON.parse error message truncates the source to a
+      // ~13-char snippet, so a substring leak is the real hazard
+      // (not the full string). Operator-realistic misconfig: raw hex
+      // pasted without JSON wrapping. Any 8+ char substring of the
+      // raw value appearing in the surfaced error message would leak
+      // key material to CloudWatch.
+      const raw = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
       try {
         loadGatewayHmacSecret(raw);
         throw new Error('expected throw');
       } catch (err) {
-        expect(err.message).not.toContain('SECRET_SHOULD_NOT_APPEAR_HERE');
+        for (let i = 0; i + 8 <= raw.length; i += 1) {
+          expect(err.message).not.toContain(raw.slice(i, i + 8));
+        }
       }
     });
   });

@@ -183,6 +183,11 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
 }
 
 // Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
+// Caller guarantees the upstream resume combo check has already run
+// (resumeEnabled=true → shipper+ddb already validated upstream), so
+// the 3-arg signature here is sufficient — no need to re-check
+// shipper/storeType.
+//
 // Two unsupported shapes:
 //
 //   1. hotStandby=true with role!=gateway — the leader coordinator
