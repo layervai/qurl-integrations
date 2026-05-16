@@ -370,10 +370,15 @@ if (hotStandbyInvalid.length > 0) {
 // surface upfront before any I/O — same posture as missingHotStandbyKeys.
 // Stashed in a module-level so startHotStandby can read the parsed value
 // without re-parsing (and without drifting if the parse logic changes).
+//
+// `config.takeGatewayHandoffHmac()` reads the raw value from the
+// module-private binding in config.js and nulls that binding — see
+// the takeGatewayHandoffHmac definition for the heap-dump rationale.
+// Called once at boot here; calling again would return undefined.
 let gatewayHmacSecrets = null;
 if (config.ENABLE_GATEWAY_HOT_STANDBY) {
   try {
-    gatewayHmacSecrets = loadGatewayHmacSecret(config.GATEWAY_HANDOFF_HMAC);
+    gatewayHmacSecrets = loadGatewayHmacSecret(config.takeGatewayHandoffHmac());
   } catch (err) {
     logger.error(err.message);
     process.exit(1);
@@ -897,16 +902,15 @@ async function startHotStandby() {
 
   // Secrets were parsed + validated at module load (see boot chain
   // adjacent to missingHotStandbyKeys). Read the stash here, then
-  // scrub both the parsed-secret stash and the raw env value off
-  // `config` once createGatewayHmac has captured the material
-  // internally. Defense in depth against a heap dump (CloudWatch
-  // crash diagnostics, debugger attach, future memory-profiling
-  // tools) surfacing the key from a long-lived module-scope ref.
-  // The live HMAC instance still holds the strings for sign/verify
-  // — that's unavoidable — but the redundant references are not.
+  // null it once createGatewayHmac has captured the material
+  // internally. The raw env value is already unreachable — the
+  // one-shot config.takeGatewayHandoffHmac() at boot nulled the
+  // private binding in config.js — so nulling gatewayHmacSecrets
+  // here closes the remaining module-scope reference. The live
+  // HMAC instance still holds the strings for sign/verify (the
+  // only retained reference, unavoidable).
   const hmac = createGatewayHmac({ secrets: gatewayHmacSecrets, logger });
   gatewayHmacSecrets = null;
-  delete config.GATEWAY_HANDOFF_HMAC;
 
   const controlClient = createControlClient({ hmac, logger });
 

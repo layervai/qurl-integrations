@@ -464,7 +464,7 @@ describe('missingHotStandbyKeys', () => {
       ENABLE_GATEWAY_HOT_STANDBY: true,
       INSTANCE_ID: 'task-abc-123',
       INSTANCE_IP: '10.0.1.42',
-      GATEWAY_HANDOFF_HMAC: '{"current":"' + 'a'.repeat(64) + '"}',
+      hasGatewayHandoffHmac: true,
       ...overrides,
     };
   }
@@ -488,8 +488,11 @@ describe('missingHotStandbyKeys', () => {
     expect(missingHotStandbyKeys(cfg({ INSTANCE_IP: null }))).toEqual(['INSTANCE_IP']);
   });
 
-  it('surfaces missing GATEWAY_HANDOFF_HMAC', () => {
-    expect(missingHotStandbyKeys(cfg({ GATEWAY_HANDOFF_HMAC: '' })))
+  it('surfaces missing GATEWAY_HANDOFF_HMAC (via hasGatewayHandoffHmac flag)', () => {
+    // The presence check reads `hasGatewayHandoffHmac` (boolean) rather
+    // than the raw secret string — see config.js's
+    // `takeGatewayHandoffHmac` for the heap-dump security rationale.
+    expect(missingHotStandbyKeys(cfg({ hasGatewayHandoffHmac: false })))
       .toEqual(['GATEWAY_HANDOFF_HMAC']);
   });
 
@@ -501,7 +504,7 @@ describe('missingHotStandbyKeys', () => {
     const missing = missingHotStandbyKeys(cfg({
       INSTANCE_ID: undefined,
       INSTANCE_IP: undefined,
-      GATEWAY_HANDOFF_HMAC: undefined,
+      hasGatewayHandoffHmac: false,
     }));
     expect(missing).toEqual(['INSTANCE_ID', 'INSTANCE_IP', 'GATEWAY_HANDOFF_HMAC']);
   });

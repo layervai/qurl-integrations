@@ -242,7 +242,12 @@ function missingHotStandbyKeys(cfg) {
   const missing = [];
   if (!cfg.INSTANCE_ID) missing.push('INSTANCE_ID');
   if (!cfg.INSTANCE_IP) missing.push('INSTANCE_IP');
-  if (!cfg.GATEWAY_HANDOFF_HMAC) missing.push('GATEWAY_HANDOFF_HMAC');
+  // GATEWAY_HANDOFF_HMAC presence is surfaced via `hasGatewayHandoffHmac`
+  // (boolean flag) rather than the raw value — the secret string is
+  // never exposed as a config-object property to keep it unreachable
+  // through heap-dump-accessible references. See config.js's
+  // `takeGatewayHandoffHmac` for the security rationale.
+  if (!cfg.hasGatewayHandoffHmac) missing.push('GATEWAY_HANDOFF_HMAC');
   return missing;
 }
 
