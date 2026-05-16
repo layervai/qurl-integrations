@@ -68,7 +68,7 @@ function deriveInstanceIp() {
   // but yield nothing (the first pass already rejected every candidate),
   // so a separate skip isn't worth the noise.
   for (const addrs of Object.values(ifaces)) {
-    for (const addr of addrs) {
+    for (const addr of addrs || []) {
       if (isIPv4(addr)) return addr.address;
     }
   }

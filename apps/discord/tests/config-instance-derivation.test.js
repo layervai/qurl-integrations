@@ -58,6 +58,19 @@ describe('INSTANCE_ID derivation', () => {
     );
   });
 
+  it('returns null when both env override and os.hostname() are empty', () => {
+    // Pins the `|| null` branch in deriveInstanceId: rare chroot or
+    // misconfigured-init-ns where os.hostname() returns ''. Without
+    // the null normalization, callers branching on `=== null` would
+    // see an empty string instead.
+    withFreshConfig(
+      { env: {}, hostname: '' },
+      (config) => {
+        expect(config.INSTANCE_ID).toBeNull();
+      },
+    );
+  });
+
   it('falls back to os.hostname() when INSTANCE_ID is empty string', () => {
     withFreshConfig(
       { env: { INSTANCE_ID: '' }, hostname: 'fargate-empty-env' },
