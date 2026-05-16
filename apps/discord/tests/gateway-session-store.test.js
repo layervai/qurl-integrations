@@ -495,6 +495,53 @@ describe('flushFinal', () => {
     expect(flushSettled).toBe(true);
   });
 
+  it('awaits an in-flight null-clear delete chased by a fresh-session put', async () => {
+    // The other "awaits every in-flight write" test exercises
+    // two consecutive puts. This one pins the more operationally
+    // relevant shape: a RESUME rejection (updateSessionInfo(null)
+    // → Delete) immediately followed by a fresh IDENTIFY's READY
+    // (updateSessionInfo({...}) → Put). Both writes have to settle
+    // before flushFinal returns, otherwise SIGTERM could exit
+    // mid-delete and the next process would hydrate a row that
+    // should have been cleared.
+    let resolveDelete;
+    let putFired = false;
+
+    const rawClient = new DynamoDBClient({});
+    const docClient = DynamoDBDocumentClient.from(rawClient);
+    const ddbMock = mockClient(docClient);
+    ddbMock.on(DeleteCommand).callsFake(() => new Promise((resolve) => { resolveDelete = resolve; }));
+    ddbMock.on(PutCommand).callsFake(() => { putFired = true; return Promise.resolve({}); });
+
+    const logger = {
+      info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+    };
+    const store = createGatewaySessionStore({
+      ddbClient: docClient, tableName: 't', shardId: '0:1', logger,
+    });
+
+    // Prime mirror with a session, then null-clear (Delete starts,
+    // blocked on resolveDelete).
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    store.updateSessionInfo('0:1', null);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
+    // Fresh IDENTIFY's READY fires while Delete is still in-flight.
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-B', sequence: 1 }));
+    expect(putFired).toBe(true);
+
+    // flushFinal awaits BOTH the in-flight Delete AND the in-flight
+    // Put. It can't resolve until we unblock the Delete.
+    const flushPromise = store.flushFinal();
+    let flushSettled = false;
+    flushPromise.then(() => { flushSettled = true; });
+    await new Promise((r) => setImmediate(r));
+    expect(flushSettled).toBe(false);
+
+    resolveDelete({});
+    await flushPromise;
+    expect(flushSettled).toBe(true);
+  });
+
   it('after flushFinal, subsequent updateSessionInfo calls are dropped', async () => {
     // SIGTERM lands; flushFinal runs and sets stopped=true. A late
     // dispatch arriving on the way out shouldn't trigger another
