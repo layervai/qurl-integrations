@@ -116,6 +116,17 @@ function createGatewaySessionStore({
   // stale cursor). On failure the cursor isn't rolled back; the
   // throttle's next flush retries, and SIGTERM's flushFinal is
   // the backstop. Sustained failure logs every retry.
+  //
+  // Intentional design choice: a failed READY write (sessionId
+  // change → immediate write → DDB rejects) does NOT get a high-
+  // priority retry. The cursor's lastWrittenSessionId has already
+  // advanced to the new sessionId, so the next dispatch's
+  // sessionChanged check is false and the write defers to the
+  // throttle's 1Hz flush. This is the desired behavior — the
+  // mirror holds the correct in-memory state, and DDB catches up
+  // within ~1s. Burst-retrying on every dispatch would amplify
+  // a DDB outage into a hot loop without changing the eventual
+  // outcome.
   // Tracks a promise in `inFlightWrites` until it settles. The
   // .catch wrapper guarantees the tracked promise never carries a
   // rejected state — without it, a caller that forgot to pre-catch

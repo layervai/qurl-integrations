@@ -328,4 +328,72 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
 
     await shim.stop({ flushFinal: false });
   });
+
+  it('registerCommands fires only on the first READY per process, not on RESUMED or a later READY', async () => {
+    // The load-bearing case: a >60s outage expires Discord's resume
+    // buffer, RESUME is rejected, fresh IDENTIFY yields a fresh READY
+    // in the same process. Without the once-flag, registerCommands
+    // would re-PUT ~150 global commands and burn the global-commands
+    // rate budget. Mirrors the legacy `client.once('ready', …)`.
+    const rawClient = new DynamoDBClient({});
+    const docClient = DynamoDBDocumentClient.from(rawClient);
+    const ddbMock = mockClient(docClient);
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const logger = makeLogger();
+    const store = createGatewaySessionStore({
+      ddbClient: docClient, tableName: 't', shardId: '0:1', logger,
+    });
+    const { FakeManager, instances } = makeFakeManagerCtor();
+    const shim = createGatewayWsShim({
+      token: 't', intents: 1, store, logger,
+      WebSocketManagerCtor: FakeManager,
+      RESTCtor: makeFakeRESTCtor().FakeREST,
+    });
+
+    await shim.hydrate();
+    await shim.start();
+    const mgr = instances[0];
+
+    // Replicate the production wiring from src/index.js: a
+    // commandsRegistered closure-flag gates the registerCommands
+    // call to fire exactly once.
+    const registerCommandsCalls = [];
+    let commandsRegistered = false;
+    shim.onDispatch(({ data }) => {
+      if (data?.t === 'READY' && !commandsRegistered) {
+        const appId = shim.getAppId();
+        if (appId) {
+          commandsRegistered = true;
+          registerCommandsCalls.push({ appId });
+        }
+      }
+    });
+
+    // (1) First READY → registerCommands fires.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, session_id: 's1', resume_gateway_url: 'wss://r1/' } },
+      shardId: '0:1',
+    });
+    expect(registerCommandsCalls).toHaveLength(1);
+    expect(registerCommandsCalls[0]).toEqual({ appId: 'app-1' });
+
+    // RESUMED dispatch — must not trigger the t==='READY' branch.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'RESUMED', d: {} },
+      shardId: '0:1',
+    });
+    expect(registerCommandsCalls).toHaveLength(1);
+
+    // Second READY (resume-buffer-expired path). Once-flag holds.
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'READY', d: { application: { id: 'app-1' }, session_id: 's2', resume_gateway_url: 'wss://r2/' } },
+      shardId: '0:1',
+    });
+    expect(registerCommandsCalls).toHaveLength(1);
+
+    await shim.stop({ flushFinal: false });
+  });
 });

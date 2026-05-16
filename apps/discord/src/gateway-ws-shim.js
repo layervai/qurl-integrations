@@ -384,10 +384,15 @@ function createGatewayWsShim({
       return () => dispatchHandlers.delete(handler);
     },
 
+    // Null until the first READY in this process. Pure-RESUMED boots
+    // (no IDENTIFY → no READY) leave this null for the process
+    // lifetime — appId isn't persisted alongside the session row.
+    // Callers MUST null-check before templating into a REST endpoint.
     getAppId() {
       return appId;
     },
 
+    // Null until start() resolves.
     getRest() {
       return restInstance;
     },

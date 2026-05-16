@@ -519,24 +519,37 @@ if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
 // eventPublisher.publish remains the load-bearing INTERACTION_CREATE
 // gate.
 //
-// READY triggers registerCommands once (Discord delivers RESUMED
-// rather than READY on a successful resume, so commands don't
-// re-register on every reconnect). The shim-on + shipper-on
-// invariant is enforced at boot (unsupportedRoleResumeCombo).
+// registerCommands fires only on the FIRST READY in this process.
+// Discord delivers RESUMED (not READY) on a successful resume,
+// but READY *can* land twice: a >60s outage expires the resume
+// buffer, RESUME is rejected, fresh IDENTIFY yields a fresh READY.
+// The once-flag mirrors the legacy path's `client.once('ready', …)`.
 if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
+  let commandsRegistered = false;
   gatewayShim.onDispatch(({ data }) => {
-    if (data?.t === 'READY') {
-      // Gateway-tier shim doesn't maintain a guild cache (that's
-      // the worker tier's job); empty map skips purge. The
-      // handleCommand dispatch-time filter remains the correctness
-      // guarantee for stale registrations.
-      registerCommands({
-        rest: gatewayShim.getRest(),
-        appId: gatewayShim.getAppId(),
-        guilds: new Map(),
-      }).catch((err) => {
-        logger.error('registerCommands (shim path) failed', { error: err.message });
-      });
+    if (data?.t === 'READY' && !commandsRegistered) {
+      const appId = gatewayShim.getAppId();
+      if (!appId) {
+        // READY without application.id is a degenerate Discord shape
+        // (the spec requires it). Skip registration rather than
+        // route a request through `/applications/null/commands`,
+        // and don't latch commandsRegistered so a subsequent
+        // well-formed READY can recover.
+        logger.warn('registerCommands (shim path) skipped: appId not populated by READY');
+      } else {
+        commandsRegistered = true;
+        // Gateway-tier shim doesn't maintain a guild cache (that's
+        // the worker tier's job); empty map skips purge. The
+        // handleCommand dispatch-time filter remains the correctness
+        // guarantee for stale registrations.
+        registerCommands({
+          rest: gatewayShim.getRest(),
+          appId,
+          guilds: new Map(),
+        }).catch((err) => {
+          logger.error('registerCommands (shim path) failed', { error: err.message });
+        });
+      }
     }
     noteGatewayActivity();
     eventPublisher.publish(data);
