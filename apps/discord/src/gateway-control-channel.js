@@ -124,6 +124,16 @@ function startControlChannelServer({
   if (port == null) {
     throw new Error('startControlChannelServer: port is required');
   }
+  // Floor on requestTimeoutMs. The headersTimeout formula below is
+  // `min(max(1000, requestTimeout/2), requestTimeout - 100)`. Below
+  // ~1100 ms the outer min picks `requestTimeout - 100`, and below
+  // 1100 ms entirely it collapses toward 1 ms — effectively
+  // disabling header-read protection. Fail loud at boot rather than
+  // letting a misconfigured caller silently lose the invariant.
+  // 1100 ms is the floor for both clauses to produce ≥ 1000 ms.
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1100) {
+    throw new Error('startControlChannelServer: requestTimeoutMs must be an integer >= 1100 (see headersTimeout invariant)');
+  }
 
   const server = http.createServer((req, res) => {
     handleRequest(req, res, {
@@ -150,6 +160,11 @@ function startControlChannelServer({
   // headersTimeout < requestTimeout invariant holds even when
   // the floor would otherwise push it over the request timeout.
   // Defaults (5s request, 1s headers) are unaffected.
+  //
+  // The factory-level `requestTimeoutMs < 1100` guard above ensures
+  // both clauses can produce a meaningful >= 1000 ms — without it,
+  // requestTimeoutMs=50 would yield headersTimeout=1ms (effectively
+  // disabling header-read protection).
   server.requestTimeout = requestTimeoutMs;
   server.headersTimeout = Math.min(
     Math.max(1_000, Math.floor(requestTimeoutMs / 2)),
@@ -245,7 +260,7 @@ async function handleRequest(req, res, ctx) {
     ctx.logger.warn('control-channel: body addressed to wrong peer', {
       addressedTo: payload.peer_instance_id, self: ctx.selfInstanceId,
     });
-    sendJson(res, 400, { error: 'wrong_peer' });
+    sendJson(res, 400, { error: 'wrong_peer' }, { Connection: 'close' });
     return;
   }
 
@@ -253,7 +268,7 @@ async function handleRequest(req, res, ctx) {
     ctx.logger.warn('control-channel: handoff from unknown peer', {
       activeInstanceId: payload.active_instance_id,
     });
-    sendJson(res, 400, { error: 'unknown_peer' });
+    sendJson(res, 400, { error: 'unknown_peer' }, { Connection: 'close' });
     return;
   }
 

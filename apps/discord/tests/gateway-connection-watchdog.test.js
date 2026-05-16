@@ -47,6 +47,7 @@ function makeWatchdog({
   isHoldingLock = () => true,
   isConnecting = () => false,
   releaseLock = jest.fn(async () => {}),
+  deleteOwnRow,
   pollIntervalMs,
   maxAttempts,
   sleep = jest.fn(async () => {}),
@@ -57,10 +58,12 @@ function makeWatchdog({
   };
   const watchdog = createConnectionWatchdog({
     manager: manager ?? makeFakeManager(),
-    isHoldingLock, isConnecting, releaseLock, logger,
+    isHoldingLock, isConnecting, releaseLock, deleteOwnRow, logger,
     pollIntervalMs, maxAttempts, sleep, exit,
   });
-  return { watchdog, logger, releaseLock, sleep, exit };
+  return {
+    watchdog, logger, releaseLock, deleteOwnRow, sleep, exit,
+  };
 }
 
 describe('createConnectionWatchdog — factory validation', () => {
@@ -72,14 +75,16 @@ describe('createConnectionWatchdog — factory validation', () => {
   });
 
   it('BACKOFF_CAP_MS stays above the natural ceiling at DEFAULT_MAX_ATTEMPTS', () => {
-    // Source comment names this the "dead-code branch": at default
-    // maxAttempts=5, the highest pre-exit backoff is 2^4 * 100 =
-    // 1600 ms, well under the 5000 cap. Pin the inequality so a
-    // future bump to maxAttempts that pushes the natural backoff
-    // past the cap surfaces here rather than silently truncating
-    // the failure ladder.
-    const naturalCeiling = (2 ** DEFAULT_MAX_ATTEMPTS) * BACKOFF_BASE_MS;
-    // At maxAttempts=5: ceiling = 32 * 100 = 3200. Cap 5000 > 3200.
+    // Source comment names this the "dead-code branch": the highest
+    // backoff that actually sleeps is at `attempts = maxAttempts - 1`
+    // (the next failure tips into the exhaustion-exit path before
+    // sleeping). At default maxAttempts=5 that's 2^4 * 100 = 1600 ms,
+    // well under the 5000 cap. Pin the inequality so a future bump
+    // to maxAttempts that pushes the natural backoff past the cap
+    // surfaces here rather than silently truncating the failure
+    // ladder.
+    const naturalCeiling = (2 ** (DEFAULT_MAX_ATTEMPTS - 1)) * BACKOFF_BASE_MS;
+    // At maxAttempts=5: ceiling = 16 * 100 = 1600. Cap 5000 > 1600.
     expect(BACKOFF_CAP_MS).toBeGreaterThan(naturalCeiling);
   });
 
@@ -329,6 +334,65 @@ describe('step() — exhaustion path', () => {
       'connection-watchdog: releaseLock failed during exhaustion-exit',
       expect.objectContaining({ error: 'ddb-blip' }),
     );
+  });
+
+  it('calls deleteOwnRow on exhaustion when hook is provided (symmetric to pushHandoff)', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('persistent-fail'));
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => {});
+    const exit = jest.fn();
+    const { watchdog } = makeWatchdog({
+      manager, releaseLock, deleteOwnRow, exit, maxAttempts: 3,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    expect(deleteOwnRow).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('still exits(1) when deleteOwnRow throws (logged and swallowed)', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const releaseLock = jest.fn(async () => {});
+    const deleteOwnRow = jest.fn(async () => { throw new Error('ddb-blip'); });
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, deleteOwnRow, exit, maxAttempts: 3,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'connection-watchdog: deleteOwnRow failed during exhaustion-exit',
+      expect.objectContaining({ error: 'ddb-blip' }),
+    );
+  });
+
+  it('omits deleteOwnRow call when hook not provided (back-compat with leader-less wiring)', async () => {
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const releaseLock = jest.fn(async () => {});
+    const exit = jest.fn();
+    // No deleteOwnRow injected.
+    const { watchdog } = makeWatchdog({
+      manager, releaseLock, exit, maxAttempts: 3,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it('does not re-enter start() after exhaustion-exit', async () => {

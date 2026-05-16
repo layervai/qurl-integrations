@@ -149,6 +149,24 @@ describe('startControlChannelServer — factory validation', () => {
       logger: makeLogger(), onListenError: () => {},
     })).toThrow(/port/);
   });
+
+  it('throws on requestTimeoutMs < 1100 (headersTimeout invariant)', () => {
+    // For requestTimeoutMs = 50, the headersTimeout formula yields 1ms,
+    // effectively disabling header-read protection. The factory rejects
+    // the misconfig rather than letting it silently lose the invariant.
+    const baseArgs = {
+      hmac: { verify() {} }, selfInstanceId: 'a', isKnownPeer: () => true,
+      onHandoff: () => {}, logger: makeLogger(), onListenError: () => {}, port: 0,
+    };
+    expect(() => startControlChannelServer({ ...baseArgs, requestTimeoutMs: 50 }))
+      .toThrow(/requestTimeoutMs.*1100/);
+    expect(() => startControlChannelServer({ ...baseArgs, requestTimeoutMs: 1099 }))
+      .toThrow(/requestTimeoutMs.*1100/);
+    expect(() => startControlChannelServer({ ...baseArgs, requestTimeoutMs: 1.5 }))
+      .toThrow(/requestTimeoutMs.*1100/);
+    expect(() => startControlChannelServer({ ...baseArgs, requestTimeoutMs: '5000' }))
+      .toThrow(/requestTimeoutMs.*1100/);
+  });
 });
 
 describe('handleRequest — method + path routing', () => {

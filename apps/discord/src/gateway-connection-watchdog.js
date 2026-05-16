@@ -68,6 +68,17 @@ function createConnectionWatchdog({
   // `() => false`.
   isConnecting,
   releaseLock,
+  // Optional. If provided, called best-effort on the exhaustion-exit
+  // path alongside releaseLock. Symmetric to gateway-leader.js's
+  // SIGTERM pushHandoff path which also deletes the row. Without
+  // this, the heartbeat row lingers until DDB TTL (default 60s) and
+  // surviving peers keep `isKnownPeer`-ing this dead replica + the
+  // next handoff source may pick this row from listFreshPeers head
+  // and time out the 200 ms ACK. Not a correctness issue (the cold-
+  // fallback floor applies), but a small latency tax during the TTL
+  // window. Optional so existing wiring without peerHeartbeat
+  // visibility doesn't break — the absence is a no-op, not a throw.
+  deleteOwnRow,
   logger,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
@@ -137,6 +148,21 @@ function createConnectionWatchdog({
           logger.error('connection-watchdog: releaseLock failed during exhaustion-exit', {
             error: rerr.message,
           });
+        }
+        // Best-effort heartbeat-row cleanup, symmetric to gateway-
+        // leader.js's pushHandoff path. Closes the discovery window
+        // immediately so a freshly-promoted peer's listFreshPeers
+        // stops returning this dead row. Optional hook — absence is
+        // a no-op; failure is logged and swallowed (we're already
+        // exiting).
+        if (typeof deleteOwnRow === 'function') {
+          try {
+            await deleteOwnRow();
+          } catch (derr) {
+            logger.warn('connection-watchdog: deleteOwnRow failed during exhaustion-exit', {
+              error: derr.message,
+            });
+          }
         }
         closed = true;
         running = false;

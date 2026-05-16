@@ -170,13 +170,16 @@ function createGatewayLeader({
     // chain-keeping promise behavior on purpose.
     const next = inFlight.then(() => work(), () => work());
     inFlight = next.then(() => {}, (err) => {
-      // Warn (not debug): every work() should already log its own
-      // failure at warn/error level, so this backstop should never
-      // fire visibly in practice. If it ever does (a future caller
-      // passes a work fn that throws before its own try/catch),
-      // surfacing at warn level makes it visible at default prod
-      // log levels rather than silently swallowing.
-      logger.warn('gateway-leader: serialized op rejected (chain continues)', {
+      // Debug (not warn): every rethrowing op (tick / handleInboundHandoff
+      // / pushHandoff) ALREADY logs at warn/error from its own
+      // try/catch before throwing. Logging again at warn here
+      // double-reports the same failure under a different message,
+      // confusing log readers into thinking two things failed. Drop
+      // to debug so the chain-keeping observability is still
+      // available for whoever ever needs it (e.g., investigating a
+      // backstop firing for a future caller that bypassed the
+      // op-level try/catch) without polluting prod log levels.
+      logger.debug('gateway-leader: serialized op rejected (chain continues)', {
         error: err && err.message,
       });
     });
@@ -297,10 +300,15 @@ function createGatewayLeader({
   // a handoff to us. Already HMAC-verified + routing-checked by the
   // server; this just does the lock-cursor + WS-connect side.
   //
-  // Returns nothing on success. Throws on failure — the server
-  // returns 500 to the active. Either branch is safe: the active
-  // exits on any non-2xx, and the watchdog re-tries the connect
-  // path if heldLock got set before the throw.
+  // @param {object} arg
+  // @param {string} arg.activeInstanceId  who's transferring to us
+  // @param {number} arg.expectedVersion   the lock version to adopt
+  // @returns {Promise<void>}              resolves on success
+  // @throws on adopt failure, connect failure, or stray-handoff
+  //
+  // Server returns 500 to the active on any throw. Either branch is
+  // safe: the active exits on any non-2xx, and the watchdog re-tries
+  // the connect path if heldLock got set before the throw.
   async function handleInboundHandoff({ activeInstanceId, expectedVersion }) {
     return runSerialized(async () => {
       // Stray-handoff guard: if we already hold the lock AND the WS
