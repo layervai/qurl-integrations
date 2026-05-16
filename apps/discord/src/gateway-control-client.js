@@ -115,87 +115,86 @@ function createControlClient({
       // pre-validated above, so this is belt-and-braces — but the
       // contract is load-bearing for the SIGTERM caller, which
       // cannot handle exceptions cleanly.
-      let req;
       try {
-        req = httpRequest({
-        hostname: peerIp,
-        port: peerPort,
-        path: '/control/yours',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': wire.length,
-        },
-        // Per-call timeout — covers both connect and response phases.
-        timeout: timeoutMs,
-      }, (res) => {
-        const chunks = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString('utf8');
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            logger.info('control-client: handoff ACKed', {
-              peerInstanceId, status: res.statusCode,
+        const req = httpRequest({
+          hostname: peerIp,
+          port: peerPort,
+          path: '/control/yours',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': wire.length,
+          },
+          // Per-call timeout — covers both connect and response phases.
+          timeout: timeoutMs,
+        }, (res) => {
+          const chunks = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => {
+            const body = Buffer.concat(chunks).toString('utf8');
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              logger.info('control-client: handoff ACKed', {
+                peerInstanceId, status: res.statusCode,
+              });
+              settle({ ok: true, status: res.statusCode });
+            } else {
+              // Cap the logged body so an unexpectedly large peer
+              // response (e.g., a stray HTML error page from a
+              // misrouted request) doesn't flood the log line. The
+              // returned `body` field stays uncapped — callers don't
+              // act on it today, but a future debugger reading the
+              // full string from the result object is still ok.
+              logger.warn('control-client: handoff rejected by peer', {
+                peerInstanceId, status: res.statusCode, body: body.slice(0, 512),
+              });
+              settle({ ok: false, reason: 'rejected', status: res.statusCode, body });
+            }
+          });
+          res.on('error', (err) => {
+            logger.warn('control-client: response error', {
+              peerInstanceId, error: err.message,
             });
-            settle({ ok: true, status: res.statusCode });
-          } else {
-            // Cap the logged body so an unexpectedly large peer
-            // response (e.g., a stray HTML error page from a
-            // misrouted request) doesn't flood the log line. The
-            // returned `body` field stays uncapped — callers don't
-            // act on it today, but a future debugger reading the
-            // full string from the result object is still ok.
-            logger.warn('control-client: handoff rejected by peer', {
-              peerInstanceId, status: res.statusCode, body: body.slice(0, 512),
-            });
-            settle({ ok: false, reason: 'rejected', status: res.statusCode, body });
-          }
+            settle({ ok: false, reason: 'http_error', error: err.message });
+          });
+          // Peer crashes mid-response (after headers, before end):
+          // 'aborted' fires but 'end' never will. Without this
+          // handler we'd wait the full timeout before settling.
+          // Settle as http_error so the caller treats it like any
+          // other peer-side failure.
+          res.on('aborted', () => {
+            logger.warn('control-client: response aborted', { peerInstanceId });
+            settle({ ok: false, reason: 'http_error', error: 'response_aborted' });
+          });
         });
-        res.on('error', (err) => {
-          logger.warn('control-client: response error', {
+
+        req.on('timeout', () => {
+          // `timeout` event fires but doesn't close the socket. We
+          // MUST settle BEFORE destroy: `req.destroy(err)` can emit
+          // 'error' synchronously in some code paths, and the 'error'
+          // handler below would otherwise race ahead and settle with
+          // reason:'http_error' instead of 'timeout'. Settle is
+          // idempotent, so the destroy-induced 'error' becomes a
+          // no-op after this.
+          logger.warn('control-client: handoff timed out', {
+            peerInstanceId, timeoutMs,
+          });
+          settle({ ok: false, reason: 'timeout' });
+          req.destroy(new Error('handoff_timeout'));
+        });
+
+        req.on('error', (err) => {
+          // After `destroy(err)` for the timeout path, 'error' will
+          // fire — settle is already done, so this is a no-op. Other
+          // error paths (connection refused, DNS fail, etc.) settle
+          // here.
+          logger.warn('control-client: request error', {
             peerInstanceId, error: err.message,
           });
           settle({ ok: false, reason: 'http_error', error: err.message });
         });
-        // Peer crashes mid-response (after headers, before end):
-        // 'aborted' fires but 'end' never will. Without this
-        // handler we'd wait the full timeout before settling.
-        // Settle as http_error so the caller treats it like any
-        // other peer-side failure.
-        res.on('aborted', () => {
-          logger.warn('control-client: response aborted', { peerInstanceId });
-          settle({ ok: false, reason: 'http_error', error: 'response_aborted' });
-        });
-      });
 
-      req.on('timeout', () => {
-        // `timeout` event fires but doesn't close the socket. We
-        // MUST settle BEFORE destroy: `req.destroy(err)` can emit
-        // 'error' synchronously in some code paths, and the 'error'
-        // handler below would otherwise race ahead and settle with
-        // reason:'http_error' instead of 'timeout'. Settle is
-        // idempotent, so the destroy-induced 'error' becomes a
-        // no-op after this.
-        logger.warn('control-client: handoff timed out', {
-          peerInstanceId, timeoutMs,
-        });
-        settle({ ok: false, reason: 'timeout' });
-        req.destroy(new Error('handoff_timeout'));
-      });
-
-      req.on('error', (err) => {
-        // After `destroy(err)` for the timeout path, 'error' will
-        // fire — settle is already done, so this is a no-op. Other
-        // error paths (connection refused, DNS fail, etc.) settle
-        // here.
-        logger.warn('control-client: request error', {
-          peerInstanceId, error: err.message,
-        });
-        settle({ ok: false, reason: 'http_error', error: err.message });
-      });
-
-      req.write(wire);
-      req.end();
+        req.write(wire);
+        req.end();
       } catch (err) {
         logger.warn('control-client: synchronous http.request failure', {
           peerInstanceId, error: err.message,

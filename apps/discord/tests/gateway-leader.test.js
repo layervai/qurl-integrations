@@ -367,7 +367,7 @@ describe('pushHandoff', () => {
     await preHoldLock(leader);
 
     await leader.pushHandoff();
-    expect(lock.transferLock).toHaveBeenCalledWith('inst-B', 'peer/inst-B');
+    expect(lock.transferLock).toHaveBeenCalledWith('inst-B', 'placeholder/inst-B');
   });
 
   it('stops the tick loop before the transferLock', async () => {
@@ -479,6 +479,57 @@ describe('serialization — no two mutators interleave', () => {
     // After push completes, heldLock=false, so the tick's branch
     // calls acquireLock again.
     expect(lock.acquireLock.mock.calls.length).toBe(firstAcquireCalls + 1);
+  });
+
+  it('a SIGTERM pushHandoff during an in-flight inbound-handoff queues behind it', async () => {
+    // Real race: handleInboundHandoff is awaiting manager.connect()
+    // when SIGTERM fires. pushHandoff must queue behind the inbound
+    // handoff on the serialization chain — otherwise both would
+    // touch the lock state concurrently.
+    const callOrder = [];
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-X', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-X/inst-X', updated_at: 100,
+      }],
+    });
+    let resolveConnect;
+    mocks.lock.adoptLockFromHandoff = jest.fn(() => callOrder.push('adopt'));
+    mocks.manager.connect = jest.fn(() => new Promise((resolve) => {
+      callOrder.push('connect-start');
+      resolveConnect = resolve;
+    }));
+    mocks.lock.transferLock = jest.fn(async () => {
+      callOrder.push('transfer');
+      return { transferred: true, version: 3 };
+    });
+    const { leader } = makeLeader({ mocks });
+
+    // Pre-hold lock via a tick so pushHandoff has something to do.
+    // (Note: this acquires; handleInboundHandoff below will overwrite
+    // the version cursor via adoptLockFromHandoff. That's a slight
+    // semantic stretch — in reality we wouldn't have both — but the
+    // test is about serialization ordering.)
+    await leader._stepForTest();
+    callOrder.length = 0;
+
+    // Kick off inbound handoff; blocks at connect-start.
+    const inbound = leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 5,
+    });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(callOrder).toEqual(['adopt', 'connect-start']);
+
+    // SIGTERM fires now: pushHandoff queues.
+    const push = leader.pushHandoff();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(callOrder).toEqual(['adopt', 'connect-start']); // still blocked
+
+    // Release the inbound handoff; push then runs.
+    resolveConnect();
+    await inbound;
+    await push;
+    expect(callOrder).toEqual(['adopt', 'connect-start', 'transfer']);
   });
 
   it('two concurrent inbound handoffs serialize through adopt + connect', async () => {

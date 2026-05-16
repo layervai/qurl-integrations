@@ -101,11 +101,11 @@ function makeCtx({
   };
 }
 
-function makeSignedEnvelope({ hmac, payload }) {
-  // `hmac` arg kept for clarity/future use; we recompute with the
-  // same SECRET to avoid coupling to the hmac module's nonce LRU
-  // state during fixture construction.
-  void hmac;
+function makeSignedEnvelope({ payload }) {
+  // Recompute the signature directly with the shared SECRET rather
+  // than calling into a `makeHmac()` instance — that would couple
+  // the fixture to the hmac module's nonce LRU state and require
+  // careful clock injection on every call site.
   const bodyBytes = Buffer.from(JSON.stringify(payload), 'utf8');
   const signature = crypto.createHmac('sha256', SECRET).update(bodyBytes).digest('hex');
   return wrapEnvelope({ bodyBytes, signature }).toString('utf8');
@@ -177,7 +177,7 @@ describe('handleRequest — method + path routing', () => {
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ url: '/control/yours?cachebust=1', body: Buffer.from(envelope) });
     const res = makeRes();
@@ -246,7 +246,7 @@ describe('handleRequest — HMAC verify', () => {
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -283,7 +283,7 @@ describe('handleRequest — HMAC verify', () => {
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
     now += 10_000; // 10s past freshness window
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -297,7 +297,7 @@ describe('handleRequest — HMAC verify', () => {
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     // First call succeeds.
     const req1 = makeReq({ body: Buffer.from(envelope) });
@@ -320,7 +320,7 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac, selfInstanceId: 'inst-B' });
     const payload = makeFreshPayload({ now, peerInstanceId: 'inst-C' });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -336,7 +336,7 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
     const isKnownPeer = jest.fn(() => false);
     const ctx = makeCtx({ hmac, isKnownPeer });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -357,7 +357,7 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
       // iterations as replay.
       i += 1;
       payload.nonce = `bad${i}`.padEnd(32, 'x');
-      const envelope = makeSignedEnvelope({ hmac, payload });
+      const envelope = makeSignedEnvelope({ payload });
       const ctx = makeCtx({ hmac });
       const req = makeReq({ body: Buffer.from(envelope) });
       const res = makeRes();
@@ -379,7 +379,7 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
       active_instance_id: 'inst-A',
       peer_instance_id: 'inst-B',
     };
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
     const ctx = makeCtx({ hmac });
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -401,7 +401,7 @@ describe('handleRequest — onHandoff', () => {
     });
     const ctx = makeCtx({ hmac, onHandoff });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -423,7 +423,7 @@ describe('handleRequest — onHandoff', () => {
     const onHandoff = jest.fn(async () => { throw new Error('connect-rejected'); });
     const ctx = makeCtx({ hmac, onHandoff });
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
 
     const req = makeReq({ body: Buffer.from(envelope) });
     const res = makeRes();
@@ -547,7 +547,7 @@ describe('end-to-end — real HTTP server on ephemeral port', () => {
     await start({ hmac, onHandoff });
 
     const payload = makeFreshPayload({ now });
-    const envelope = makeSignedEnvelope({ hmac, payload });
+    const envelope = makeSignedEnvelope({ payload });
     const result = await post('/control/yours', envelope);
     expect(result.status).toBe(200);
     expect(onHandoff).toHaveBeenCalledWith({

@@ -429,13 +429,11 @@ describe('verify — nonce LRU', () => {
     expect(signAndVerify('1').ok).toBe(true);
   });
 
-  it('bumps a nonce to newest on re-access (would not happen via verify but exercised via the size cap)', () => {
-    // We can't directly call rememberNonce; but bump-to-newest is an
-    // internal property that only matters via the size cap. Since
-    // verify rejects duplicates, the bump-on-re-insert path is only
-    // reached by the explicit `seenNonces.has(...) → delete → set`
-    // dance. We approximate by checking the inspection seam reports
-    // a stable size after many distinct nonces with capacity.
+  it('enforces the size cap — verifying more nonces than the LRU holds settles at cap, not above', () => {
+    // rememberNonce is insert-only and verify rejects duplicates,
+    // so this test exercises only the eviction-at-capacity path:
+    // after many distinct nonces, the LRU size settles at the cap
+    // rather than growing unbounded.
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now, nonceLruSize: 5 });
     for (let i = 0; i < 50; i += 1) {

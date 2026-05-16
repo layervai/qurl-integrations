@@ -133,7 +133,13 @@ function createGatewayLeader({
     // prior outcome.
     const next = inFlight.then(() => work(), () => work());
     inFlight = next.then(() => {}, (err) => {
-      logger.debug('gateway-leader: serialized op rejected (chain continues)', {
+      // Warn (not debug): every work() should already log its own
+      // failure at warn/error level, so this backstop should never
+      // fire visibly in practice. If it ever does (a future caller
+      // passes a work fn that throws before its own try/catch),
+      // surfacing at warn level makes it visible at default prod
+      // log levels rather than silently swallowing.
+      logger.warn('gateway-leader: serialized op rejected (chain continues)', {
         error: err && err.message,
       });
     });
@@ -292,6 +298,14 @@ function createGatewayLeader({
       // concurrency. Reset in `finally` so a connect throw still
       // clears the flag — the watchdog can then validly take over
       // the retry on the next tick.
+      //
+      // Note: `manager.connect()` is awaited inline with no timeout
+      // here. A hung connect (e.g., Discord WS endpoint resolution
+      // black-holed) would pin `connecting=true` indefinitely and
+      // the watchdog would no-op every tick. PR 13b.3 wiring MUST
+      // ensure the WS shim's connect() either has an internal
+      // timeout OR provide an external timeout wrapper at the
+      // call site.
       connecting = true;
       try {
         await manager.connect();
@@ -353,11 +367,14 @@ function createGatewayLeader({
       // window), build a placeholder so transferLock still has a
       // valid string to write. The lock_holder field is operational
       // metadata; correctness doesn't depend on its value, only its
-      // non-emptiness. TODO(post-13b.2-bake): drop this fallback
-      // once all peers have been on >=13b.2 long enough that
-      // missing lock_holder is impossible.
+      // non-emptiness. Prefix `placeholder/` so the fallback is
+      // obvious in transferLock traces — vs. a real holder string
+      // which is shaped like `task-arn:.../inst-X`.
+      // TODO(post-13b.2-bake): drop this fallback once all peers
+      // have been on >=13b.2 long enough that missing lock_holder
+      // is impossible.
       const targetLockHolder = peer.lock_holder
-        || `peer/${peer.instance_id}`;
+        || `placeholder/${peer.instance_id}`;
 
       let transferResult;
       try {
@@ -418,6 +435,14 @@ function createGatewayLeader({
 
   // For the connection-watchdog's releaseLock hook. Serialized so
   // it can't race a tick's renewLock.
+  //
+  // Order note: heldLock=false is cleared BEFORE awaiting the DDB
+  // release. If releaseLock throws, the local flag is already false
+  // but the DDB row may still belong to us until TTL lapse. This is
+  // OK only because the sole caller (watchdog exhaustion path)
+  // `exit(1)`s immediately afterward — the row fades naturally via
+  // TTL. A future non-exiting caller would need to flip the
+  // ordering (await release first, then clear the flag on success).
   async function releaseLockForExit() {
     return runSerialized(async () => {
       heldLock = false;
