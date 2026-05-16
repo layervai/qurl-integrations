@@ -266,14 +266,14 @@ describe('tryClose', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('logs at warn and resolves cleanly when close yields an error', async () => {
+  it('logs at warn (with error + stack) and resolves cleanly when close yields an error', async () => {
     const logger = makeFakeLogger();
     const err = new Error('listener already detached');
     const server = { close: jest.fn((cb) => cb(err)) };
     await expect(tryClose('control-channel server', server, logger)).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(
       'control-channel server close reported error',
-      { error: 'listener already detached' },
+      { error: 'listener already detached', stack: err.stack },
     );
   });
 

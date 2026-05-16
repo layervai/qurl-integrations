@@ -266,6 +266,41 @@ describe('handleInboundHandoff', () => {
     expect(mocks.manager.connect).not.toHaveBeenCalled();
   });
 
+  it('inbound handoff on a never-started leader: adopts + connects without start()', async () => {
+    // Pins the SIGTERM-during-startHotStandby race contract. The
+    // control-channel server starts listening BEFORE leader.start()
+    // runs, so an in-flight handoff envelope can land on a leader
+    // whose tick loop has not begun. The runSerialized chain is
+    // primed at factory time (inFlight = Promise.resolve()), so the
+    // adopt → flag → connect ordering must hold without start()
+    // having ever fired.
+    const callOrder = [];
+    const mocks = makeMocks();
+    mocks.lock.adoptLockFromHandoff = jest.fn(() => callOrder.push('adopt'));
+    const { leader } = makeLeader({ mocks });
+
+    let flagAtConnect = null;
+    let tickLoopStartedAtConnect = null;
+    mocks.manager.connect = jest.fn(async () => {
+      flagAtConnect = leader.isHoldingLock();
+      tickLoopStartedAtConnect = leader.hasStartedTickLoop();
+      callOrder.push('connect');
+    });
+
+    // Pre-condition: no tick loop yet.
+    expect(leader.hasStartedTickLoop()).toBe(false);
+
+    await leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    });
+
+    expect(callOrder).toEqual(['adopt', 'connect']);
+    expect(flagAtConnect).toBe(true);
+    expect(tickLoopStartedAtConnect).toBe(false); // confirms the loop never ran
+    expect(leader.isHoldingLock()).toBe(true);
+    expect(mocks.peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
+  });
+
   it('adopt throw — heldLock + connecting both stay false; runSerialized chain stays intact for next call', async () => {
     // Adopt is the first step of the handoff. If it throws, NO
     // flag mutations must happen (heldLock=false, connecting=false),

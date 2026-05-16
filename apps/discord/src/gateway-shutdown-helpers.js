@@ -70,7 +70,11 @@ async function tryClose(name, server, logger) {
   if (!server) return;
   await new Promise(resolve => {
     server.close(err => {
-      if (err) logger.warn(`${name} close reported error`, { error: err.message });
+      // Stack alongside message — symmetric with tryStop. Most
+      // net.Server.close errors are low-information ("listener
+      // already detached"), but the next failure mode introduced
+      // here will benefit from the call-site trace.
+      if (err) logger.warn(`${name} close reported error`, { error: err.message, stack: err.stack });
       resolve();
     });
   });

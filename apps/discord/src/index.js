@@ -785,14 +785,22 @@ async function pushHandoffShutdown(code = 0) {
 // drain (every other shape). Decision is made via the pure helper
 // in gateway-shutdown-helpers so the branching contract is unit-
 // testable independent of the boot-state mutations here.
-function signalShutdown(code) {
+//
+// Async + .catch on the call sites — both shutdown branches are
+// async fire-and-forget from the signal handler. Either is supposed
+// to handle its own errors internally (both wrap their critical
+// work in try/catch), but a future refactor that introduces an
+// uncaught reject path (e.g., adds a new await above the try)
+// would otherwise surface as an unhandledRejection on the process.
+// The explicit .catch is defense-in-depth.
+async function signalShutdown(code) {
   if (shouldUsePushHandoffShutdown({
     enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
     gatewayLeader,
   })) {
-    pushHandoffShutdown(code);
+    await pushHandoffShutdown(code);
   } else {
-    gracefulShutdown(code);
+    await gracefulShutdown(code);
   }
 }
 
@@ -805,12 +813,18 @@ function signalShutdown(code) {
 // gateway-shutdown-helpers.test.js.
 process.on('SIGTERM', () => {
   logger.info('Received SIGTERM');
-  signalShutdown(0);
+  signalShutdown(0).catch(err => {
+    logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
+    process.exit(1);
+  });
 });
 
 process.on('SIGINT', () => {
   logger.info('Received SIGINT');
-  signalShutdown(0);
+  signalShutdown(0).catch(err => {
+    logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
+    process.exit(1);
+  });
 });
 
 // Pillar 3 hot-standby wiring. Called from start() AFTER the shim is
@@ -948,6 +962,14 @@ async function startHotStandby() {
     logger,
   });
 
+  // gatewayLeader.start() and connectionWatchdog.start() are
+  // sync-by-design: each schedules its own tick loop via
+  // setTimeout, captures the loop promise in a closure (so it
+  // can be awaited by stop()), and returns. Awaiting here would
+  // hang — the loop only resolves on stop(). If a future refactor
+  // adds an async pre-flight (e.g., warming a connection), that
+  // pre-flight should resolve BEFORE `.start()` returns so any
+  // thrown error still routes through `start().catch()`.
   gatewayLeader.start();
   connectionWatchdog.start();
 
