@@ -93,7 +93,7 @@ function createConnectionWatchdog({
   let running = false;
   let loopPromise = null;
   let attempts = 0;
-  let exited = false;
+  let closed = false;
 
   // Run one iteration of the watchdog. Public for tests; production
   // calls it from the `start()` loop. Returns once the iteration
@@ -138,7 +138,7 @@ function createConnectionWatchdog({
             error: rerr.message,
           });
         }
-        exited = true;
+        closed = true;
         running = false;
         exit(1);
         return;
@@ -180,7 +180,7 @@ function createConnectionWatchdog({
     // flag — the old loop is still inside `await sleep(...)` — does
     // not spawn a second concurrent loop. Callers that need to
     // re-start MUST await `stop()` first.
-    if (loopPromise || exited) return;
+    if (loopPromise || closed) return;
     running = true;
     loopPromise = loop().finally(() => { loopPromise = null; });
   }

@@ -286,7 +286,17 @@ function readRequestBody(req, byteCap) {
 
     req.on('end', () => { settle(resolve, Buffer.concat(chunks)); });
     req.on('error', (err) => { settle(reject, err); });
-    req.on('aborted', () => { settle(reject, new Error('request_aborted')); });
+    // 'close' fires after the request stream is fully done — either
+    // by 'end' (we already settled resolve) or by abort/transport
+    // error (we may not have settled yet). Use `req.destroyed`
+    // post-close as the abort signal. The older 'aborted' event was
+    // deprecated in Node 17 in favor of this pattern; settling here
+    // makes the abort path forward-compatible.
+    req.on('close', () => {
+      if (req.destroyed) {
+        settle(reject, new Error('request_aborted'));
+      }
+    });
   });
 }
 

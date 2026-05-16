@@ -118,14 +118,12 @@ function createGatewayHmac({
   const seenNonces = new Map();
 
   function rememberNonce(nonce) {
-    // The `has → delete → set` bump-to-newest pattern. Note that
-    // the `has` branch is unreachable from `verify()` (verify
-    // returns `replay` BEFORE calling rememberNonce on a duplicate),
-    // so this is defensive for any future caller that might insert
-    // without the pre-check. Harmless dead branch via verify.
-    if (seenNonces.has(nonce)) {
-      seenNonces.delete(nonce);
-    }
+    // Insert-only. The sole caller (`verify`) already returns
+    // `replay` BEFORE reaching here on a duplicate, so this never
+    // sees an existing key — and a defensive bump-to-newest would
+    // be misleading code (it would never run). If a future caller
+    // bypasses the verify path and needs bump semantics, add an
+    // explicit pre-check at that call site.
     seenNonces.set(nonce, true);
     while (seenNonces.size > nonceLruSize) {
       const oldest = seenNonces.keys().next().value;

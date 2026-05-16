@@ -205,8 +205,22 @@ function createGatewayLeader({
       // refresh don't touch lock state, but bundling the whole step
       // is simpler than splitting the serialization boundary inside
       // it.
-      // eslint-disable-next-line no-await-in-loop
-      await runSerialized(step);
+      //
+      // Backstop for unexpected throws inside step() that escape
+      // its internal try/catch (e.g., a future row-shape regression
+      // that throws inside `peers.map(...)`). Without this, a single
+      // throw would resolve loopPromise as a rejection, the loop
+      // would exit silently, and the leader would stop renewing
+      // without anyone observing it. Mirrors the watchdog's
+      // backstop. Log + continue: the next tick re-tries.
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await runSerialized(step);
+      } catch (err) {
+        logger.error('gateway-leader: tick threw unexpectedly (loop continues)', {
+          error: err && err.message,
+        });
+      }
     }
   }
 

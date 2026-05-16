@@ -703,6 +703,47 @@ describe('hooks for watchdog + control-channel', () => {
   });
 });
 
+describe('loop backstop — survives unexpected throws from step()', () => {
+  it('a synchronous throw from peerHeartbeat.listFreshPeers does not kill the loop', async () => {
+    // Symmetric to the watchdog's loop backstop. A synchronous throw
+    // (NOT a rejecting promise) from any awaited operation inside
+    // step() escapes the inner try/catch arms — `Promise.all([...])`
+    // captures sync rejections, but the array-element construction
+    // itself can throw synchronously and that's not caught by the
+    // inner .catch() arms. Without the loop-level backstop, the
+    // loop's `await runSerialized(step)` would reject and exit.
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const mocks = makeMocks();
+    let throwCount = 0;
+    mocks.peerHeartbeat.listFreshPeers = jest.fn(() => {
+      throwCount += 1;
+      // Synchronous throw, NOT a rejecting promise.
+      throw new Error('sync-list-throw');
+    });
+
+    const { leader, logger } = makeLeader({ mocks, sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    // Tick #1: throws synchronously → backstop catches → loop
+    // schedules tick #2 sleep.
+    sleepResolvers[0]();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(throwCount).toBeGreaterThanOrEqual(1);
+    // Loop must NOT have exited — another sleep was scheduled.
+    expect(sleep.mock.calls.length).toBeGreaterThan(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/tick threw unexpectedly/),
+      expect.objectContaining({ error: 'sync-list-throw' }),
+    );
+
+    leader.stop();
+    while (sleepResolvers.length > 0) sleepResolvers.shift()();
+  });
+});
+
 describe('start / stop lifecycle', () => {
   it('start is idempotent', async () => {
     const sleep = jest.fn(() => new Promise(() => {}));
