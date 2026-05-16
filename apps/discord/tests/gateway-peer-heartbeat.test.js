@@ -52,7 +52,7 @@ describe('createPeerHeartbeat — factory validation', () => {
     })).toThrow(/ip is required/);
     expect(() => createPeerHeartbeat({
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
-    })).toThrow(/port \(number\) is required/);
+    })).toThrow(/port \(integer 1-65535\) is required/);
     expect(() => createPeerHeartbeat({
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1', port: 9876,
     })).toThrow(/shardId is required/);
@@ -61,15 +61,29 @@ describe('createPeerHeartbeat — factory validation', () => {
     })).toThrow(/logger is required/);
   });
 
-  it('rejects a non-number port (defends against string-from-env bug)', () => {
+  it('rejects invalid ports (string, NaN, 0, negative, >65535, fractional)', () => {
     // The control-channel port comes from config (env). A bug that
-    // forgot to parseInt would surface as a string "9876" which would
-    // serialize into DDB as an S-type, and DDB readers expecting N
-    // would skip it. Catch at construction.
-    expect(() => createPeerHeartbeat({
+    // forgot to parseInt would surface as a string; an off-by-one in
+    // a port-allocator could overflow 65535; a leftover sentinel could
+    // pass 0 or -1. All of these would produce an unreachable peer
+    // entry; catch them at construction so a misconfig fails boot
+    // rather than failing the first handoff POST.
+    const base = {
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
-      port: '9876', shardId: '0:1', logger: {},
-    })).toThrow(/port \(number\) is required/);
+      shardId: '0:1', logger: {},
+    };
+    expect(() => createPeerHeartbeat({ ...base, port: '9876' }))
+      .toThrow(/port \(integer 1-65535\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, port: NaN }))
+      .toThrow(/port \(integer 1-65535\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, port: 0 }))
+      .toThrow(/port \(integer 1-65535\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, port: -1 }))
+      .toThrow(/port \(integer 1-65535\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, port: 65536 }))
+      .toThrow(/port \(integer 1-65535\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, port: 9876.5 }))
+      .toThrow(/port \(integer 1-65535\) is required/);
   });
 });
 

@@ -141,6 +141,48 @@ describe('acquireLock', () => {
     await expect(lock.acquireLock()).rejects.toThrow(/ThroughputExceededException/);
   });
 
+  it('treats expires_at === :now as still-live (strict < boundary)', async () => {
+    // The cond uses strict `expires_at < :now`. A peer whose lease
+    // expires at exactly `:now` should NOT be takeable yet — DDB
+    // rejects the cond and we return acquired:false. Pins the
+    // boundary against a refactor to `<=` that would shave 1s off
+    // the steady-state cold-fallback floor at the cost of a clock-
+    // skew race against the legitimate holder.
+    const { lock, ddbMock } = makeLock({ clock: () => 1_700_000_000_000 });
+    ddbMock.on(PutCommand).rejects(ccfe()); // simulate DDB rejecting because expires_at == :now
+
+    const result = await lock.acquireLock();
+
+    expect(result).toEqual({ acquired: false });
+    // Pin that we're checking the right condition by inspecting the
+    // request payload — the cond text must say `<`, not `<=`.
+    const condText = ddbMock.commandCalls(PutCommand)[0].args[0].input.ConditionExpression;
+    expect(condText).toContain('expires_at < :now');
+    expect(condText).not.toContain('expires_at <= :now');
+  });
+
+  it('re-acquire while already holding is a soft no-op (DDB cond fails on live lease)', async () => {
+    // A caller bug that double-calls acquireLock without a release
+    // in between should NOT be treated as a renewal (which would
+    // require a CAS on the existing instance_id/version). The cond
+    // `expires_at < :now` fails against our own live lease, DDB
+    // rejects, we return acquired:false. The local `currentVersion`
+    // stays at the first acquire's value — important so the next
+    // renewLock CAS still works.
+    const { lock, ddbMock } = makeLock({ clock: () => 1_700_000_000_000 });
+    ddbMock.on(PutCommand)
+      .resolvesOnce({}) // first acquire wins
+      .rejects(ccfe()); // second acquire hits cond fail
+
+    const first = await lock.acquireLock();
+    expect(first).toEqual({ acquired: true, version: 1 });
+
+    const second = await lock.acquireLock();
+    expect(second).toEqual({ acquired: false });
+    // Cursor unchanged — the first acquire's version=1 is still valid.
+    expect(lock._getVersionForTest()).toBe(1);
+  });
+
   it('embeds expires_at < :now in the cond — :now is the caller wall clock at acquire time', async () => {
     // The lock primitive's correctness over a clock-skewed peer
     // depends on `:now` being self-evaluated (we trust our own clock
@@ -327,6 +369,92 @@ describe('transferLock', () => {
       'gateway-lock: transfer called without prior acquire',
       expect.anything(),
     );
+  });
+
+  it('rejects self-handoff (target === self) as no-op with warn', async () => {
+    // A caller bug — e.g., peer-discovery accidentally returns our
+    // own row — that called transferLock(self → self) would otherwise
+    // bump the version counter while keeping ownership, churning
+    // DDB for nothing. Reject at the API boundary so the failure
+    // surfaces as a warn log rather than silent state churn.
+    const { lock, ddbMock, logger } = makeLock({ clock: () => 1_700_000_000_000 });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await lock.acquireLock();
+    const result = await lock.transferLock('inst-A', 'task-A/inst-A'); // same as constructor instanceId
+
+    expect(result).toEqual({ transferred: false });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0); // no DDB write
+    expect(lock._getVersionForTest()).toBe(1); // cursor unchanged
+    expect(logger.warn).toHaveBeenCalledWith(
+      'gateway-lock: transferLock called with self as target (no-op)',
+      expect.anything(),
+    );
+  });
+});
+
+describe('adoptLockFromHandoff', () => {
+  it('seeds currentVersion so the new holder\'s next renewLock CAS passes', async () => {
+    // The load-bearing case: PR 13b.2's control-channel handler
+    // receives an HMAC-verified push, the active calls transferLock
+    // (DDB row now shows this replica as holder, version=v), and
+    // this call synchronizes the local cursor with that DDB state.
+    // Without it, the first renewLock hits the currentVersion===null
+    // guard and returns renewed:false — the standby would think it
+    // lost the lock it just received.
+    const { lock, ddbMock, logger } = makeLock({ clock: () => 1_700_000_000_000 });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    lock.adoptLockFromHandoff(7); // active's prior version was 6, transferLock bumped to 7
+
+    expect(lock._getVersionForTest()).toBe(7);
+    expect(logger.info).toHaveBeenCalledWith(
+      'gateway-lock: adopted from handoff',
+      expect.objectContaining({ shardId: '0:1', instanceId: 'inst-A', version: 7 }),
+    );
+
+    // The next renewLock uses the adopted version as :expected.
+    await lock.renewLock();
+    const updateCall = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(updateCall.ExpressionAttributeValues[':expected']).toBe(7);
+    expect(updateCall.ExpressionAttributeValues[':next']).toBe(8);
+  });
+
+  it('does NOT write to DDB (caller is responsible for the prior transferLock)', async () => {
+    // Pure local-state-sync. The active's transferLock already
+    // wrote DDB; this call is just the new holder catching up its
+    // in-memory cursor.
+    const { lock, ddbMock } = makeLock();
+    lock.adoptLockFromHandoff(5);
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  it('throws on non-positive-integer version (defends against null/undefined/0/string from a malformed HMAC body)', () => {
+    // The HMAC body upstream carries the version as JSON-decoded number.
+    // A buggy upstream (or a forged body that passed the HMAC check
+    // somehow) could pass garbage. Fail loud so the standby's handler
+    // bubbles a clear error to the active rather than silently
+    // adopting an invalid cursor.
+    const { lock } = makeLock();
+    expect(() => lock.adoptLockFromHandoff(null)).toThrow(/positive integer version/);
+    expect(() => lock.adoptLockFromHandoff(undefined)).toThrow(/positive integer version/);
+    expect(() => lock.adoptLockFromHandoff(0)).toThrow(/positive integer version/);
+    expect(() => lock.adoptLockFromHandoff(-1)).toThrow(/positive integer version/);
+    expect(() => lock.adoptLockFromHandoff(1.5)).toThrow(/positive integer version/);
+    expect(() => lock.adoptLockFromHandoff('5')).toThrow(/positive integer version/);
+  });
+
+  it('is safe to call multiple times — cursor just re-anchors', async () => {
+    // Idempotency lets the control-channel handler retry-on-error
+    // without worrying about double-anchor side effects.
+    const { lock } = makeLock();
+    lock.adoptLockFromHandoff(5);
+    lock.adoptLockFromHandoff(5);
+    lock.adoptLockFromHandoff(7);
+    expect(lock._getVersionForTest()).toBe(7);
   });
 });
 

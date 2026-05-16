@@ -69,7 +69,13 @@ function createPeerHeartbeat({
   if (!tableName) throw new Error('createPeerHeartbeat: tableName is required');
   if (!instanceId) throw new Error('createPeerHeartbeat: instanceId is required');
   if (!ip) throw new Error('createPeerHeartbeat: ip is required');
-  if (typeof port !== 'number') throw new Error('createPeerHeartbeat: port (number) is required');
+  // Validate port as a TCP port (positive integer, 1-65535) rather
+  // than just `typeof === 'number'` — the latter accepts NaN, 0,
+  // negatives, fractionals, and >65535 (all of which would produce
+  // an unreachable peer entry that's invalid even before DDB sees it).
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('createPeerHeartbeat: port (integer 1-65535) is required');
+  }
   if (!shardId) throw new Error('createPeerHeartbeat: shardId is required');
   if (!logger) throw new Error('createPeerHeartbeat: logger is required');
 

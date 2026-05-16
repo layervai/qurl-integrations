@@ -37,6 +37,18 @@
 //    take it while the legitimate holder is still heartbeating;
 //    their write hits a ConditionalCheckFailedException.
 //
+//    Scope note: `version` is scoped to the CURRENT lock tenancy.
+//    Each `acquireLock` after a release / lapse / transfer resets
+//    the counter to 1; it is NOT a globally monotonic fencing token
+//    in the Kleppmann-treats-it-as-external sense. The internal-CAS
+//    use is sound because every CAS pairs `version` with `instance_id`,
+//    and `instance_id` is unique per process. If any downstream
+//    system ever consumes `version` as an EXTERNAL fencing token
+//    (e.g., a separate storage system that wants "is this fence
+//    number ahead of the last one we saw"), the per-acquire reset
+//    breaks that assumption and the consumer would need to pair
+//    `version` with `instance_id` or read the holder row.
+//
 // 4. Release uses `DeleteItem`, not `UpdateItem REMOVE lock_holder`.
 //    A REMOVE would leave `expires_at` populated, so a peer's next
 //    acquire couldn't take the `attribute_not_exists(lock_holder)`
@@ -189,6 +201,17 @@ function createGatewayLock({
       });
       return { transferred: false };
     }
+    if (targetInstanceId === instanceId) {
+      // Self-handoff is meaningless and would still bump the version
+      // (the CAS would succeed, since we're a holder). Reject at the
+      // API boundary so a caller bug (e.g., a peer-discovery lookup
+      // that accidentally returns our own row) doesn't silently churn
+      // the version counter.
+      logger.warn('gateway-lock: transferLock called with self as target (no-op)', {
+        shardId, instanceId,
+      });
+      return { transferred: false };
+    }
     const now = nowSeconds();
     const nextVersion = currentVersion + 1;
     try {
@@ -264,6 +287,31 @@ function createGatewayLock({
     }
   }
 
+  // Bootstrap the local version cursor after receiving a lock via
+  // cross-process handoff. The producer of this call is PR 13b.2's
+  // control-channel handler: after HMAC-verifying a `POST /control/yours`
+  // body and observing that the active's `transferLock` succeeded
+  // (DDB row now shows this replica as `instance_id`, version=`v`),
+  // the standby must seed its own gateway-lock instance's version
+  // cursor with `v` so the next `renewLock` finds a non-null
+  // `currentVersion` and passes its CAS guard.
+  //
+  // No DDB write. The active's transferLock already wrote the row;
+  // this call just synchronizes local state with what already
+  // exists in DDB. Safe to call multiple times — the cursor just
+  // re-anchors.
+  function adoptLockFromHandoff(versionAfterTransfer) {
+    if (!Number.isInteger(versionAfterTransfer) || versionAfterTransfer < 1) {
+      throw new Error(
+        `gateway-lock: adoptLockFromHandoff requires a positive integer version (got ${versionAfterTransfer})`
+      );
+    }
+    currentVersion = versionAfterTransfer;
+    logger.info('gateway-lock: adopted from handoff', {
+      shardId, instanceId, version: versionAfterTransfer,
+    });
+  }
+
   // Read the current holder row for diagnostics (/health, debug logs).
   // NOT a correctness primitive — the conditional writes above are
   // the lock contract. Returns the row or null if absent.
@@ -279,6 +327,7 @@ function createGatewayLock({
     acquireLock,
     renewLock,
     transferLock,
+    adoptLockFromHandoff,
     releaseLock,
     readCurrentHolder,
     // Inspection seam for tests. Production callers track version
