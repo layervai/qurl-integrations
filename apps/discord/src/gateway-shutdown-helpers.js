@@ -137,6 +137,12 @@ async function tryClose(name, server, logger) {
 //     by the standby. Holding up SIGTERM for a Knex pool drain
 //     would extend the handoff critical path with no correctness
 //     gain.
+//   * eventConsumer — never runs on the gateway tier (isWorker is
+//     derived as isHttp && ENABLE_EVENT_SHIPPER, so hot-standby
+//     gateways have no consumer to drain). Skipped implicitly by
+//     never being constructed; called out here so a future role-
+//     shape refactor doesn't quietly re-introduce a consumer on
+//     the gateway path without re-thinking this list.
 //
 // One NON-skip: `eventPublisher.stop()` runs in parallel with
 // pushHandoff. The publisher's in-flight SQS sends are the outgoing

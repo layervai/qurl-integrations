@@ -246,6 +246,47 @@ function missingHotStandbyKeys(cfg) {
   return missing;
 }
 
+// Shape checks for INSTANCE_ID + INSTANCE_IP (run AFTER missing-keys
+// passes). Matches the secret-loader's "fail at boot, not at first
+// use" posture: a misconfigured task-def that injects the literal
+// `${ECS_TASK_ARN}` (unsubstituted shell expansion) or
+// `INSTANCE_IP=10.0.0.999` (non-IPv4) would pass the presence gate
+// and surface as a baffling DDB-lock-can't-acquire or peer-
+// unreachable error at runtime. A cheap regex catches both.
+//
+// INSTANCE_ID: rejects the `${...}` template-literal pattern (the
+// common ECS task-def substitution-failure footgun). Otherwise
+// permissive — the downstream lock/heartbeat code does not require
+// a specific format.
+//
+// INSTANCE_IP: must parse as an IPv4 dotted-quad. The hot-standby
+// awsvpc deployment puts each task on a unique ENI with a v4
+// address; v6 is not in scope for Pillar 3 today (the control
+// channel binds to the v4 ENI, peers reach each other over v4 SG
+// rules). If v6 ever lands, this check loosens.
+//
+// Returns an array of operator-facing message strings (one per
+// problem) or [] when all values are well-shaped. Hot-standby off
+// → skip entirely.
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+function invalidHotStandbyValues(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const problems = [];
+  if (cfg.INSTANCE_ID && cfg.INSTANCE_ID.includes('${')) {
+    problems.push(
+      `INSTANCE_ID looks like an unsubstituted template literal ('${cfg.INSTANCE_ID}'). ` +
+      'Check the ECS task-def is resolving the placeholder against the task metadata endpoint.'
+    );
+  }
+  if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
+    problems.push(
+      `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
+      'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today.'
+    );
+  }
+  return problems;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -346,6 +387,7 @@ module.exports = {
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
+  invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

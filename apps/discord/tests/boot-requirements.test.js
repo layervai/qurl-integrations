@@ -21,6 +21,7 @@ const {
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
+  invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -503,5 +504,83 @@ describe('missingHotStandbyKeys', () => {
       GATEWAY_HANDOFF_HMAC: undefined,
     }));
     expect(missing).toEqual(['INSTANCE_ID', 'INSTANCE_IP', 'GATEWAY_HANDOFF_HMAC']);
+  });
+});
+
+describe('invalidHotStandbyValues', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no shape requirements)', () => {
+    expect(invalidHotStandbyValues({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      INSTANCE_ID: '${LITERALLY_UNRESOLVED}',
+      INSTANCE_IP: 'not-an-ip',
+    })).toEqual([]);
+  });
+
+  it('returns empty when both values are well-shaped', () => {
+    expect(invalidHotStandbyValues(cfg())).toEqual([]);
+  });
+
+  it('flags unsubstituted template literal in INSTANCE_ID — the ECS task-def footgun', () => {
+    // The specific scenario: a task-def with
+    // `INSTANCE_ID: "${ECS_TASK_ARN}"` that the metadata-resolution
+    // layer fails to substitute. Without this check the literal
+    // `${ECS_TASK_ARN}` would key the lock + heartbeat rows and
+    // every replica would think it owns the same identifier.
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_ID: '${ECS_TASK_ARN}' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_ID looks like an unsubstituted template literal/);
+    expect(problems[0]).toContain('${ECS_TASK_ARN}');
+  });
+
+  it('flags non-IPv4 INSTANCE_IP (string)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: 'not-an-ip' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_IP must be a valid IPv4 address/);
+    expect(problems[0]).toContain("'not-an-ip'");
+  });
+
+  it('flags out-of-range octets in INSTANCE_IP (10.0.0.999)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '10.0.0.999' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('10.0.0.999');
+  });
+
+  it('flags IPv6 INSTANCE_IP (out of scope for Pillar 3)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '::1' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/must be a valid IPv4/);
+  });
+
+  it('accepts every octet boundary (0, 9, 10, 99, 100, 199, 200, 249, 255)', () => {
+    const ips = ['0.0.0.0', '255.255.255.255', '10.99.100.249', '1.9.199.200'];
+    for (const ip of ips) {
+      expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }))).toEqual([]);
+    }
+  });
+
+  it('reports every problem on a single call (one-shot operator remediation)', () => {
+    const problems = invalidHotStandbyValues(cfg({
+      INSTANCE_ID: '${ECS_TASK_ARN}',
+      INSTANCE_IP: '999.999.999.999',
+    }));
+    expect(problems).toHaveLength(2);
+  });
+
+  it('does not trip on present-but-empty INSTANCE_IP (the missingHotStandbyKeys check catches that)', () => {
+    // Separation of concerns: missing-key checks are presence-only,
+    // shape checks only run on present values. An empty string is
+    // "missing" from the perspective of the upstream check and is
+    // skipped here to avoid duplicate operator-facing messages.
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
   });
 });

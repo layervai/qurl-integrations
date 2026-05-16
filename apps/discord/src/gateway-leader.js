@@ -714,8 +714,8 @@ function createGatewayLeader({
   // renew, heartbeat write, peer-cache refresh) would still report
   // healthy here. Acceptable for now — the 2 s renew + 60 s lock
   // TTL means a hung loop loses the lock to a peer's cold-acquire
-  // within ~1 min anyway. Follow-up to add a `lastTickAt`
-  // freshness check tracked in the post-13b.3 polish list.
+  // within ~1 min anyway. Tracked: issue #420 (lastTickAt
+  // freshness check follow-up).
   function hasStartedTickLoop() {
     return loopPromise !== null;
   }

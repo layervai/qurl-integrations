@@ -1102,6 +1102,37 @@ describe('loop backstop — survives unexpected throws from step()', () => {
 });
 
 describe('start / stop lifecycle', () => {
+  it('stop() before start() is a safe no-op (returns resolved promise, no side effects)', async () => {
+    // Load-bearing for startHotStandby's partial-construction
+    // teardown path: if startControlChannelServer throws after
+    // gatewayLeader is assigned but before .start() runs,
+    // gracefulShutdown calls leader.stop() on a never-started
+    // leader. This must resolve cleanly, NOT throw, and must not
+    // call any of the injected mocks — there's no loop to halt yet.
+    const mocks = makeMocks();
+    const { leader } = makeLeader({ mocks });
+
+    await expect(leader.stop()).resolves.toBeUndefined();
+
+    expect(mocks.lock.acquireLock).not.toHaveBeenCalled();
+    expect(mocks.lock.releaseLock).not.toHaveBeenCalled();
+    expect(mocks.peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
+    expect(leader.isHoldingLock()).toBe(false);
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
+  it('stop() is idempotent across repeated pre-start calls', async () => {
+    const mocks = makeMocks();
+    const { leader } = makeLeader({ mocks });
+
+    await leader.stop();
+    await leader.stop();
+    await leader.stop();
+
+    expect(mocks.lock.acquireLock).not.toHaveBeenCalled();
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
   it('start is idempotent', async () => {
     const sleep = jest.fn(() => new Promise(() => {}));
     const { leader } = makeLeader({ sleep });

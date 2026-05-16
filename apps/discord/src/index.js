@@ -38,6 +38,7 @@ const {
   unsupportedRoleResumeCombo,
   unsupportedRoleHotStandbyCombo,
   missingHotStandbyKeys,
+  invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -356,6 +357,14 @@ if (hotStandbyMissing.length > 0) {
   process.exit(1);
 }
 
+const hotStandbyInvalid = invalidHotStandbyValues(config);
+if (hotStandbyInvalid.length > 0) {
+  for (const problem of hotStandbyInvalid) {
+    logger.error(problem);
+  }
+  process.exit(1);
+}
+
 // Parse + validate the HMAC secret AT BOOT, not inside startHotStandby.
 // All hot-standby misconfigs (env-var presence AND secret-format validity)
 // surface upfront before any I/O — same posture as missingHotStandbyKeys.
@@ -408,22 +417,13 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // tables) so a future env-name rename touches one var, not many.
 // Both this module and the qurl-integrations-infra qurl-bot-ddb
 // module pin the `gateway-session` suffix.
-// Pillar 3 hot-standby plumbing. These are constructed inside start()
-// — not here at module load — because the leader factory requires the
-// shim's WebSocketManager handle (`shim.getManager()`), which doesn't
-// exist until `await gatewayShim.start({ connect: false })` resolves.
-// We hoist the locals here so gracefulShutdown + SIGTERM branching can
-// see them. Both stay null when hot-standby is off.
-//
-// Concurrency invariant: these three `let`s are written only inside
-// `startHotStandby` (one ECS-task-lifetime initialization path) and
-// read from `gracefulShutdown` + the SIGTERM handler. Node's single
-// event loop guarantees read/write atomicity here — no two tasks
-// can be mid-mutation while a signal handler reads. The tryClose /
-// tryStop calls in gracefulShutdown are `!= null`-guarded, so a
-// SIGTERM landing mid-startHotStandby (before the assignment) is
-// safe; the `isShuttingDown` re-check after the listen-await closes
-// the inverse race (assignment done, but `.start()` not yet called).
+// Pillar 3 hot-standby plumbing. Constructed inside startHotStandby
+// (the leader factory needs the shim's WebSocketManager handle, which
+// only exists after `gatewayShim.start({ connect: false })` resolves).
+// Hoisted to module scope so gracefulShutdown + signal handlers can
+// see them; tryClose/tryStop are null-guarded so a SIGTERM mid-
+// construction is safe, and the `isShuttingDown` re-check in
+// startHotStandby closes the inverse race.
 let gatewayLeader = null;
 let controlChannelServer = null;
 let connectionWatchdog = null;
@@ -742,6 +742,14 @@ async function gracefulShutdown(code = 0) {
     // but skipping the gate would still pay 3 microtask hops per
     // teardown across every HTTP-only / combined replica that never
     // built the hot-standby surface.
+    //
+    // No per-call timeout on tryStop/tryClose: a wedged
+    // gatewayLeader.stop() (e.g., DDB hanging in the final renew)
+    // is bounded by the 10 s `force-exit` setTimeout at the top of
+    // this function — which itself sits inside ECS's 30 s SIGTERM
+    // deadline. That layered ceiling is the deliberate outermost
+    // belt; introducing a third per-call timeout here would just
+    // multiply the moving parts without changing the worst-case.
     if (config.ENABLE_GATEWAY_HOT_STANDBY) {
       await tryClose('control-channel server', controlChannelServer, logger);
       await tryStop('connection-watchdog', connectionWatchdog, logger);
@@ -794,18 +802,21 @@ async function gracefulShutdown(code = 0) {
 // `.stop()` runs in parallel with pushHandoff — the outgoing
 // process's in-flight SQS sends carry dispatches the standby
 // can't replay (they arrived on OUR WebSocket).
+//
+// Defaults left implicit (forcedExitCode=1, ceilingMs=12_000): the
+// 12 s ceiling = 9 s pushHandoff race + 3 s headroom, comfortably
+// inside ECS's 30 s SIGTERM-to-SIGKILL window. If that deadline
+// ever changes, runPushHandoffShutdown's DEFAULT_CEILING_MS is
+// the load-bearing knob to revisit.
 async function pushHandoffShutdown(code = 0) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   await runPushHandoffShutdown({ code, gatewayLeader, eventPublisher, logger });
 }
 
-// Handle shutdown signals. Branches between the pushHandoff path
-// (active replica with the lock) and the legacy gracefulShutdown
-// drain (every other shape). `shouldUsePushHandoffShutdown` handles
-// the null-leader case (SIGTERM during boot) by falling through to
-// gracefulShutdown — pinned by the "returns false when leader is
-// null" test in gateway-shutdown-helpers.test.js.
+// SIGTERM during boot (gatewayLeader still null) falls through to
+// gracefulShutdown via shouldUsePushHandoffShutdown's null-leader
+// check — pinned in gateway-shutdown-helpers.test.js.
 async function signalShutdown() {
   if (shouldUsePushHandoffShutdown({
     enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
@@ -817,10 +828,6 @@ async function signalShutdown() {
   }
 }
 
-// `.catch` is defense-in-depth: both shutdown branches handle their
-// own errors today, but a future refactor that introduces an
-// uncaught reject path would otherwise surface as an
-// unhandledRejection on the process.
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     logger.info(`Received ${sig}`);
@@ -852,6 +859,11 @@ async function startHotStandby() {
   const ddbTablePrefix = config.DDB_TABLE_PREFIX;
   const lockTableName = `${ddbTablePrefix}gateway-lock`;
   const peerHeartbeatTableName = `${ddbTablePrefix}gateway-peer-heartbeat`;
+  // `lockHolder` identifies the ROLE-owning entity (one shard, one
+  // gateway role), NOT the replica. Both active + standby replicas
+  // of the same shard share the same lockHolder string — replica
+  // disambiguation lives on `instanceId` (passed separately to the
+  // lock primitive, used in the heartbeat row + DDB CAS attribution).
   const lockHolder = `${config.SHARD_ID}#gateway`;
 
   const lock = createGatewayLock({
@@ -875,8 +887,17 @@ async function startHotStandby() {
   });
 
   // Secrets were parsed + validated at module load (see boot chain
-  // adjacent to missingHotStandbyKeys). Read the stash here.
+  // adjacent to missingHotStandbyKeys). Read the stash here, then
+  // scrub both the parsed-secret stash and the raw env value off
+  // `config` once createGatewayHmac has captured the material
+  // internally. Defense in depth against a heap dump (CloudWatch
+  // crash diagnostics, debugger attach, future memory-profiling
+  // tools) surfacing the key from a long-lived module-scope ref.
+  // The live HMAC instance still holds the strings for sign/verify
+  // — that's unavoidable — but the redundant references are not.
   const hmac = createGatewayHmac({ secrets: gatewayHmacSecrets, logger });
+  gatewayHmacSecrets = null;
+  delete config.GATEWAY_HANDOFF_HMAC;
 
   const controlClient = createControlClient({ hmac, logger });
 
@@ -918,11 +939,17 @@ async function startHotStandby() {
       // indefinitely. Route through gracefulShutdown(1) to clean up
       // the leader / lock release / etc.
       //
+      // Null out controlChannelServer so gracefulShutdown's
+      // `tryClose` skips a server that's in an error state.
+      // Mirrors the same defensive null-out in
+      // startGatewayHealthServer's error callback below.
+      //
       // `.catch` mirrors the SIGTERM/SIGINT handlers' defense-in-depth:
       // gracefulShutdown handles its own errors internally, but a
       // future refactor that introduces an uncaught reject path would
       // otherwise surface as an unhandledRejection on the process.
       logger.error('control-channel listener fatal error; shutting down', { error: err.message });
+      controlChannelServer = null;
       gracefulShutdown(1).catch(shutdownErr => {
         logger.error('gracefulShutdown rejected unexpectedly from onListenError', {
           error: shutdownErr.message, stack: shutdownErr.stack,
@@ -944,6 +971,13 @@ async function startHotStandby() {
   if (isShuttingDown) {
     return;
   }
+
+  // INVARIANT: no `await` below this guard. Everything from here to
+  // the function's return runs synchronously, so a SIGTERM can't
+  // preempt — the OS-level signal is queued until the JS micro-
+  // tasks settle and signalShutdown observes `isShuttingDown=true`
+  // via the `gracefulShutdown` re-entry gate. Adding an async hop
+  // here silently reopens the SIGTERM-mid-startup race.
 
   // Watchdog drives the active path's manager.connect() on lock
   // acquisition + monitors the connection during the active lifetime.
