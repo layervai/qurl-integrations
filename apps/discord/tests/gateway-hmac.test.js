@@ -446,6 +446,38 @@ describe('verify — nonce LRU', () => {
     expect(hmac._getSeenNoncesSizeForTest()).toBe(5);
   });
 
+  it('an evicted nonce is accepted again (size cap is a deliberate ceiling, not a correctness primitive)', async () => {
+    // Module header explicitly notes: at 5s freshness and 1024
+    // entries, the LRU absorbs ~200 handoffs/sec before still-
+    // fresh nonces start evicting (which would allow replay
+    // within the 5s window). Real rate is 1/deploy, so this
+    // never happens in practice — but the eviction-allows-replay
+    // semantic is intentional. Pin it so a future refactor that
+    // makes eviction equivalent to permanent rejection (e.g.,
+    // appending to a separate "burned" set) doesn't silently
+    // change behavior.
+    const now = 1_700_000_000_000;
+    const { hmac } = makeHmac({ clock: () => now, nonceLruSize: 3 });
+
+    function verifyNonce(nonceChar) {
+      const payload = { ts: now, nonce: nonceChar.repeat(32) };
+      const bodyBytes = Buffer.from(JSON.stringify(payload), 'utf8');
+      const signature = crypto.createHmac('sha256', SECRET_CURRENT)
+        .update(bodyBytes).digest('hex');
+      return hmac.verify({ bodyBytes, signature });
+    }
+
+    // Fill the LRU. State after each verify (FIFO, oldest first):
+    expect(verifyNonce('1').ok).toBe(true);   // [1]
+    expect(verifyNonce('2').ok).toBe(true);   // [1, 2]
+    expect(verifyNonce('3').ok).toBe(true);   // [1, 2, 3]
+    expect(verifyNonce('4').ok).toBe(true);   // [2, 3, 4] (evicted 1)
+    // '1' is now evicted — verifying it AGAIN succeeds.
+    expect(verifyNonce('1').ok).toBe(true);   // [3, 4, 1] (evicted 2)
+    // '3' is still in the LRU — replay rejection.
+    expect(verifyNonce('3')).toEqual({ ok: false, reason: 'replay' });
+  });
+
   it('check-then-set is synchronous — two parallel verifies of the same nonce produce exactly one ok:true', async () => {
     // The check-then-set MUST run as one microtask. A future refactor
     // that drops an `await` between `seenNonces.has(nonce)` and

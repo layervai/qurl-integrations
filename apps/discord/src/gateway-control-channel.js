@@ -179,6 +179,18 @@ async function handleRequest(req, res, ctx) {
     sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' });
     return;
   }
+  // Content-Type must be application/json (or absent, since
+  // control-client always sets it and the body is always JSON).
+  // 415 unsupported_media_type is the RFC-correct response — and
+  // helps operator triage by distinguishing "probe with wrong
+  // content type" from "real client with a bad envelope" (400).
+  // We accept charset parameters (`application/json; charset=utf-8`)
+  // by matching the prefix.
+  const contentType = req.headers['content-type'];
+  if (contentType !== undefined && !/^application\/json(\s*;|\s*$)/i.test(contentType)) {
+    sendJson(res, 415, { error: 'unsupported_media_type' });
+    return;
+  }
 
   let bodyBuf;
   try {
@@ -267,9 +279,15 @@ function findInvalidHandoffField(payload) {
   if (typeof payload.peer_instance_id !== 'string' || payload.peer_instance_id.length === 0) {
     return 'peer_instance_id';
   }
+  // Upper bound is a sanity ceiling, not a security primitive — the
+  // HMAC has already authenticated the sender. A peer adopting
+  // Number.MAX_SAFE_INTEGER as the version cursor would burn
+  // ~2^53 CAS values before the row could ever match again; reject
+  // anything that's clearly not a real lock-version number.
   if (typeof payload.expected_version !== 'number'
       || !Number.isInteger(payload.expected_version)
-      || payload.expected_version <= 0) {
+      || payload.expected_version <= 0
+      || payload.expected_version > Number.MAX_SAFE_INTEGER) {
     return 'expected_version';
   }
   return null;

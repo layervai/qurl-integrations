@@ -591,13 +591,20 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
     expect(leader.isConnecting()).toBe(false);
   });
 
-  it('inbound handoff connect times out internally and throws (watchdog takes over)', async () => {
-    // A hung Discord WS connect (never resolves) would pin
-    // connecting=true forever without the internal timeout. The
-    // leader races connect against a timer; on timeout it throws
-    // and the finally clears the flag so the watchdog can retry.
+  it('inbound handoff connect times out internally; isConnecting stays true until underlying connect settles', async () => {
+    // A hung Discord WS connect would pin connecting=true forever
+    // without the internal timeout. The leader races connect
+    // against a timer and THROWS on timeout — but critically,
+    // `isConnecting()` stays true until the UNDERLYING connect
+    // promise actually settles. Otherwise the next watchdog tick
+    // (1s) would fire its OWN manager.connect() while the original
+    // is still pending in @discordjs/ws — exactly the concurrent-
+    // connect race the flag exists to prevent.
     const mocks = makeMocks();
-    mocks.manager.connect = jest.fn(() => new Promise(() => {})); // never resolves
+    let resolveUnderlying;
+    mocks.manager.connect = jest.fn(() => new Promise((resolve) => {
+      resolveUnderlying = resolve;
+    }));
     const leader = createGatewayLeader({
       lock: mocks.lock,
       peerHeartbeat: mocks.peerHeartbeat,
@@ -607,20 +614,26 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
       selfLockHolder: 'task-arn:.../inst-A',
       shardId: '0:1',
       logger: mocks.logger,
-      inboundConnectTimeoutMs: 50, // fast timeout for the test
+      inboundConnectTimeoutMs: 50,
     });
 
     await expect(leader.handleInboundHandoff({
       activeInstanceId: 'inst-X', expectedVersion: 5,
     })).rejects.toThrow(/inbound_connect_timeout/);
 
-    // Critical: connecting must be cleared after the timeout so
-    // the watchdog can take over on the next tick.
-    expect(leader.isConnecting()).toBe(false);
-    // heldLock must still be true (adopt + flag-set happened before
-    // the connect await) so the watchdog observes lock-held + WS-
-    // not-connected and retries.
+    // Post-timeout-throw: connecting MUST still be true. The
+    // underlying connect is still pending — the watchdog must
+    // back off, not race a second connect.
+    expect(leader.isConnecting()).toBe(true);
+    // heldLock stays true so the watchdog observes lock-held but
+    // is held off by isConnecting until the underlying settles.
     expect(leader.isHoldingLock()).toBe(true);
+
+    // Resolve the underlying connect — flag clears, watchdog
+    // can take over.
+    resolveUnderlying();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.isConnecting()).toBe(false);
   });
 
   it('isConnecting clears even when manager.connect() throws', async () => {

@@ -312,15 +312,33 @@ function createGatewayLeader({
       // Internal timeout: a hung `manager.connect()` (e.g., Discord
       // WS endpoint resolution black-holed) would otherwise pin
       // `connecting=true` indefinitely and the watchdog would
-      // no-op every tick. Racing connect against a timer keeps
-      // the leader self-sufficient — on timeout we throw, the
-      // catch arm logs, the finally clears the flag, and the
-      // watchdog picks up the retry next tick.
+      // no-op every tick. Racing connect against a timer lets us
+      // throw on timeout so the caller (control-channel server)
+      // returns 500 to the active.
+      //
+      // Critical: `connecting=true` MUST stay true until the
+      // UNDERLYING `manager.connect()` actually settles — not just
+      // until `Promise.race` resolves. Otherwise: timeout fires →
+      // race resolves → flag clears → next watchdog tick (1s) sees
+      // !isConnecting and fires its OWN `manager.connect()` while
+      // the original is STILL pending in @discordjs/ws's internal
+      // state. That's exactly the concurrent-connect race the flag
+      // exists to prevent.
+      //
+      // Pattern: start the connect, attach the flag-clear to its
+      // settlement, then race the timer separately. The handler
+      // returns when EITHER settles, but the flag stays held until
+      // the underlying connect resolves or rejects.
       connecting = true;
+      const connectPromise = manager.connect();
+      connectPromise.then(
+        () => { connecting = false; },
+        () => { connecting = false; },
+      );
       let connectTimer;
       try {
         await Promise.race([
-          manager.connect(),
+          connectPromise,
           new Promise((_, reject) => {
             connectTimer = setTimeout(
               () => reject(new Error(`inbound_connect_timeout_${inboundConnectTimeoutMs}ms`)),
@@ -335,7 +353,10 @@ function createGatewayLeader({
         throw err;
       } finally {
         clearTimeout(connectTimer);
-        connecting = false;
+        // Note: NO `connecting = false` here — that's owned by the
+        // connectPromise settlement handlers above. Clearing it
+        // here on a timeout would race the still-pending connect
+        // against the next watchdog tick's fresh connect().
       }
       logger.info('gateway-leader: adopted lock + connected via inbound handoff', {
         activeInstanceId, expectedVersion,
