@@ -1657,9 +1657,9 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
 
   test('pollOnce early-returns + backs off when in-flight at cap', async () => {
     // When inFlightCount >= MAX_INFLIGHT_HANDLERS, pollOnce must
-    // skip the receive call and sleep INFLIGHT_BACKOFF_MS to let
-    // handlers drain. Pins that the cap is enforced + the receive
-    // path is bypassed.
+    // skip the receive call and sleep at least the base backoff to
+    // let handlers drain. Pins that the cap is enforced + the
+    // receive path is bypassed.
     const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
 
     // Manually crank inFlightCount up to cap via the tracker. Use
@@ -1694,37 +1694,131 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
   });
 
-  test('pollOnce only warns once per at-cap streak (debug for subsequent polls)', async () => {
-    // Pins the throttle: a sustained at-cap condition produces one
-    // warn at the entry transition and debug lines for the rest of
-    // the streak. Without this, a slow downstream wedge would spam
-    // logger.warn ~10x/s per worker.
-    const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
-    withWorkerDispatch(() => {
-      for (let i = 0; i < cap; i += 1) {
-        eventConsumer.trackDispatch(new Promise(() => {})); // never resolves
+  // Helper: kick off pollOnce and immediately advance fake timers so
+  // the at-cap abortableSleep resolves in test time, not wall time.
+  // Without this, sustained-at-cap tests pay 100+200+400+800+1600 =
+  // 3.1s of real-time sleep per iteration sequence. setImmediate +
+  // queueMicrotask are excluded from fake-timer wrapping so the
+  // existing flushMicrotasks() + Promise scheduling stay unaffected.
+  //
+  // Invariant: pollOnce's at-cap branch awaits exactly one timer
+  // (abortableSleep's setTimeout) and yields ONLY on that timer.
+  // runOnlyPendingTimersAsync fires that timer + drains microtasks.
+  // Two failure modes a future change could introduce:
+  //   1. A second `await abortableSleep` in this branch (e.g., a
+  //      separate metrics-flush sleep) — this helper would advance
+  //      only the first and the second would hang in real time.
+  //   2. An `await` before the setTimeout (e.g., `await
+  //      someMetric.flush()`) — runOnlyPendingTimersAsync would
+  //      execute before the setTimeout was even scheduled, advance
+  //      zero timers, and the test would hang.
+  // Convert to a loop + microtask flushes between if either lands.
+  async function pollOnceFast(client) {
+    const p = withMockedSqs(() => eventConsumer._test.pollOnce(client));
+    await jest.runOnlyPendingTimersAsync();
+    return p;
+  }
+
+  test('pollOnce stays silent during a sustained at-cap streak (one warn at entry, no per-iteration noise)', async () => {
+    // The entry warn + the eventual exit info already bookend the
+    // pause for operators — steady-state at-cap is intentionally
+    // silent. Pre-#390, this test asserted a per-iteration debug
+    // log; that pattern is gone now (it spammed ~10×/s per worker
+    // with no operational value beyond what entry+exit convey).
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          eventConsumer.trackDispatch(new Promise(() => {})); // never resolves
+        }
+      });
+
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+      const warnBaseline = logger.warn.mock.calls.length;
+      const debugBaseline = logger.debug.mock.calls.length;
+
+      await pollOnceFast(client);
+      await pollOnceFast(client);
+      await pollOnceFast(client);
+
+      // Exactly one warn fired (the entry), no debugs across the streak.
+      expect(logger.warn.mock.calls.length - warnBaseline).toBe(1);
+      expect(logger.debug.mock.calls.length - debugBaseline).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('pollOnce: at-cap backoff doubles each iteration up to the ceiling', async () => {
+    // Exponential backoff: 100ms → 200 → 400 → 800 → 1600 (max).
+    // Cuts wake rate from 10/s to ~0.6/s under sustained at-cap
+    // without significantly delaying recovery (a release in the
+    // middle of a backoff still wakes via the next below-cap check).
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(400);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(800);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+
+      // One more iteration past the ceiling: still pinned at MAX.
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('_resetStateForTest restores currentBackoffMs to base', async () => {
+    // _resetStateForTest is the beforeEach harness path. stop()'s
+    // finally also resets currentBackoffMs — that branch is asserted
+    // in the start()+stop() round-trip test in the start/stop
+    // lifecycle describe block. The cap-release path (below-cap
+    // transition after a streak) is covered by the next test in this
+    // describe block.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      // Drive to MAX (4 doublings: 100 → 200 → 400 → 800 → 1600).
+      for (let i = 0; i < 4; i += 1) {
+        await pollOnceFast(client);
       }
-    });
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
 
-    sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
-    const client = makeStubClient();
-
-    // First poll: warn fires.
-    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.debug).not.toHaveBeenCalledWith(
-      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
-      expect.anything(),
-    );
-
-    // Subsequent polls in the same streak: debug only, no extra warn.
-    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
-    await withMockedSqs(() => eventConsumer._test.pollOnce(client));
-    expect(logger.warn).toHaveBeenCalledTimes(1); // still 1
-    expect(logger.debug).toHaveBeenCalledWith(
-      eventConsumer._test.AT_CAP_PAUSE_DEBUG_MSG,
-      expect.objectContaining({ inFlight: cap, cap }),
-    );
+      eventConsumer._test._resetStateForTest();
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('pollOnce logs cap-released info on transition back to below-cap', async () => {
@@ -1747,9 +1841,10 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
     const client = makeStubClient();
 
-    // Enter at-cap state (warn fires, gate is set).
+    // Enter at-cap state (warn fires, gate set, backoff doubled).
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(true);
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
 
     // Drain all handlers: resolve every tracked promise, then let
     // the .finally microtask chain flush so inFlightCount drops to 0.
@@ -1757,13 +1852,111 @@ describe('event-consumer: backpressure (in-flight handler cap)', () => {
     await flushMicrotasks();
     expect(eventConsumer._test.getInFlightCount()).toBe(0);
 
-    // Below-cap poll: release-info fires, gate clears.
+    // Below-cap poll: release-info fires, gate clears, backoff
+    // resets to base so the next at-cap entry starts responsive.
     await withMockedSqs(() => eventConsumer._test.pollOnce(client));
     expect(logger.info).toHaveBeenCalledWith(
       eventConsumer._test.AT_CAP_RELEASED_INFO_MSG,
       expect.objectContaining({ cap }),
     );
     expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+  });
+
+  test('stop() finally resets currentBackoffMs to BASE (load-bearing assertion)', async () => {
+    // cr-r5/r10: the cr-r5 fix drove currentBackoffMs to 200 before
+    // stop() but then drained the in-flight handlers, so start()'s
+    // pollLoop took pollOnce's BELOW-cap branch first, which itself
+    // calls clearAtCapState() — meaning stop()'s finally reset was
+    // a no-op by the time it ran. Deleting stop()'s clearAtCapState()
+    // still passed the test (cr-r10 traced this empirically).
+    //
+    // To make the assertion actually load-bearing on stop()'s
+    // finally, the in-flight handlers must STAY at cap throughout
+    // start(): pollLoop enters pollOnce → AT-cap branch → sleeps →
+    // stop() aborts the sleep → doubling runs → pollLoop exits via
+    // signal check → stop()'s finally is the ONLY reset path. Pair
+    // with _setDrainDeadlineForTest(50) so stop()'s drain race
+    // resolves on the deadline-timer side without waiting the full
+    // DRAIN_DEADLINE_MS (handlers never resolve in this test).
+    const originalDeadline = eventConsumer._test.getDrainDeadlineMs();
+    eventConsumer._test._setDrainDeadlineForTest(50);
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          // Never-resolving promises: keep inFlightCount at cap for
+          // the entire test so pollOnce stays in the at-cap branch.
+          eventConsumer.trackDispatch(new Promise(() => {}));
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      // Drive currentBackoffMs to a non-base value via one fake-timer
+      // at-cap iteration (100 → 200).
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+      try {
+        await pollOnceFast(client);
+        expect(eventConsumer._test.getCurrentBackoffMs()).toBe(200);
+      } finally {
+        jest.useRealTimers();
+      }
+
+      // start() + stop() under real timers. Handlers are at cap, so
+      // pollLoop's first pollOnce takes the at-cap branch, sleeps,
+      // stop()'s abort wakes the sleep, the post-sleep doubling line
+      // runs (currentBackoffMs = 400), pollLoop exits on the signal
+      // check. stop()'s finally is the ONLY reset path remaining:
+      // delete its clearAtCapState() call and this assertion fails.
+      eventConsumer.start(client);
+      await eventConsumer.stop();
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+    } finally {
+      eventConsumer._test._setDrainDeadlineForTest(originalDeadline);
+    }
+  });
+
+  test('pollOnce: MAX → BASE reset via production below-cap path (not just one doubling)', async () => {
+    // Companion to the cap-released test, which only exercises the
+    // single-doubling case (200 → 100). This drives currentBackoffMs
+    // to the ceiling first, then triggers the real below-cap
+    // transition, locking in that the reset works from any step on
+    // the doubling ladder — not just the first.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const cap = eventConsumer._test.MAX_INFLIGHT_HANDLERS;
+      const resolvers = [];
+      withWorkerDispatch(() => {
+        for (let i = 0; i < cap; i += 1) {
+          let resolve;
+          const p = new Promise((r) => { resolve = r; });
+          resolvers.push(resolve);
+          eventConsumer.trackDispatch(p);
+        }
+      });
+      sqsMock.on(ReceiveMessageCommand).resolves({ Messages: [] });
+      const client = makeStubClient();
+
+      // Drive to MAX (4 doublings: 100 → 200 → 400 → 800 → 1600).
+      for (let i = 0; i < 4; i += 1) {
+        await pollOnceFast(client);
+      }
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_MAX_MS);
+
+      // Drain all handlers, then take the production below-cap path.
+      resolvers.forEach((r) => r('done'));
+      // flushMicrotasks uses setImmediate which is excluded from
+      // fake timers, so the .finally chain flushes normally.
+      await flushMicrotasks();
+      expect(eventConsumer._test.getInFlightCount()).toBe(0);
+
+      await pollOnceFast(client);
+      expect(eventConsumer._test.getCurrentBackoffMs()).toBe(eventConsumer._test.INFLIGHT_BACKOFF_BASE_MS);
+      expect(eventConsumer._test.isAtCapPauseLogged()).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('pollOnce proceeds with receive when below cap', async () => {
