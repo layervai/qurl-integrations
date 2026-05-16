@@ -802,27 +802,10 @@ async function pushHandoffShutdown(code = 0) {
 
 // Handle shutdown signals. Branches between the pushHandoff path
 // (active replica with the lock) and the legacy gracefulShutdown
-// drain (every other shape). Decision is made via the pure helper
-// in gateway-shutdown-helpers so the branching contract is unit-
-// testable independent of the boot-state mutations here.
-//
-// Async + .catch on the call sites — both shutdown branches are
-// async fire-and-forget from the signal handler. Either is supposed
-// to handle its own errors internally (both wrap their critical
-// work in try/catch), but a future refactor that introduces an
-// uncaught reject path (e.g., adds a new await above the try)
-// would otherwise surface as an unhandledRejection on the process.
-// The explicit .catch is defense-in-depth.
-//
-// No `code` parameter — both call sites always pass 0 (the signal
-// itself never carries a "fault" semantic; it's ECS asking us to
-// drain). The non-zero exit codes come from `runPushHandoffShutdown`
-// (pushHandoff threw / 12 s ceiling fired) or from explicit
-// `gracefulShutdown(1)` calls on the boot-failure / onListenError
-// paths. So in production the dual-knob `code` was always 0, and
-// the third observable outcome lives in the runPushHandoffShutdown
-// unit-test surface + the existing `gracefulShutdown(1)` direct
-// callers (boot-failure path, onListenError).
+// drain (every other shape). `shouldUsePushHandoffShutdown` handles
+// the null-leader case (SIGTERM during boot) by falling through to
+// gracefulShutdown — pinned by the "returns false when leader is
+// null" test in gateway-shutdown-helpers.test.js.
 async function signalShutdown() {
   if (shouldUsePushHandoffShutdown({
     enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
@@ -834,28 +817,19 @@ async function signalShutdown() {
   }
 }
 
-// SIGTERM/SIGINT can land BEFORE startHotStandby has assigned
-// `gatewayLeader` (e.g. ECS task replacement mid-boot, ctrl-c during
-// `npm start`). Applies to BOTH handlers below.
-// `shouldUsePushHandoffShutdown` handles the null-leader case by
-// falling through to gracefulShutdown — the contract is pinned by
-// the "returns false when leader is null" test in
-// gateway-shutdown-helpers.test.js.
-process.on('SIGTERM', () => {
-  logger.info('Received SIGTERM');
-  signalShutdown().catch(err => {
-    logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
-    process.exit(1);
+// `.catch` is defense-in-depth: both shutdown branches handle their
+// own errors today, but a future refactor that introduces an
+// uncaught reject path would otherwise surface as an
+// unhandledRejection on the process.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    logger.info(`Received ${sig}`);
+    signalShutdown().catch(err => {
+      logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
+      process.exit(1);
+    });
   });
-});
-
-process.on('SIGINT', () => {
-  logger.info('Received SIGINT');
-  signalShutdown().catch(err => {
-    logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
-    process.exit(1);
-  });
-});
+}
 
 // Pillar 3 hot-standby wiring. Called from start() AFTER the shim is
 // constructed and started in connect-deferred mode. Sequencing matters:
