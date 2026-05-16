@@ -72,6 +72,12 @@ function createPeerHeartbeat({
   ip,
   port,
   shardId,
+  // Optional. When set, written as `lock_holder` on the heartbeat
+  // row so the active's SIGTERM `transferLock(target, targetHolder)`
+  // call has a real holder string for the peer instead of inventing
+  // a placeholder. Pure operational-debug metadata; lock correctness
+  // doesn't depend on its value.
+  lockHolder,
   logger,
   clock = () => Date.now(),
   freshnessWindowSeconds = DEFAULT_FRESHNESS_WINDOW_SECONDS,
@@ -85,6 +91,15 @@ function createPeerHeartbeat({
   // the string `"undefined"`) would otherwise write a row whose
   // `ip` field looks valid to DDB but is unreachable from the
   // active's POST. `net.isIP` returns 0 for non-IPs, 4/6 otherwise.
+  //
+  // ── IPv6 zone-id assumption ──
+  // `net.isIP` accepts scoped IPv6 literals (`fe80::1%eth0`) on
+  // some Node versions, but `node:http` doesn't reliably connect
+  // to them across platforms. ECS awsvpc tasks get a non-link-local
+  // ENI address, so zone-ids never reach this row in practice; we
+  // rely on the caller passing a global-scope literal. If a future
+  // deployment surface adds link-local addresses, strip the zone-id
+  // here AND in gateway-control-client's peerIp validator.
   if (!ip || net.isIP(ip) === 0) {
     throw new Error('createPeerHeartbeat: ip (IPv4 or IPv6 literal) is required');
   }
@@ -97,6 +112,13 @@ function createPeerHeartbeat({
   }
   if (!shardId) throw new Error('createPeerHeartbeat: shardId is required');
   if (!logger) throw new Error('createPeerHeartbeat: logger is required');
+  // `lockHolder` is optional but, when provided, must be a non-empty
+  // string. A stray `lockHolder: 42` or `lockHolder: true` would write
+  // a non-string to DDB and surface as a confusing log field at
+  // SIGTERM. Mirrors the `secrets.previous` posture in gateway-hmac.
+  if (lockHolder !== undefined && (typeof lockHolder !== 'string' || lockHolder.length === 0)) {
+    throw new Error('createPeerHeartbeat: lockHolder must be a non-empty string when provided');
+  }
 
   function nowSeconds() {
     return Math.floor(clock() / 1000);
@@ -112,16 +134,20 @@ function createPeerHeartbeat({
   // the freshness window absorbs up to three misses).
   async function writeHeartbeat() {
     const now = nowSeconds();
+    const item = {
+      instance_id: instanceId,
+      ip,
+      port,
+      shard_id: shardId,
+      updated_at: now,
+      expires_at: now + ttlSeconds,
+    };
+    // Only write lock_holder if provided. DDB rejects undefined
+    // attribute values and back-compat callers may not pass it.
+    if (lockHolder) item.lock_holder = lockHolder;
     await ddbClient.send(new PutCommand({
       TableName: tableName,
-      Item: {
-        instance_id: instanceId,
-        ip,
-        port,
-        shard_id: shardId,
-        updated_at: now,
-        expires_at: now + ttlSeconds,
-      },
+      Item: item,
     }));
   }
 
@@ -142,6 +168,16 @@ function createPeerHeartbeat({
       .filter((row) => row.instance_id !== instanceId)
       .filter((row) => row.shard_id === shardId)
       .filter((row) => typeof row.updated_at === 'number' && row.updated_at > cutoff)
+      // Defense-in-depth: skip any row missing a parseable IPv4/IPv6
+      // `ip` or a valid TCP `port`. The write path already validates
+      // both, but a corrupt or pre-validator row would otherwise reach
+      // the SIGTERM handoff path. The control-client validates again
+      // at POST time and would throw — but the cost of catching a bad
+      // row here is one filter pass, and the win is that the caller
+      // moves on to the next-freshest peer instead of bailing out
+      // with `pushHandoff: peerIp required` and losing the handoff.
+      .filter((row) => typeof row.ip === 'string' && net.isIP(row.ip) !== 0)
+      .filter((row) => Number.isInteger(row.port) && row.port > 0 && row.port <= 65535)
       .sort((a, b) => b.updated_at - a.updated_at);
   }
 

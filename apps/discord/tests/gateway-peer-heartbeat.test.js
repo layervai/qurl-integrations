@@ -25,6 +25,7 @@ const {
 function makeHeartbeat({
   clock, freshnessWindowSeconds, ttlSeconds,
   instanceId = 'inst-A', ip = '10.0.1.5', port = 9876, shardId = '0:1',
+  lockHolder,
 } = {}) {
   const rawClient = new DynamoDBClient({});
   const docClient = DynamoDBDocumentClient.from(rawClient);
@@ -35,7 +36,7 @@ function makeHeartbeat({
   const heartbeat = createPeerHeartbeat({
     ddbClient: docClient,
     tableName: 'test-gateway-peer-heartbeat',
-    instanceId, ip, port, shardId, logger, clock,
+    instanceId, ip, port, shardId, logger, clock, lockHolder,
     freshnessWindowSeconds, ttlSeconds,
   });
   return { heartbeat, ddbMock, logger };
@@ -92,6 +93,29 @@ describe('createPeerHeartbeat — factory validation', () => {
     expect(() => createPeerHeartbeat({ ...base, ip: '10.0.0.1' })).not.toThrow();
     expect(() => createPeerHeartbeat({ ...base, ip: 'fe80::1' })).not.toThrow();
     expect(() => createPeerHeartbeat({ ...base, ip: '::1' })).not.toThrow();
+  });
+
+  it('rejects non-string or empty-string lockHolder when provided', () => {
+    // `lockHolder` is optional but, when provided, must be a non-
+    // empty string. A stray non-string would write a non-S value to
+    // DDB and surface as a confusing log field at SIGTERM transfer
+    // time. Mirrors the secrets.previous posture in gateway-hmac.
+    const base = {
+      ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
+      port: 9876, shardId: '0:1', logger: {},
+    };
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: '' }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: 42 }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: true }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: {} }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    // Omitted and undefined both fine.
+    expect(() => createPeerHeartbeat({ ...base })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: undefined })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: 'task-arn:..../inst-A' })).not.toThrow();
   });
 
   it('rejects invalid ports (string, NaN, 0, negative, >65535, fractional)', () => {
@@ -176,6 +200,30 @@ describe('writeHeartbeat', () => {
       port: 9876,
       shard_id: '0:1',
     });
+  });
+
+  it('writes lock_holder when supplied, omits when absent', async () => {
+    // The leader's SIGTERM path needs the peer's lockHolder string
+    // to call transferLock(targetInstanceId, targetLockHolder).
+    // Carrying it on the heartbeat row keeps the active from having
+    // to invent or look it up. Absent — back-compat with cold-only
+    // callers, no `lock_holder: undefined` on the DDB write.
+    const { heartbeat: withHolder, ddbMock: m1 } = makeHeartbeat({
+      clock: () => 1_700_000_000_000,
+      lockHolder: 'task-arn:.../inst-A',
+    });
+    m1.on(PutCommand).resolves({});
+    await withHolder.writeHeartbeat();
+    expect(m1.commandCalls(PutCommand)[0].args[0].input.Item.lock_holder)
+      .toBe('task-arn:.../inst-A');
+
+    const { heartbeat: noHolder, ddbMock: m2 } = makeHeartbeat({
+      clock: () => 1_700_000_000_000,
+    });
+    m2.on(PutCommand).resolves({});
+    await noHolder.writeHeartbeat();
+    expect(m2.commandCalls(PutCommand)[0].args[0].input.Item)
+      .not.toHaveProperty('lock_holder');
   });
 
   it('uses no condition expression — idempotent overwrite is the desired shape', async () => {
