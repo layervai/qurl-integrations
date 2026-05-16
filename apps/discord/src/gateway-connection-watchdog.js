@@ -53,6 +53,13 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 100;
 const BACKOFF_CAP_MS = 5_000;
+// Ceilings below bound the WATCHDOG's own failure-replace path —
+// they're NOT on the SIGTERM critical path (which has its own
+// ~200 ms client-side cap in gateway-leader.js's pushHandoff). A
+// stuck standby holding the failover slot is what these protect
+// against; worst-case watchdog tick at exhaustion is CONNECT +
+// RELEASE_LOCK ≈ 11 s, well inside the 30 s ECS graceful-stop.
+//
 // Hard ceiling on the releaseLock-during-exit call. The leader's
 // releaseLockForImmediateExit awaits through `runSerialized`, so a
 // hung inbound-handoff (parked inside manager.connect() with

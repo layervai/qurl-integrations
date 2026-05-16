@@ -142,13 +142,13 @@ function createGatewayHmac({
     throw new Error('createGatewayHmac: nonceLruSize must be a positive integer');
   }
 
-  // Map insertion order is preserved per spec — so a Map gives us
+  // Set insertion order is preserved per spec — so a Set gives us
   // a size-bounded FIFO by evicting the oldest (first iterator key)
   // when at capacity. We do NOT re-insert on access (which would
   // make this a true LRU) — see the FIFO discussion in the module
   // header for why insertion-order eviction is correct for the
   // replay-window invariant.
-  const seenNonces = new Map();
+  const seenNonces = new Set();
 
   function rememberNonce(nonce) {
     // Insert-only. The sole caller (`verify`) already returns
@@ -157,9 +157,9 @@ function createGatewayHmac({
     // be misleading code (it would never run). If a future caller
     // bypasses the verify path and needs bump semantics, add an
     // explicit pre-check at that call site.
-    seenNonces.set(nonce, true);
+    seenNonces.add(nonce);
     while (seenNonces.size > nonceLruSize) {
-      const oldest = seenNonces.keys().next().value;
+      const oldest = seenNonces.values().next().value;
       seenNonces.delete(oldest);
     }
   }

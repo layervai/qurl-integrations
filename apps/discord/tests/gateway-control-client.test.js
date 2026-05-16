@@ -317,6 +317,55 @@ describe('pushHandoff — result mapping', () => {
     );
   });
 
+  it('drops in-flight chunks AFTER bodyCapExceeded fires (synchronous-destroy + flag-mark)', async () => {
+    // The cap path settles synchronously on the over-cap chunk AND
+    // calls res.destroy(), but subsequent 'data' events already in
+    // the event-loop pipeline still arrive. The bodyCapExceeded
+    // flag must drop them without growing the buffer or re-firing
+    // settle (which is idempotent but a second log/state mutation
+    // would be a regression). Pin this contract.
+    const hmac = makeHmac();
+    let capturedRes;
+    const fakeRequest = (options, responseHandler) => {
+      const req = new EventEmitter();
+      req.write = () => {};
+      req.end = () => {
+        const res = new EventEmitter();
+        res.statusCode = 200;
+        res.destroyed = false;
+        res.destroy = () => { res.destroyed = true; };
+        capturedRes = res;
+        responseHandler(res);
+        // First chunk: under cap. Second chunk: trips cap. Third
+        // chunk: arrives AFTER cap-exceeded → must be dropped.
+        setImmediate(() => {
+          res.emit('data', Buffer.from('A'.repeat(30), 'utf8'));
+          res.emit('data', Buffer.from('B'.repeat(30), 'utf8')); // 60 > 50 cap
+          res.emit('data', Buffer.from('C'.repeat(30), 'utf8')); // post-cap drop
+          res.emit('end');
+        });
+      };
+      req.destroy = () => {};
+      return req;
+    };
+    const logger = makeLogger();
+    const client = createControlClient({
+      hmac, logger, httpRequest: fakeRequest, responseByteCap: 50,
+    });
+    const result = await client.pushHandoff(validArgs);
+    expect(result).toEqual({
+      ok: false, reason: 'http_error', error: 'response_body_too_large',
+    });
+    // res.destroy() fires synchronously on the over-cap chunk.
+    expect(capturedRes.destroyed).toBe(true);
+    // Cap-exceeded log fires exactly once (not three times — the
+    // post-cap drops must be silent).
+    const capLogs = logger.warn.mock.calls.filter(
+      ([msg]) => msg === 'control-client: response body exceeded cap',
+    );
+    expect(capLogs).toHaveLength(1);
+  });
+
   it('returns reason:http_error when the response is aborted mid-stream', async () => {
     // Peer sends headers then crashes — `aborted` event fires but
     // `end` never will. Without an aborted handler we'd block on
