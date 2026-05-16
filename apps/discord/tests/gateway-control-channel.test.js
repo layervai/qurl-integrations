@@ -31,6 +31,7 @@ const { Readable } = require('node:stream');
 const {
   startControlChannelServer,
   _handleRequestForTest,
+  _readRequestBodyForTest,
   DEFAULT_BODY_BYTE_CAP,
 } = require('../src/gateway-control-channel');
 
@@ -727,6 +728,43 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body)).toEqual({ error: 'unknown_peer' });
     expect(res.headers).not.toMatchObject({ Connection: 'close' });
+  });
+});
+
+describe('readRequestBody — settle idempotence on close-after-end', () => {
+  it('resolves cleanly when close fires after end (Node 17+ destroy-on-end path)', async () => {
+    // Some Node versions emit `close` with `req.destroyed=true` right
+    // after a normal `end` — this is the post-Node-17 stream lifecycle
+    // for cleanly-consumed request streams. The `settle` helper must
+    // be idempotent so the `end` → resolve wins and the trailing
+    // `close` → reject is a no-op. Without idempotence, the body
+    // would correctly resolve then immediately get a reject for
+    // `request_aborted`, which would unhandled-promise-warn or worse.
+    const req = new Readable({ read() {} });
+    const p = _readRequestBodyForTest(req, 1024);
+    req.push(Buffer.from('hello'));
+    req.push(null); // triggers 'end'
+    // Simulate the Node 17+ post-end behavior: close with destroyed.
+    setImmediate(() => {
+      // eslint-disable-next-line no-param-reassign
+      req.destroyed = true;
+      req.emit('close');
+    });
+    await expect(p).resolves.toEqual(Buffer.from('hello'));
+  });
+
+  it('rejects cleanly when close fires WITHOUT a preceding end (true abort)', async () => {
+    // The mirror case: socket dies mid-body, no `end` ever arrives.
+    // The `close` handler sees `req.destroyed=true` and rejects.
+    const req = new Readable({ read() {} });
+    const p = _readRequestBodyForTest(req, 1024);
+    req.push(Buffer.from('partial'));
+    setImmediate(() => {
+      // eslint-disable-next-line no-param-reassign
+      req.destroyed = true;
+      req.emit('close');
+    });
+    await expect(p).rejects.toThrow(/request_aborted/);
   });
 });
 

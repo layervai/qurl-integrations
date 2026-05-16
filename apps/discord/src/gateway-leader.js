@@ -543,8 +543,12 @@ function createGatewayLeader({
       // have been on >=13b.2 long enough that missing lock_holder
       // is impossible. Target removal: 2026-07-01 (~6 weeks after
       // 13b.2 lands in prod). Tracked: #416.
+      // `??` (not `||`) so an empty-string or 0-valued row from a
+      // misbehaving writer doesn't silently take the placeholder
+      // branch. heartbeat write-time validation enforces non-empty
+      // string, but defense-in-depth on the read side too.
       const targetLockHolder = peer.lock_holder
-        || `placeholder/${peer.instance_id}`;
+        ?? `placeholder/${peer.instance_id}`;
 
       let transferResult;
       try {
@@ -623,7 +627,16 @@ function createGatewayLeader({
     // re-check (in handleInboundHandoff) makes the leader reject
     // any work that got queued post-`closed`. After this call
     // returns, peer-side listFreshPeers stops returning our row.
-    await peerHeartbeat.deleteOwnRow().catch(() => {});
+    // `peerHeartbeat.deleteOwnRow()` is documented as never-throwing
+    // (logs+swallows internally), but defense-in-depth: belt-and-
+    // braces .catch so a future regression in that contract doesn't
+    // poison the pushHandoff result. Debug-level — a real fault here
+    // is already surfaced by the inner warn log in deleteOwnRow.
+    await peerHeartbeat.deleteOwnRow().catch((err) => {
+      logger.debug('gateway-leader: deleteOwnRow rejected (contract regression?)', {
+        error: err && err.message,
+      });
+    });
 
     return result;
   }

@@ -237,11 +237,13 @@ async function handleRequest(req, res, ctx) {
   // cap is unambiguous — short-circuit before reading any bytes so
   // an obvious bad request doesn't get a per-chunk dance.
   // `parseInt` tolerates leading whitespace; we additionally require
-  // a digits-only value to ignore garbage like `0xFF` or `1KB`.
+  // a digits-only value to ignore garbage like `0xFF` or `1KB`. The
+  // regex pre-check guarantees `parseInt` returns a non-negative
+  // integer, so no further `Number.isFinite` guard is needed.
   const declaredLengthRaw = req.headers['content-length'];
   if (declaredLengthRaw !== undefined && /^\d+$/.test(declaredLengthRaw)) {
     const declaredLength = parseInt(declaredLengthRaw, 10);
-    if (Number.isFinite(declaredLength) && declaredLength > ctx.bodyByteCap) {
+    if (declaredLength > ctx.bodyByteCap) {
       ctx.logger.warn('control-channel: Content-Length exceeds cap', {
         declared: declaredLength, cap: ctx.bodyByteCap,
       });

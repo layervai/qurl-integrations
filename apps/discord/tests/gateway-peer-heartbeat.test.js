@@ -95,6 +95,29 @@ describe('createPeerHeartbeat — factory validation', () => {
     expect(() => createPeerHeartbeat({ ...base, ip: '::1' })).not.toThrow();
   });
 
+  it('rejects non-string or empty-string lockHolder when provided', () => {
+    // `lockHolder` is optional but, when provided, must be a non-
+    // empty string. A stray non-string would write a non-S value to
+    // DDB and surface as a confusing log field at SIGTERM transfer
+    // time. Mirrors the secrets.previous posture in gateway-hmac.
+    const base = {
+      ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
+      port: 9876, shardId: '0:1', logger: {},
+    };
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: '' }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: 42 }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: true }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: {} }))
+      .toThrow(/lockHolder must be a non-empty string when provided/);
+    // Omitted and undefined both fine.
+    expect(() => createPeerHeartbeat({ ...base })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: undefined })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, lockHolder: 'task-arn:..../inst-A' })).not.toThrow();
+  });
+
   it('rejects invalid ports (string, NaN, 0, negative, >65535, fractional)', () => {
     // The control-channel port comes from config (env). A bug that
     // forgot to parseInt would surface as a string; an off-by-one in

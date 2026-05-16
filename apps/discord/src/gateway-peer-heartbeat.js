@@ -112,6 +112,13 @@ function createPeerHeartbeat({
   }
   if (!shardId) throw new Error('createPeerHeartbeat: shardId is required');
   if (!logger) throw new Error('createPeerHeartbeat: logger is required');
+  // `lockHolder` is optional but, when provided, must be a non-empty
+  // string. A stray `lockHolder: 42` or `lockHolder: true` would write
+  // a non-string to DDB and surface as a confusing log field at
+  // SIGTERM. Mirrors the `secrets.previous` posture in gateway-hmac.
+  if (lockHolder !== undefined && (typeof lockHolder !== 'string' || lockHolder.length === 0)) {
+    throw new Error('createPeerHeartbeat: lockHolder must be a non-empty string when provided');
+  }
 
   function nowSeconds() {
     return Math.floor(clock() / 1000);
