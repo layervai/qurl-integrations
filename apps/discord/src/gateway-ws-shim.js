@@ -47,23 +47,23 @@
 //   - getAppId()         — application id from READY, or null
 //                          before READY fires. Used by
 //                          registerCommands.
-//   - rest               — the REST instance (constructed with the
+//   - getRest()          — REST instance (constructed with the
 //                          token); exposed for registerCommands.
 //
 // ── SIGTERM contract: do NOT call manager.destroy() ──
 //
-// @discordjs/ws@1.2.3's `destroy()` (dist/index.js around line 733)
-// calls `updateSessionInfo(shardId, null)` and sends a close-1000
-// frame unless `recover: Resume` is passed. Both signals invalidate
-// the session on Discord's side. For Pillar 2 cross-process RESUME,
-// we need Discord to PRESERVE the session in its 60 s resume buffer
-// past our exit, so the next process can RESUME (op 6) on it. The
-// only way to achieve that is to drop the TCP connection without a
-// clean close: persist final state, then `process.exit()` from the
-// caller. Discord sees a network-level disconnect (not a clean
-// close), holds the session for ~60 s, and the new process's
-// IDENTIFY-or-RESUME decision goes through retrieveSessionInfo →
-// returns the persisted row → @discordjs/ws issues RESUME.
+// @discordjs/ws's `destroy()` calls `updateSessionInfo(shardId, null)`
+// and sends a close-1000 frame unless `recover: Resume` is passed.
+// Both signals invalidate the session on Discord's side. Cross-
+// process RESUME requires Discord to PRESERVE the session in its
+// ~60 s resume buffer past our exit, so the next process can
+// RESUME (op 6) on it. The only way to achieve that is to drop the
+// TCP connection without a clean close: persist final state, then
+// `process.exit()` from the caller. Discord sees a network-level
+// disconnect (not a clean close), holds the session, and the new
+// process's IDENTIFY-or-RESUME decision goes through
+// retrieveSessionInfo → returns the persisted row → @discordjs/ws
+// issues RESUME.
 //
 // stop() therefore flushes the store's mirror to DDB and clears
 // internal timers, but does not touch manager state. Caller is
@@ -167,14 +167,9 @@ function createGatewayWsShim({
   }
 
   function buildUpdateCallback() {
-    // Pass-through to the store. Whether the store throttles,
-    // writes immediately, or deletes is its own concern; the shim
-    // doesn't second-guess.
-    //
-    // Bound to preserve `this` semantics if the store ever moves
-    // to a class shape. Factory closure today, but the bind is
-    // belt-and-suspenders.
-    return store.updateSessionInfo.bind(store);
+    // Pass-through to the store. Throttle / write / delete behavior
+    // is the store's concern; the shim doesn't second-guess.
+    return (shardId, info) => store.updateSessionInfo(shardId, info);
   }
 
   return {
@@ -196,8 +191,8 @@ function createGatewayWsShim({
       }
 
       // REST is lazy-constructed if the caller didn't inject one.
-      // The single token-bound instance is reused for registerCommands
-      // (commit 6 will refactor registerCommands to accept REST + appId).
+      // The single token-bound instance is reused by registerCommands
+      // (which accepts REST + appId rather than a discord.js Client).
       if (!restInstance) {
         restInstance = new RESTCtor().setToken(token);
       }
@@ -318,7 +313,7 @@ function createGatewayWsShim({
       return appId;
     },
 
-    get rest() {
+    getRest() {
       return restInstance;
     },
 

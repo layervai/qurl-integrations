@@ -8054,41 +8054,30 @@ function getActiveCommands() {
 // in handleCommand prevents those stale commands from doing anything
 // harmful, but users still see dead commands in the picker. Issuing
 // PUT-with-empty-body on the guild-commands endpoint clears the
-// guild-scoped set; any ALIVE guild-scoped registration for the
-// CURRENT mode gets reinstalled by the main registerCommands path
-// below.
+// guild-scoped set.
 //
 // Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
 // guild-scoped commands to config.GUILD_ID, so purging there would
-// race with the upcoming PUT. Only iterates guildIds the caller passes
-// in — we can't and shouldn't enumerate guilds we've never joined.
-async function purgeStaleGuildCommands({ rest, appId, guildIds, guildNames = {} }) {
+// race with the upcoming PUT. Only iterates the `guilds` map the caller
+// passes in — we can't and shouldn't enumerate guilds we've never joined.
+async function purgeStaleGuildCommands({ rest, appId, guilds }) {
   if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
-  // Parallelize the per-guild fetch+put. Sequentializing makes boot
-  // time O(guilds) at ~500ms per round-trip, which scales badly for
-  // the public-bot install path this PR targets. Promise.allSettled
-  // so one slow/failing guild doesn't block the others, and so a
-  // single rejection doesn't bubble and abort registerCommands.
-  // Discord's guild-commands endpoint has a separate rate bucket
-  // per guild, so parallel fans out cleanly until the global
-  // app-command rate limit (~200/min) — well above any realistic
-  // boot-time burst.
-  await Promise.allSettled(guildIds.map(async (guildId) => {
+  // Parallelize the per-guild fetch+put. Promise.allSettled so one
+  // slow/failing guild doesn't block the others; Discord's guild-
+  // commands endpoint uses a separate rate bucket per guild.
+  await Promise.allSettled(Array.from(guilds, ([guildId, guildName]) => (async () => {
     try {
       const existing = await rest.get(Routes.applicationGuildCommands(appId, guildId));
-      // REST returns an array of Command objects; falsy / zero-length
-      // means no stale registrations to purge (skip the PUT).
       const existingCount = Array.isArray(existing) ? existing.length : 0;
       if (existingCount === 0) return;
       await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
-      const displayName = guildNames[guildId] ?? guildId;
-      logger.info(`Purged ${existingCount} stale guild-scoped commands from ${displayName} (${guildId})`);
+      logger.info(`Purged ${existingCount} stale guild-scoped commands from ${guildName ?? guildId} (${guildId})`);
     } catch (error) {
       // Don't fail boot on a purge error — the dispatch-time filter in
       // handleCommand is the correctness guarantee; purge is UX polish.
       logger.warn(`Could not purge stale commands from guild ${guildId}`, { error: error.message });
     }
-  }));
+  })()));
 }
 
 // Register commands with Discord. `config.isOpenNHPActive` is the
@@ -8096,19 +8085,14 @@ async function purgeStaleGuildCommands({ rest, appId, guildIds, guildNames = {} 
 // community surface" — see config.js for the derivation.
 //
 // Signature decoupled from discord.js Client so both the legacy
-// `client.login()` path AND the Pillar 2 `@discordjs/ws` shim path
-// can call this with the same shape: pass REST + appId + the guild
-// list the caller already has.
-//   - Legacy path: rest=client.rest, appId=client.application.id,
-//     guildIds=[...client.guilds.cache.keys()], guildNames map.
-//   - Shim path: rest=shim.rest, appId=shim.getAppId() (READY-derived),
-//     guildIds=[] (gateway-tier shim doesn't track guild cache;
-//     purge is non-load-bearing UX polish in the shim path).
-async function registerCommands({ rest, appId, guildIds = [], guildNames = {} }) {
-  // Purge first — prevents stale OpenNHP-era registrations in guilds the
-  // bot is still in. See purgeStaleGuildCommands for details + why this
-  // is scoped to non-OpenNHP modes.
-  await purgeStaleGuildCommands({ rest, appId, guildIds, guildNames });
+// Client path AND the @discordjs/ws shim path can call this:
+//   - Legacy path: build `guilds` as `Map<guildId, guildName>` from
+//     client.guilds.cache.
+//   - Shim path: empty Map — gateway-tier shim doesn't track guild
+//     cache, and the handleCommand dispatch-time filter remains the
+//     correctness guarantee for stale registrations.
+async function registerCommands({ rest, appId, guilds = new Map() }) {
+  await purgeStaleGuildCommands({ rest, appId, guilds });
 
   const activeCommands = getActiveCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());

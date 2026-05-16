@@ -353,16 +353,14 @@ describe('commands module exports', () => {
 });
 
 describe('registerCommands', () => {
-  // Post-refactor signature: ({rest, appId, guildIds, guildNames}).
-  // Both legacy (client.login) and Pillar 2 shim paths share this
-  // signature; tests assert the REST-call shape that the production
-  // wire calls produce.
+  // Signature: ({rest, appId, guilds: Map<id, name>}). Tests assert
+  // the REST-call shape that production wire calls produce.
   it('issues rest.put for the global commands endpoint when GUILD_ID is unset', async () => {
     const rest = {
       put: jest.fn().mockResolvedValue([]),
       get: jest.fn().mockResolvedValue([]),
     };
-    await registerCommands({ rest, appId: 'app-123', guildIds: [], guildNames: {} });
+    await registerCommands({ rest, appId: 'app-123', guilds: new Map() });
     expect(rest.put).toHaveBeenCalled();
   });
 
@@ -372,7 +370,7 @@ describe('registerCommands', () => {
       put: jest.fn().mockRejectedValue(new Error('fail')),
       get: jest.fn().mockResolvedValue([]),
     };
-    await registerCommands({ rest, appId: 'app-123', guildIds: [], guildNames: {} });
+    await registerCommands({ rest, appId: 'app-123', guilds: new Map() });
     expect(logger.error).toHaveBeenCalledWith(
       'Failed to register commands',
       expect.objectContaining({ error: 'fail' }),

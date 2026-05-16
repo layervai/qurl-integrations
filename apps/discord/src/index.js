@@ -305,6 +305,7 @@ const roleResumeConflict = unsupportedRoleResumeCombo(
   PROCESS_ROLE,
   config.ENABLE_GATEWAY_RESUME,
   config.ENABLE_EVENT_SHIPPER,
+  (process.env.STORE_TYPE ?? '').trim() || 'sqlite',
 );
 if (roleResumeConflict) {
   logger.error(roleResumeConflict);
@@ -348,23 +349,18 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // tables) so a future env-name rename touches one var, not many.
 // Both this module and the qurl-integrations-infra qurl-bot-ddb
 // module pin the `gateway-session` suffix.
+// Single-shard topology today. Matches the `"k:n"` convention in
+// modules/qurl-bot-ddb's gateway-session schema. Reshard generalization
+// computes this from a SHARD_ID/SHARD_COUNT env pair.
+const DEFAULT_SHARD_ID = '0:1';
+
 let gatewayShim = null;
 if (isGateway && config.ENABLE_GATEWAY_RESUME) {
-  const ddbTablePrefix = (process.env.DDB_TABLE_PREFIX ?? '').trim();
-  const awsRegion = (process.env.AWS_REGION ?? '').trim();
-  if (!ddbTablePrefix || !ddbTablePrefix.endsWith('-')) {
-    logger.error(
-      'ENABLE_GATEWAY_RESUME=true requires DDB_TABLE_PREFIX (with trailing "-"). ' +
-      `Got '${ddbTablePrefix}'. The gateway-session table is at ` +
-      '`${DDB_TABLE_PREFIX}gateway-session`; without a prefix the bot cannot ' +
-      'address its DDB session row.',
-    );
-    process.exit(1);
-  }
-  if (!awsRegion) {
-    logger.error('ENABLE_GATEWAY_RESUME=true requires AWS_REGION. Set it to the env-specific region in the deployment template.');
-    process.exit(1);
-  }
+  // DDB_TABLE_PREFIX and AWS_REGION are validated by src/store/ddb-store.js
+  // at module load when STORE_TYPE=ddb (which gateway-resume implies in
+  // practice). Re-checking here would duplicate the upstream guard.
+  const ddbTablePrefix = process.env.DDB_TABLE_PREFIX;
+  const awsRegion = process.env.AWS_REGION;
   const rawDdbClient = new DynamoDBClient({
     region: awsRegion,
     ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
@@ -375,11 +371,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   const sessionStore = createGatewaySessionStore({
     ddbClient,
     tableName: `${ddbTablePrefix}gateway-session`,
-    // Single-shard topology in PR 13a — matches the "0:1" convention
-    // in modules/qurl-bot-ddb's gateway-session schema comment. Reshard
-    // generalization (PR 14+) flips this to `${shardId}:${total}`
-    // computed from a SHARD_ID/SHARD_COUNT env pair.
-    shardId: '0:1',
+    shardId: DEFAULT_SHARD_ID,
     logger,
   });
   gatewayShim = createGatewayWsShim({
@@ -388,9 +380,9 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
     store: sessionStore,
     logger,
   });
-  logger.info('Pillar 2 gateway-resume shim constructed', {
+  logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
-    shardId: '0:1',
+    shardId: DEFAULT_SHARD_ID,
   });
 }
 
@@ -466,36 +458,18 @@ if (shouldRegisterInteractionListener({
   });
 }
 
-// Gateway-only event wiring. HTTP-only replicas skip these because
-// they never login() and so the client never fires these events —
-// but the `.on()` registrations would still leak handler references
-// and register no-op listeners, so gate them for clarity.
-//
-// Two disjoint subpaths inside the isGateway branch:
-//   - !ENABLE_GATEWAY_RESUME (legacy): register listeners on the
-//     discord.js Client; client.login() opens the WS in start().
-//   - ENABLE_GATEWAY_RESUME (Pillar 2): register listeners on the
-//     shim's onDispatch fan-out; shim.start() opens the WS via
-//     @discordjs/ws WebSocketManager in start(). The Client object
-//     still exists at module load (legacy modules depend on its
-//     symbol exports) but client.login() never runs.
+// Gateway-only client event wiring. Skipped on HTTP-only replicas
+// (the client never logs in there) and on the shim path (the shim
+// owns the WS — listeners attach via shim.onDispatch instead).
 if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // Register commands when ready
   client.once('ready', async () => {
-    // registerCommands accepts REST + appId + guildIds (rather than
-    // the discord.js Client) so the Pillar 2 shim path can call the
-    // same function without constructing a Client. In the legacy
-    // flag-off path here, lift the same three pieces out of the
-    // discord.js client — semantics identical to the pre-refactor
-    // shape (single PUT to global or guild-scoped commands, with
-    // stale-guild-purge for non-OpenNHP deploys).
+    // registerCommands takes REST + appId + a guilds map so the
+    // shim path can call the same function without a Client.
     await registerCommands({
       rest: client.rest,
       appId: client.application.id,
-      guildIds: [...client.guilds.cache.keys()],
-      guildNames: Object.fromEntries(
-        [...client.guilds.cache.values()].map((g) => [g.id, g.name]),
-      ),
+      guilds: new Map([...client.guilds.cache.values()].map((g) => [g.id, g.name])),
     });
   });
 
@@ -538,63 +512,36 @@ if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   });
 }
 
-// Pillar 2 shim listeners. Symmetric with the legacy block above
-// but every subscription routes through gatewayShim.onDispatch (a
-// fan-out wrapping the underlying @discordjs/ws WebSocketShardEvents.
-// Dispatch event) instead of client.on('raw').
+// Shim-path dispatch listener. One handler, three branches —
+// keeping a single closure on the per-dispatch hot path instead of
+// fanning out to three. The shim fires only for op=0 dispatches
+// (@discordjs/ws absorbs the control frames internally), so the
+// publish op-filter is trivially satisfied; the t-filter inside
+// eventPublisher.publish remains the load-bearing INTERACTION_CREATE
+// gate.
 //
-// The shim only fires for op=0 dispatches (HEARTBEAT_ACK / Hello /
-// etc. don't reach this code path; @discordjs/ws absorbs them
-// internally). Every legacy `raw` listener that used the op-filter
-// (eventPublisher.publish) still works correctly: its op check is
-// trivially satisfied, and the t-filter (INTERACTION_CREATE)
-// remains the load-bearing branch.
-//
-// registerCommands is triggered on the first READY dispatch — same
-// semantics as the legacy `client.once('ready')` listener above.
-// Discord delivers RESUMED (not READY) on a successful resume, so
-// this handler doesn't re-register commands on every reconnect.
+// READY triggers registerCommands once (Discord delivers RESUMED
+// rather than READY on a successful resume, so commands don't
+// re-register on every reconnect). The shim-on + shipper-on
+// invariant is enforced at boot (unsupportedRoleResumeCombo).
 if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
   gatewayShim.onDispatch(({ data }) => {
     if (data?.t === 'READY') {
-      // Fire-and-log: registerCommands does its own try/catch on the
-      // rest.put failure path, but a thrown promise outside that
-      // (defensive: e.g. shim.getAppId() returning null past the
-      // READY guard) would bubble to unhandledRejection. Add a
-      // .catch here for completeness.
+      // Gateway-tier shim doesn't maintain a guild cache (that's
+      // the worker tier's job); empty map skips purge. The
+      // handleCommand dispatch-time filter remains the correctness
+      // guarantee for stale registrations.
       registerCommands({
-        rest: gatewayShim.rest,
+        rest: gatewayShim.getRest(),
         appId: gatewayShim.getAppId(),
-        // Gateway tier under the shim doesn't maintain a guild
-        // cache — that's the worker tier's job. Skip the
-        // purgeStaleGuildCommands branch by passing an empty
-        // list. The dispatch-time filter in handleCommand
-        // remains the correctness guarantee; purge is UX polish
-        // that PR 13a defers. Multi-tenant deploys land on the
-        // global-commands endpoint regardless of guild count.
-        guildIds: [],
-        guildNames: {},
+        guilds: new Map(),
       }).catch((err) => {
         logger.error('registerCommands (shim path) failed', { error: err.message });
       });
     }
+    noteGatewayActivity();
+    eventPublisher.publish(data);
   });
-
-  // Activity ticker — same observability gauge as the legacy block.
-  // The arrow wraps noteGatewayActivity to discard the dispatch
-  // payload (noteGatewayActivity's signature expects no real args).
-  gatewayShim.onDispatch(() => noteGatewayActivity());
-
-  // Publish-to-SQS hook. The shim's dispatch payload is `{data,
-  // shardId}` where `data` is the raw gateway packet (`{op, t, s,
-  // d}`) — same shape eventPublisher.publish() consumes from the
-  // legacy client.on('raw') wiring.
-  //
-  // Always armed when the shim is active because shim-on requires
-  // shipper-on at boot (unsupportedRoleResumeCombo rejects the
-  // shim-on + shipper-off combo). The conditional in the legacy
-  // block is therefore unnecessary here.
-  gatewayShim.onDispatch(({ data }) => eventPublisher.publish(data));
 }
 
 // Log and continue on unhandled rejections. The old behavior killed the

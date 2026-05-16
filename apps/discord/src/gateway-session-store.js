@@ -1,67 +1,41 @@
-// DDB-backed @discordjs/ws session store for the gateway tier
-// (zero-downtime design, Pillar 2 — cross-process RESUME).
+// DDB-backed @discordjs/ws session store. Persists
+// `WebSocketShard.sessionInfo` (`{sessionId, resumeURL, sequence}`)
+// so a process restart can RESUME from the last observed sequence
+// instead of IDENTIFYing fresh — Discord replays buffered events
+// from the last sequence within its ~60 s resume buffer window.
 //
-// Persists `WebSocketShard.sessionInfo` (`{sessionId, resumeURL,
-// sequence}`) to DDB so a process restart can RESUME from the last
-// observed sequence instead of IDENTIFYing fresh. Without this
-// persistence, every restart costs the cold-start window
-// (~5-10 s of WebSocket handshake + READY + GUILD_CREATE bursts);
-// with it, Discord replays buffered events from the last sequence
-// within the ~60 s resume buffer window and the bot misses no
-// interactions across the deploy boundary.
-//
-// Module shape: factory `createGatewaySessionStore({ ddbClient,
-// tableName, shardId, logger, clock })` returns a store instance
-// with its own mirror + throttle state. The factory shape (vs
-// module-level singleton like event-publisher.js) lets tests run
-// in parallel without resetting shared state and generalizes when
-// PR 14+ scales beyond single-shard.
+// Factory `createGatewaySessionStore` returns a store instance with
+// its own mirror + throttle state, so tests run isolated and a
+// future multi-shard caller can construct one per shard.
 //
 // ── Load-bearing contracts ──
 //
 // 1. In-memory mirror, not DDB-per-callback. `retrieveSessionInfo`
-//    is called by @discordjs/ws every reconnect — possibly inside
-//    a tight IDENTIFY-reject loop. Reading DDB on each call would
-//    introduce ~10-100 ms of latency per loop iteration AND
-//    couldn't observe in-process state changes made by an earlier
-//    `updateSessionInfo(null)` (DDB writes are visible only after
-//    SDK round-trip; mirror updates are visible immediately).
-//    The mirror is hydrated from DDB once at boot via `hydrate()`;
-//    subsequent reads from `retrieveSessionInfo` are pure-local.
+//    is called by @discordjs/ws every reconnect — possibly in a
+//    tight IDENTIFY-reject loop. Reading DDB on each call adds
+//    ~10-100 ms per iteration AND can't observe in-process state
+//    changes made by an earlier `updateSessionInfo(null)`. Mirror
+//    is hydrated once at boot; subsequent reads are pure-local.
 //
 // 2. Null-clear respected. When @discordjs/ws calls
 //    `updateSessionInfo(shardId, null)` (Discord rejected the
 //    RESUME), the mirror MUST be set to null AND the DDB row MUST
 //    be deleted. Returning the stale session from the next
-//    `retrieveSessionInfo` produces an infinite RESUME-reject loop
-//    that the spike's first sandbox run reproduced. The DDB delete
-//    is load-bearing for the cross-process case: a process that
-//    crashes between IDENTIFY and the next READY would otherwise
-//    leave the dead session row visible to the next boot's
-//    hydrate(), and the next process would try to RESUME on a
-//    session Discord has already invalidated.
+//    `retrieveSessionInfo` produces an infinite RESUME-reject
+//    loop. The DDB delete is load-bearing across processes too:
+//    a crash between IDENTIFY and the next READY would otherwise
+//    leave the dead row visible to the next boot's hydrate().
 //
 // 3. Write throttling. `updateSessionInfo` fires on every gateway
-//    dispatch (HEARTBEAT_ACK + PRESENCE_UPDATE + READY + every
-//    INTERACTION_CREATE — high rate). DDB-write per dispatch would
-//    burn ~$50/month at typical interaction volume AND introduce
-//    write-rate-limit risk. We write immediately only when:
-//      - the session_id changes (READY just fired), OR
-//      - the prior write is more than WRITE_THROTTLE_MS old.
-//    Otherwise the update is deferred via a single scheduled flush
-//    that fires at most every WRITE_THROTTLE_MS. Mirror always
-//    reflects the latest dispatch (so retrieveSessionInfo is
-//    fresh); DDB lags by at most WRITE_THROTTLE_MS, which the
-//    Discord 60 s resume window absorbs trivially.
+//    dispatch (high rate). We write immediately on session_id
+//    change (READY) or when the prior write is older than
+//    WRITE_THROTTLE_MS; other updates defer to a single scheduled
+//    flush. Mirror always reflects the latest dispatch; DDB lags
+//    by at most WRITE_THROTTLE_MS, well inside the resume window.
 //
-// 4. Final flush on SIGTERM. The throttle defers writes; on
-//    shutdown we must ensure the latest sequence reaches DDB
-//    before exit. `flushFinal()` cancels any pending timer and
-//    issues a synchronous write of the mirror's current state.
-//    Skipping this drops the last (up to WRITE_THROTTLE_MS) worth
-//    of sequence on the floor; the next boot's RESUME starts from
-//    a too-old sequence and Discord replays those events (or
-//    rejects the resume if it's older than the buffer).
+// 4. Final flush on SIGTERM. `flushFinal()` cancels any pending
+//    timer and writes the mirror's current state synchronously
+//    so the next process's hydrate sees the latest sequence.
 
 const { PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 
@@ -99,6 +73,13 @@ function createGatewaySessionStore({
   let lastWriteAt = 0;
   let pendingFlush = null;
   let stopped = false;
+  // Tracks the most recently fired DDB write so flushFinal can await
+  // its settlement before exit. Writes are fire-and-forget (see
+  // updateSessionInfo) — `await ddb.send(...)` inside the @discordjs/
+  // ws callback would back-pressure the WS dispatch loop on every
+  // sequence update, undoing the Pillar 1 win of keeping the gateway
+  // forwarder responsive under load.
+  let inFlightWrite = Promise.resolve();
 
   async function persistRow(info) {
     // Wall-clock epoch ms for `updated_at`. Matches the design
@@ -130,38 +111,39 @@ function createGatewaySessionStore({
     }
   }
 
+  // Fire-and-forget DDB write. Cursor (lastWrittenSessionId +
+  // lastWriteAt) updates synchronously so the next call's
+  // sessionChanged + throttleExpired checks reflect the in-flight
+  // write — without it, two same-sessionId updates in quick
+  // succession would both fire immediate writes (each sees a
+  // stale cursor). On failure the cursor isn't rolled back; the
+  // throttle's next flush retries, and SIGTERM's flushFinal is
+  // the backstop. Sustained failure logs every retry.
+  function firePersist(info) {
+    lastWrittenSessionId = info.sessionId;
+    lastWriteAt = clock();
+    inFlightWrite = persistRow(info).catch((err) => {
+      logger.warn('gateway-session-store: write failed', { error: err.message });
+    });
+  }
+
   // Schedule a deferred write at (lastWriteAt + writeThrottleMs).
   // Idempotent — if a timer is already pending, leave it; the
-  // existing timer will pick up whatever's in the mirror at fire
-  // time, which is the latest dispatch. .unref() so a process
-  // exit doesn't get pinned by a pending session-flush timer
-  // (gracefulShutdown's flushFinal handles the final write).
+  // existing timer fires `firePersist(mirror)` with whatever's
+  // current at the time. .unref() so a process exit isn't pinned
+  // by a pending session-flush timer (flushFinal handles the
+  // final write at SIGTERM).
   function scheduleFlush() {
     if (pendingFlush) return;
     if (stopped) return;
     const delay = Math.max(0, writeThrottleMs - (clock() - lastWriteAt));
-    pendingFlush = setTimeout(async () => {
+    pendingFlush = setTimeout(() => {
       pendingFlush = null;
-      // Re-check mirror at fire time: an interleaved null-clear
-      // would have set mirror=null and cancelled this timer. If
-      // the clear fired AFTER this callback was queued by the
-      // event loop but BEFORE it ran, mirror is now null and we
-      // shouldn't write the stale info. The null-clear path
-      // already deleted the row directly, so there's nothing left
-      // to do here.
+      // Mirror may have been null-cleared between schedule and
+      // fire; if so, the null-clear path already issued a Delete
+      // and there's nothing to write here.
       if (!mirror || stopped) return;
-      try {
-        await persistRow(mirror);
-        lastWrittenSessionId = mirror.sessionId;
-        lastWriteAt = clock();
-      } catch (err) {
-        // Deferred write failure is non-fatal: the mirror still
-        // holds the latest info, and the next dispatch will either
-        // re-throttle (and retry on the next firing) or trigger an
-        // immediate write (sessionId change). Final flush on
-        // SIGTERM is the backstop for "throttle never recovers."
-        logger.warn('gateway-session-store: deferred write failed', { error: err.message });
-      }
+      firePersist(mirror);
     }, delay);
     pendingFlush.unref();
   }
@@ -180,70 +162,41 @@ function createGatewaySessionStore({
     },
 
     // `updateSessionInfo(shardId, info)` — info=null means Discord
-    // rejected the RESUME (session expired / version skew / etc.)
-    // and @discordjs/ws fell back to IDENTIFY. Async so the
-    // immediate-write paths can await the DDB call; @discordjs/ws
-    // accepts async callbacks.
-    async updateSessionInfo(_shardId, info) {
-      if (stopped) {
-        // Race: SIGTERM landed mid-dispatch. Don't issue new DDB
-        // writes; flushFinal already wrote (or about to write) the
-        // mirror state captured before stop().
-        return;
-      }
+    // rejected the RESUME and @discordjs/ws fell back to IDENTIFY.
+    //
+    // Synchronous resolution from @discordjs/ws's perspective:
+    // returns before DDB I/O completes so a slow DDB write doesn't
+    // back-pressure the per-frame WS dispatch loop. Writes fire-
+    // and-forget; flushFinal awaits the most recent one before
+    // exit so the next process's hydrate sees current state.
+    updateSessionInfo(_shardId, info) {
+      if (stopped) return;
 
       if (info === null) {
-        // Null-clear path. Mirror cleared first so any in-flight
-        // retrieveSessionInfo on a tight loop never observes the
-        // dead session. Pending throttle is cancelled (it would
-        // have re-written the dead row). DDB delete completes the
-        // cross-process clear so the next boot's hydrate() returns
-        // null and the new process IDENTIFYs cleanly.
         mirror = null;
         lastWrittenSessionId = null;
         cancelPendingFlush();
-        try {
-          await deleteRow();
-          lastWriteAt = clock();
-        } catch (err) {
-          // Delete failure is recoverable: the in-process mirror
-          // is already cleared (correctness for this process is
-          // preserved), and the next dispatch's putItem (after
-          // READY) will overwrite the stale row. Log loudly so
-          // a sustained delete-fail surfaces in metrics.
+        // Fire-and-forget delete. The next boot's hydrate() must
+        // not observe the dead session row, hence the cross-
+        // process clear — but waiting on DDB here would stall the
+        // WS dispatch loop.
+        inFlightWrite = deleteRow().catch((err) => {
           logger.warn('gateway-session-store: null-clear delete failed', { error: err.message });
-        }
+        });
+        lastWriteAt = clock();
         return;
       }
 
-      // Non-null update. Mirror always updated first so
-      // retrieveSessionInfo sees the latest sequence even if the
-      // DDB write is throttled.
+      // Mirror always updated synchronously so retrieveSessionInfo
+      // sees the latest sequence even if the DDB write is throttled.
       mirror = info;
 
       const sessionChanged = info.sessionId !== lastWrittenSessionId;
       const throttleExpired = (clock() - lastWriteAt) >= writeThrottleMs;
       if (sessionChanged || throttleExpired) {
-        // Immediate-write path. Cancel any pending flush since we're
-        // about to persist a newer value.
         cancelPendingFlush();
-        try {
-          await persistRow(info);
-          lastWrittenSessionId = info.sessionId;
-          lastWriteAt = clock();
-        } catch (err) {
-          // Immediate-write failure is the same recoverability
-          // story as the deferred path: mirror holds the truth,
-          // next dispatch retries. Log loudly so a sustained
-          // write-fail surfaces — without it, the gateway runs
-          // happily until restart and then RESUMEs on a too-old
-          // sequence (or hits the resume-rejection IDENTIFY
-          // fallback, which is at least observable).
-          logger.warn('gateway-session-store: write failed', { error: err.message });
-        }
+        firePersist(info);
       } else {
-        // Throttle still cooling. Schedule a deferred flush so the
-        // latest sequence reaches DDB within writeThrottleMs.
         scheduleFlush();
       }
     },
@@ -307,28 +260,31 @@ function createGatewaySessionStore({
       }
     },
 
-    // Final flush on SIGTERM. Cancels any pending throttle timer
-    // and synchronously writes the mirror's current state. If
-    // mirror is null (session was cleared mid-flight), nothing to
-    // write — the null-clear path already issued the DDB delete.
-    // Idempotent: safe to call multiple times (stop() guards
-    // re-entry).
+    // Final flush on SIGTERM. Cancels any pending throttle timer,
+    // awaits the most recently fired DDB write (write or null-
+    // clear), then writes the mirror's current state synchronously
+    // so the next process's hydrate sees current state.
+    //
+    // Failure here is the worst case for the migration: the next
+    // boot's hydrate returns a stale sequence and Discord replays
+    // a few seconds of events (best case) or rejects the RESUME
+    // and the new process IDENTIFYs (acceptable degradation). Log
+    // error-level so operators can correlate a failed flush with
+    // a degraded RESUME on the next boot.
     async flushFinal() {
       stopped = true;
       cancelPendingFlush();
+      // Settle the most recent fire-and-forget write before our
+      // own synchronous write so we don't race it with a stale
+      // value of `mirror`. Errors were already logged by the
+      // .catch inside firePersist/null-clear; swallow here.
+      try { await inFlightWrite; } catch (_) { /* logged */ }
       if (!mirror) return;
       try {
         await persistRow(mirror);
         lastWrittenSessionId = mirror.sessionId;
         lastWriteAt = clock();
       } catch (err) {
-        // Final-flush failure is the worst case for Pillar 2: the
-        // next boot's hydrate() returns a stale sequence, and
-        // Discord either replays a few seconds of events (best
-        // case) or rejects the RESUME and the next process
-        // IDENTIFYs (acceptable degradation). Log loudly so the
-        // operator can correlate a failed flush with a degraded-
-        // RESUME observation on the next boot.
         logger.error('gateway-session-store: final flush failed', { error: err.message });
       }
     },
@@ -355,6 +311,13 @@ function createGatewaySessionStore({
     },
     _getLastWriteAtForTest() {
       return lastWriteAt;
+    },
+    // Synchronizes a test on the most recent fire-and-forget DDB
+    // write. Production callers never await this (the WS dispatch
+    // loop must remain non-blocking); flushFinal handles the
+    // pre-exit synchronization.
+    async _awaitInFlightForTest() {
+      try { await inFlightWrite; } catch (_) { /* swallowed in production .catch */ }
     },
   };
 }

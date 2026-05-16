@@ -241,9 +241,11 @@ describe('updateSessionInfo — null-clear contract', () => {
     const { store, ddbMock, logger } = makeStore();
     ddbMock.on(DeleteCommand).rejects(new Error('throughput exceeded'));
 
-    // Should resolve cleanly — mirror is the in-process source of
-    // truth, and the in-flight gateway must stay running.
-    await expect(store.updateSessionInfo('0:1', null)).resolves.toBeUndefined();
+    // updateSessionInfo returns synchronously; the DDB delete is
+    // fire-and-forget. Settle the in-flight promise via the test
+    // seam before asserting on the warn log.
+    store.updateSessionInfo('0:1', null);
+    await store._awaitInFlightForTest();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringMatching(/null-clear delete failed/i),
       expect.objectContaining({ error: 'throughput exceeded' }),
@@ -366,25 +368,27 @@ describe('updateSessionInfo — throttle path', () => {
     jest.useRealTimers();
   });
 
-  it('logs but does not throw when deferred write fails', async () => {
+  it('logs but does not throw when a fire-and-forget write fails', async () => {
     jest.useFakeTimers();
     let now = 1_000_000;
     const clock = () => now;
     const { store, ddbMock, logger } = makeStore({ clock, writeThrottleMs: 1000 });
 
-    // First Put succeeds (the prime); second Put (deferred) fails.
+    // First Put succeeds (the prime); second Put (deferred fire-
+    // and-forget after the throttle elapses) fails.
     ddbMock.on(PutCommand)
       .resolvesOnce({})
       .rejects(new Error('throttling'));
 
-    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
     now += 100;
-    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
+    store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
     now += 1000;
     await jest.advanceTimersByTimeAsync(1000);
+    await store._awaitInFlightForTest();
 
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(/deferred write failed/i),
+      expect.stringMatching(/write failed/i),
       expect.objectContaining({ error: 'throttling' }),
     );
     jest.useRealTimers();

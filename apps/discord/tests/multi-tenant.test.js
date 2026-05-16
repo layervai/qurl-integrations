@@ -154,8 +154,7 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-123',
-      guildIds: [],
-      guildNames: {},
+      guilds: new Map(),
     });
 
     expect(mockPut).toHaveBeenCalledTimes(1);
@@ -177,8 +176,7 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-123',
-      guildIds: [],
-      guildNames: {},
+      guilds: new Map(),
     });
 
     expect(mockPut).toHaveBeenCalledTimes(1);
@@ -201,8 +199,7 @@ describe('multi-tenant mode — registerCommands command filtering', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-123',
-      guildIds: [],
-      guildNames: {},
+      guilds: new Map(),
     });
 
     expect(mockPut).toHaveBeenCalledTimes(1);
@@ -252,8 +249,7 @@ describe('registerCommands stale-command purge (issue #86)', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-1',
-      guildIds: ['ga', 'gb', 'gc'],
-      guildNames: { ga: 'A', gb: 'B', gc: 'C' },
+      guilds: new Map([['ga', 'A'], ['gb', 'B'], ['gc', 'C']]),
     });
 
     // get called once per guild (3) — the per-guild fetch.
@@ -286,8 +282,7 @@ describe('registerCommands stale-command purge (issue #86)', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-1',
-      guildIds: ['ga'],
-      guildNames: { ga: 'A' },
+      guilds: new Map([['ga', 'A']]),
     });
 
     // get never called — purge skipped in OpenNHP mode.
@@ -311,8 +306,7 @@ describe('registerCommands stale-command purge (issue #86)', () => {
     await commandsModule.registerCommands({
       rest,
       appId: 'app-1',
-      guildIds: ['ga', 'gb'],
-      guildNames: { ga: 'A', gb: 'B' },
+      guilds: new Map([['ga', 'A'], ['gb', 'B']]),
     });
 
     // Guild A's get failed but we still tried guild B.

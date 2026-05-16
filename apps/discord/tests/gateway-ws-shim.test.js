@@ -388,7 +388,7 @@ describe('exposed REST instance', () => {
     const { shim, restInstances } = makeShim({ rest: injectedRest });
 
     await shim.start();
-    expect(shim.rest).toBe(injectedRest);
+    expect(shim.getRest()).toBe(injectedRest);
     // No internal REST was constructed when one was injected.
     expect(restInstances).toHaveLength(0);
   });
@@ -398,7 +398,7 @@ describe('exposed REST instance', () => {
     await shim.start();
 
     expect(restInstances).toHaveLength(1);
-    expect(shim.rest).toBe(restInstances[0]);
+    expect(shim.getRest()).toBe(restInstances[0]);
     expect(restInstances[0].token).toBe('test-token');
   });
 });

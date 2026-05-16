@@ -123,26 +123,29 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
 }
 
 // Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
-// Two unsupported shapes:
+// Three unsupported shapes:
 //
-//   1. resume=true with shipper=false — the resume shim
+//   1. resume=true with role=combined — combined mode runs both
+//      tiers in one process, which the legacy discord.js Client
+//      owns end-to-end. The resume shim would conflict with the
+//      Client's WS ownership.
+//   2. resume=true with shipper=false — the resume shim
 //      (@discordjs/ws WebSocketManager) replaces discord.js's Client
 //      entirely, so the in-process interaction dispatcher has no
 //      `client.on('interactionCreate')` emitter to attach to. The
 //      flag-on path is only coherent when the shipper has already
 //      moved dispatch to SQS.
-//   2. resume=true with role=combined — combined mode runs both
-//      tiers in one process, which the legacy discord.js Client
-//      owns end-to-end. The resume shim would conflict with the
-//      Client's WS ownership.
-//
-// (combined + shipper=true is independently rejected by
-// unsupportedRoleShipperCombo; resume's combined-mode rejection
-// catches the remaining combined+shipper-off+resume-on case.)
+//   3. resume=true with storeType!=ddb — the resume guarantee only
+//      holds when session state is persisted across processes.
+//      The default sqlite backend writes a local file that the
+//      next ECS task won't see; a resume against the previous
+//      sequence would fail every restart. Rejecting at boot is
+//      preferable to a silent IDENTIFY-every-restart degradation
+//      that mimics flag-off behavior.
 //
 // Returns the operator-facing message on rejection or null on
 // success. Same string-or-null shape as unsupportedRoleShipperCombo.
-function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, storeType) {
   if (!resumeEnabled) return null;
   if (role === 'combined') {
     return (
@@ -161,6 +164,14 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
       'WebSocketManager, which forwards every frame to SQS — the ' +
       'in-process dispatcher path is unreachable from the shim). ' +
       'Enable the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (storeType !== 'ddb') {
+    return (
+      `ENABLE_GATEWAY_RESUME=true requires STORE_TYPE=ddb (got '${storeType ?? 'unset (defaults to sqlite)'}'). ` +
+      'Cross-process RESUME persists session state to the gateway-session DDB ' +
+      'table; sqlite would write a local file the next process never sees. Set ' +
+      'STORE_TYPE=ddb in the deployment template, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
   return null;
