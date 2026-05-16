@@ -73,7 +73,6 @@ function makeLeader({ mocks, sleep, tickIntervalMs } = {}) {
     controlClient: m.controlClient,
     manager: m.manager,
     selfInstanceId: 'inst-A',
-    selfLockHolder: 'task-arn:.../inst-A',
     shardId: '0:1',
     logger: m.logger,
     tickIntervalMs, sleep,
@@ -103,14 +102,10 @@ describe('createGatewayLeader — factory validation', () => {
     expect(() => createGatewayLeader({
       lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
       selfInstanceId: 'a',
-    })).toThrow(/selfLockHolder/);
-    expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
-      selfInstanceId: 'a', selfLockHolder: 'h',
     })).toThrow(/shardId/);
     expect(() => createGatewayLeader({
       lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
-      selfInstanceId: 'a', selfLockHolder: 'h', shardId: 's',
+      selfInstanceId: 'a', shardId: 's',
     })).toThrow(/logger/);
   });
 });
@@ -322,6 +317,23 @@ describe('handleInboundHandoff', () => {
       expect.objectContaining({ error: 'discord-down' }),
     );
   });
+
+  it('synchronous manager.connect throw clears connecting flag (defensive)', async () => {
+    // @discordjs/ws's WebSocketManager.connect contract is async, but
+    // a future shim regression could surface a sync throw. The flag
+    // must clear so the watchdog can take over the retry — otherwise
+    // it would no-op forever.
+    const mocks = makeMocks();
+    mocks.manager.connect = jest.fn(() => { throw new Error('sync-shim-bug'); });
+    const { leader } = makeLeader({ mocks });
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    })).rejects.toThrow(/sync-shim-bug/);
+
+    expect(leader.isConnecting()).toBe(false);
+    expect(leader.isHoldingLock()).toBe(true);
+  });
 });
 
 describe('pushHandoff', () => {
@@ -396,6 +408,33 @@ describe('pushHandoff', () => {
 
     const result = await leader.pushHandoff();
     expect(result).toEqual({ pushed: true, ackReason: 'timeout' });
+  });
+
+  it('returns pushed:true, ackReason:push_threw when controlClient.pushHandoff throws', async () => {
+    // The control-client's documented contract is "never throws", but
+    // its synchronous argument validators DO throw if a row makes it
+    // past listFreshPeers' filters in a future regression. transferLock
+    // has already moved the lock in DDB at this point, so the standby
+    // owns it either way; the standby's watchdog catches lock-held +
+    // WS-disconnected and brings up the gateway from the cold path.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    mocks.controlClient.pushHandoff = jest.fn(async () => {
+      throw new Error('pushHandoff: peerIp (IPv4 or IPv6 literal) required');
+    });
+    const { leader, logger } = makeLeader({ mocks });
+    await preHoldLock(leader);
+
+    const result = await leader.pushHandoff();
+    expect(result).toEqual({ pushed: true, ackReason: 'push_threw' });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/controlClient\.pushHandoff threw/),
+      expect.objectContaining({ peerInstanceId: 'inst-B' }),
+    );
   });
 
   it('falls back to placeholder lock_holder when peer row lacks the field', async () => {
@@ -654,7 +693,6 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
       controlClient: mocks.controlClient,
       manager: mocks.manager,
       selfInstanceId: 'inst-A',
-      selfLockHolder: 'task-arn:.../inst-A',
       shardId: '0:1',
       logger: mocks.logger,
       inboundConnectTimeoutMs: 50,

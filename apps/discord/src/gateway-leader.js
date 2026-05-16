@@ -86,7 +86,6 @@ function createGatewayLeader({
   controlClient,
   manager,
   selfInstanceId,
-  selfLockHolder,
   shardId,
   logger,
   tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
@@ -103,7 +102,6 @@ function createGatewayLeader({
     throw new Error('createGatewayLeader: manager with connect() and isConnected() is required');
   }
   if (!selfInstanceId) throw new Error('createGatewayLeader: selfInstanceId is required');
-  if (!selfLockHolder) throw new Error('createGatewayLeader: selfLockHolder is required');
   if (!shardId) throw new Error('createGatewayLeader: shardId is required');
   if (!logger) throw new Error('createGatewayLeader: logger is required');
 
@@ -158,6 +156,15 @@ function createGatewayLeader({
     // distinct thenable handlers but both call the same `work`
     // callee; `work()` runs exactly once per `runSerialized` call
     // regardless of the prior outcome.
+    //
+    // Subtle: this function returns `next` (which propagates work's
+    // rejection to the caller) but ASSIGNS `inFlight` to a different
+    // promise that swallows the rejection (via the second `.then`
+    // arm below). The caller awaiting the return value can `.catch`
+    // its op's failure; the NEXT `runSerialized` call chains off an
+    // always-fulfilled `inFlight` so a prior op's rejection doesn't
+    // poison the chain. Returned-promise behavior diverges from
+    // chain-keeping promise behavior on purpose.
     const next = inFlight.then(() => work(), () => work());
     inFlight = next.then(() => {}, (err) => {
       // Warn (not debug): every work() should already log its own
@@ -379,13 +386,21 @@ function createGatewayLeader({
       // risk, or wire a `manager.destroy()`-on-timeout escape in
       // the shim layer.
       connecting = true;
-      const connectPromise = manager.connect();
-      connectPromise.then(
-        () => { connecting = false; },
-        () => { connecting = false; },
-      );
+      // `manager.connect()` is inside the try so a synchronous throw
+      // (defensive — @discordjs/ws's WebSocketManager.connect contract
+      // is async, but a future shim regression or wiring bug could
+      // surface a sync throw) still clears `connecting=false`. If
+      // `connectPromise` is unassigned at catch-time, the lifecycle
+      // attachment never ran, so the catch arm is the only thing that
+      // can clear the flag.
+      let connectPromise;
       let connectTimer;
       try {
+        connectPromise = manager.connect();
+        connectPromise.then(
+          () => { connecting = false; },
+          () => { connecting = false; },
+        );
         await Promise.race([
           connectPromise,
           new Promise((_, reject) => {
@@ -396,16 +411,22 @@ function createGatewayLeader({
           }),
         ]);
       } catch (err) {
+        // Sync-throw path: no connectPromise means the lifecycle
+        // attachment never ran, so this catch is the only clear. The
+        // async-rejection path is owned by the .then() handlers, so
+        // we DON'T touch `connecting` there (would race the next
+        // tick's connect; see comment in finally).
+        if (!connectPromise) connecting = false;
         logger.error('gateway-leader: inbound-handoff connect threw (watchdog will retry)', {
           error: err.message, activeInstanceId,
         });
         throw err;
       } finally {
         clearTimeout(connectTimer);
-        // Note: NO `connecting = false` here — that's owned by the
-        // connectPromise settlement handlers above. Clearing it
-        // here on a timeout would race the still-pending connect
-        // against the next watchdog tick's fresh connect().
+        // Note: NO `connecting = false` here on the async path —
+        // that's owned by the connectPromise settlement handlers.
+        // Clearing it here on a timeout would race the still-pending
+        // connect against the next watchdog tick's fresh connect().
       }
       logger.info('gateway-leader: adopted lock + connected via inbound handoff', {
         activeInstanceId, expectedVersion,
@@ -486,14 +507,32 @@ function createGatewayLeader({
 
       heldLock = false;
 
-      const pushResult = await controlClient.pushHandoff({
-        peerIp: peer.ip,
-        peerPort: peer.port,
-        peerInstanceId: peer.instance_id,
-        selfInstanceId,
-        expectedVersion: transferResult.version,
-      });
-      // Either branch is fine. The active is exiting anyway; the
+      // The control-client's documented contract is "never throws"
+      // (returns a result object). Wrap defensively anyway: the
+      // synchronous validators inside pushHandoff (peerIp/peerPort/
+      // expectedVersion shape) DO throw if a row makes it past
+      // listFreshPeers' filters in a future regression — and the
+      // SIGTERM caller cannot handle exceptions cleanly. Mirrors the
+      // transferLock try/catch posture above. transferLock has
+      // already moved the lock in DDB, so the standby owns it either
+      // way; the watchdog catches lock-held + WS-disconnected within
+      // ~1 s and brings up the gateway from the cold-fallback path.
+      let pushResult;
+      try {
+        pushResult = await controlClient.pushHandoff({
+          peerIp: peer.ip,
+          peerPort: peer.port,
+          peerInstanceId: peer.instance_id,
+          selfInstanceId,
+          expectedVersion: transferResult.version,
+        });
+      } catch (err) {
+        logger.error('gateway-leader: controlClient.pushHandoff threw (watchdog will catch)', {
+          peerInstanceId: peer.instance_id, error: err && err.message,
+        });
+        return { pushed: true, ackReason: 'push_threw' };
+      }
+      // Either ACK branch is fine. The active is exiting anyway; the
       // standby has the lock either way (transferLock already moved
       // it in DDB). If the push didn't ACK, the standby's watchdog
       // sees lock-held + WS-disconnected within ~1 s and brings
