@@ -796,6 +796,13 @@ function signalShutdown(code) {
   }
 }
 
+// SIGTERM/SIGINT can land BEFORE startHotStandby has assigned
+// `gatewayLeader` (e.g. ECS task replacement mid-boot, ctrl-c during
+// `npm start`). Applies to BOTH handlers below.
+// `shouldUsePushHandoffShutdown` handles the null-leader case by
+// falling through to gracefulShutdown — the contract is pinned by
+// the "returns false when leader is null" test in
+// gateway-shutdown-helpers.test.js.
 process.on('SIGTERM', () => {
   logger.info('Received SIGTERM');
   signalShutdown(0);

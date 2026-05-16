@@ -111,6 +111,11 @@ async function runPushHandoffShutdown({
   // src/event-publisher.js; tests can omit or pass a spy.
   eventPublisher = null,
   logger,
+  // 12 s = 9 s pushHandoff internal ceiling (enforced in
+  // gateway-leader.js's DEFAULT_INBOUND_CONNECT_TIMEOUT_MS /
+  // pushHandoff race) + ~3 s headroom for the post-handoff log,
+  // publisher drain, and process.exit unwind. Well under ECS's 30 s
+  // SIGTERM deadline.
   ceilingMs = 12_000,
   // Forced exit code when the outer ceiling fires. Defaults to 1
   // so ECS / dashboards can distinguish "clean transfer, exit 0"
@@ -120,6 +125,7 @@ async function runPushHandoffShutdown({
   // Injected for tests; production uses node:timers + process.
   exit = (c) => process.exit(c),
   scheduleHardExit = setTimeout,
+  clearHardExit = clearTimeout,
 }) {
   logger.info('Hot-standby shutdown initiated; attempting pushHandoff');
   const hardExit = scheduleHardExit(() => {
@@ -135,6 +141,13 @@ async function runPushHandoffShutdown({
   // promise (instead of awaiting here) lets pushHandoff run
   // concurrently; we await both before exit below.
   const drainPromise = tryStop('event-publisher', eventPublisher, logger);
+  // Track whether pushHandoff threw — we still exit (so the standby
+  // cold-acquires after lock TTL) but with `forcedExitCode` instead
+  // of the incoming `code` so deploy dashboards can distinguish three
+  // outcomes by exit code: clean transfer (code), pushHandoff threw
+  // (forcedExitCode), pushHandoff timed out (forcedExitCode, via the
+  // hard-exit timer above).
+  let handoffThrew = false;
   try {
     const result = await gatewayLeader.pushHandoff();
     logger.info('pushHandoff complete', {
@@ -144,6 +157,7 @@ async function runPushHandoffShutdown({
       pushReason: result?.pushReason,
     });
   } catch (err) {
+    handoffThrew = true;
     logger.error('pushHandoff threw — exiting anyway so the standby can cold-acquire', {
       error: err.message,
     });
@@ -153,7 +167,14 @@ async function runPushHandoffShutdown({
   // round-trip. Best-effort; the outer ceiling absorbs the worst
   // case.
   await drainPromise;
-  exit(code);
+  // Clear the hard-exit timer on the success path. In prod
+  // process.exit kills the process so the pending timer is moot
+  // (and .unref'd so it can't pin shutdown anyway), but a
+  // non-terminal injected `exit` (tests, future metric-emitting
+  // wrappers) would observe a spurious second exit-code-1 ~12 s
+  // later without this clear.
+  clearHardExit(hardExit);
+  exit(handoffThrew ? forcedExitCode : code);
 }
 
 module.exports = {

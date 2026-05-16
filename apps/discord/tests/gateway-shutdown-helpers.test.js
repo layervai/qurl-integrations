@@ -308,6 +308,7 @@ describe('runPushHandoffShutdown', () => {
       gatewayLeader: { pushHandoff: jest.fn().mockResolvedValue({ transferred: true, pushAcked: true }) },
       exit: jest.fn(),
       scheduleHardExit: makeTimerSpy(),
+      clearHardExit: jest.fn(),
       ...overrides,
     };
   }
@@ -323,16 +324,58 @@ describe('runPushHandoffShutdown', () => {
     );
   });
 
-  it('on a thrown pushHandoff, still exits with the incoming code (standby cold-acquires)', async () => {
+  it('on a thrown pushHandoff, exits with forcedExitCode so deploy metrics distinguish clean transfer from throw', async () => {
+    // Three observable outcomes, three exit codes:
+    //   * clean transfer       → exit(code)            (typically 0)
+    //   * pushHandoff threw    → exit(forcedExitCode)  (defaults to 1)
+    //   * pushHandoff timed out → exit(forcedExitCode)  (via hard-exit timer)
+    // Collapsing throw + clean would hide deploy-time peer-reachability
+    // failures behind clean-transfer SLI metrics.
     const deps = makeDeps({
       gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(new Error('peer unreachable')) },
     });
     await runPushHandoffShutdown({ code: 0, ...deps });
-    expect(deps.exit).toHaveBeenCalledWith(0);
+    expect(deps.exit).toHaveBeenCalledWith(1);
     expect(deps.logger.error).toHaveBeenCalledWith(
       'pushHandoff threw — exiting anyway so the standby can cold-acquire',
       expect.objectContaining({ error: 'peer unreachable' }),
     );
+  });
+
+  it('forcedExitCode is configurable for the throw path too', async () => {
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(new Error('hmac mismatch')) },
+    });
+    await runPushHandoffShutdown({ code: 0, forcedExitCode: 42, ...deps });
+    expect(deps.exit).toHaveBeenCalledWith(42);
+  });
+
+  it('clears the hard-exit timer on the success path so a non-terminal injected exit does not see a spurious second exit', async () => {
+    // In prod process.exit kills the process so the .unref'd timer
+    // is moot. But a non-terminal injected exit (tests, future
+    // metric-emitting wrapper) would observe a spurious exit-code-1
+    // ~12 s later without the clear.
+    const deps = makeDeps();
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.clearHardExit).toHaveBeenCalledTimes(1);
+    expect(deps.clearHardExit).toHaveBeenCalledWith(deps.scheduleHardExit.timers[0]);
+    // Sanity: exit fired exactly once (the success-path exit), NOT
+    // a second time from the timer callback.
+    expect(deps.exit).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(0);
+  });
+
+  it('clears the hard-exit timer on the throw path too (and exits with forcedExitCode)', async () => {
+    const deps = makeDeps({
+      gatewayLeader: { pushHandoff: jest.fn().mockRejectedValue(new Error('peer down')) },
+    });
+    await runPushHandoffShutdown({ code: 0, ...deps });
+    expect(deps.clearHardExit).toHaveBeenCalledTimes(1);
+    // Assert the exit code here too (not just call count) so a
+    // regression that swaps the throw path back to `code` is caught
+    // by this test independently of the dedicated throw-code test.
+    expect(deps.exit).toHaveBeenCalledTimes(1);
+    expect(deps.exit).toHaveBeenCalledWith(1);
   });
 
   it('schedules a hard-exit timer with the configured ceiling', async () => {
