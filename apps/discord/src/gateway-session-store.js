@@ -116,13 +116,15 @@ function createGatewaySessionStore({
   // stale cursor). On failure the cursor isn't rolled back; the
   // throttle's next flush retries, and SIGTERM's flushFinal is
   // the backstop. Sustained failure logs every retry.
-  // Tracks a promise in `inFlightWrites` until it settles. Callers
-  // MUST pre-wrap their promise with `.catch()` so a rejection
-  // doesn't become an unhandled rejection — `p.finally` here
-  // preserves the rejected state, and `Promise.allSettled` inside
-  // flushFinal would mask the rejection silently.
+  // Tracks a promise in `inFlightWrites` until it settles. The
+  // .catch wrapper guarantees the tracked promise never carries a
+  // rejected state — without it, a caller that forgot to pre-catch
+  // would leak unhandled rejections, and Promise.allSettled in
+  // flushFinal would silently consume the rejection. Callers still
+  // attach their own .catch for per-write error logging.
   function fireWrite(promise) {
-    const p = promise.finally(() => inFlightWrites.delete(p));
+    const wrapped = Promise.resolve(promise).catch(() => { /* shape guarantee */ });
+    const p = wrapped.finally(() => inFlightWrites.delete(p));
     inFlightWrites.add(p);
   }
   function firePersist(info) {

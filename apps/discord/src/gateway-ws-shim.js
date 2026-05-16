@@ -281,6 +281,9 @@ function createGatewayWsShim({
     },
 
     async stop({ flushFinal: shouldFlush = true } = {}) {
+      // Idempotent: a second SIGTERM/SIGINT racing the first shouldn't
+      // re-flush the store or re-strip listeners. Cheap early return.
+      if (stopped) return;
       stopped = true;
       // Drop dispatch handlers so any late dispatch arriving on
       // the way out doesn't trigger a downstream side effect.
@@ -296,12 +299,12 @@ function createGatewayWsShim({
       // NO manager.destroy() — see SIGTERM contract in module header.
       // The caller's process.exit() drops the TCP socket; Discord
       // holds the session in its 60 s buffer for the next process's
-      // RESUME. removeAllListeners detaches the Dispatch/Error
-      // handlers we installed so a test that calls stop() without
-      // immediately exiting doesn't leak the listeners (production
-      // exits right after, so this is hygiene rather than correctness).
+      // RESUME. Detach only the listeners we installed; an
+      // unscoped removeAllListeners() could strip @discordjs/ws's
+      // own internal listeners on the same emitter.
       if (manager) {
-        manager.removeAllListeners();
+        manager.removeAllListeners(WebSocketShardEvents.Dispatch);
+        manager.removeAllListeners(WebSocketShardEvents.Error);
       }
       manager = null;
     },

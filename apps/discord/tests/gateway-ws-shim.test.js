@@ -416,20 +416,37 @@ describe('SIGTERM contract — stop() does NOT call manager.destroy()', () => {
     expect(h).not.toHaveBeenCalled();
   });
 
-  it('removes manager listeners so non-exiting callers (tests, future shapes) do not leak handler refs', async () => {
-    // Hygiene check: production exits immediately after stop(), so
-    // listener-leak is harmless there. But a test cleanup path
-    // (stop({flushFinal:false}) without process.exit) shouldn't
-    // strand the Dispatch/Error listeners on the manager.
+  it('removes only the listeners the shim installed (does not strip foreign listeners)', async () => {
+    // The shim installs Dispatch + Error listeners; stop() must
+    // detach those and leave any other listeners alone. An unscoped
+    // manager.removeAllListeners() would also strip @discordjs/ws's
+    // own internal listeners on the same emitter.
     const { shim, managerInstances } = makeShim();
     await shim.start();
     const mgr = managerInstances[0];
-    const beforeCount = mgr.listenerCount(WebSocketShardEvents.Dispatch);
-    expect(beforeCount).toBeGreaterThan(0);
+    const foreign = jest.fn();
+    mgr.on('SomeOtherEvent', foreign);
+    expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBeGreaterThan(0);
+    expect(mgr.listenerCount('SomeOtherEvent')).toBe(1);
 
     await shim.stop();
     expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBe(0);
     expect(mgr.listenerCount(WebSocketShardEvents.Error)).toBe(0);
+    expect(mgr.listenerCount('SomeOtherEvent')).toBe(1); // unaffected
+  });
+
+  it('stop() is idempotent — second call is a no-op (does not double-flush)', async () => {
+    // A graceful-shutdown signal arriving twice (SIGTERM then SIGINT
+    // racing) shouldn't double-flush the store or otherwise re-enter
+    // teardown. Single-flush also matters for cost — flushFinal
+    // issues a synchronous DDB PUT; a second one is wasted.
+    const { shim, store } = makeShim();
+    await shim.start();
+
+    await shim.stop();
+    await shim.stop();
+
+    expect(store.flushFinal).toHaveBeenCalledTimes(1);
   });
 });
 

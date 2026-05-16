@@ -349,11 +349,6 @@ const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 // tables) so a future env-name rename touches one var, not many.
 // Both this module and the qurl-integrations-infra qurl-bot-ddb
 // module pin the `gateway-session` suffix.
-// Single-shard topology today. Matches the `"k:n"` convention in
-// modules/qurl-bot-ddb's gateway-session schema. Reshard generalization
-// computes this from a SHARD_ID/SHARD_COUNT env pair.
-const DEFAULT_SHARD_ID = '0:1';
-
 let gatewayShim = null;
 if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   // DDB_TABLE_PREFIX and AWS_REGION are validated upstream: the
@@ -373,7 +368,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   const sessionStore = createGatewaySessionStore({
     ddbClient,
     tableName: `${ddbTablePrefix}gateway-session`,
-    shardId: DEFAULT_SHARD_ID,
+    shardId: config.SHARD_ID,
     logger,
   });
   gatewayShim = createGatewayWsShim({
@@ -384,7 +379,7 @@ if (isGateway && config.ENABLE_GATEWAY_RESUME) {
   });
   logger.info('gateway-resume shim constructed', {
     tableName: `${ddbTablePrefix}gateway-session`,
-    shardId: DEFAULT_SHARD_ID,
+    shardId: config.SHARD_ID,
   });
 }
 
