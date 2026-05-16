@@ -69,6 +69,32 @@ describe('INSTANCE_ID derivation', () => {
 });
 
 describe('INSTANCE_IP derivation', () => {
+  it('falls back to interface scan when INSTANCE_IP is empty string', () => {
+    withFreshConfig(
+      {
+        env: { INSTANCE_IP: '' },
+        networkInterfaces: {
+          eth0: [{ family: 'IPv4', address: '10.0.0.7', internal: false }],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('10.0.0.7');
+      },
+    );
+  });
+
+  it('trims whitespace from env overrides (parity with other env-derived values)', () => {
+    withFreshConfig(
+      {
+        env: { INSTANCE_ID: '  pinned  ', INSTANCE_IP: ' 10.0.0.5 ' },
+      },
+      (config) => {
+        expect(config.INSTANCE_ID).toBe('pinned');
+        expect(config.INSTANCE_IP).toBe('10.0.0.5');
+      },
+    );
+  });
+
   it('uses INSTANCE_IP env override when set (wins over interfaces)', () => {
     withFreshConfig(
       {

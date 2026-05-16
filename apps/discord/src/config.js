@@ -24,12 +24,23 @@ const os = require('os');
 // circuit and both replicas would believe they hold leadership.
 // The peer-heartbeat row collision (two writers on the same composite
 // key) would surface post-deploy as a telemetry signal.
+// Env overrides are trimmed for parity with GUILD_ID / STORE_TYPE /
+// ALLOWED_GITHUB_ORGS upstream — a trailing space on INSTANCE_ID
+// would otherwise silently key into the DDB lock and a replica
+// mismatch would be hard to spot.
+//
+// `addr.family === 'IPv4'` matches Node 22's `os.networkInterfaces()`
+// string-form contract (the brief Node 18 numeric experiment was
+// reverted). If a future Node major flips back to numeric, this
+// returns null on every Fargate boot and invalidHotStandbyValues
+// catches it — fail-loud, but the diagnostic would be misleading.
 function deriveInstanceId() {
-  return process.env.INSTANCE_ID || os.hostname();
+  return process.env.INSTANCE_ID?.trim() || os.hostname();
 }
 
 function deriveInstanceIp() {
-  if (process.env.INSTANCE_IP) return process.env.INSTANCE_IP;
+  const envOverride = process.env.INSTANCE_IP?.trim();
+  if (envOverride) return envOverride;
   const ifaces = os.networkInterfaces();
   for (const addr of ifaces.eth0 || []) {
     if (addr.family === 'IPv4' && !addr.internal) return addr.address;
@@ -38,8 +49,9 @@ function deriveInstanceIp() {
   // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
   // returns — best-effort only; under Fargate awsvpc the eth0 path
   // above always wins, so this branch never runs in prod.
-  for (const name of Object.keys(ifaces).filter(n => n !== 'eth0')) {
-    for (const addr of ifaces[name]) {
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (name === 'eth0') continue;
+    for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal) return addr.address;
     }
   }
