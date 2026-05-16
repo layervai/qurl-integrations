@@ -406,7 +406,21 @@ if (shouldRegisterInteractionListener({
 if (isGateway) {
   // Register commands when ready
   client.once('ready', async () => {
-    await registerCommands(client);
+    // registerCommands accepts REST + appId + guildIds (rather than
+    // the discord.js Client) so the Pillar 2 shim path can call the
+    // same function without constructing a Client. In the legacy
+    // flag-off path here, lift the same three pieces out of the
+    // discord.js client — semantics identical to the pre-refactor
+    // shape (single PUT to global or guild-scoped commands, with
+    // stale-guild-purge for non-OpenNHP deploys).
+    await registerCommands({
+      rest: client.rest,
+      appId: client.application.id,
+      guildIds: [...client.guilds.cache.keys()],
+      guildNames: Object.fromEntries(
+        [...client.guilds.cache.values()].map((g) => [g.id, g.name]),
+      ),
+    });
   });
 
   // interactionCreate listener is registered above (isGateway || isWorker

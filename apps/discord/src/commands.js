@@ -14,6 +14,7 @@ const {
   TextInputStyle,
   AttachmentBuilder,
 } = require('discord.js');
+const { Routes } = require('discord-api-types/v10');
 const crypto = require('crypto');
 const config = require('./config');
 const db = require('./store');
@@ -8045,25 +8046,25 @@ function getActiveCommands() {
 
 // Proactively clear stale guild-scoped command registrations from any
 // guild the bot is in. Discord's guild and global command namespaces do
-// not purge each other on a fresh .set() call, so a bot that previously
+// not purge each other on a fresh PUT call, so a bot that previously
 // ran in OpenNHP mode (GUILD_ID=X, full command set registered to guild
 // X) and is now redeployed in multi-tenant or single-guild-plain mode
 // will leave /link, /leaderboard, etc. visible in X's slash-command
 // autocomplete until Discord's cache ages out. The dispatch-time filter
 // in handleCommand prevents those stale commands from doing anything
 // harmful, but users still see dead commands in the picker. Issuing
-// .set([], guildId) clears the guild-scoped set; any ALIVE guild-scoped
-// registration for the CURRENT mode gets reinstalled by the main
-// registerCommands path below.
+// PUT-with-empty-body on the guild-commands endpoint clears the
+// guild-scoped set; any ALIVE guild-scoped registration for the
+// CURRENT mode gets reinstalled by the main registerCommands path
+// below.
 //
 // Scoped to non-OpenNHP modes: in OpenNHP mode we intentionally register
 // guild-scoped commands to config.GUILD_ID, so purging there would
-// race with the upcoming set(). Only iterates guilds the bot is
-// actually in (client.guilds.cache) — we can't and shouldn't enumerate
-// guilds we've never joined.
-async function purgeStaleGuildCommands(client) {
+// race with the upcoming PUT. Only iterates guildIds the caller passes
+// in — we can't and shouldn't enumerate guilds we've never joined.
+async function purgeStaleGuildCommands({ rest, appId, guildIds, guildNames = {} }) {
   if (config.isOpenNHPActive) return; // guild-scoped register is the goal in OpenNHP mode
-  // Parallelize the per-guild fetch+set. Sequentializing makes boot
+  // Parallelize the per-guild fetch+put. Sequentializing makes boot
   // time O(guilds) at ~500ms per round-trip, which scales badly for
   // the public-bot install path this PR targets. Promise.allSettled
   // so one slow/failing guild doesn't block the others, and so a
@@ -8072,17 +8073,20 @@ async function purgeStaleGuildCommands(client) {
   // per guild, so parallel fans out cleanly until the global
   // app-command rate limit (~200/min) — well above any realistic
   // boot-time burst.
-  const guilds = [...client.guilds.cache.values()];
-  await Promise.allSettled(guilds.map(async (guild) => {
+  await Promise.allSettled(guildIds.map(async (guildId) => {
     try {
-      const existing = await client.application.commands.fetch({ guildId: guild.id });
-      if (existing.size === 0) return;
-      await client.application.commands.set([], guild.id);
-      logger.info(`Purged ${existing.size} stale guild-scoped commands from ${guild.name} (${guild.id})`);
+      const existing = await rest.get(Routes.applicationGuildCommands(appId, guildId));
+      // REST returns an array of Command objects; falsy / zero-length
+      // means no stale registrations to purge (skip the PUT).
+      const existingCount = Array.isArray(existing) ? existing.length : 0;
+      if (existingCount === 0) return;
+      await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
+      const displayName = guildNames[guildId] ?? guildId;
+      logger.info(`Purged ${existingCount} stale guild-scoped commands from ${displayName} (${guildId})`);
     } catch (error) {
       // Don't fail boot on a purge error — the dispatch-time filter in
       // handleCommand is the correctness guarantee; purge is UX polish.
-      logger.warn(`Could not purge stale commands from guild ${guild.id}`, { error: error.message });
+      logger.warn(`Could not purge stale commands from guild ${guildId}`, { error: error.message });
     }
   }));
 }
@@ -8090,11 +8094,21 @@ async function purgeStaleGuildCommands(client) {
 // Register commands with Discord. `config.isOpenNHPActive` is the
 // single source of truth for "this deployment exercises the OpenNHP
 // community surface" — see config.js for the derivation.
-async function registerCommands(client) {
+//
+// Signature decoupled from discord.js Client so both the legacy
+// `client.login()` path AND the Pillar 2 `@discordjs/ws` shim path
+// can call this with the same shape: pass REST + appId + the guild
+// list the caller already has.
+//   - Legacy path: rest=client.rest, appId=client.application.id,
+//     guildIds=[...client.guilds.cache.keys()], guildNames map.
+//   - Shim path: rest=shim.rest, appId=shim.getAppId() (READY-derived),
+//     guildIds=[] (gateway-tier shim doesn't track guild cache;
+//     purge is non-load-bearing UX polish in the shim path).
+async function registerCommands({ rest, appId, guildIds = [], guildNames = {} }) {
   // Purge first — prevents stale OpenNHP-era registrations in guilds the
   // bot is still in. See purgeStaleGuildCommands for details + why this
   // is scoped to non-OpenNHP modes.
-  await purgeStaleGuildCommands(client);
+  await purgeStaleGuildCommands({ rest, appId, guildIds, guildNames });
 
   const activeCommands = getActiveCommands();
   const commandData = activeCommands.map(cmd => cmd.data.toJSON());
@@ -8105,14 +8119,14 @@ async function registerCommands(client) {
       // guild. Used by the single-guild OpenNHP deployment where fast command
       // iteration matters more than appearing in other guilds.
       logger.info(`Registering ${activeCommands.length} slash commands to guild ${config.GUILD_ID}...`);
-      await client.application.commands.set(commandData, config.GUILD_ID);
+      await rest.put(Routes.applicationGuildCommands(appId, config.GUILD_ID), { body: commandData });
     } else {
       // Global registration: commands appear in every guild the bot joins.
       // Discord caches global commands for up to 1 hour, so newly-added
       // commands may take that long to propagate. Used for multi-tenant
       // deployments (customers invite the bot to their own servers).
       logger.info(`Registering ${activeCommands.length} slash commands globally (multi-tenant mode): ${activeCommands.map(c => c.data.name).join(', ')}`);
-      await client.application.commands.set(commandData);
+      await rest.put(Routes.applicationCommands(appId), { body: commandData });
     }
     logger.info('Slash commands registered.');
   } catch (error) {
