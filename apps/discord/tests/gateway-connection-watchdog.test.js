@@ -426,6 +426,46 @@ describe('start() / stop() lifecycle', () => {
     const { watchdog } = makeWatchdog();
     expect(() => watchdog.stop()).not.toThrow();
   });
+
+  it('stop() returns a promise that resolves once the loop exits', async () => {
+    const manager = makeFakeManager({ initialConnected: true });
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { watchdog } = makeWatchdog({ manager, sleep });
+    watchdog.start();
+    await flushMicrotasks();
+
+    const stopPromise = watchdog.stop();
+    sleepResolvers[0](); // wake the loop so it can observe running=false and exit
+    await stopPromise;
+
+    expect(watchdog._getRunningForTest()).toBe(false);
+  });
+
+  it('start() after stop() without awaiting does NOT orphan a second loop', async () => {
+    // Re-start safety: caller must await stop() before start();
+    // a naked start() during the wind-down window is a no-op.
+    const manager = makeFakeManager({ initialConnected: true });
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { watchdog } = makeWatchdog({ manager, sleep });
+
+    watchdog.start();
+    await flushMicrotasks();
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    watchdog.stop();
+    watchdog.start(); // no-op — old loop still pending
+    await flushMicrotasks();
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    // Wake old loop so it exits, then a fresh start is allowed.
+    sleepResolvers[0]();
+    await flushMicrotasks();
+    watchdog.start();
+    await flushMicrotasks();
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
 });
 
 // Lets the queued microtasks (await sleep/connect resolutions) flush

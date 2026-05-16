@@ -127,8 +127,14 @@ function createControlClient({
             });
             settle({ ok: true, status: res.statusCode });
           } else {
+            // Cap the logged body so an unexpectedly large peer
+            // response (e.g., a stray HTML error page from a
+            // misrouted request) doesn't flood the log line. The
+            // returned `body` field stays uncapped — callers don't
+            // act on it today, but a future debugger reading the
+            // full string from the result object is still ok.
             logger.warn('control-client: handoff rejected by peer', {
-              peerInstanceId, status: res.statusCode, body,
+              peerInstanceId, status: res.statusCode, body: body.slice(0, 512),
             });
             settle({ ok: false, reason: 'rejected', status: res.statusCode, body });
           }

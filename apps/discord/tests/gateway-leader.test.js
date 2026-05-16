@@ -599,7 +599,7 @@ describe('start / stop lifecycle', () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 
-  it('stop halts the loop', async () => {
+  it('stop halts the loop and returns a promise that resolves when the loop exits', async () => {
     const sleepResolvers = [];
     const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
     const { leader, peerHeartbeat } = makeLeader({ sleep });
@@ -608,12 +608,43 @@ describe('start / stop lifecycle', () => {
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(sleep).toHaveBeenCalledTimes(1);
 
-    leader.stop();
+    const stopPromise = leader.stop();
     sleepResolvers[0](); // wake the loop so it observes running=false
-    await new Promise((resolve) => { setImmediate(resolve); });
+    await stopPromise;
 
     // After stop, the loop must not have called writeHeartbeat (the
     // first tick's work — running=false check skips step).
     expect(peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it('start after stop without awaiting does NOT orphan a second loop', async () => {
+    // Lifecycle correctness: a re-start must wait for the prior
+    // loop to fully exit, otherwise the in-flight `await sleep(...)`
+    // in the OLD loop resumes after a `start()` toggles running=true
+    // again, and we get two concurrent ticks against the same
+    // single-caller-only gateway-lock. Guard: start() is a no-op
+    // while loopPromise is still pending.
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { leader } = makeLeader({ sleep });
+
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    // stop() does NOT immediately resolve — the old loop is still
+    // inside the sleep promise. Calling start() now must NOT spawn
+    // a second loop.
+    leader.stop();
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep).toHaveBeenCalledTimes(1); // still only 1, not 2
+
+    // Wake the old loop so it can exit, then start fresh.
+    sleepResolvers[0]();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    leader.start(); // now safe — loopPromise resolved
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep).toHaveBeenCalledTimes(2);
   });
 });

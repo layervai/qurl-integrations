@@ -175,17 +175,24 @@ function createConnectionWatchdog({
   }
 
   function start() {
-    if (running || exited) return;
+    // Guard on `loopPromise` (NOT just `running`) so a `start()`
+    // after a `stop()` that hasn't yet observed the running=false
+    // flag — the old loop is still inside `await sleep(...)` — does
+    // not spawn a second concurrent loop. Callers that need to
+    // re-start MUST await `stop()` first.
+    if (loopPromise || exited) return;
     running = true;
-    loopPromise = loop();
+    loopPromise = loop().finally(() => { loopPromise = null; });
   }
 
-  // Halts the loop. Idempotent. Does not interrupt an in-flight
+  // Halts the loop and returns a promise that resolves once the
+  // last in-flight tick has completed (including any in-flight
   // `manager.connect()` — the awaiting tick still completes before
-  // the loop check sees running=false. That matches the design's
-  // at-most-one outstanding connect invariant.
+  // the loop check sees running=false). Idempotent. Callers that
+  // want to re-start the watchdog MUST await this.
   function stop() {
     running = false;
+    return loopPromise ?? Promise.resolve();
   }
 
   return {

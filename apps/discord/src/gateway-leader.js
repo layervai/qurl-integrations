@@ -199,13 +199,23 @@ function createGatewayLeader({
   }
 
   function start() {
-    if (running) return;
+    // Guard on `loopPromise` (NOT just `running`) so a `start()`
+    // after a `stop()` that hasn't yet observed the running=false
+    // flag — the old loop is still inside `await sleep(...)` — does
+    // not spawn a second concurrent loop. Callers that need to
+    // re-start MUST `await stop()` first; the returned promise
+    // resolves once the loop has actually exited.
+    if (loopPromise) return;
     running = true;
-    loopPromise = loop();
+    loopPromise = loop().finally(() => { loopPromise = null; });
   }
 
+  // Halts the loop and returns a promise that resolves once the
+  // last in-flight tick has completed. Callers that want to
+  // re-start the leader MUST await this. Idempotent.
   function stop() {
     running = false;
+    return loopPromise ?? Promise.resolve();
   }
 
   // Called by the gateway-control-channel server when a peer pushes
@@ -220,8 +230,18 @@ function createGatewayLeader({
     return runSerialized(async () => {
       // Step 1: bootstrap version cursor. THROWS if expectedVersion
       // is malformed — protects against a future control-channel-server
-      // bug that lets bad payloads through.
-      lock.adoptLockFromHandoff(expectedVersion);
+      // bug that lets bad payloads through. Log at error level with
+      // routing context so an unexpected adopt failure is visible
+      // (the catch in runSerialized only logs at debug, which
+      // wouldn't show in default-prod log levels).
+      try {
+        lock.adoptLockFromHandoff(expectedVersion);
+      } catch (err) {
+        logger.error('gateway-leader: adoptLockFromHandoff threw', {
+          error: err.message, activeInstanceId, expectedVersion,
+        });
+        throw err;
+      }
       // Step 2: flag held BEFORE connect. If connect throws, watchdog
       // picks up the retry. If we flipped the flag after connect,
       // the watchdog would race the connect and possibly redundantly
