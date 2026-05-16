@@ -395,6 +395,36 @@ describe('step() — exhaustion path', () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
+  it('still exits(1) when releaseLock throws AND deleteOwnRow is absent (combined-permutation pin)', async () => {
+    // Pin the cross-product the individual tests don't cover. Both
+    // best-effort awaits are independent, but a future refactor that
+    // accidentally wires them sequentially (one throw aborting the
+    // other) would still need to surface exit(1).
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('fail'));
+    const releaseLock = jest.fn(async () => { throw new Error('ddb-blip'); });
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, exit, maxAttempts: 3,
+      // deleteOwnRow deliberately omitted.
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'connection-watchdog: releaseLock failed during exhaustion-exit',
+      expect.objectContaining({ error: 'ddb-blip' }),
+    );
+    // No deleteOwnRow log because hook wasn't provided.
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      'connection-watchdog: deleteOwnRow failed during exhaustion-exit',
+      expect.anything(),
+    );
+  });
+
   it('does not re-enter start() after exhaustion-exit', async () => {
     const manager = makeFakeManager();
     manager.connect.mockRejectedValue(new Error('fail'));

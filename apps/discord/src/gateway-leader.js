@@ -107,6 +107,16 @@ function createGatewayLeader({
   if (!selfInstanceId) throw new Error('createGatewayLeader: selfInstanceId is required');
   if (!shardId) throw new Error('createGatewayLeader: shardId is required');
   if (!logger) throw new Error('createGatewayLeader: logger is required');
+  // tickIntervalMs=0 would saturate the renew loop; negative would
+  // produce surprising setTimeout behavior. Fail loud at boot.
+  if (!Number.isInteger(tickIntervalMs) || tickIntervalMs <= 0) {
+    throw new Error('createGatewayLeader: tickIntervalMs must be a positive integer');
+  }
+  // inboundConnectTimeoutMs=0 would race the timer against the
+  // connect immediately; negative would be undefined behavior.
+  if (!Number.isInteger(inboundConnectTimeoutMs) || inboundConnectTimeoutMs <= 0) {
+    throw new Error('createGatewayLeader: inboundConnectTimeoutMs must be a positive integer');
+  }
 
   let heldLock = false;
   // Set true around `handleInboundHandoff`'s in-flight
@@ -149,9 +159,12 @@ function createGatewayLeader({
   // push-handoff never overlap. The serialization chain absorbs
   // failures so one op's rejection doesn't break the next op's
   // turn — see the function-level comment for the load-bearing
-  // invariant.
+  // invariant. The `opName` argument is included in the chain-catch
+  // debug log so a future caller that bypasses an op-level try/catch
+  // is trivially recognizable in logs (vs. an unlabeled backstop
+  // firing without context).
   let inFlight = Promise.resolve();
-  function runSerialized(work) {
+  function runSerialized(opName, work) {
     // The load-bearing invariant: `inFlight` is ALWAYS fulfilled
     // (never rejected) because we assign it below to a `.then` whose
     // rejection arm returns undefined — turning every prior failure
@@ -178,7 +191,7 @@ function createGatewayLeader({
       // backstop firing for a future caller that bypassed the
       // op-level try/catch) without polluting prod log levels.
       logger.debug('gateway-leader: serialized op rejected (chain continues)', {
-        error: err && err.message,
+        op: opName, error: err && err.message,
       });
     });
     return next;
@@ -259,7 +272,7 @@ function createGatewayLeader({
       // backstop. Log + continue: the next tick re-tries.
       try {
         // eslint-disable-next-line no-await-in-loop
-        await runSerialized(step);
+        await runSerialized('tick', step);
       } catch (err) {
         logger.error('gateway-leader: tick threw unexpectedly (loop continues)', {
           error: err && err.message,
@@ -319,7 +332,7 @@ function createGatewayLeader({
       });
       throw new Error('leader_closed');
     }
-    return runSerialized(async () => {
+    return runSerialized('inbound-handoff', async () => {
       // Stray-handoff guard: if we already hold the lock AND the WS
       // is connected, a second inbound handoff is either a duplicate
       // from a retry-ing active or a misrouted body (the server-side
@@ -475,7 +488,7 @@ function createGatewayLeader({
     running = false;
     closed = true;
 
-    const result = await runSerialized(async () => {
+    const result = await runSerialized('pushHandoff', async () => {
       if (!heldLock) {
         logger.info('gateway-leader: pushHandoff called without holding lock (no-op)');
         return { transferred: false, reason: 'not_holding_lock' };
@@ -612,7 +625,7 @@ function createGatewayLeader({
       logger.debug('gateway-leader: releaseLockForImmediateExit called on closed leader (no-op)');
       return;
     }
-    await runSerialized(async () => {
+    await runSerialized('releaseLockForImmediateExit', async () => {
       heldLock = false;
       await lock.releaseLock();
     });
@@ -643,7 +656,7 @@ function createGatewayLeader({
     isConnecting,
     isKnownPeer,
     // Inspection seams for tests.
-    _stepForTest: () => runSerialized(step),
+    _stepForTest: () => runSerialized('tick', step),
     _getKnownPeersForTest: () => new Set(knownPeerInstanceIds),
     _getLoopPromiseForTest: () => loopPromise,
   };

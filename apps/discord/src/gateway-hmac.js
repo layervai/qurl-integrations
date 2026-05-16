@@ -105,7 +105,13 @@ function createGatewayHmac({
     throw new Error('createGatewayHmac: secrets ({ current, previous? }) is required');
   }
   if (typeof secrets.current !== 'string' || secrets.current.length === 0) {
-    throw new Error('createGatewayHmac: secrets.current (non-empty hex string) is required');
+    // Format: any non-empty opaque string. Production deploys
+    // load this from SSM as a hex-encoded 32-byte value (matches
+    // operator tooling that assumes hex), but `createHmac` accepts
+    // any string and uses its UTF-8 bytes as the key, so the
+    // module itself does not enforce hex. If you change the SSM
+    // format, audit operator tooling for hex assumptions.
+    throw new Error('createGatewayHmac: secrets.current (non-empty string) is required');
   }
   // `previous` is optional — null/undefined accepted, but if present
   // must be a NON-EMPTY string. The use site at the verify path

@@ -84,6 +84,12 @@ function createControlClient({
     throw new Error('createControlClient: hmac with sign() and generateNonce() is required');
   }
   if (!logger) throw new Error('createControlClient: logger is required');
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('createControlClient: timeoutMs must be a positive integer');
+  }
+  if (!Number.isInteger(responseByteCap) || responseByteCap <= 0) {
+    throw new Error('createControlClient: responseByteCap must be a positive integer');
+  }
 
   async function pushHandoff({
     peerIp,

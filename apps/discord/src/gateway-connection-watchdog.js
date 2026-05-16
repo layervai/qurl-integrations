@@ -100,6 +100,14 @@ function createConnectionWatchdog({
     throw new Error('createConnectionWatchdog: releaseLock function is required');
   }
   if (!logger) throw new Error('createConnectionWatchdog: logger is required');
+  // maxAttempts=0 would exit(1) on the first tick; pollIntervalMs=0
+  // would saturate the loop. Fail loud at boot.
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new Error('createConnectionWatchdog: maxAttempts must be a positive integer');
+  }
+  if (!Number.isInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error('createConnectionWatchdog: pollIntervalMs must be a positive integer');
+  }
 
   let running = false;
   let loopPromise = null;

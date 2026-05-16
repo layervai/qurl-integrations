@@ -167,6 +167,21 @@ describe('startControlChannelServer — factory validation', () => {
     expect(() => startControlChannelServer({ ...baseArgs, requestTimeoutMs: '5000' }))
       .toThrow(/requestTimeoutMs.*1100/);
   });
+
+  it('throws on non-positive bodyByteCap (every request would 413)', () => {
+    const baseArgs = {
+      hmac: { verify() {} }, selfInstanceId: 'a', isKnownPeer: () => true,
+      onHandoff: () => {}, logger: makeLogger(), onListenError: () => {}, port: 0,
+    };
+    expect(() => startControlChannelServer({ ...baseArgs, bodyByteCap: 0 }))
+      .toThrow(/bodyByteCap.*positive integer/);
+    expect(() => startControlChannelServer({ ...baseArgs, bodyByteCap: -1 }))
+      .toThrow(/bodyByteCap.*positive integer/);
+    expect(() => startControlChannelServer({ ...baseArgs, bodyByteCap: 1.5 }))
+      .toThrow(/bodyByteCap.*positive integer/);
+    expect(() => startControlChannelServer({ ...baseArgs, bodyByteCap: '8192' }))
+      .toThrow(/bodyByteCap.*positive integer/);
+  });
 });
 
 describe('handleRequest — method + path routing', () => {
@@ -250,6 +265,58 @@ describe('handleRequest — body cap', () => {
     expect(res.statusCode).toBe(413);
     expect(JSON.parse(res.body)).toEqual({ error: 'body_too_large' });
     expect(ctx.onHandoff).not.toHaveBeenCalled();
+  });
+
+  it('413s on Content-Length over cap WITHOUT reading body chunks (short-circuit)', async () => {
+    // A declared length over cap is unambiguous — short-circuit before
+    // any stream work. Body chunks must NOT be consumed; verify that
+    // by tracking data emissions.
+    const ctx = makeCtx({ bodyByteCap: 100 });
+    const big = Buffer.alloc(200, 0x61);
+    const req = makeReq({ body: big });
+    req.headers['content-length'] = '200';
+    // Spy: track whether anyone read from the stream.
+    let dataEmitted = false;
+    req.on('data', () => { dataEmitted = true; });
+
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.body)).toEqual({ error: 'body_too_large' });
+    // The pre-check fires before readRequestBody starts the data
+    // listener, so no chunks were drained.
+    expect(dataEmitted).toBe(false);
+  });
+
+  it('ignores malformed Content-Length and falls through to streaming check', async () => {
+    // "1KB", "0xFF", negative, multi-value-like — anything not pure
+    // digits is ignored, the streaming cap still catches over-cap.
+    const ctx = makeCtx({ bodyByteCap: 100 });
+    const big = Buffer.alloc(200, 0x61);
+    for (const bad of ['1KB', '-50', '0xFF', '1, 2']) {
+      // eslint-disable-next-line no-await-in-loop
+      const req = makeReq({ body: big });
+      req.headers['content-length'] = bad;
+      const res = makeRes();
+      // eslint-disable-next-line no-await-in-loop
+      await _handleRequestForTest(req, res, ctx);
+      expect(res.statusCode).toBe(413); // streaming cap caught it
+    }
+  });
+
+  it('accepts request when Content-Length is under cap (no pre-check trigger)', async () => {
+    // Sanity: under-cap declared length passes the pre-check, then
+    // streaming runs normally.
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    const ctx = makeCtx({ bodyByteCap: 8192, hmac });
+    const payload = makeFreshPayload({ now });
+    const envelope = makeSignedEnvelope({ payload });
+    const req = makeReq({ body: Buffer.from(envelope) });
+    req.headers['content-length'] = String(envelope.length);
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(200);
   });
 
   it('accepts a body exactly at bodyByteCap (boundary: cap = "max allowed", not "first rejected")', async () => {

@@ -91,6 +91,15 @@ function createPeerHeartbeat({
   // the string `"undefined"`) would otherwise write a row whose
   // `ip` field looks valid to DDB but is unreachable from the
   // active's POST. `net.isIP` returns 0 for non-IPs, 4/6 otherwise.
+  //
+  // ── IPv6 zone-id assumption ──
+  // `net.isIP` accepts scoped IPv6 literals (`fe80::1%eth0`) on
+  // some Node versions, but `node:http` doesn't reliably connect
+  // to them across platforms. ECS awsvpc tasks get a non-link-local
+  // ENI address, so zone-ids never reach this row in practice; we
+  // rely on the caller passing a global-scope literal. If a future
+  // deployment surface adds link-local addresses, strip the zone-id
+  // here AND in gateway-control-client's peerIp validator.
   if (!ip || net.isIP(ip) === 0) {
     throw new Error('createPeerHeartbeat: ip (IPv4 or IPv6 literal) is required');
   }

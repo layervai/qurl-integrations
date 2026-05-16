@@ -134,6 +134,12 @@ function startControlChannelServer({
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1100) {
     throw new Error('startControlChannelServer: requestTimeoutMs must be an integer >= 1100 (see headersTimeout invariant)');
   }
+  // bodyByteCap = 0 would 413 every request; negative / NaN / float
+  // would produce surprising int-coercion behavior in the stream
+  // length check. Fail loud at boot.
+  if (!Number.isInteger(bodyByteCap) || bodyByteCap <= 0) {
+    throw new Error('startControlChannelServer: bodyByteCap must be a positive integer');
+  }
 
   const server = http.createServer((req, res) => {
     handleRequest(req, res, {
@@ -159,7 +165,8 @@ function startControlChannelServer({
   // Math.min then caps at `requestTimeout - 100` so the
   // headersTimeout < requestTimeout invariant holds even when
   // the floor would otherwise push it over the request timeout.
-  // Defaults (5s request, 1s headers) are unaffected.
+  // With defaults (5 s request) this yields 2.5 s headersTimeout —
+  // the floor only kicks in below requestTimeoutMs ≈ 2 s.
   //
   // The factory-level `requestTimeoutMs < 1100` guard above ensures
   // both clauses can produce a meaningful >= 1000 ms — without it,
@@ -208,11 +215,31 @@ async function handleRequest(req, res, ctx) {
   // helps operator triage by distinguishing "probe with wrong
   // content type" from "real client with a bad envelope" (400).
   // We accept charset parameters (`application/json; charset=utf-8`)
-  // by matching the prefix.
+  // by matching the prefix, plus RFC 9110-style trailing whitespace
+  // after the media type (`application/json `).
   const contentType = req.headers['content-type'];
-  if (contentType !== undefined && !/^application\/json(\s*;|\s*$)/i.test(contentType)) {
+  if (contentType !== undefined && !/^application\/json\s*(?:;|$)/i.test(contentType)) {
     sendJson(res, 415, { error: 'unsupported_media_type' }, { Connection: 'close' });
     return;
+  }
+
+  // Pre-check Content-Length against the body cap. The streaming
+  // guard in readRequestBody is the load-bearing check (a client can
+  // omit or lie about Content-Length), but a declared length over
+  // cap is unambiguous — short-circuit before reading any bytes so
+  // an obvious bad request doesn't get a per-chunk dance.
+  // `parseInt` tolerates leading whitespace; we additionally require
+  // a digits-only value to ignore garbage like `0xFF` or `1KB`.
+  const declaredLengthRaw = req.headers['content-length'];
+  if (declaredLengthRaw !== undefined && /^\d+$/.test(declaredLengthRaw)) {
+    const declaredLength = parseInt(declaredLengthRaw, 10);
+    if (Number.isFinite(declaredLength) && declaredLength > ctx.bodyByteCap) {
+      ctx.logger.warn('control-channel: Content-Length exceeds cap', {
+        declared: declaredLength, cap: ctx.bodyByteCap,
+      });
+      sendJson(res, 413, { error: 'body_too_large' }, { Connection: 'close' });
+      return;
+    }
   }
 
   let bodyBuf;
