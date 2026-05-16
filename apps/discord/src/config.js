@@ -29,13 +29,23 @@ const os = require('os');
 // would otherwise silently key into the DDB lock and a replica
 // mismatch would be hard to spot.
 //
+// Shape validation for env overrides lives in `invalidHotStandbyValues`
+// (boot-requirements.js): this helper trusts env values verbatim,
+// the boot-time validator catches malformed IPv4 / template-literal
+// pastes via a single source of truth.
+//
 // `addr.family === 'IPv4'` matches Node 22's `os.networkInterfaces()`
-// string-form contract (the brief Node 18 numeric experiment was
-// reverted). If a future Node major flips back to numeric, this
-// returns null on every Fargate boot and invalidHotStandbyValues
-// catches it — fail-loud, but the diagnostic would be misleading.
+// string-form contract. Node 18.0.0 briefly returned numeric `4`/`6`
+// before that was reverted; we accept both shapes so a future Node
+// major regressing back to numeric doesn't return null on every
+// Fargate boot (which would surface as a misleading "no IPv4 found"
+// diagnostic at 3am).
 function deriveInstanceId() {
   return process.env.INSTANCE_ID?.trim() || os.hostname();
+}
+
+function isIPv4(addr) {
+  return (addr.family === 'IPv4' || addr.family === 4) && !addr.internal;
 }
 
 function deriveInstanceIp() {
@@ -45,16 +55,16 @@ function deriveInstanceIp() {
   // First pass: eth0 (the awsvpc ENI's stable name) gets priority —
   // under Fargate this always returns on the first candidate.
   for (const addr of ifaces.eth0 || []) {
-    if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+    if (isIPv4(addr)) return addr.address;
   }
   // Fallback for local/dev (macOS `en0`, stripped containers without
   // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
-  // returns — best-effort only. Re-walking eth0 here is a no-op (the
-  // first pass already returned on any usable candidate), so we don't
-  // bother skipping it.
+  // returns — best-effort only. The eth0 entries get re-walked here
+  // but yield nothing (the first pass already rejected every candidate),
+  // so a separate skip isn't worth the noise.
   for (const addrs of Object.values(ifaces)) {
     for (const addr of addrs) {
-      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+      if (isIPv4(addr)) return addr.address;
     }
   }
   return null;
@@ -520,7 +530,9 @@ module.exports = {
   // `os.hostname()` (Fargate sets this to a short alphanumeric per
   // task — distinct across replicas in the same service); env override
   // wins. When hot-standby is off, the leader code path doesn't run,
-  // so the value is never read.
+  // so the value is never read. LOAD-BEARING INVARIANT (full rationale
+  // above `deriveInstanceId`): two replicas in the same ECS service
+  // MUST see different values, or the DDB lock short-circuits.
   INSTANCE_ID: deriveInstanceId(),
 
   // The IPv4 address peers reach this replica on (`http://<ip>:<port>/control/yours`).

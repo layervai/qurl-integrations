@@ -143,6 +143,24 @@ describe('INSTANCE_IP derivation', () => {
     );
   });
 
+  it('accepts numeric addr.family (defensive against historical Node 18 regression)', () => {
+    // Node 18.0.0 briefly returned `family: 4`/`6` before that was
+    // reverted to the string form. Pinning both shapes here so a
+    // future Node major regressing back to numeric doesn't return
+    // null on every Fargate boot.
+    withFreshConfig(
+      {
+        env: {},
+        networkInterfaces: {
+          eth0: [{ family: 4, address: '10.0.0.55', internal: false }],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('10.0.0.55');
+      },
+    );
+  });
+
   it('falls back to non-eth0 when eth0 has only internal IPv4 addresses', () => {
     // The branch the previous tests missed: eth0 exists and has IPv4
     // addresses, but all are internal (e.g., loopback aliased). The
