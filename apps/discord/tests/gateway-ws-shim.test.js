@@ -28,6 +28,23 @@ const { WebSocketShardEvents } = require('@discordjs/ws');
 // Fake WebSocketManager built on EventEmitter. Captures construction
 // args so tests can interrogate the callback wiring and emit fake
 // Dispatch / Error events to drive the shim's listeners.
+// Factory for a manager whose connect() never resolves — drives
+// the Promise.race against the deadline to fire. Function form
+// (not arrow) so `new WebSocketManagerCtor(...)` works.
+function makeSlowManagerCtor() {
+  const instances = [];
+  function SlowFakeManager(args) {
+    const inst = Object.assign(new EventEmitter(), {
+      _constructorArgs: args,
+      connect: jest.fn(() => new Promise(() => { /* never resolves */ })),
+      destroy: jest.fn().mockResolvedValue(undefined),
+    });
+    instances.push(inst);
+    return inst;
+  }
+  return { SlowFakeManager, instances };
+}
+
 function makeFakeManagerCtor() {
   const instances = [];
   function FakeManager(args) {
@@ -146,23 +163,6 @@ describe('start — wiring + connect', () => {
     await shim.stop();
     await expect(shim.start()).rejects.toThrow(/start\(\) after stop\(\)/);
   });
-
-  // Factory for a manager whose connect() never resolves — drives
-  // the Promise.race against the deadline to fire. Constructor
-  // form (not arrow) so `new WebSocketManagerCtor(...)` works.
-  function makeSlowManagerCtor() {
-    const instances = [];
-    function SlowFakeManager(args) {
-      const inst = Object.assign(new EventEmitter(), {
-        _constructorArgs: args,
-        connect: jest.fn(() => new Promise(() => { /* never resolves */ })),
-        destroy: jest.fn().mockResolvedValue(undefined),
-      });
-      instances.push(inst);
-      return inst;
-    }
-    return { SlowFakeManager, instances };
-  }
 
   it('drops late dispatches that arrive after connect timeout (start-failure teardown race)', async () => {
     // start() attaches Dispatch/Error listeners BEFORE racing
@@ -532,6 +532,31 @@ describe('SIGTERM contract — stop() does NOT call manager.destroy()', () => {
     await shim.stop();
 
     expect(store.flushFinal).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop() after a failed start still runs cleanup (listener detach + flushFinal)', async () => {
+    // Regression guard for the cr-r5-caught flag-conflation bug:
+    // start()'s catch sets `stopped=true` for the dispatch-race
+    // guard. A naive single-flag impl would make stop()'s
+    // idempotency check (`if (stopped) return`) short-circuit on
+    // the failed-start path — so manager.removeAllListeners() and
+    // store.flushFinal() would never run. Splitting into
+    // `stopped` (drop-dispatches) and `stopCompleted` (idempotency)
+    // keeps cleanup reachable.
+    const { SlowFakeManager, instances: lateInstances } = makeSlowManagerCtor();
+    const { shim, store } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    await expect(shim.start({ timeoutMs: 10 })).rejects.toThrow(/timed out/);
+    const mgr = lateInstances[0];
+    expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBeGreaterThan(0);
+
+    // Caller (gracefulShutdown) now calls stop() after the throw.
+    // It must reach flushFinal AND detach listeners despite
+    // start()-fail having flipped `stopped` first.
+    await shim.stop();
+
+    expect(store.flushFinal).toHaveBeenCalledTimes(1);
+    expect(mgr.listenerCount(WebSocketShardEvents.Dispatch)).toBe(0);
+    expect(mgr.listenerCount(WebSocketShardEvents.Error)).toBe(0);
   });
 });
 

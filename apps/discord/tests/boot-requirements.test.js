@@ -232,7 +232,12 @@ describe('unsupportedRoleResumeCombo', () => {
       const msg = unsupportedRoleResumeCombo(role, true, false, 'ddb');
       expect(msg).not.toBeNull();
       expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true/);
-      expect(msg).toMatch(/@discordjs\/ws/);
+      // Role-neutral framing: the rejection should not mention
+      // gateway-tier-specific implementation details (the shim is
+      // never constructed on http, so an http operator reading the
+      // message wouldn't see "the shim replaces Client" verbiage).
+      expect(msg).not.toMatch(/replaces discord\.js Client/);
+      expect(msg).not.toMatch(/@discordjs\/ws/);
     }
   });
 

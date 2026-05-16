@@ -129,7 +129,23 @@ function createGatewayWsShim({
   let isReady = false;
   let appId = null;
   let identifyAttempts = 0;
+  // Two distinct flags:
+  //
+  //   `stopped`       — "drop late dispatches." Set by start()'s
+  //                     catch on connect failure AND by stop(). The
+  //                     Dispatch listener guards on this to ignore
+  //                     frames arriving in the boot-teardown race
+  //                     or after stop().
+  //   `stopCompleted` — "stop() has already run cleanup once." stop()
+  //                     idempotency gate; without splitting these,
+  //                     start()-fail → stopped=true → gracefulShutdown
+  //                     calls shim.stop() → stop() short-circuits on
+  //                     stopped=true → flushFinal + listener detach
+  //                     never run. The split keeps the dispatch guard
+  //                     wide AND lets stop() actually clean up on
+  //                     the failed-start path.
   let stopped = false;
+  let stopCompleted = false;
   // Set rather than array for O(1) unsubscribe. The fan-out path
   // (Dispatch listener) iterates this once per gateway frame; Set
   // iteration is fine at expected handler counts (~2-3 today:
@@ -324,8 +340,13 @@ function createGatewayWsShim({
 
     async stop({ flushFinal: shouldFlush = true } = {}) {
       // Idempotent: a second SIGTERM/SIGINT racing the first shouldn't
-      // re-flush the store or re-strip listeners. Cheap early return.
-      if (stopped) return;
+      // re-flush the store or re-strip listeners.
+      if (stopCompleted) return;
+      stopCompleted = true;
+      // Also flip `stopped` so the Dispatch listener drops any
+      // frames that may still arrive on the way out. (start() may
+      // have already set this on a failed-connect path; the flip
+      // here is idempotent.)
       stopped = true;
       // Drop dispatch handlers so any late dispatch arriving on
       // the way out doesn't trigger a downstream side effect.

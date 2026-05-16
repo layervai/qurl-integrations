@@ -158,12 +158,17 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
     );
   }
   if (!eventShipperEnabled) {
+    // Role-neutral framing: the same env may be applied uniformly
+    // across gateway + http task defs, and an http operator reading
+    // this message shouldn't see gateway-tier-specific language
+    // (the shim is never constructed on http; the rejection here
+    // is a consistency canary, not a description of what http does).
     return (
-      'ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true ' +
-      '(the resume shim replaces discord.js Client with @discordjs/ws ' +
-      'WebSocketManager, which forwards every frame to SQS — the ' +
-      'in-process dispatcher path is unreachable from the shim). ' +
-      'Enable the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
+      'ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true. ' +
+      'The two flags co-design: the gateway tier forwards every Discord ' +
+      'frame to SQS while the worker tier consumes it, so a resume path ' +
+      'without the shipper-shape split has nowhere to dispatch. Enable ' +
+      'the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
     );
   }
   if (storeType !== 'ddb') {
