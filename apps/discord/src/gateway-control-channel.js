@@ -38,6 +38,13 @@
 //      body addressed to a different peer hits a different replica's
 //      LRU anyway.
 //
+// IMPORTANT: the nonce-burn-on-routing-rejection tradeoff is only
+// safe BECAUSE verify runs first. If a future change moves the
+// routing checks before verify (e.g., to reject early on shard
+// mismatch), the threat model flips — an attacker without the HMAC
+// secret could spam wrong-peer bodies to evict legitimate nonces
+// from the LRU. Verify-first is load-bearing.
+//
 // ── Routing checks (after verify) ──
 //   - `payload.peer_instance_id === self.instance_id` — the body is
 //     addressed to THIS standby. Defends against intra-cluster cross-
@@ -292,7 +299,11 @@ async function handleRequest(req, res, ctx) {
     ctx.logger.warn('control-channel: body addressed to wrong peer', {
       addressedTo: payload.peer_instance_id, self: ctx.selfInstanceId,
     });
-    sendJson(res, 400, { error: 'wrong_peer' }, { Connection: 'close' });
+    // No Connection: close — body fully consumed before this bail.
+    // Matches the posture of other post-verify bails (invalid_payload,
+    // unauthorized, handoff_failed): close is only needed when the
+    // request body is in an indeterminate state.
+    sendJson(res, 400, { error: 'wrong_peer' });
     return;
   }
 
@@ -300,7 +311,9 @@ async function handleRequest(req, res, ctx) {
     ctx.logger.warn('control-channel: handoff from unknown peer', {
       activeInstanceId: payload.active_instance_id,
     });
-    sendJson(res, 400, { error: 'unknown_peer' }, { Connection: 'close' });
+    // No Connection: close — body fully consumed before this bail.
+    // (Same rationale as the wrong_peer branch above.)
+    sendJson(res, 400, { error: 'unknown_peer' });
     return;
   }
 

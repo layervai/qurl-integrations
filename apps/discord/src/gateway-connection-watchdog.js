@@ -53,6 +53,14 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 100;
 const BACKOFF_CAP_MS = 5_000;
+// Hard ceiling on the releaseLock-during-exit call. The leader's
+// releaseLockForImmediateExit awaits through `runSerialized`, so a
+// hung inbound-handoff (parked inside manager.connect() with
+// `connecting=true` latched per gateway-leader.js's bounded-
+// settlement comment, tracked in #415) would otherwise block the
+// chain forever and exit(1) would never fire. 3 s is generous
+// vs. the 1 s expected DDB RTT; on miss we log and exit anyway.
+const RELEASE_LOCK_CEILING_MS = 3_000;
 
 function createConnectionWatchdog({
   manager,
@@ -68,6 +76,15 @@ function createConnectionWatchdog({
   // `() => false`.
   isConnecting,
   releaseLock,
+  // Hard ceiling on the releaseLock call during exhaustion-exit. The
+  // leader's releaseLockForImmediateExit awaits through `runSerialized`,
+  // so a hung inbound-handoff (parked inside manager.connect() with
+  // `connecting=true` latched per gateway-leader.js's bounded-
+  // settlement comment, tracked in #415) would otherwise block the
+  // chain forever and exit(1) would never fire. 3 s is generous vs.
+  // the ~1 s expected DDB RTT; on miss we log and exit anyway.
+  // Injected for tests so the ceiling can be tuned tiny.
+  releaseLockCeilingMs = RELEASE_LOCK_CEILING_MS,
   // Optional. If provided, called best-effort on the exhaustion-exit
   // path alongside releaseLock. Symmetric to gateway-leader.js's
   // SIGTERM pushHandoff path which also deletes the row. Without
@@ -154,11 +171,29 @@ function createConnectionWatchdog({
           error: err.message, attempts,
         });
         try {
-          await releaseLock();
+          // Race against a hard ceiling. The leader's
+          // releaseLockForImmediateExit awaits through its
+          // serialization chain, so a hung inbound-handoff (parked
+          // inside manager.connect() with `connecting=true` latched)
+          // would block the chain forever. Without the race, exit(1)
+          // would never fire — the failover slot stays held with
+          // no live gateway. On ceiling miss we log and exit anyway;
+          // the row fades via TTL.
+          let releaseTimer;
+          await Promise.race([
+            releaseLock(),
+            new Promise((_, reject) => {
+              releaseTimer = setTimeout(
+                () => reject(new Error(`release_lock_ceiling_${releaseLockCeilingMs}ms`)),
+                releaseLockCeilingMs,
+              );
+            }),
+          ]).finally(() => clearTimeout(releaseTimer));
         } catch (rerr) {
           // Logged-and-swallowed: we're already in the failure-exit
-          // path; refusing to exit because of a DDB blip would leave
-          // the lock held with no live gateway.
+          // path; refusing to exit because of a DDB blip — or the
+          // ceiling-miss above — would leave the lock held with no
+          // live gateway.
           logger.error('connection-watchdog: releaseLock failed during exhaustion-exit', {
             error: rerr.message,
           });

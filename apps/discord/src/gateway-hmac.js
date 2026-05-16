@@ -301,6 +301,18 @@ function unwrapEnvelope(wireBytes) {
 //      a same-length-but-non-hex `a` produces a SHORTER buffer than
 //      the proper-hex `b` — re-check buffer byte length before the
 //      timing-safe compare to keep timingSafeEqual from throwing.
+//
+// ── Timing-safety limits ──
+// The string-length and post-Buffer length short-circuits are NOT
+// constant-time — they leak whether the candidate signature was
+// the wrong length. For legitimate inputs the length is always
+// fixed at 64 (sha256 hex), so the leak is bounded to "candidate
+// was wrong length" — which an attacker can already observe from
+// the wire by counting bytes they sent. The constant-time guarantee
+// applies to the BYTE-WISE comparison once both sides are valid
+// sha256-hex; we do not claim "constant time across all inputs."
+// If that stronger property is ever needed, drop the length checks
+// and require the caller to pre-validate the candidate length.
 function timingSafeHexEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) {
     return false;

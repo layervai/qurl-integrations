@@ -532,6 +532,25 @@ describe('handleRequest — routing checks (after HMAC verify)', () => {
     }
   });
 
+  it('400s when expected_version exceeds Number.MAX_SAFE_INTEGER (sanity ceiling)', async () => {
+    // Defense against a peer adopting an absurd version cursor that
+    // would burn ~2^53 CAS values before the row could match again.
+    // 2^53 is the first integer > MAX_SAFE_INTEGER; isInteger(2^53)
+    // is still true (representable but unsafe), so the ceiling check
+    // is what catches it.
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    const payload = makeFreshPayload({ now, expectedVersion: 2 ** 53 });
+    payload.nonce = 'huge'.padEnd(32, 'h');
+    const envelope = makeSignedEnvelope({ payload });
+    const ctx = makeCtx({ hmac });
+    const req = makeReq({ body: Buffer.from(envelope) });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'invalid_payload' });
+  });
+
   it('400s when expected_version is missing entirely', async () => {
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
@@ -673,10 +692,13 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
     expect(res.headers).toMatchObject({ Connection: 'close' });
   });
 
-  it('sets Connection: close on 400 wrong_peer', async () => {
-    // wrong_peer fires AFTER HMAC verify + envelope parse, so body
-    // is fully consumed. Connection: close is consistency-only here
-    // (no leftover bytes), but matches the rest of the bail paths.
+  it('does NOT set Connection: close on 400 wrong_peer (body fully consumed)', async () => {
+    // wrong_peer fires AFTER HMAC verify + envelope parse, so the
+    // body is fully consumed and the stream is in a determinate
+    // state. Omitting Connection: close matches the posture of
+    // other post-verify bails (invalid_payload, unauthorized,
+    // handoff_failed). Close is only needed when leftover bytes
+    // could confuse a keep-alive parser.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({ hmac, selfInstanceId: 'inst-B' });
@@ -687,10 +709,11 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
     await _handleRequestForTest(req, res, ctx);
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body)).toEqual({ error: 'wrong_peer' });
-    expect(res.headers).toMatchObject({ Connection: 'close' });
+    expect(res.headers).not.toMatchObject({ Connection: 'close' });
   });
 
-  it('sets Connection: close on 400 unknown_peer', async () => {
+  it('does NOT set Connection: close on 400 unknown_peer (body fully consumed)', async () => {
+    // Same rationale as wrong_peer above.
     const now = 1_700_000_000_000;
     const hmac = makeHmac({ clock: () => now });
     const ctx = makeCtx({
@@ -703,7 +726,7 @@ describe('handleRequest — Connection: close on bail-out paths', () => {
     await _handleRequestForTest(req, res, ctx);
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body)).toEqual({ error: 'unknown_peer' });
-    expect(res.headers).toMatchObject({ Connection: 'close' });
+    expect(res.headers).not.toMatchObject({ Connection: 'close' });
   });
 });
 

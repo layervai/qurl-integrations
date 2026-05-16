@@ -467,11 +467,15 @@ function createGatewayLeader({
           }),
         ]);
       } catch (err) {
-        // Sync-throw path (and non-thenable-return path): if the
-        // lifecycle handlers never attached, this catch is the only
-        // clear. The async-rejection path is owned by the .then()
-        // handlers, so we DON'T touch `connecting` there (would
-        // race the next tick's connect; see comment in finally).
+        // Sync-throw path: if `manager.connect()` itself throws OR
+        // returns a non-thenable (in which case `.then` is undefined
+        // on the return value and the call site throws synchronously
+        // BEFORE `lifecycleAttached` flips true), the lifecycle
+        // handlers never registered. This catch is then the only
+        // clear for `connecting=false`. The async-rejection path is
+        // owned by the .then() handlers, so we DON'T touch
+        // `connecting` there (would race the next tick's connect;
+        // see comment in finally).
         if (!lifecycleAttached) connecting = false;
         logger.error('gateway-leader: inbound-handoff connect threw (watchdog will retry)', {
           error: err.message, activeInstanceId,

@@ -50,6 +50,7 @@ function makeWatchdog({
   deleteOwnRow,
   pollIntervalMs,
   maxAttempts,
+  releaseLockCeilingMs,
   sleep = jest.fn(async () => {}),
   exit = jest.fn(),
 } = {}) {
@@ -59,7 +60,7 @@ function makeWatchdog({
   const watchdog = createConnectionWatchdog({
     manager: manager ?? makeFakeManager(),
     isHoldingLock, isConnecting, releaseLock, deleteOwnRow, logger,
-    pollIntervalMs, maxAttempts, sleep, exit,
+    pollIntervalMs, maxAttempts, releaseLockCeilingMs, sleep, exit,
   });
   return {
     watchdog, logger, releaseLock, deleteOwnRow, sleep, exit,
@@ -393,6 +394,35 @@ describe('step() — exhaustion path', () => {
       await watchdog._stepForTest();
     }
     expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('exits(1) even when releaseLock hangs (Promise.race ceiling kicks in)', async () => {
+    // Defense vs the inbound-handoff-hung-on-manager.connect path
+    // (see #415). releaseLockForImmediateExit awaits through the
+    // leader's serialization chain, which can be stuck behind a
+    // hung connect. Without the race, exit(1) would never fire and
+    // the failover slot stays held with no live gateway. Inject a
+    // tiny ceiling (10ms) so the test runs in real time.
+    const manager = makeFakeManager();
+    manager.connect.mockRejectedValue(new Error('persistent-fail'));
+    // releaseLock returns a never-resolving promise — simulates the
+    // serialization chain being stuck behind a hung op.
+    const releaseLock = jest.fn(() => new Promise(() => {}));
+    const exit = jest.fn();
+    const { watchdog, logger } = makeWatchdog({
+      manager, releaseLock, exit, maxAttempts: 3, releaseLockCeilingMs: 10,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'connection-watchdog: releaseLock failed during exhaustion-exit',
+      expect.objectContaining({ error: expect.stringMatching(/release_lock_ceiling/) }),
+    );
   });
 
   it('still exits(1) when releaseLock throws AND deleteOwnRow is absent (combined-permutation pin)', async () => {
