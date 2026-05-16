@@ -259,7 +259,11 @@ async function handleRequest(req, res, ctx) {
       return;
     }
     ctx.logger.warn('control-channel: body read failed', { error: err.message });
-    sendJson(res, 400, { error: 'body_read_failed' });
+    // `Connection: close` for the same reason as 413 above: a body-
+    // read error lands after a partial stream, so any leftover bytes
+    // would confuse a keep-alive client's HTTP parser on the next
+    // request. Force close to make the indeterminate state harmless.
+    sendJson(res, 400, { error: 'body_read_failed' }, { Connection: 'close' });
     return;
   }
 

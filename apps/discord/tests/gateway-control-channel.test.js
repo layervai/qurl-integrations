@@ -601,6 +601,112 @@ describe('handleRequest — onHandoff', () => {
   });
 });
 
+describe('handleRequest — Connection: close on bail-out paths', () => {
+  // Keep-alive-safety contract: every bail path that leaves the
+  // request body in an indeterminate state MUST set Connection:
+  // close so the parser doesn't see leftover unread bytes on the
+  // next keep-alive request. Pin each bail path here so a future
+  // refactor doesn't silently drop the header.
+
+  it('sets Connection: close on 404 (wrong path)', async () => {
+    const ctx = makeCtx();
+    const req = makeReq({ url: '/control/other' });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(404);
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 405 (wrong method)', async () => {
+    const ctx = makeCtx();
+    const req = makeReq({ method: 'GET' });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(405);
+    expect(res.headers).toMatchObject({ Allow: 'POST', Connection: 'close' });
+  });
+
+  it('sets Connection: close on 415 (wrong content-type)', async () => {
+    const ctx = makeCtx();
+    const req = makeReq();
+    req.headers['content-type'] = 'text/plain';
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(415);
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 415 (missing content-type)', async () => {
+    const ctx = makeCtx();
+    const req = makeReq();
+    delete req.headers['content-type'];
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(415);
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 413 (body cap exceeded)', async () => {
+    const ctx = makeCtx({ bodyByteCap: 100 });
+    const big = Buffer.alloc(200, 0x61);
+    const req = makeReq({ body: big });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(413);
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 400 body_read_failed', async () => {
+    // Drive a stream error by emitting an error mid-read.
+    const ctx = makeCtx();
+    const req = new (require('node:stream').Readable)({ read() {} });
+    req.method = 'POST';
+    req.url = '/control/yours';
+    req.headers = { 'content-type': 'application/json' };
+    const res = makeRes();
+    const handlePromise = _handleRequestForTest(req, res, ctx);
+    // Emit error after one tick so readRequestBody is listening.
+    setImmediate(() => req.emit('error', new Error('socket reset')));
+    await handlePromise;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'body_read_failed' });
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 400 wrong_peer', async () => {
+    // wrong_peer fires AFTER HMAC verify + envelope parse, so body
+    // is fully consumed. Connection: close is consistency-only here
+    // (no leftover bytes), but matches the rest of the bail paths.
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    const ctx = makeCtx({ hmac, selfInstanceId: 'inst-B' });
+    const payload = makeFreshPayload({ now, peerInstanceId: 'inst-OTHER' });
+    const envelope = makeSignedEnvelope({ payload });
+    const req = makeReq({ body: Buffer.from(envelope) });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'wrong_peer' });
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+
+  it('sets Connection: close on 400 unknown_peer', async () => {
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    const ctx = makeCtx({
+      hmac, selfInstanceId: 'inst-B', isKnownPeer: () => false,
+    });
+    const payload = makeFreshPayload({ now });
+    const envelope = makeSignedEnvelope({ payload });
+    const req = makeReq({ body: Buffer.from(envelope) });
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'unknown_peer' });
+    expect(res.headers).toMatchObject({ Connection: 'close' });
+  });
+});
+
 describe('handleRequest — body cap response race (real socket)', () => {
   let server;
   let port;

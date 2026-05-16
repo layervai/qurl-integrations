@@ -648,6 +648,15 @@ function createGatewayLeader({
       return;
     }
     await runSerialized('releaseLockForImmediateExit', async () => {
+      // Inner closed re-check: mirrors handleInboundHandoff's
+      // closure-level guard. The outer check catches the post-
+      // pushHandoff sequential case, but a watchdog call queued
+      // BEFORE pushHandoff flipped closed could still pop here
+      // after closed=true has latched. Consequence in practice is
+      // only a redundant releaseLock call (the sole caller exits
+      // right after), but the inner guard keeps the closed-state
+      // invariant uniform across the API surface.
+      if (closed) return;
       heldLock = false;
       await lock.releaseLock();
     });
