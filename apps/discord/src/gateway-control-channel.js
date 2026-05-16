@@ -53,6 +53,23 @@
 // without re-litigating the cap, but small enough to bound the
 // worst-case memory of an attacker spamming maximally-large bodies.
 //
+// When the cap is hit, `req.pause()` stops further data events and
+// the handler returns a 413 with `Connection: close`. Server-level
+// `requestTimeout` (default 5 s) is the backstop for a misbehaving
+// client that ignores the close and keeps the socket open — the
+// paused stream stays in memory at most 5 s before the timeout
+// reaps it.
+//
+// ── 401 reason leak — intentional tradeoff ──
+// On HMAC verify failure, the 401 response includes the verifier's
+// `reason` field (bad_signature | stale | replay | malformed_body |
+// missing_field). On a VPC-internal HMAC-authenticated channel this
+// is a small information leak — an attacker without the secret can
+// only ever produce `bad_signature`, so the differentiation only
+// helps a legitimate operator triage their own misconfig (clock
+// skew → stale; replay-protection collision → replay). Worth the
+// triage value at this trust boundary.
+//
 // ── Bind address ──
 // Defaults to `0.0.0.0` because in awsvpc mode each Fargate task has
 // its own ENI; binding all interfaces means "this ENI" — there are

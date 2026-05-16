@@ -108,7 +108,16 @@ function createControlClient({
         resolve(result);
       }
 
-      const req = httpRequest({
+      // Wrap httpRequest + req.write/end in try/catch so a future
+      // Node version tightening validation on hostname/port (or
+      // any other synchronous throw from the http module) doesn't
+      // break the "pushHandoff never throws" contract. Inputs are
+      // pre-validated above, so this is belt-and-braces — but the
+      // contract is load-bearing for the SIGTERM caller, which
+      // cannot handle exceptions cleanly.
+      let req;
+      try {
+        req = httpRequest({
         hostname: peerIp,
         port: peerPort,
         path: '/control/yours',
@@ -187,6 +196,12 @@ function createControlClient({
 
       req.write(wire);
       req.end();
+      } catch (err) {
+        logger.warn('control-client: synchronous http.request failure', {
+          peerInstanceId, error: err.message,
+        });
+        settle({ ok: false, reason: 'http_error', error: err.message });
+      }
     });
   }
 

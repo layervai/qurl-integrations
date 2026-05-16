@@ -321,20 +321,10 @@ function createGatewayLeader({
   async function pushHandoff() {
     running = false;
     closed = true;
-    const cleanupHeartbeatRow = async () => {
-      // Best-effort: close the discovery window immediately so the
-      // freshly-promoted standby's listFreshPeers stops returning
-      // this row, rather than waiting up to `freshnessWindowSeconds`
-      // for the natural fade. Already-warned-and-logged inside
-      // deleteOwnRow; the .catch() is belt-and-braces in case the
-      // module surface changes.
-      await peerHeartbeat.deleteOwnRow().catch(() => {});
-    };
 
-    return runSerialized(async () => {
+    const result = await runSerialized(async () => {
       if (!heldLock) {
         logger.info('gateway-leader: pushHandoff called without holding lock (no-op)');
-        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'not_holding_lock' };
       }
 
@@ -348,7 +338,6 @@ function createGatewayLeader({
         // Best-effort release so the next replacement task can acquire
         // immediately rather than wait for TTL lapse.
         await lock.releaseLock().catch(() => {});
-        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'peer_lookup_failed' };
       }
 
@@ -356,7 +345,6 @@ function createGatewayLeader({
       if (!peer) {
         logger.warn('gateway-leader: no fresh peer for handoff — falling through to cold-fallback');
         await lock.releaseLock().catch(() => {});
-        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'no_peer' };
       }
 
@@ -377,7 +365,6 @@ function createGatewayLeader({
       } catch (err) {
         logger.error('gateway-leader: transferLock threw', { error: err.message });
         await lock.releaseLock().catch(() => {});
-        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'transfer_threw' };
       }
 
@@ -387,13 +374,12 @@ function createGatewayLeader({
         // longer ours, so flip the local flag to match.
         heldLock = false;
         logger.warn('gateway-leader: transferLock CAS failed; skipping push');
-        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'transfer_failed' };
       }
 
       heldLock = false;
 
-      const result = await controlClient.pushHandoff({
+      const pushResult = await controlClient.pushHandoff({
         peerIp: peer.ip,
         peerPort: peer.port,
         peerInstanceId: peer.instance_id,
@@ -405,18 +391,29 @@ function createGatewayLeader({
       // it in DDB). If the push didn't ACK, the standby's watchdog
       // sees lock-held + WS-disconnected within ~1 s and brings
       // up the gateway.
-      if (result.ok) {
+      if (pushResult.ok) {
         logger.info('gateway-leader: pushHandoff ACKed', {
           peerInstanceId: peer.instance_id,
         });
       } else {
         logger.warn('gateway-leader: pushHandoff did not ACK (watchdog will catch)', {
-          peerInstanceId: peer.instance_id, reason: result.reason,
+          peerInstanceId: peer.instance_id, reason: pushResult.reason,
         });
       }
-      await cleanupHeartbeatRow();
-      return { pushed: true, ackReason: result.ok ? 'ack' : result.reason };
+      return { pushed: true, ackReason: pushResult.ok ? 'ack' : pushResult.reason };
     });
+
+    // Best-effort heartbeat-row cleanup. Deliberately OUTSIDE the
+    // serialized chain: deleteOwnRow does not touch gateway-lock
+    // state (it's a different DDB table), so serializing it would
+    // only add latency to the SIGTERM critical path. Failure is
+    // swallowed — the worst case is the row fades naturally inside
+    // the freshness window. Closes the discovery window immediately
+    // so the freshly-promoted standby's listFreshPeers stops
+    // returning this row.
+    await peerHeartbeat.deleteOwnRow().catch(() => {});
+
+    return result;
   }
 
   // For the connection-watchdog's releaseLock hook. Serialized so
