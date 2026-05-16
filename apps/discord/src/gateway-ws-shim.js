@@ -203,13 +203,19 @@ function createGatewayWsShim({
       return store.hydrate();
     },
 
-    async start({ timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS } = {}) {
+    async start({ timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS, connect = true } = {}) {
       if (manager) {
         throw new Error('gateway-ws-shim: start() called twice (manager already constructed)');
       }
       if (stopped) {
         throw new Error('gateway-ws-shim: start() after stop() is unsupported');
       }
+      // `connect: false` is the Pillar 3 hot-standby seam: construct
+      // the manager + attach listeners without opening a WS, so both
+      // replicas can boot without racing to IDENTIFY against the same
+      // bot token (which Discord would resolve by flapping the session
+      // identity). The watchdog/leader drives manager.connect() later
+      // after winning the DDB lock or receiving an inbound handoff.
 
       // REST is lazy-constructed if the caller didn't inject one.
       // The single token-bound instance is reused by registerCommands
@@ -297,6 +303,10 @@ function createGatewayWsShim({
           error: error?.message ?? String(error),
         });
       });
+
+      if (!connect) {
+        return;
+      }
 
       // Race connect() against a deadline. Without this, an
       // unreachable Discord API would hang the boot indefinitely
@@ -404,10 +414,16 @@ function createGatewayWsShim({
       return restInstance;
     },
 
-    // ── Test-only inspection ──
-    _getManagerForTest() {
+    // Null until start() constructs the WebSocketManager. Pillar 3
+    // wiring (leader coordinator + connection watchdog) needs the
+    // manager handle to call .connect() / .isConnected() — exposed as
+    // a getter rather than a stored reference so callers always see
+    // the current value (the field is reassigned inside start()).
+    getManager() {
       return manager;
     },
+
+    // ── Test-only inspection ──
     _getIdentifyAttemptsForTest() {
       return identifyAttempts;
     },

@@ -266,6 +266,41 @@ describe('handleInboundHandoff', () => {
     expect(mocks.manager.connect).not.toHaveBeenCalled();
   });
 
+  it('inbound handoff on a never-started leader: adopts + connects without start()', async () => {
+    // Pins the SIGTERM-during-startHotStandby race contract. The
+    // control-channel server starts listening BEFORE leader.start()
+    // runs, so an in-flight handoff envelope can land on a leader
+    // whose tick loop has not begun. The runSerialized chain is
+    // primed at factory time (inFlight = Promise.resolve()), so the
+    // adopt → flag → connect ordering must hold without start()
+    // having ever fired.
+    const callOrder = [];
+    const mocks = makeMocks();
+    mocks.lock.adoptLockFromHandoff = jest.fn(() => callOrder.push('adopt'));
+    const { leader } = makeLeader({ mocks });
+
+    let flagAtConnect = null;
+    let tickLoopStartedAtConnect = null;
+    mocks.manager.connect = jest.fn(async () => {
+      flagAtConnect = leader.isHoldingLock();
+      tickLoopStartedAtConnect = leader.hasStartedTickLoop();
+      callOrder.push('connect');
+    });
+
+    // Pre-condition: no tick loop yet.
+    expect(leader.hasStartedTickLoop()).toBe(false);
+
+    await leader.handleInboundHandoff({
+      activeInstanceId: 'inst-A', expectedVersion: 7,
+    });
+
+    expect(callOrder).toEqual(['adopt', 'connect']);
+    expect(flagAtConnect).toBe(true);
+    expect(tickLoopStartedAtConnect).toBe(false); // confirms the loop never ran
+    expect(leader.isHoldingLock()).toBe(true);
+    expect(mocks.peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
+  });
+
   it('adopt throw — heldLock + connecting both stay false; runSerialized chain stays intact for next call', async () => {
     // Adopt is the first step of the handoff. If it throws, NO
     // flag mutations must happen (heldLock=false, connecting=false),
@@ -1067,6 +1102,37 @@ describe('loop backstop — survives unexpected throws from step()', () => {
 });
 
 describe('start / stop lifecycle', () => {
+  it('stop() before start() is a safe no-op (returns resolved promise, no side effects)', async () => {
+    // Load-bearing for startHotStandby's partial-construction
+    // teardown path: if startControlChannelServer throws after
+    // gatewayLeader is assigned but before .start() runs,
+    // gracefulShutdown calls leader.stop() on a never-started
+    // leader. This must resolve cleanly, NOT throw, and must not
+    // call any of the injected mocks — there's no loop to halt yet.
+    const mocks = makeMocks();
+    const { leader } = makeLeader({ mocks });
+
+    await expect(leader.stop()).resolves.toBeUndefined();
+
+    expect(mocks.lock.acquireLock).not.toHaveBeenCalled();
+    expect(mocks.lock.releaseLock).not.toHaveBeenCalled();
+    expect(mocks.peerHeartbeat.writeHeartbeat).not.toHaveBeenCalled();
+    expect(leader.isHoldingLock()).toBe(false);
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
+  it('stop() is idempotent across repeated pre-start calls', async () => {
+    const mocks = makeMocks();
+    const { leader } = makeLeader({ mocks });
+
+    await leader.stop();
+    await leader.stop();
+    await leader.stop();
+
+    expect(mocks.lock.acquireLock).not.toHaveBeenCalled();
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
   it('start is idempotent', async () => {
     const sleep = jest.fn(() => new Promise(() => {}));
     const { leader } = makeLeader({ sleep });
@@ -1124,5 +1190,40 @@ describe('start / stop lifecycle', () => {
     leader.start(); // now safe — loopPromise resolved
     await new Promise((resolve) => { setImmediate(resolve); });
     expect(sleep).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('hasStartedTickLoop — /health probe seam', () => {
+  it('returns false before start()', () => {
+    const sleep = jest.fn(() => new Promise(() => {}));
+    const { leader } = makeLeader({ sleep });
+    expect(leader.hasStartedTickLoop()).toBe(false);
+  });
+
+  it('returns true after start()', async () => {
+    const sleep = jest.fn(() => new Promise(() => {}));
+    const { leader } = makeLeader({ sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.hasStartedTickLoop()).toBe(true);
+  });
+
+  it('returns false again after stop() drains the loop', async () => {
+    // The /health probe on the standby path relies on this predicate.
+    // The crashed-loop case (loop body throws) and the stop() case
+    // both null `loopPromise` via the .finally — so both report
+    // unhealthy via this predicate. (A *hung* tick — DDB call that
+    // never resolves — does NOT flip this; see the helper comment.)
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { leader } = makeLeader({ sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(leader.hasStartedTickLoop()).toBe(true);
+
+    const stopPromise = leader.stop();
+    sleepResolvers[0]();
+    await stopPromise;
+    expect(leader.hasStartedTickLoop()).toBe(false);
   });
 });

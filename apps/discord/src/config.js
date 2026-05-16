@@ -188,6 +188,32 @@ const isDiscordInstallConfigured = Boolean(
 // export point so a future grep-and-replace doesn't miss a callsite.
 const SHARD_ID = process.env.SHARD_ID || '0:1';
 
+// One-shot getter for the GATEWAY_HANDOFF_HMAC secret. The raw value
+// is captured into a module-private binding at require time, then
+// surfaced exactly once via takeGatewayHandoffHmac() which nulls the
+// binding before returning.
+//
+// Defense in depth against heap-dump key exposure: even if a future
+// caller adds telemetry that captures the config object wholesale,
+// or a debugger attaches mid-process, the secret string is no longer
+// reachable through any module-level reference once startHotStandby
+// has consumed it. The live HMAC instance created by createGatewayHmac
+// still holds the parsed bytes (necessary for sign/verify) — that's
+// the only retained reference.
+//
+// Why a private binding rather than a config-object property: the
+// `config` object is exported and any module can capture it at
+// require time. A `delete config.GATEWAY_HANDOFF_HMAC` after the
+// secret is consumed does NOT remove already-captured references.
+// A private binding inside this module is unreachable to anything
+// except this getter.
+let _gatewayHandoffHmacRaw = process.env.GATEWAY_HANDOFF_HMAC;
+function takeGatewayHandoffHmac() {
+  const value = _gatewayHandoffHmacRaw;
+  _gatewayHandoffHmacRaw = undefined;
+  return value;
+}
+
 // Configuration from environment variables
 module.exports = {
   // Discord
@@ -403,6 +429,83 @@ module.exports = {
   // silently flip the gateway path.
   ENABLE_GATEWAY_RESUME: process.env.ENABLE_GATEWAY_RESUME === 'true',
 
+  // Gateway hot-standby (zero-downtime design, Pillar 3). When true
+  // and PROCESS_ROLE=gateway, the gateway tier runs two replicas
+  // (active + standby) that elect a leader via the DDB lock table,
+  // exchange heartbeats via the peer-heartbeat table, and push
+  // ownership of the live WebSocket via an HMAC-authenticated control
+  // channel on SIGTERM. Eliminates the IDENTIFY/RESUME gap on every
+  // deploy — the incoming task `manager.connect()`s synchronously
+  // inside the outgoing task's pushHandoff so the next dispatch
+  // lands without a cold start. See `apps/discord/docs/zero-downtime-design.md`
+  // → "Pillar 3: hot-standby + push handoff".
+  //
+  // Requires ENABLE_GATEWAY_RESUME=true AND PROCESS_ROLE=gateway —
+  // the hot-standby control plane drives the gateway-ws-shim's
+  // manager handle, so neither the legacy single-process shape nor
+  // the http/worker tiers have a manager to hand off. Combined +
+  // hot-standby is rejected for the same reason as combined + RESUME
+  // (the legacy Client owns the WS). Boot-requirements rejects every
+  // unsupported combo at startup.
+  //
+  // Default off so a deploy without the flag set behaves identically
+  // to the pre-Pillar-3 codebase — single replica, single-process
+  // gateway, no control channel listening. Literal-'true' check for
+  // the same typo-rejection reason as ENABLE_EVENT_SHIPPER.
+  ENABLE_GATEWAY_HOT_STANDBY: process.env.ENABLE_GATEWAY_HOT_STANDBY === 'true',
+
+  // Per-replica identity. The leader coordinator writes this into the
+  // DDB lock row as the holder; the control-channel server logs it on
+  // every handoff; the peer-heartbeat row keys on it. Injected by the
+  // ECS task-def `environment = []` block from `${ECS_TASK_ARN}` or
+  // the task metadata endpoint — the deploy is responsible for
+  // ensuring two replicas never share the same value (the lock would
+  // otherwise short-circuit and both replicas would think they hold
+  // it). When unset (hot-standby off), the leader code path doesn't
+  // run, so the value is never read.
+  INSTANCE_ID: process.env.INSTANCE_ID || null,
+
+  // The IPv4 address peers reach this replica on (`http://<ip>:<port>/control/yours`).
+  // ECS awsvpc mode assigns a routable VPC IP per task and exposes it
+  // on the ECS metadata endpoint `$ECS_CONTAINER_METADATA_URI_V4`;
+  // the task-def `environment = []` block plumbs that into INSTANCE_IP
+  // at boot. Used by the peer-heartbeat row's `address_v4` field so
+  // the active replica's pushHandoff client knows where to connect.
+  INSTANCE_IP: process.env.INSTANCE_IP || null,
+
+  // Bind/listen ports for the in-VPC control channel that receives
+  // pushHandoff envelopes from the outgoing leader. The bind address
+  // defaults to 0.0.0.0 (awsvpc-routable) rather than 127.0.0.1
+  // because the peer reaches it via the task's VPC IP. The security
+  // posture is HMAC-on-every-request (gateway-hmac) plus a security-
+  // group rule that restricts the listening port to peer tasks in the
+  // same service — see qurl-integrations-infra `qurl-bot-discord/terraform/control-channel.tf`.
+  GATEWAY_CONTROL_PORT: intEnv('GATEWAY_CONTROL_PORT', 7800, {
+    strictInteger: true,
+    min: 1024,
+    max: 65535,
+  }),
+  GATEWAY_CONTROL_BIND_ADDR: process.env.GATEWAY_CONTROL_BIND_ADDR || '0.0.0.0',
+
+  // JSON-shaped HMAC secret for the control channel. NOT a direct
+  // property — read once via the `takeGatewayHandoffHmac` helper
+  // exported below. The boot-presence check
+  // (`missingHotStandbyKeys`) reads from `_gatewayHandoffHmacRaw` via
+  // a separate `hasGatewayHandoffHmac` flag exposed below so the
+  // gate can fire before takeGatewayHandoffHmac is called.
+  //
+  // Surfaced this way (not as a property on the exported config
+  // object) so a heap dump after secret consumption can't recover
+  // the raw value through `config.GATEWAY_HANDOFF_HMAC`. See the
+  // takeGatewayHandoffHmac definition near the top of this file
+  // for the security rationale.
+  //
+  // Operator note: the boot-presence check below uses
+  // `process.env.GATEWAY_HANDOFF_HMAC` directly (via the flag), so
+  // an unset env var still surfaces the same "required key missing"
+  // error message as before — no observable behavior change.
+  hasGatewayHandoffHmac: Boolean(process.env.GATEWAY_HANDOFF_HMAC),
+
   // Persistence backend selector. Lifted from raw env into config
   // so the boot-guard (`unsupportedRoleResumeCombo`) and the
   // gateway-shim wiring both read through the same parsed shape.
@@ -448,4 +551,10 @@ module.exports = {
     min: 100,
     max: 8000,
   }),
+
+  // One-shot getter for the GATEWAY_HANDOFF_HMAC raw value (see the
+  // takeGatewayHandoffHmac definition near the top of this file).
+  // Exposed as a function, NOT a property — second call returns
+  // undefined.
+  takeGatewayHandoffHmac,
 };

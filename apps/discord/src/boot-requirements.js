@@ -182,6 +182,122 @@ function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled, st
   return null;
 }
 
+// Parallel to unsupportedRoleResumeCombo for ENABLE_GATEWAY_HOT_STANDBY.
+// Caller guarantees the upstream resume combo check has already run
+// (resumeEnabled=true → shipper+ddb already validated upstream), so
+// the 3-arg signature here is sufficient — no need to re-check
+// shipper/storeType.
+//
+// Two unsupported shapes:
+//
+//   1. hotStandby=true with role!=gateway — the leader coordinator
+//      drives the gateway-ws-shim's manager handle; only the gateway
+//      tier constructs the shim, so http/combined have nothing to
+//      hand off. Rejecting at boot avoids a deploy where the hot-
+//      standby flag is set in a uniform env block but the role isn't
+//      gateway — which would silently no-op the leader path and
+//      mask the misconfig as "the lock never gets acquired."
+//   2. hotStandby=true with resume=false — pushHandoff hands the
+//      incoming task a snapshot of session_id + sequence so it can
+//      RESUME without dropping events. Without the cross-process
+//      RESUME path, "handoff" degenerates to "both replicas
+//      IDENTIFY against the same token" — Discord rejects the
+//      second IDENTIFY and the second replica flaps the session.
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleResumeCombo.
+function unsupportedRoleHotStandbyCombo(role, hotStandbyEnabled, resumeEnabled) {
+  if (!hotStandbyEnabled) return null;
+  if (role !== 'gateway') {
+    return (
+      `ENABLE_GATEWAY_HOT_STANDBY=true requires PROCESS_ROLE=gateway (got '${role}'). ` +
+      'The hot-standby control plane (leader election + push handoff) drives the ' +
+      'gateway-ws-shim manager, which only the gateway tier constructs. http and ' +
+      'combined roles have no manager to hand off. Set PROCESS_ROLE=gateway on the ' +
+      'gateway task def, or leave ENABLE_GATEWAY_HOT_STANDBY unset on http/combined.'
+    );
+  }
+  if (!resumeEnabled) {
+    return (
+      'ENABLE_GATEWAY_HOT_STANDBY=true requires ENABLE_GATEWAY_RESUME=true. ' +
+      'Push handoff transfers session_id + sequence from the outgoing task to the ' +
+      'incoming task; without cross-process RESUME the incoming task would IDENTIFY ' +
+      'against the same bot token and Discord would flap the session. Enable RESUME ' +
+      'first, or leave ENABLE_GATEWAY_HOT_STANDBY unset.'
+    );
+  }
+  return null;
+}
+
+// Required env vars when ENABLE_GATEWAY_HOT_STANDBY=true on a gateway
+// replica. Returns the array of missing keys (parallel shape to
+// missingMapCommandKeys / missingEventShipperKeys). Each value is
+// load-bearing: INSTANCE_ID keys the lock row + peer-heartbeat row;
+// INSTANCE_IP is the address peers reach this replica on; the HMAC
+// secret authenticates every control-channel envelope. A boot with
+// any of these unset would either crash at first use or — worse —
+// run with a zero-knowledge HMAC that fails every verify silently.
+function missingHotStandbyKeys(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const missing = [];
+  if (!cfg.INSTANCE_ID) missing.push('INSTANCE_ID');
+  if (!cfg.INSTANCE_IP) missing.push('INSTANCE_IP');
+  // GATEWAY_HANDOFF_HMAC presence is surfaced via `hasGatewayHandoffHmac`
+  // (boolean flag) rather than the raw value — the secret string is
+  // never exposed as a config-object property to keep it unreachable
+  // through heap-dump-accessible references. See config.js's
+  // `takeGatewayHandoffHmac` for the security rationale.
+  if (!cfg.hasGatewayHandoffHmac) missing.push('GATEWAY_HANDOFF_HMAC');
+  return missing;
+}
+
+// Shape checks for INSTANCE_ID + INSTANCE_IP (run AFTER missing-keys
+// passes). Matches the secret-loader's "fail at boot, not at first
+// use" posture: a misconfigured task-def that injects the literal
+// `${ECS_TASK_ARN}` (unsubstituted shell expansion) or
+// `INSTANCE_IP=10.0.0.999` (non-IPv4) would pass the presence gate
+// and surface as a baffling DDB-lock-can't-acquire or peer-
+// unreachable error at runtime. A cheap regex catches both.
+//
+// INSTANCE_ID: rejects the `${...}` template-literal pattern (the
+// common ECS task-def substitution-failure footgun). Otherwise
+// permissive — the downstream lock/heartbeat code does not require
+// a specific format.
+//
+// INSTANCE_IP: must parse as an IPv4 dotted-quad. The hot-standby
+// awsvpc deployment puts each task on a unique ENI with a v4
+// address; v6 is not in scope for Pillar 3 today (the control
+// channel binds to the v4 ENI, peers reach each other over v4 SG
+// rules). If v6 ever lands, this check loosens.
+//
+// Leading-zero octets are rejected (`01.02.03.04` would parse as
+// octal under some resolvers); each octet is `0` alone, `1-9`, or
+// `1[0-9]-25[0-5]` with no leading zero. ECS task-def injection
+// produces canonical no-leading-zero v4 strings; this just closes
+// the operator-typo door.
+//
+// Returns an array of operator-facing message strings (one per
+// problem) or [] when all values are well-shaped. Hot-standby off
+// → skip entirely.
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
+function invalidHotStandbyValues(cfg) {
+  if (!cfg.ENABLE_GATEWAY_HOT_STANDBY) return [];
+  const problems = [];
+  if (cfg.INSTANCE_ID && cfg.INSTANCE_ID.includes('${')) {
+    problems.push(
+      `INSTANCE_ID looks like an unsubstituted template literal ('${cfg.INSTANCE_ID}'). ` +
+      'Check the ECS task-def is resolving the placeholder against the task metadata endpoint.'
+    );
+  }
+  if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {
+    problems.push(
+      `INSTANCE_IP must be a valid IPv4 address (got '${cfg.INSTANCE_IP}'). ` +
+      'Hot-standby uses v4 for the control-channel binding + peer reach; v6 is not in scope today.'
+    );
+  }
+  return problems;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -280,6 +396,9 @@ module.exports = {
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
+  invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

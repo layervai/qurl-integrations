@@ -198,6 +198,63 @@ describe('start — wiring + connect', () => {
 
     await expect(shim.start({ timeoutMs: 10 })).rejects.toThrow(/timed out after 10ms/);
   });
+
+  it('connect:false skips manager.connect() — Pillar 3 hot-standby seam', async () => {
+    // Both replicas call start({ connect: false }) at boot so the
+    // manager is constructed + listeners attached, but only the
+    // lock-holder eventually drives connect(). Without this seam,
+    // both replicas would IDENTIFY at boot and Discord would flap
+    // the session identity every few seconds.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+
+    expect(managerInstances).toHaveLength(1);
+    // Manager was constructed (listeners attached) but connect() was
+    // NOT called by the shim — the caller drives it later.
+    expect(managerInstances[0].connect).not.toHaveBeenCalled();
+  });
+
+  it('connect:false still attaches Dispatch listener (fan-out works after a later connect)', async () => {
+    // Standby flow: start({connect:false}) at boot, then later the
+    // leader drives manager.connect() inside handleInboundHandoff.
+    // The first READY/RESUMED that arrives after that connect MUST
+    // fan out to onDispatch handlers — otherwise the standby's event
+    // pipeline is dead.
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    const handler = jest.fn();
+    shim.onDispatch(handler);
+
+    managerInstances[0].emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'MESSAGE_CREATE', d: {} },
+      shardId: 0,
+    });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getManager — Pillar 3 leader handle', () => {
+  it('returns null before start()', () => {
+    const { shim } = makeShim();
+    expect(shim.getManager()).toBeNull();
+  });
+
+  it('returns the WebSocketManager instance after start()', async () => {
+    const { shim, managerInstances } = makeShim();
+    await shim.start();
+    expect(shim.getManager()).toBe(managerInstances[0]);
+  });
+
+  it('returns the manager after start({ connect: false }) too', async () => {
+    // Critical for the hot-standby wiring path: the leader needs the
+    // manager handle BEFORE driving connect(). If getManager() only
+    // returned non-null after a successful connect, the wiring chain
+    // would deadlock (leader needs manager → manager needs leader to
+    // call connect → loop).
+    const { shim, managerInstances } = makeShim();
+    await shim.start({ connect: false });
+    expect(shim.getManager()).toBe(managerInstances[0]);
+  });
 });
 
 describe('IDENTIFY budget guard', () => {

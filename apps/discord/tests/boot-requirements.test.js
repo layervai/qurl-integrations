@@ -19,6 +19,9 @@ const {
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
   unsupportedRoleResumeCombo,
+  unsupportedRoleHotStandbyCombo,
+  missingHotStandbyKeys,
+  invalidHotStandbyValues,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -397,5 +400,203 @@ describe('resolveProcessRole', () => {
     // 'GATEWAY' should fail loud, not silently coerce.
     expect(() => resolveProcessRole('GATEWAY')).toThrow(/GATEWAY/);
     expect(() => resolveProcessRole('Combined')).toThrow(/Combined/);
+  });
+});
+
+describe('unsupportedRoleHotStandbyCombo', () => {
+  it('returns null when hot-standby=false regardless of other inputs', () => {
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const resume of [true, false]) {
+        expect(unsupportedRoleHotStandbyCombo(role, false, resume)).toBeNull();
+      }
+    }
+  });
+
+  it('rejects hot-standby=true on combined role with operator-facing remediation', () => {
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/ENABLE_GATEWAY_HOT_STANDBY=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    // Names the actual role so an operator pasting the log line into
+    // a ticket sees their misconfiguration immediately.
+    expect(msg).toMatch(/'combined'/);
+  });
+
+  it('rejects hot-standby=true on http role', () => {
+    const msg = unsupportedRoleHotStandbyCombo('http', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/'http'/);
+    expect(msg).toMatch(/no manager to hand off/);
+  });
+
+  it('rejects hot-standby=true with resume=false (would session-flap)', () => {
+    // The push-handoff path adopts the outgoing leader's
+    // session_id+sequence on the standby — without RESUME, the
+    // standby would IDENTIFY against the same token and Discord
+    // would flap the session identity.
+    const msg = unsupportedRoleHotStandbyCombo('gateway', true, false);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/requires ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/flap the session/);
+  });
+
+  it('returns null on the supported combo (gateway + resume + hot-standby)', () => {
+    expect(unsupportedRoleHotStandbyCombo('gateway', true, true)).toBeNull();
+  });
+
+  it('sequences role check before resume check (operator sees the dominant fix first)', () => {
+    // combined+hot-standby+resume-off is doubly broken. The role
+    // check fires first because PROCESS_ROLE is the higher-order
+    // misconfig — fixing the role + leaving resume off would leave
+    // the second rejection still firing; fixing resume + leaving
+    // combined would re-fire the role rejection. Sequencing the
+    // role check first means the first redeploy lands the higher-
+    // order fix.
+    const msg = unsupportedRoleHotStandbyCombo('combined', true, false);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).not.toMatch(/ENABLE_GATEWAY_RESUME=true/);
+  });
+});
+
+describe('missingHotStandbyKeys', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      hasGatewayHandoffHmac: true,
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no requirements)', () => {
+    expect(missingHotStandbyKeys({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      // Everything else unset — must still be empty.
+    })).toEqual([]);
+  });
+
+  it('returns empty when every required key is present', () => {
+    expect(missingHotStandbyKeys(cfg())).toEqual([]);
+  });
+
+  it('surfaces missing INSTANCE_ID', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_ID: undefined }))).toEqual(['INSTANCE_ID']);
+  });
+
+  it('surfaces missing INSTANCE_IP', () => {
+    expect(missingHotStandbyKeys(cfg({ INSTANCE_IP: null }))).toEqual(['INSTANCE_IP']);
+  });
+
+  it('surfaces missing GATEWAY_HANDOFF_HMAC (via hasGatewayHandoffHmac flag)', () => {
+    // The presence check reads `hasGatewayHandoffHmac` (boolean) rather
+    // than the raw secret string — see config.js's
+    // `takeGatewayHandoffHmac` for the heap-dump security rationale.
+    expect(missingHotStandbyKeys(cfg({ hasGatewayHandoffHmac: false })))
+      .toEqual(['GATEWAY_HANDOFF_HMAC']);
+  });
+
+  it('returns every missing key (not just the first) for one-shot remediation', () => {
+    // Order is the function's natural push order (INSTANCE_ID,
+    // INSTANCE_IP, GATEWAY_HANDOFF_HMAC); pinning it documents that
+    // contract so a refactor that reorders the pushes flags the
+    // operator-facing log-message ordering as a change.
+    const missing = missingHotStandbyKeys(cfg({
+      INSTANCE_ID: undefined,
+      INSTANCE_IP: undefined,
+      hasGatewayHandoffHmac: false,
+    }));
+    expect(missing).toEqual(['INSTANCE_ID', 'INSTANCE_IP', 'GATEWAY_HANDOFF_HMAC']);
+  });
+});
+
+describe('invalidHotStandbyValues', () => {
+  function cfg(overrides = {}) {
+    return {
+      ENABLE_GATEWAY_HOT_STANDBY: true,
+      INSTANCE_ID: 'task-abc-123',
+      INSTANCE_IP: '10.0.1.42',
+      ...overrides,
+    };
+  }
+
+  it('returns empty when the flag is off (no shape requirements)', () => {
+    expect(invalidHotStandbyValues({
+      ENABLE_GATEWAY_HOT_STANDBY: false,
+      INSTANCE_ID: '${LITERALLY_UNRESOLVED}',
+      INSTANCE_IP: 'not-an-ip',
+    })).toEqual([]);
+  });
+
+  it('returns empty when both values are well-shaped', () => {
+    expect(invalidHotStandbyValues(cfg())).toEqual([]);
+  });
+
+  it('flags unsubstituted template literal in INSTANCE_ID — the ECS task-def footgun', () => {
+    // The specific scenario: a task-def with
+    // `INSTANCE_ID: "${ECS_TASK_ARN}"` that the metadata-resolution
+    // layer fails to substitute. Without this check the literal
+    // `${ECS_TASK_ARN}` would key the lock + heartbeat rows and
+    // every replica would think it owns the same identifier.
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_ID: '${ECS_TASK_ARN}' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_ID looks like an unsubstituted template literal/);
+    expect(problems[0]).toContain('${ECS_TASK_ARN}');
+  });
+
+  it('flags non-IPv4 INSTANCE_IP (string)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: 'not-an-ip' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/INSTANCE_IP must be a valid IPv4 address/);
+    expect(problems[0]).toContain("'not-an-ip'");
+  });
+
+  it('flags out-of-range octets in INSTANCE_IP (10.0.0.999)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '10.0.0.999' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('10.0.0.999');
+  });
+
+  it('flags IPv6 INSTANCE_IP (out of scope for Pillar 3)', () => {
+    const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: '::1' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/must be a valid IPv4/);
+  });
+
+  it('flags leading-zero IPv4 octets (octal-parse hazard under some resolvers)', () => {
+    // `01.02.03.04` parses as octal under glibc's `inet_aton` and a
+    // handful of resolvers — a typo'd "010.0.0.1" would resolve as
+    // 8.0.0.1, silently routing the control channel to a wrong host.
+    // The closed-door fix is to require canonical no-leading-zero
+    // octets, which the ECS task-def injection always produces.
+    for (const ip of ['01.0.0.1', '10.01.0.1', '10.0.01.1', '10.0.0.01']) {
+      const problems = invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }));
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toMatch(/must be a valid IPv4/);
+    }
+  });
+
+  it('accepts every octet boundary (0, 9, 10, 99, 100, 199, 200, 249, 255)', () => {
+    const ips = ['0.0.0.0', '255.255.255.255', '10.99.100.249', '1.9.199.200'];
+    for (const ip of ips) {
+      expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: ip }))).toEqual([]);
+    }
+  });
+
+  it('reports every problem on a single call (one-shot operator remediation)', () => {
+    const problems = invalidHotStandbyValues(cfg({
+      INSTANCE_ID: '${ECS_TASK_ARN}',
+      INSTANCE_IP: '999.999.999.999',
+    }));
+    expect(problems).toHaveLength(2);
+  });
+
+  it('does not trip on present-but-empty INSTANCE_IP (the missingHotStandbyKeys check catches that)', () => {
+    // Separation of concerns: missing-key checks are presence-only,
+    // shape checks only run on present values. An empty string is
+    // "missing" from the perspective of the upstream check and is
+    // skipped here to avoid duplicate operator-facing messages.
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_IP: '' }))).toEqual([]);
+    expect(invalidHotStandbyValues(cfg({ INSTANCE_ID: '' }))).toEqual([]);
   });
 });
