@@ -42,15 +42,17 @@ function deriveInstanceIp() {
   const envOverride = process.env.INSTANCE_IP?.trim();
   if (envOverride) return envOverride;
   const ifaces = os.networkInterfaces();
+  // First pass: eth0 (the awsvpc ENI's stable name) gets priority —
+  // under Fargate this always returns on the first candidate.
   for (const addr of ifaces.eth0 || []) {
     if (addr.family === 'IPv4' && !addr.internal) return addr.address;
   }
   // Fallback for local/dev (macOS `en0`, stripped containers without
   // `eth0`, etc.). Iteration order is whatever `os.networkInterfaces()`
-  // returns — best-effort only; under Fargate awsvpc the eth0 path
-  // above always wins, so this branch never runs in prod.
-  for (const [name, addrs] of Object.entries(ifaces)) {
-    if (name === 'eth0') continue;
+  // returns — best-effort only. Re-walking eth0 here is a no-op (the
+  // first pass already returned on any usable candidate), so we don't
+  // bother skipping it.
+  for (const addrs of Object.values(ifaces)) {
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal) return addr.address;
     }

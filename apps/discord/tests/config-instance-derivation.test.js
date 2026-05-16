@@ -95,6 +95,22 @@ describe('INSTANCE_IP derivation', () => {
     );
   });
 
+  it('whitespace-only env overrides fall through to derivation', () => {
+    withFreshConfig(
+      {
+        env: { INSTANCE_ID: '   ', INSTANCE_IP: '\t\t' },
+        hostname: 'derived-host',
+        networkInterfaces: {
+          eth0: [{ family: 'IPv4', address: '10.0.0.99', internal: false }],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_ID).toBe('derived-host');
+        expect(config.INSTANCE_IP).toBe('10.0.0.99');
+      },
+    );
+  });
+
   it('uses INSTANCE_IP env override when set (wins over interfaces)', () => {
     withFreshConfig(
       {
@@ -123,6 +139,25 @@ describe('INSTANCE_IP derivation', () => {
       },
       (config) => {
         expect(config.INSTANCE_IP).toBe('10.0.0.42');
+      },
+    );
+  });
+
+  it('falls back to non-eth0 when eth0 has only internal IPv4 addresses', () => {
+    // The branch the previous tests missed: eth0 exists and has IPv4
+    // addresses, but all are internal (e.g., loopback aliased). The
+    // first-pass eth0 loop must walk through without returning, then
+    // the fallback must pick up the non-internal address on en0.
+    withFreshConfig(
+      {
+        env: {},
+        networkInterfaces: {
+          eth0: [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
+          en0: [{ family: 'IPv4', address: '192.168.5.10', internal: false }],
+        },
+      },
+      (config) => {
+        expect(config.INSTANCE_IP).toBe('192.168.5.10');
       },
     );
   });
