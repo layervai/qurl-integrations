@@ -190,6 +190,32 @@ describe('step() — isConnecting backoff (race with leader inbound-handoff)', (
     expect(watchdog._getAttemptsForTest()).toBe(0);
   });
 
+  it('stays at attempts=0 indefinitely while isConnecting=true (escape hatch #415)', async () => {
+    // Pin the *current* failure mode tracked by #415: if @discordjs/ws
+    // ever fails to settle manager.connect(), the leader latches
+    // `connecting=true` forever, isConnecting() returns true on every
+    // tick, the watchdog resets attempts and stands down, and the
+    // exit(1) recovery never fires. The process is permanently broken
+    // without an external process-health monitor. This test pins the
+    // current behavior so the fix (process-level alarm landing later)
+    // is loud about changing it.
+    const manager = makeFakeManager();
+    const isConnecting = jest.fn(() => true);
+    const exit = jest.fn();
+    const releaseLock = jest.fn(async () => {});
+    const { watchdog } = makeWatchdog({
+      manager, isConnecting, exit, releaseLock, maxAttempts: 3,
+    });
+    for (let i = 0; i < 20; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await watchdog._stepForTest();
+    }
+    expect(manager.connect).not.toHaveBeenCalled();
+    expect(releaseLock).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+    expect(watchdog._getAttemptsForTest()).toBe(0);
+  });
+
   it('resets attempts when leader transitions to isConnecting=true mid-ladder', async () => {
     // Failure ladder is at attempt 3; leader then takes over the
     // connect (inbound-handoff). The watchdog must reset attempts

@@ -80,6 +80,11 @@ const crypto = require('node:crypto');
 
 const DEFAULT_FRESHNESS_WINDOW_MS = 5_000;
 const DEFAULT_NONCE_LRU_SIZE = 1024;
+// sha256 hex digest length. Used as a cheap pre-check in `verify`
+// to skip the hmacHex compute when the candidate signature can't
+// possibly match (any non-64-char string fails the byte-wise
+// compare in `timingSafeHexEqual` regardless).
+const SHA256_HEX_LENGTH = 64;
 
 // Verify-rejection reasons. Exported so callers (control-channel
 // server logs, tests) reference the constant rather than the literal
@@ -194,6 +199,18 @@ function createGatewayHmac({
   function verify({ bodyBytes, signature }) {
     if (!Buffer.isBuffer(bodyBytes) || typeof signature !== 'string') {
       return { ok: false, reason: VERIFY_REASONS.MALFORMED_BODY };
+    }
+    // Skip the hmacHex compute when the candidate is the wrong
+    // length. sha256 hex is always 64 chars; anything else can't
+    // possibly match `expected*` so the byte-wise compare in
+    // timingSafeHexEqual would short-circuit anyway. Pre-checking
+    // here saves an HMAC compute on every malformed candidate AND
+    // keeps the cost forward-compatible if a future caller swaps
+    // sha256 for a heavier MAC. The "candidate was wrong length"
+    // timing leak is unchanged (already documented above
+    // timingSafeHexEqual).
+    if (signature.length !== SHA256_HEX_LENGTH) {
+      return { ok: false, reason: VERIFY_REASONS.BAD_SIGNATURE };
     }
 
     const expectedCurrent = hmacHex(secrets.current, bodyBytes);

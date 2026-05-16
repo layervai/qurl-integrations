@@ -577,9 +577,14 @@ describe('serialization — no two mutators interleave', () => {
     await pushPromise;
     await tickPromise;
 
-    // After push completes, heldLock=false, so the tick's branch
-    // calls acquireLock again.
-    expect(lock.acquireLock.mock.calls.length).toBe(firstAcquireCalls + 1);
+    // After push completes, `closed=true` is latched — the queued
+    // tick's closed-guard now bails before touching the lock. This
+    // matches handleInboundHandoff's closed-state invariant: any
+    // work queued behind pushHandoff is a no-op once the leader is
+    // terminal. The serialization contract is still pinned (the
+    // tick waited; transferLock was called exactly once).
+    expect(lock.acquireLock.mock.calls.length).toBe(firstAcquireCalls);
+    expect(lock.transferLock).toHaveBeenCalledTimes(1);
   });
 
   it('a SIGTERM pushHandoff during an in-flight inbound-handoff queues behind it', async () => {
@@ -750,6 +755,28 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
 });
 
 describe('pushHandoff — terminal contract (closed sentinel)', () => {
+  it('step() is a no-op after pushHandoff (closed-guard mirrors handleInboundHandoff)', async () => {
+    // Mirrors the closed-guard contract: handleInboundHandoff has an
+    // inner closed re-check inside the serialized closure; step() now
+    // has its own closed-guard so a stray post-close `_stepForTest`
+    // call doesn't re-write heartbeat / re-acquire / re-renew. The
+    // production loop guards via running=false, but the seam needs
+    // to match the rest of the module's invariants.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, peerHeartbeat } = makeLeader({ mocks });
+    await leader._stepForTest();
+    await leader.pushHandoff();
+    const writeCallsBefore = peerHeartbeat.writeHeartbeat.mock.calls.length;
+    await leader._stepForTest();
+    // No new heartbeat, no new peer-list refresh, no new lock work.
+    expect(peerHeartbeat.writeHeartbeat).toHaveBeenCalledTimes(writeCallsBefore);
+  });
+
   it('after pushHandoff, start() is a permanent no-op', async () => {
     const sleep = jest.fn(() => new Promise(() => {})); // never resolves
     const mocks = makeMocks({

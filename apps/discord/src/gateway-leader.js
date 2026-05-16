@@ -198,6 +198,14 @@ function createGatewayLeader({
   }
 
   async function step() {
+    // Terminal-state guard: mirrors handleInboundHandoff's inner
+    // closed re-check. The production loop already stops via
+    // running=false, but `_stepForTest` enters through the same
+    // serialized chain — without this guard a stray post-close test
+    // call would re-write heartbeat / re-call renewLock / re-acquire,
+    // diverging from the closed-sentinel invariant the rest of the
+    // module enforces.
+    if (closed) return;
     // Heartbeat write + peer-list refresh run in parallel — both are
     // independent DDB ops, neither feeds into the other. Sequencing
     // them adds ~one DDB RTT to every tick for no correctness gain.
