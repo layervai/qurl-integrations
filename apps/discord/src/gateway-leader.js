@@ -292,6 +292,15 @@ function createGatewayLeader({
         return { pushed: false, reason: 'transfer_failed' };
       }
 
+      // Implicit invariant: caller (SIGTERM handler) MUST exit
+      // after this point. Clearing heldLock here without exiting
+      // would cause the next tick (if `running` got flipped back
+      // on) to observe heldLock=false and try `acquireLock` —
+      // immediately re-acquiring the lock we just transferred.
+      // Stop is already false (set at the top of pushHandoff),
+      // but a future refactor that ever resumes the tick loop
+      // after handoff needs to also clear or re-key heldLock
+      // semantics.
       heldLock = false;
 
       const result = await controlClient.pushHandoff({

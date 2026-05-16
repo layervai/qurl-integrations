@@ -296,6 +296,49 @@ describe('step() — exhaustion path', () => {
   });
 });
 
+describe('loop backstop — survives unexpected throws from step()', () => {
+  it('an isConnected() throw does not exit the loop (logs + retries next tick)', async () => {
+    // Contractually `manager.isConnected()` is non-throwing, but a
+    // future shim refactor could regress. Without a backstop, the
+    // first throw would reject the loop's `await step()` and
+    // silently disable the watchdog. The loop must keep running.
+    const manager = makeFakeManager();
+    let nthCall = 0;
+    manager.isConnected = jest.fn(() => {
+      nthCall += 1;
+      if (nthCall === 1) throw new Error('shim-regression');
+      return true;
+    });
+    const sleepResolvers = [];
+    const sleep = jest.fn(() => new Promise((resolve) => { sleepResolvers.push(resolve); }));
+    const { watchdog, logger } = makeWatchdog({
+      manager, sleep, pollIntervalMs: 1,
+    });
+
+    watchdog.start();
+    await flushMicrotasks();
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    // Wake the loop for tick #1 — isConnected throws.
+    sleepResolvers[0]();
+    await flushMicrotasks();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/step threw unexpectedly/),
+      expect.objectContaining({ error: 'shim-regression' }),
+    );
+    // Loop must have scheduled the next sleep.
+    expect(sleep).toHaveBeenCalledTimes(2);
+
+    // Wake tick #2 — isConnected succeeds (returns true).
+    sleepResolvers[1]();
+    await flushMicrotasks();
+    expect(manager.isConnected).toHaveBeenCalledTimes(2);
+
+    watchdog.stop();
+    sleepResolvers[2]();
+  });
+});
+
 describe('start() / stop() lifecycle', () => {
   it('start() schedules ticks via the injected sleep + stop() halts the loop', async () => {
     const manager = makeFakeManager({ initialConnected: true });

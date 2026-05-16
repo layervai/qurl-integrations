@@ -239,11 +239,17 @@ function readRequestBody(req, byteCap) {
       if (settled) return;
       totalLength += chunk.length;
       if (totalLength > byteCap) {
+        // `req.pause()` (NOT `req.destroy()`) stops further data
+        // events without tearing down the socket. Destroying here
+        // would race the 413 response: the handler's
+        // sendJson(res, 413, ...) runs in the next microtask, by
+        // which point the destroyed socket may not be writable,
+        // and legitimate over-cap clients wouldn't see the 413.
+        // Pause keeps the response path alive; TCP backpressure
+        // bounds the attacker's per-connection cost.
+        req.pause();
         const err = new Error('body-too-large');
         err.code = 'BODY_TOO_LARGE';
-        // Destroy the request to stop further reads. Without this,
-        // a malicious peer could keep streaming past the cap.
-        req.destroy();
         settle(reject, err);
         return;
       }

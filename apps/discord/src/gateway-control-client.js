@@ -39,6 +39,7 @@
 // distinction is for observability only.
 
 const http = require('node:http');
+const net = require('node:net');
 
 const { wrapEnvelope } = require('./gateway-hmac');
 
@@ -63,8 +64,15 @@ function createControlClient({
     selfInstanceId,
     expectedVersion,
   }) {
-    if (typeof peerIp !== 'string' || peerIp.length === 0) {
-      throw new Error('pushHandoff: peerIp (non-empty string) required');
+    // Validate as a parseable IPv4/IPv6 literal — same shape as
+    // gateway-peer-heartbeat's write-time check. Defense-in-depth:
+    // if a heartbeat row is ever corrupted or mis-written to carry
+    // a hostname (or the literal "undefined" from env-stringification),
+    // we don't want to do DNS resolution + POST to wherever it
+    // resolves. The heartbeat-side validator and this validator
+    // are deliberately the same so each side fails loud on a bad row.
+    if (typeof peerIp !== 'string' || net.isIP(peerIp) === 0) {
+      throw new Error('pushHandoff: peerIp (IPv4 or IPv6 literal) required');
     }
     if (!Number.isInteger(peerPort) || peerPort <= 0 || peerPort > 65535) {
       throw new Error('pushHandoff: peerPort (integer 1-65535) required');
@@ -130,6 +138,15 @@ function createControlClient({
             peerInstanceId, error: err.message,
           });
           settle({ ok: false, reason: 'http_error', error: err.message });
+        });
+        // Peer crashes mid-response (after headers, before end):
+        // 'aborted' fires but 'end' never will. Without this
+        // handler we'd wait the full timeout before settling.
+        // Settle as http_error so the caller treats it like any
+        // other peer-side failure.
+        res.on('aborted', () => {
+          logger.warn('control-client: response aborted', { peerInstanceId });
+          settle({ ok: false, reason: 'http_error', error: 'response_aborted' });
         });
       });
 

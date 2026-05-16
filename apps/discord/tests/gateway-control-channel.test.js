@@ -435,6 +435,65 @@ describe('handleRequest — onHandoff', () => {
   });
 });
 
+describe('handleRequest — body cap response race (real socket)', () => {
+  let server;
+  let port;
+
+  beforeEach(() => new Promise((resolve) => {
+    const hmac = makeHmac();
+    server = startControlChannelServer({
+      hmac,
+      selfInstanceId: 'inst-B',
+      isKnownPeer: () => true,
+      onHandoff: jest.fn(async () => {}),
+      logger: makeLogger(),
+      port: 0,
+      bindAddr: '127.0.0.1',
+      bodyByteCap: 100,
+      onListenError: () => {},
+    });
+    server.on('listening', () => {
+      port = server.address().port;
+      resolve();
+    });
+  }));
+
+  afterEach(() => new Promise((resolve) => {
+    server.close(() => resolve());
+  }));
+
+  it('returns the 413 response to the client even after the body exceeds the cap (no socket-destroy race)', async () => {
+    // Earlier shape used req.destroy() on over-cap which tore down
+    // the socket BEFORE the catch handler could write the 413 —
+    // legitimate over-cap clients never saw the response. The fix
+    // uses req.pause(). Drive a real HTTP request that streams
+    // bytes past the cap and assert we get a 413 status code +
+    // JSON body, not a connection-reset error.
+    const result = await new Promise((resolve, reject) => {
+      const big = Buffer.alloc(500, 0x61); // 5× the cap
+      const req = http.request({
+        host: '127.0.0.1', port, path: '/control/yours', method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': big.length,
+        },
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({
+          status: res.statusCode,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+      req.on('error', reject);
+      req.write(big);
+      req.end();
+    });
+    expect(result.status).toBe(413);
+    expect(JSON.parse(result.body)).toEqual({ error: 'body_too_large' });
+  });
+});
+
 describe('end-to-end — real HTTP server on ephemeral port', () => {
   let server;
   let port;

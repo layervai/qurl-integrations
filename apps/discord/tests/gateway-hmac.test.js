@@ -71,7 +71,7 @@ describe('createGatewayHmac — factory validation', () => {
     expect(() => createGatewayHmac({ secrets: {}, logger })).toThrow(/secrets\.current/);
     expect(() => createGatewayHmac({ secrets: { current: '' }, logger })).toThrow(/secrets\.current/);
     expect(() => createGatewayHmac({ secrets: { current: 'x', previous: 42 }, logger }))
-      .toThrow(/secrets\.previous must be a string/);
+      .toThrow(/secrets\.previous must be a non-empty string/);
   });
 
   it('throws when logger is missing', () => {
@@ -83,6 +83,17 @@ describe('createGatewayHmac — factory validation', () => {
     expect(() => createGatewayHmac({ secrets: { current: 'x' }, logger })).not.toThrow();
     expect(() => createGatewayHmac({ secrets: { current: 'x', previous: null }, logger })).not.toThrow();
     expect(() => createGatewayHmac({ secrets: { current: 'x', previous: undefined }, logger })).not.toThrow();
+  });
+
+  it('rejects secrets.previous = "" (empty string) — would silently disable dual-accept', () => {
+    // The verify use site treats falsy `previous` as "not configured"
+    // and skips the second hmac check. Without this validator, a
+    // misconfig writing `previous: ""` would pass at boot and silently
+    // disable the rotation window's dual-accept. Fail loud.
+    const logger = { info() {}, warn() {}, error() {}, debug() {} };
+    expect(() => createGatewayHmac({
+      secrets: { current: 'x', previous: '' }, logger,
+    })).toThrow(/non-empty string or null/);
   });
 
   it('exposes default constants', () => {

@@ -60,6 +60,14 @@ function makeFakeHttpRequest({ behavior }) {
             res.emit('end');
           });
         },
+        respondThenAbort(status) {
+          // Headers + partial body arrive, then peer crashes — emit
+          // 'aborted' instead of 'end'.
+          const res = new EventEmitter();
+          res.statusCode = status;
+          responseHandler(res);
+          setImmediate(() => res.emit('aborted'));
+        },
         timeout() { req.emit('timeout'); },
         error(err) { req.emit('error', err); },
       };
@@ -101,6 +109,34 @@ describe('pushHandoff — argument validation', () => {
     await expect(client.pushHandoff({})).rejects.toThrow(/required/);
     await expect(client.pushHandoff({ ...validArgs, peerIp: '' })).rejects.toThrow(/required/);
     await expect(client.pushHandoff({ ...validArgs, expectedVersion: 0 })).rejects.toThrow(/required/);
+  });
+
+  it('rejects peerIp that is not an IPv4/IPv6 literal (defense-in-depth vs corrupted heartbeat row)', async () => {
+    // The heartbeat-side validator (gateway-peer-heartbeat.js) uses
+    // net.isIP() to reject hostnames + the literal "undefined" from
+    // env-stringification. The client mirrors that check so a
+    // corrupted row (or pre-13b.2 callers that bypassed the write-
+    // time validator) doesn't get a free DNS resolution + POST to
+    // an arbitrary host.
+    const hmac = makeHmac();
+    const client = createControlClient({ hmac, logger: makeLogger() });
+    for (const bad of ['discord.com', 'localhost', 'undefined', 'not-an-ip', '10.0.0', '10.0.0.0.0']) {
+      // eslint-disable-next-line no-await-in-loop
+      await expect(client.pushHandoff({ ...validArgs, peerIp: bad }))
+        .rejects.toThrow(/IPv4 or IPv6 literal/);
+    }
+    // IPv4 + IPv6 literals pass validation. Use a fake httpRequest
+    // so the assertion runs without actually opening a socket.
+    const { fakeRequest } = makeFakeHttpRequest({
+      behavior: (ctx) => ctx.respond(200, '{}'),
+    });
+    const okClient = createControlClient({
+      hmac, logger: makeLogger(), httpRequest: fakeRequest,
+    });
+    await expect(okClient.pushHandoff({ ...validArgs, peerIp: '10.0.0.1' }))
+      .resolves.toEqual({ ok: true, status: 200 });
+    await expect(okClient.pushHandoff({ ...validArgs, peerIp: '::1' }))
+      .resolves.toEqual({ ok: true, status: 200 });
   });
 });
 
@@ -217,6 +253,26 @@ describe('pushHandoff — result mapping', () => {
     const client = createControlClient({ hmac, logger: makeLogger(), httpRequest: fakeRequest });
     const result = await client.pushHandoff(validArgs);
     expect(result).toEqual({ ok: false, reason: 'http_error', error: 'ECONNREFUSED' });
+  });
+
+  it('returns reason:http_error when the response is aborted mid-stream', async () => {
+    // Peer sends headers then crashes — `aborted` event fires but
+    // `end` never will. Without an aborted handler we'd block on
+    // the 200 ms timeout; with it we settle immediately.
+    const hmac = makeHmac();
+    const { fakeRequest } = makeFakeHttpRequest({
+      behavior: (ctx) => ctx.respondThenAbort(200),
+    });
+    const logger = makeLogger();
+    const client = createControlClient({ hmac, logger, httpRequest: fakeRequest });
+    const result = await client.pushHandoff(validArgs);
+    expect(result).toEqual({
+      ok: false, reason: 'http_error', error: 'response_aborted',
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      'control-client: response aborted',
+      expect.objectContaining({ peerInstanceId: 'inst-B' }),
+    );
   });
 
   it('settles exactly once when timeout + error both fire', async () => {

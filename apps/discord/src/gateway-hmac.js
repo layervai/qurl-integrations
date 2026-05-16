@@ -99,11 +99,15 @@ function createGatewayHmac({
     throw new Error('createGatewayHmac: secrets.current (non-empty hex string) is required');
   }
   // `previous` is optional — null/undefined accepted, but if present
-  // must be a string. Lets the rotation deploy run with a
-  // single-secret state (post-step-3 "scrub previous") without
-  // forcing every replica to redeploy first.
-  if (secrets.previous != null && typeof secrets.previous !== 'string') {
-    throw new Error('createGatewayHmac: secrets.previous must be a string or null');
+  // must be a NON-EMPTY string. The use site at the verify path
+  // (`if (!matched && secrets.previous)`) treats empty string as
+  // "not configured" (falsy); without this validator catching it,
+  // a misconfig that set `previous: ""` would silently disable
+  // dual-accept during the rolling-deploy rotation window. Fail
+  // loud at boot.
+  if (secrets.previous != null
+      && (typeof secrets.previous !== 'string' || secrets.previous.length === 0)) {
+    throw new Error('createGatewayHmac: secrets.previous must be a non-empty string or null');
   }
   if (!logger) throw new Error('createGatewayHmac: logger is required');
 
@@ -114,7 +118,11 @@ function createGatewayHmac({
   const seenNonces = new Map();
 
   function rememberNonce(nonce) {
-    // Bump-to-newest on re-insert.
+    // The `has → delete → set` bump-to-newest pattern. Note that
+    // the `has` branch is unreachable from `verify()` (verify
+    // returns `replay` BEFORE calling rememberNonce on a duplicate),
+    // so this is defensive for any future caller that might insert
+    // without the pre-check. Harmless dead branch via verify.
     if (seenNonces.has(nonce)) {
       seenNonces.delete(nonce);
     }

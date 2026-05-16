@@ -135,7 +135,19 @@ function createConnectionWatchdog({
       // shutdown semantics.
       await sleep(pollIntervalMs);
       if (!running) break;
-      await step();
+      // Backstop for unexpected throws from `manager.isConnected()`
+      // (contractually non-throwing, but a future shim refactor
+      // could regress) or any other unhandled path. Without this,
+      // a single throw inside step() would exit the loop and
+      // silently disable the watchdog. Log + continue: the next
+      // tick re-tries.
+      try {
+        await step();
+      } catch (err) {
+        logger.error('connection-watchdog: step threw unexpectedly (loop continues)', {
+          error: err && err.message,
+        });
+      }
     }
   }
 
