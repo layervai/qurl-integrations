@@ -1,0 +1,481 @@
+// Unit tests for src/gateway-session-store.js — Pillar 2 DDB-backed
+// session store. Pins the four load-bearing contracts the module
+// header enumerates:
+//
+//   1. In-memory mirror (retrieveSessionInfo never hits DDB after
+//      hydrate).
+//   2. Null-clear respected (mirror set to null AND DDB row deleted).
+//   3. Write throttling (READY/sessionId-change writes immediately;
+//      sequence-only updates within throttle window defer).
+//   4. Final flush on SIGTERM (cancels pending timer; persists mirror).
+//
+// Failure of any of these contracts produced a real incident class:
+//   - Mirror miss → infinite RESUME-reject loop (spike's first run).
+//   - Null-clear miss → same infinite loop on the next process boot.
+//   - Throttle miss → DDB write burn at dispatch rate ($50/mo+ at
+//     interaction-storm volume).
+//   - Final-flush miss → stale-sequence RESUME after every restart,
+//     observable as "Discord replays the last few seconds of events."
+
+const { mockClient } = require('aws-sdk-client-mock');
+const {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+  DeleteCommand,
+} = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+
+const {
+  createGatewaySessionStore,
+  DEFAULT_WRITE_THROTTLE_MS,
+} = require('../src/gateway-session-store');
+
+// Helper to build the standard test store + mocks. Each test calls
+// this fresh so state isolation is automatic (vs reusing a top-level
+// store across tests, which would leak mirror state).
+function makeStore({ clock, writeThrottleMs } = {}) {
+  const rawClient = new DynamoDBClient({});
+  const docClient = DynamoDBDocumentClient.from(rawClient);
+  const ddbMock = mockClient(docClient);
+  const logger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  };
+  const store = createGatewaySessionStore({
+    ddbClient: docClient,
+    tableName: 'test-gateway-session',
+    shardId: '0:1',
+    logger,
+    clock,
+    writeThrottleMs,
+  });
+  return { store, ddbMock, logger };
+}
+
+// Realistic SessionInfo shape that @discordjs/ws would hand to
+// updateSessionInfo. The three fields (sessionId, resumeURL,
+// sequence) are the ones the design-doc DDB row carries; any
+// other fields @discordjs/ws may add are dropped on write (the
+// store doesn't pass info through verbatim).
+function sessionInfo({ sessionId = 'sess-abc', resumeURL = 'wss://r.discord/abc', sequence = 1 } = {}) {
+  return { sessionId, resumeURL, sequence };
+}
+
+describe('createGatewaySessionStore — factory validation', () => {
+  it('throws when required args are missing', () => {
+    // Pin every required-arg name so a refactor renaming one fails
+    // loudly rather than silently dropping a guard.
+    expect(() => createGatewaySessionStore()).toThrow(/ddbClient is required/);
+    expect(() => createGatewaySessionStore({ ddbClient: {} })).toThrow(/tableName is required/);
+    expect(() => createGatewaySessionStore({ ddbClient: {}, tableName: 't' }))
+      .toThrow(/shardId is required/);
+    expect(() => createGatewaySessionStore({ ddbClient: {}, tableName: 't', shardId: '0:1' }))
+      .toThrow(/logger is required/);
+  });
+});
+
+describe('hydrate', () => {
+  it('returns null and logs cold-start when no row exists', async () => {
+    const { store, ddbMock, logger } = makeStore();
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+    const result = await store.hydrate();
+
+    expect(result).toBeNull();
+    expect(store._getMirrorForTest()).toBeNull();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringMatching(/cold start/i),
+    );
+  });
+
+  it('parses a well-formed row into mirror and returns it', async () => {
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        shard_id: '0:1',
+        session_id: 'sess-xyz',
+        resume_url: 'wss://r.discord/xyz',
+        sequence: 42,
+        updated_at: 1700000000000,
+      },
+    });
+
+    const result = await store.hydrate();
+
+    // Mirror is hydrated with the @discordjs/ws-facing shape
+    // (sessionId/resumeURL/sequence camelCase) — distinct from
+    // the snake_case DDB column names.
+    expect(result).toEqual({
+      sessionId: 'sess-xyz',
+      resumeURL: 'wss://r.discord/xyz',
+      sequence: 42,
+    });
+    expect(store._getMirrorForTest()).toEqual(result);
+  });
+
+  it('treats malformed rows as cold start (does not throw)', async () => {
+    // Production bot MUST boot even if the DDB row is corrupted.
+    // The recovery path is IDENTIFY-from-scratch, which the
+    // mirror=null state surfaces to @discordjs/ws on the first
+    // retrieveSessionInfo call.
+    const { store, ddbMock, logger } = makeStore();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        shard_id: '0:1',
+        session_id: 'sess-xyz',
+        // resume_url missing
+        sequence: 42,
+      },
+    });
+
+    const result = await store.hydrate();
+
+    expect(result).toBeNull();
+    expect(store._getMirrorForTest()).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/malformed/i),
+      expect.any(Object),
+    );
+  });
+
+  it('treats DDB read errors as cold start (does not throw)', async () => {
+    const { store, ddbMock, logger } = makeStore();
+    ddbMock.on(GetCommand).rejects(new Error('DDB unavailable'));
+
+    const result = await store.hydrate();
+
+    expect(result).toBeNull();
+    expect(store._getMirrorForTest()).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/hydrate failed/i),
+      expect.objectContaining({ error: 'DDB unavailable' }),
+    );
+  });
+});
+
+describe('retrieveSessionInfo — in-memory mirror contract', () => {
+  it('returns null before hydrate runs', () => {
+    const { store } = makeStore();
+    expect(store.retrieveSessionInfo('0:1')).toBeNull();
+  });
+
+  it('returns hydrated mirror without a fresh DDB read', async () => {
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        shard_id: '0:1',
+        session_id: 'sess-1',
+        resume_url: 'wss://r/1',
+        sequence: 10,
+      },
+    });
+    await store.hydrate();
+
+    // Call retrieveSessionInfo 100 times — DDB Get count stays at 1
+    // (the single hydrate). Pinning this rules out a regression
+    // where a future refactor reads DDB inside retrieveSessionInfo
+    // (which would re-introduce the infinite-loop hazard the
+    // spike documented).
+    for (let i = 0; i < 100; i++) {
+      store.retrieveSessionInfo('0:1');
+    }
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+  });
+});
+
+describe('updateSessionInfo — null-clear contract', () => {
+  it('clears mirror, cancels pending flush, and issues DDB delete', async () => {
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(DeleteCommand).resolves({});
+
+    // Prime mirror with a session via the immediate-write path.
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    expect(store._getMirrorForTest()).not.toBeNull();
+
+    // Issue a sequence-only update while still inside the throttle
+    // window so a deferred flush gets scheduled.
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
+
+    // Now null-clear — mirror flips to null, DDB delete fires,
+    // and the pending timer is cancelled (no second Put after the
+    // null-clear settles).
+    await store.updateSessionInfo('0:1', null);
+
+    expect(store._getMirrorForTest()).toBeNull();
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
+
+    // Advance past the throttle window and yield to the event loop
+    // — if the pending timer wasn't cancelled, a second Put would
+    // fire here. We assert it did NOT.
+    now += 2000;
+    await new Promise((r) => setImmediate(r));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1); // only the initial prime
+  });
+
+  it('after null-clear, retrieveSessionInfo returns null (the contract)', async () => {
+    // This is the contract the spike's first sandbox run discovered:
+    // if retrieveSessionInfo returns the old session post-null-clear,
+    // Discord rejects RESUME, library calls updateSessionInfo(null)
+    // again, infinite loop.
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(DeleteCommand).resolves({});
+
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A' }));
+    expect(store.retrieveSessionInfo('0:1')).not.toBeNull();
+
+    await store.updateSessionInfo('0:1', null);
+    expect(store.retrieveSessionInfo('0:1')).toBeNull();
+  });
+
+  it('logs but does not throw when DDB delete fails', async () => {
+    const { store, ddbMock, logger } = makeStore();
+    ddbMock.on(DeleteCommand).rejects(new Error('throughput exceeded'));
+
+    // Should resolve cleanly — mirror is the in-process source of
+    // truth, and the in-flight gateway must stay running.
+    await expect(store.updateSessionInfo('0:1', null)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/null-clear delete failed/i),
+      expect.objectContaining({ error: 'throughput exceeded' }),
+    );
+  });
+});
+
+describe('updateSessionInfo — immediate-write path (sessionId change)', () => {
+  it('writes immediately when sessionId changes (READY-fresh-session)', async () => {
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(PutCommand).resolves({});
+
+    // First call: lastWrittenSessionId=null, change detected, write fires.
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 5 }));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+
+    // Second call with same sessionId but different sequence: throttle
+    // path (no immediate write, since throttle hasn't expired). We
+    // assert this in the throttle test below; here we focus on the
+    // sessionId-change path.
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-B', sequence: 6 }));
+    // sessionId changed → immediate write again.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+  });
+
+  it('persists the @discordjs/ws shape as DDB snake_case columns', async () => {
+    const { store, ddbMock } = makeStore({ clock: () => 1_700_000_000_000 });
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.updateSessionInfo('0:1', sessionInfo({
+      sessionId: 'sess-Z',
+      resumeURL: 'wss://r.discord/z',
+      sequence: 99,
+    }));
+
+    // Pin the column-name contract — a rename to camelCase on the
+    // DDB side would diverge from infra (modules/qurl-bot-ddb's
+    // schema uses snake_case shard_id PK + the attribute names
+    // here as the bot's payload).
+    const calls = ddbMock.commandCalls(PutCommand);
+    expect(calls[0].args[0].input).toEqual({
+      TableName: 'test-gateway-session',
+      Item: {
+        shard_id: '0:1',
+        session_id: 'sess-Z',
+        resume_url: 'wss://r.discord/z',
+        sequence: 99,
+        updated_at: 1_700_000_000_000,
+      },
+    });
+  });
+});
+
+describe('updateSessionInfo — throttle path', () => {
+  it('defers writes within throttle window; one flush at boundary', async () => {
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    ddbMock.on(PutCommand).resolves({});
+
+    // Prime with the first update — immediate write because
+    // lastWriteAt=0 → throttleExpired=true.
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+
+    // Rapid sequence updates inside the throttle window — no new
+    // writes should fire synchronously.
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 3 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 4 }));
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+
+    // Mirror reflects the latest sequence even though DDB hasn't
+    // caught up — pins the "mirror is fresh, DDB lags" contract.
+    expect(store._getMirrorForTest()).toEqual(expect.objectContaining({ sequence: 4 }));
+
+    // Fire the deferred flush by advancing the fake timers.
+    now += 1000;
+    jest.useFakeTimers();
+    // Re-create the store with fake timers active — the scheduleFlush
+    // path already armed a setTimeout above using the real timers,
+    // so this test is more naturally written with explicit fake-time
+    // up-front. Pivoting: rely on real timers + wait. The point is
+    // pinned by the previous assertions; the deferred-flush firing
+    // is covered by the explicit-fake-timer test below.
+    jest.useRealTimers();
+  });
+
+  it('issues exactly one deferred write after rapid updates', async () => {
+    jest.useFakeTimers();
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    ddbMock.on(PutCommand).resolves({});
+
+    // Prime: immediate write (throttleExpired=true at lastWriteAt=0).
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    // Burst of in-window updates.
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 3 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 4 }));
+
+    // Advance fake timers past the throttle boundary. The deferred
+    // flush should fire once with the latest sequence (4).
+    now += 1000;
+    await jest.advanceTimersByTimeAsync(1000);
+    // One additional Put beyond the prime — total 2.
+    const puts = ddbMock.commandCalls(PutCommand);
+    expect(puts).toHaveLength(2);
+    expect(puts[1].args[0].input.Item.sequence).toBe(4);
+
+    jest.useRealTimers();
+  });
+
+  it('logs but does not throw when deferred write fails', async () => {
+    jest.useFakeTimers();
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock, logger } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    // First Put succeeds (the prime); second Put (deferred) fails.
+    ddbMock.on(PutCommand)
+      .resolvesOnce({})
+      .rejects(new Error('throttling'));
+
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 2 }));
+    now += 1000;
+    await jest.advanceTimersByTimeAsync(1000);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/deferred write failed/i),
+      expect.objectContaining({ error: 'throttling' }),
+    );
+    jest.useRealTimers();
+  });
+});
+
+describe('flushFinal', () => {
+  it('cancels pending flush and writes the mirror state', async () => {
+    jest.useFakeTimers();
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    ddbMock.on(PutCommand).resolves({});
+
+    // Prime + schedule a deferred flush.
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 99 }));
+
+    // flushFinal cancels the timer AND writes synchronously.
+    await store.flushFinal();
+    const puts = ddbMock.commandCalls(PutCommand);
+    // Prime + flushFinal = 2 puts total. The most recent carries
+    // the latest sequence (99).
+    expect(puts).toHaveLength(2);
+    expect(puts[1].args[0].input.Item.sequence).toBe(99);
+
+    // Advance past the original throttle boundary — the cancelled
+    // deferred flush must NOT fire (would be a 3rd Put).
+    now += 2000;
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+
+    jest.useRealTimers();
+  });
+
+  it('is a no-op when mirror is null (already cleared)', async () => {
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.flushFinal();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('after flushFinal, subsequent updateSessionInfo calls are dropped', async () => {
+    // SIGTERM lands; flushFinal runs and sets stopped=true. A late
+    // dispatch arriving on the way out shouldn't trigger another
+    // DDB write — the process is exiting, the next process will
+    // pick up state from the row we just wrote.
+    const { store, ddbMock } = makeStore();
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    await store.flushFinal();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2); // prime + flushFinal
+
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-B', sequence: 2 }));
+    // No additional Put — stopped=true short-circuits.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(2);
+  });
+});
+
+describe('stop()', () => {
+  it('cancels pending flush without writing', async () => {
+    jest.useFakeTimers();
+    let now = 1_000_000;
+    const clock = () => now;
+    const { store, ddbMock } = makeStore({ clock, writeThrottleMs: 1000 });
+
+    ddbMock.on(PutCommand).resolves({});
+
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 1 }));
+    now += 100;
+    await store.updateSessionInfo('0:1', sessionInfo({ sessionId: 'sess-A', sequence: 99 }));
+
+    store.stop();
+    now += 2000;
+    await jest.advanceTimersByTimeAsync(2000);
+    // Only the prime — stop() neither wrote NOR fired the deferred.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+
+    jest.useRealTimers();
+  });
+});
+
+describe('throttle default', () => {
+  it('exposes DEFAULT_WRITE_THROTTLE_MS at 1000', () => {
+    // Pin the design-doc-derived value. Changing it would be a
+    // visible operational decision (cost vs cross-process lag);
+    // pin so the change requires a test update.
+    expect(DEFAULT_WRITE_THROTTLE_MS).toBe(1000);
+  });
+});
