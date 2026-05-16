@@ -532,12 +532,13 @@ describe('invalidHotStandbyValues', () => {
     expect(invalidHotStandbyValues(cfg())).toEqual([]);
   });
 
-  it('flags unsubstituted template literal in INSTANCE_ID — the ECS task-def footgun', () => {
-    // The specific scenario: a task-def with
-    // `INSTANCE_ID: "${ECS_TASK_ARN}"` that the metadata-resolution
-    // layer fails to substitute. Without this check the literal
-    // `${ECS_TASK_ARN}` would key the lock + heartbeat rows and
-    // every replica would think it owns the same identifier.
+  it('flags unsubstituted template literal in INSTANCE_ID — env-override paste footgun', () => {
+    // The specific scenario: an operator sets
+    // `INSTANCE_ID=${ECS_TASK_ARN}` as an env override (e.g. pasted
+    // from a runbook) and the surrounding shell fails to expand it.
+    // Without this check the literal `${ECS_TASK_ARN}` would key the
+    // lock + heartbeat rows and every replica would think it owns
+    // the same identifier.
     const problems = invalidHotStandbyValues(cfg({ INSTANCE_ID: '${ECS_TASK_ARN}' }));
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/INSTANCE_ID looks like an unsubstituted template literal/);

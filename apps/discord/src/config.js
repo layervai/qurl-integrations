@@ -1,4 +1,35 @@
 const path = require('path');
+const os = require('os');
+
+// Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
+//
+// ECS Fargate awsvpc gives each task its own hostname and ENI, but it
+// does NOT substitute `${ECS_TASK_ARN}` into task-def env-var values
+// (only `command = []` and `entryPoint = []` see that interpolation).
+// Rather than spin up an async ECS-metadata-endpoint fetch at boot —
+// which would push the missing-env guard past module load and add an
+// HTTP dependency to startup — derive both values from Node's `os`
+// module, which is sync, network-free, and works identically in ECS,
+// local docker, and unit tests. Per-field semantics are commented at
+// the call sites below.
+function deriveInstanceId() {
+  return process.env.INSTANCE_ID || os.hostname();
+}
+
+function deriveInstanceIp() {
+  if (process.env.INSTANCE_IP) return process.env.INSTANCE_IP;
+  const ifaces = os.networkInterfaces();
+  for (const addr of ifaces.eth0 || []) {
+    if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+  }
+  for (const name of Object.keys(ifaces)) {
+    if (name === 'eth0') continue;
+    for (const addr of ifaces[name] || []) {
+      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+    }
+  }
+  return null;
+}
 
 // Safe int parser: handles NaN and falsy-zero correctly.
 //
@@ -456,22 +487,21 @@ module.exports = {
 
   // Per-replica identity. The leader coordinator writes this into the
   // DDB lock row as the holder; the control-channel server logs it on
-  // every handoff; the peer-heartbeat row keys on it. Injected by the
-  // ECS task-def `environment = []` block from `${ECS_TASK_ARN}` or
-  // the task metadata endpoint — the deploy is responsible for
-  // ensuring two replicas never share the same value (the lock would
-  // otherwise short-circuit and both replicas would think they hold
-  // it). When unset (hot-standby off), the leader code path doesn't
-  // run, so the value is never read.
-  INSTANCE_ID: process.env.INSTANCE_ID || null,
+  // every handoff; the peer-heartbeat row keys on it. Derived from
+  // `os.hostname()` (Fargate sets this to a short alphanumeric per
+  // task — distinct across replicas in the same service); env override
+  // wins. When hot-standby is off, the leader code path doesn't run,
+  // so the value is never read.
+  INSTANCE_ID: deriveInstanceId(),
 
   // The IPv4 address peers reach this replica on (`http://<ip>:<port>/control/yours`).
-  // ECS awsvpc mode assigns a routable VPC IP per task and exposes it
-  // on the ECS metadata endpoint `$ECS_CONTAINER_METADATA_URI_V4`;
-  // the task-def `environment = []` block plumbs that into INSTANCE_IP
-  // at boot. Used by the peer-heartbeat row's `address_v4` field so
-  // the active replica's pushHandoff client knows where to connect.
-  INSTANCE_IP: process.env.INSTANCE_IP || null,
+  // ECS awsvpc mode assigns a routable VPC IP per task on the task's
+  // eth0 ENI; `os.networkInterfaces()` exposes it sync at boot. Used
+  // by the peer-heartbeat row's `address_v4` field so the active
+  // replica's pushHandoff client knows where to connect. Env override
+  // wins; if no non-internal IPv4 exists, this is null and
+  // invalidHotStandbyValues rejects boot.
+  INSTANCE_IP: deriveInstanceIp(),
 
   // Bind/listen ports for the in-VPC control channel that receives
   // pushHandoff envelopes from the outgoing leader. The bind address

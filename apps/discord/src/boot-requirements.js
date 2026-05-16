@@ -253,14 +253,14 @@ function missingHotStandbyKeys(cfg) {
 
 // Shape checks for INSTANCE_ID + INSTANCE_IP (run AFTER missing-keys
 // passes). Matches the secret-loader's "fail at boot, not at first
-// use" posture: a misconfigured task-def that injects the literal
-// `${ECS_TASK_ARN}` (unsubstituted shell expansion) or
+// use" posture: an env override like `INSTANCE_ID=${ECS_TASK_ARN}`
+// (unsubstituted shell expansion an operator pasted by mistake) or
 // `INSTANCE_IP=10.0.0.999` (non-IPv4) would pass the presence gate
 // and surface as a baffling DDB-lock-can't-acquire or peer-
 // unreachable error at runtime. A cheap regex catches both.
 //
 // INSTANCE_ID: rejects the `${...}` template-literal pattern (the
-// common ECS task-def substitution-failure footgun). Otherwise
+// classic env-override substitution-failure footgun). Otherwise
 // permissive — the downstream lock/heartbeat code does not require
 // a specific format.
 //
@@ -286,7 +286,7 @@ function invalidHotStandbyValues(cfg) {
   if (cfg.INSTANCE_ID && cfg.INSTANCE_ID.includes('${')) {
     problems.push(
       `INSTANCE_ID looks like an unsubstituted template literal ('${cfg.INSTANCE_ID}'). ` +
-      'Check the ECS task-def is resolving the placeholder against the task metadata endpoint.'
+      'INSTANCE_ID is derived from os.hostname() by default; an env override here was set to an unresolved placeholder.'
     );
   }
   if (cfg.INSTANCE_IP && !IPV4_RE.test(cfg.INSTANCE_IP)) {

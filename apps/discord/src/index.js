@@ -350,7 +350,8 @@ const hotStandbyMissing = missingHotStandbyKeys(config);
 if (hotStandbyMissing.length > 0) {
   logger.error(
     `ENABLE_GATEWAY_HOT_STANDBY=true but required env vars missing: ${hotStandbyMissing.join(', ')}. ` +
-    'INSTANCE_ID + INSTANCE_IP are injected by the ECS task-def from the task metadata endpoint; ' +
+    'INSTANCE_ID + INSTANCE_IP are derived in-process from `os.hostname()` and `os.networkInterfaces()` ' +
+    '(env overrides accepted) — a null value means the container has no hostname or no non-internal IPv4. ' +
     'GATEWAY_HANDOFF_HMAC is the SSM-decrypted JSON `{current, previous?}` secret. Verify the ' +
     'qurl-integrations-infra/qurl-bot-discord/terraform/main.tf wiring and re-deploy.'
   );
