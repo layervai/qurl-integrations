@@ -141,10 +141,18 @@ function startControlChannelServer({
 }
 
 async function handleRequest(req, res, ctx) {
-  const path = req.url.split('?', 1)[0];
+  const path = req.url.split('?')[0];
 
-  if (req.method !== 'POST' || path !== '/control/yours') {
+  if (path !== '/control/yours') {
     sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+  // Path matches but wrong method → 405 with Allow header (RFC 9110
+  // §9.1). The distinction from a 404 matters for triage: it tells
+  // an operator "the endpoint exists but someone is hitting it
+  // with the wrong verb" (e.g., a probe misconfigured).
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' });
     return;
   }
 

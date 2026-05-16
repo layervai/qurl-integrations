@@ -107,6 +107,12 @@ function createGatewayLeader({
   // WebSocketManager is NOT safe under concurrent connect().
   let connecting = false;
   let running = false;
+  // Terminal-after-pushHandoff sentinel. Once set, `start()` is a
+  // permanent no-op. Mirrors the watchdog's `exited` flag — it's
+  // there to make the "leader is dead after pushHandoff" invariant
+  // explicit at the API surface rather than relying on the SIGTERM
+  // handler to never call start() again.
+  let closed = false;
   let loopPromise = null;
   let knownPeerInstanceIds = new Set();
 
@@ -211,7 +217,13 @@ function createGatewayLeader({
     // not spawn a second concurrent loop. Callers that need to
     // re-start MUST `await stop()` first; the returned promise
     // resolves once the loop has actually exited.
-    if (loopPromise) return;
+    //
+    // `closed` is permanent — once pushHandoff has run, start() is
+    // a no-op. The leader is terminal after handoff (the SIGTERM
+    // handler exits the process shortly after); a stray start()
+    // from a wiring bug would otherwise resume the tick on a dead
+    // task.
+    if (loopPromise || closed) return;
     running = true;
     loopPromise = loop().finally(() => { loopPromise = null; });
   }
@@ -286,11 +298,29 @@ function createGatewayLeader({
   // Called by the SIGTERM handler. Find peer, transfer, push, return.
   // Stops the tick loop first so the next tick can't race the
   // transferLock with a renewLock.
+  //
+  // TERMINAL: after this returns (any branch), the leader is dead.
+  // The `closed` sentinel is latched so a subsequent `start()` is a
+  // no-op — protects against a wiring bug in PR 13b.3 that might
+  // accidentally re-start the leader post-SIGTERM. The SIGTERM
+  // handler is still expected to `process.exit()` shortly after.
   async function pushHandoff() {
     running = false;
+    closed = true;
+    const cleanupHeartbeatRow = async () => {
+      // Best-effort: close the discovery window immediately so the
+      // freshly-promoted standby's listFreshPeers stops returning
+      // this row, rather than waiting up to `freshnessWindowSeconds`
+      // for the natural fade. Already-warned-and-logged inside
+      // deleteOwnRow; the .catch() is belt-and-braces in case the
+      // module surface changes.
+      await peerHeartbeat.deleteOwnRow().catch(() => {});
+    };
+
     return runSerialized(async () => {
       if (!heldLock) {
         logger.info('gateway-leader: pushHandoff called without holding lock (no-op)');
+        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'not_holding_lock' };
       }
 
@@ -304,6 +334,7 @@ function createGatewayLeader({
         // Best-effort release so the next replacement task can acquire
         // immediately rather than wait for TTL lapse.
         await lock.releaseLock().catch(() => {});
+        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'peer_lookup_failed' };
       }
 
@@ -311,6 +342,7 @@ function createGatewayLeader({
       if (!peer) {
         logger.warn('gateway-leader: no fresh peer for handoff — falling through to cold-fallback');
         await lock.releaseLock().catch(() => {});
+        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'no_peer' };
       }
 
@@ -319,7 +351,9 @@ function createGatewayLeader({
       // window), build a placeholder so transferLock still has a
       // valid string to write. The lock_holder field is operational
       // metadata; correctness doesn't depend on its value, only its
-      // non-emptiness.
+      // non-emptiness. TODO(post-13b.2-bake): drop this fallback
+      // once all peers have been on >=13b.2 long enough that
+      // missing lock_holder is impossible.
       const targetLockHolder = peer.lock_holder
         || `peer/${peer.instance_id}`;
 
@@ -329,32 +363,20 @@ function createGatewayLeader({
       } catch (err) {
         logger.error('gateway-leader: transferLock threw', { error: err.message });
         await lock.releaseLock().catch(() => {});
+        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'transfer_threw' };
       }
 
       if (!transferResult.transferred) {
         // CAS failed — version moved (peer cold-acquired) or we
         // weren't actually holding. Either way the DDB row is no
-        // longer ours, so flip the local flag to match. Without
-        // this, the implicit "caller MUST exit after pushHandoff"
-        // invariant would be load-bearing for a hypothetical caller
-        // that loops back into the tick (where heldLock=true would
-        // attempt renewLock on a row owned by the peer). Making the
-        // flag explicitly match DDB state removes the dependency.
+        // longer ours, so flip the local flag to match.
         heldLock = false;
         logger.warn('gateway-leader: transferLock CAS failed; skipping push');
+        await cleanupHeartbeatRow();
         return { pushed: false, reason: 'transfer_failed' };
       }
 
-      // Implicit invariant: caller (SIGTERM handler) MUST exit
-      // after this point. Clearing heldLock here without exiting
-      // would cause the next tick (if `running` got flipped back
-      // on) to observe heldLock=false and try `acquireLock` —
-      // immediately re-acquiring the lock we just transferred.
-      // Stop is already false (set at the top of pushHandoff),
-      // but a future refactor that ever resumes the tick loop
-      // after handoff needs to also clear or re-key heldLock
-      // semantics.
       heldLock = false;
 
       const result = await controlClient.pushHandoff({
@@ -378,6 +400,7 @@ function createGatewayLeader({
           peerInstanceId: peer.instance_id, reason: result.reason,
         });
       }
+      await cleanupHeartbeatRow();
       return { pushed: true, ackReason: result.ok ? 'ack' : result.reason };
     });
   }

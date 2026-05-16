@@ -47,6 +47,7 @@ function makeMocks({
   const peerHeartbeat = {
     writeHeartbeat: jest.fn(async () => {}),
     listFreshPeers: jest.fn(async () => initialPeers),
+    deleteOwnRow: jest.fn(async () => {}),
     ...overrides.peerHeartbeat,
   };
   const controlClient = {
@@ -549,6 +550,74 @@ describe('isConnecting — race protection between inbound-handoff and watchdog'
     // finally{} block must clear the flag so the watchdog can take
     // over the retry on its next tick.
     expect(leader.isConnecting()).toBe(false);
+  });
+});
+
+describe('pushHandoff — terminal contract (closed sentinel)', () => {
+  it('after pushHandoff, start() is a permanent no-op', async () => {
+    const sleep = jest.fn(() => new Promise(() => {})); // never resolves
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader } = makeLeader({ mocks, sleep });
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep).toHaveBeenCalledTimes(1);
+
+    await leader._stepForTest(); // heldLock=true
+    await leader.pushHandoff();
+
+    // After pushHandoff, start() must NOT schedule another tick —
+    // the leader is terminal (SIGTERM handler is about to exit).
+    const sleepCallsBeforeRestart = sleep.mock.calls.length;
+    leader.start();
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(sleep.mock.calls.length).toBe(sleepCallsBeforeRestart);
+  });
+
+  it('calls peerHeartbeat.deleteOwnRow on the happy path', async () => {
+    // SIGTERM cleanup: the dying replica should close its discovery
+    // window immediately rather than wait the freshness window for
+    // the row to fade naturally.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    mocks.peerHeartbeat.deleteOwnRow = jest.fn(async () => {});
+    const { leader, peerHeartbeat } = makeLeader({ mocks });
+    await leader._stepForTest();
+    await leader.pushHandoff();
+    expect(peerHeartbeat.deleteOwnRow).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls deleteOwnRow on the no_peer branch too', async () => {
+    const mocks = makeMocks({ initialPeers: [] });
+    mocks.peerHeartbeat.deleteOwnRow = jest.fn(async () => {});
+    const { leader, peerHeartbeat } = makeLeader({ mocks });
+    await leader._stepForTest();
+    const result = await leader.pushHandoff();
+    expect(result.reason).toBe('no_peer');
+    expect(peerHeartbeat.deleteOwnRow).toHaveBeenCalledTimes(1);
+  });
+
+  it('a deleteOwnRow failure does NOT bubble into the pushHandoff result', async () => {
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    mocks.peerHeartbeat.deleteOwnRow = jest.fn(async () => { throw new Error('ddb-throttle'); });
+    const { leader } = makeLeader({ mocks });
+    await leader._stepForTest();
+    const result = await leader.pushHandoff();
+    // Push still succeeds; cleanup is best-effort.
+    expect(result).toEqual({ pushed: true, ackReason: 'ack' });
   });
 });
 

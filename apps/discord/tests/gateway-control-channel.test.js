@@ -162,12 +162,14 @@ describe('handleRequest — method + path routing', () => {
     expect(ctx.onHandoff).not.toHaveBeenCalled();
   });
 
-  it('404s GET /control/yours (only POST is allowed)', async () => {
+  it('405s GET /control/yours with an Allow: POST header (only POST is allowed)', async () => {
     const ctx = makeCtx();
     const req = makeReq({ method: 'GET' });
     const res = makeRes();
     await _handleRequestForTest(req, res, ctx);
-    expect(res.statusCode).toBe(404);
+    expect(res.statusCode).toBe(405);
+    expect(JSON.parse(res.body)).toEqual({ error: 'method_not_allowed' });
+    expect(res.headers).toMatchObject({ Allow: 'POST' });
   });
 
   it('strips query string before matching path', async () => {

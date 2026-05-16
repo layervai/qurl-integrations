@@ -71,6 +71,18 @@ describe('createConnectionWatchdog — factory validation', () => {
     expect(BACKOFF_CAP_MS).toBe(5_000);
   });
 
+  it('BACKOFF_CAP_MS stays above the natural ceiling at DEFAULT_MAX_ATTEMPTS', () => {
+    // Source comment names this the "dead-code branch": at default
+    // maxAttempts=5, the highest pre-exit backoff is 2^4 * 100 =
+    // 1600 ms, well under the 5000 cap. Pin the inequality so a
+    // future bump to maxAttempts that pushes the natural backoff
+    // past the cap surfaces here rather than silently truncating
+    // the failure ladder.
+    const naturalCeiling = (2 ** DEFAULT_MAX_ATTEMPTS) * BACKOFF_BASE_MS;
+    // At maxAttempts=5: ceiling = 32 * 100 = 3200. Cap 5000 > 3200.
+    expect(BACKOFF_CAP_MS).toBeGreaterThan(naturalCeiling);
+  });
+
   it('throws when manager lacks required methods', () => {
     expect(() => createConnectionWatchdog()).toThrow(/manager.*connect.*isConnected/);
     expect(() => createConnectionWatchdog({ manager: {} })).toThrow(/manager.*connect.*isConnected/);
@@ -78,13 +90,18 @@ describe('createConnectionWatchdog — factory validation', () => {
       .toThrow(/manager.*connect.*isConnected/);
   });
 
-  it('throws when isHoldingLock / releaseLock / logger are missing', () => {
+  it('throws when isHoldingLock / isConnecting / releaseLock / logger are missing', () => {
     const manager = makeFakeManager();
     expect(() => createConnectionWatchdog({ manager })).toThrow(/isHoldingLock/);
-    expect(() => createConnectionWatchdog({ manager, isHoldingLock: () => true }))
-      .toThrow(/releaseLock/);
     expect(() => createConnectionWatchdog({
-      manager, isHoldingLock: () => true, releaseLock: async () => {},
+      manager, isHoldingLock: () => true,
+    })).toThrow(/isConnecting/);
+    expect(() => createConnectionWatchdog({
+      manager, isHoldingLock: () => true, isConnecting: () => false,
+    })).toThrow(/releaseLock/);
+    expect(() => createConnectionWatchdog({
+      manager, isHoldingLock: () => true, isConnecting: () => false,
+      releaseLock: async () => {},
     })).toThrow(/logger is required/);
   });
 });
