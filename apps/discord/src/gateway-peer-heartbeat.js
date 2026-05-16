@@ -152,6 +152,16 @@ function createPeerHeartbeat({
       .filter((row) => row.instance_id !== instanceId)
       .filter((row) => row.shard_id === shardId)
       .filter((row) => typeof row.updated_at === 'number' && row.updated_at > cutoff)
+      // Defense-in-depth: skip any row missing a parseable IPv4/IPv6
+      // `ip` or a valid TCP `port`. The write path already validates
+      // both, but a corrupt or pre-validator row would otherwise reach
+      // the SIGTERM handoff path. The control-client validates again
+      // at POST time and would throw — but the cost of catching a bad
+      // row here is one filter pass, and the win is that the caller
+      // moves on to the next-freshest peer instead of bailing out
+      // with `pushHandoff: peerIp required` and losing the handoff.
+      .filter((row) => typeof row.ip === 'string' && net.isIP(row.ip) !== 0)
+      .filter((row) => Number.isInteger(row.port) && row.port > 0 && row.port <= 65535)
       .sort((a, b) => b.updated_at - a.updated_at);
   }
 

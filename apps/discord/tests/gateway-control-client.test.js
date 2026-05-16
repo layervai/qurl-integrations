@@ -62,12 +62,20 @@ function makeFakeHttpRequest({ behavior }) {
           });
         },
         respondThenAbort(status) {
-          // Headers + partial body arrive, then peer crashes — emit
-          // 'aborted' instead of 'end'.
+          // Headers + partial body arrive, then peer crashes. Node 17+
+          // (after `aborted` was deprecated) signals this as `close`
+          // on the response with `destroyed=true` and a statusCode
+          // already set from headers — that's what the client listens
+          // for now. See the comment in gateway-control-client.js's
+          // res.on('close') handler for why.
           const res = new EventEmitter();
           res.statusCode = status;
+          res.destroyed = false;
           responseHandler(res);
-          setImmediate(() => res.emit('aborted'));
+          setImmediate(() => {
+            res.destroyed = true;
+            res.emit('close');
+          });
         },
         timeout() { req.emit('timeout'); },
         error(err) { req.emit('error', err); },

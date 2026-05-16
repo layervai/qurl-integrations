@@ -156,14 +156,20 @@ function createControlClient({
             });
             settle({ ok: false, reason: 'http_error', error: err.message });
           });
-          // Peer crashes mid-response (after headers, before end):
-          // 'aborted' fires but 'end' never will. Without this
+          // Peer crashes mid-response (after headers, before end).
+          // The deprecated `res.on('aborted')` was replaced in Node 17
+          // by `res.on('close')` combined with checking
+          // `res.destroyed` post-close. Matches the receive-side
+          // idiom in gateway-control-channel.js. Without this
           // handler we'd wait the full timeout before settling.
-          // Settle as http_error so the caller treats it like any
-          // other peer-side failure.
-          res.on('aborted', () => {
-            logger.warn('control-client: response aborted', { peerInstanceId });
-            settle({ ok: false, reason: 'http_error', error: 'response_aborted' });
+          res.on('close', () => {
+            if (res.destroyed && res.statusCode !== undefined) {
+              // Aborted after headers but before 'end' fired. The
+              // 'end' arm already settled if the body completed
+              // normally, so settle is idempotent here.
+              logger.warn('control-client: response aborted', { peerInstanceId });
+              settle({ ok: false, reason: 'http_error', error: 'response_aborted' });
+            }
           });
         });
 

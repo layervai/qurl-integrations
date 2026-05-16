@@ -184,6 +184,42 @@ describe('handleRequest — method + path routing', () => {
     await _handleRequestForTest(req, res, ctx);
     expect(res.statusCode).toBe(200);
   });
+
+  it.each([
+    ['application/json-patch+json'],
+    ['application/jsonp'],
+    ['application/jsonish'],
+    ['text/plain'],
+    ['application/octet-stream'],
+  ])('415s POST /control/yours with content-type %s', async (contentType) => {
+    const ctx = makeCtx();
+    const req = makeReq();
+    req.headers['content-type'] = contentType;
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(415);
+    expect(JSON.parse(res.body)).toEqual({ error: 'unsupported_media_type' });
+    expect(ctx.onHandoff).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['application/json'],
+    ['application/json; charset=utf-8'],
+    ['Application/JSON'],
+    ['application/json;charset=UTF-8'],
+  ])('accepts content-type %s (matched by prefix)', async (contentType) => {
+    const now = 1_700_000_000_000;
+    const hmac = makeHmac({ clock: () => now });
+    const ctx = makeCtx({ hmac });
+    const payload = makeFreshPayload({ now });
+    const envelope = makeSignedEnvelope({ payload });
+
+    const req = makeReq({ body: Buffer.from(envelope) });
+    req.headers['content-type'] = contentType;
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(200);
+  });
 });
 
 describe('handleRequest — body cap', () => {

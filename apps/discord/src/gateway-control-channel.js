@@ -144,13 +144,17 @@ function startControlChannelServer({
   // Cap idle/header timeouts to bound resource usage. Match the
   // ordering constraint Node enforces: headersTimeout < requestTimeout.
   //
-  // Floor at 1 s: a caller passing a tiny `requestTimeoutMs` (e.g.,
-  // 1 in a test) would otherwise produce `headersTimeout = 0`, which
-  // Node interprets as DISABLED (no header timeout at all) — the
-  // exact opposite of "half." We don't want that footgun on the
-  // production surface.
+  // Floor at 1 s prevents the `headersTimeout = 0` (= disabled)
+  // footgun for tiny caller-provided requestTimeoutMs. The outer
+  // Math.min then caps at `requestTimeout - 100` so the
+  // headersTimeout < requestTimeout invariant holds even when
+  // the floor would otherwise push it over the request timeout.
+  // Defaults (5s request, 1s headers) are unaffected.
   server.requestTimeout = requestTimeoutMs;
-  server.headersTimeout = Math.max(1_000, Math.floor(requestTimeoutMs / 2));
+  server.headersTimeout = Math.min(
+    Math.max(1_000, Math.floor(requestTimeoutMs / 2)),
+    Math.max(1, requestTimeoutMs - 100),
+  );
 
   server.on('error', (err) => {
     logger.error('control-channel: listener failed', { error: err.message, code: err.code });

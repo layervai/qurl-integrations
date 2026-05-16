@@ -97,8 +97,10 @@ function createGatewayLeader({
   if (!lock) throw new Error('createGatewayLeader: lock is required');
   if (!peerHeartbeat) throw new Error('createGatewayLeader: peerHeartbeat is required');
   if (!controlClient) throw new Error('createGatewayLeader: controlClient is required');
-  if (!manager || typeof manager.connect !== 'function') {
-    throw new Error('createGatewayLeader: manager with connect() is required');
+  if (!manager
+      || typeof manager.connect !== 'function'
+      || typeof manager.isConnected !== 'function') {
+    throw new Error('createGatewayLeader: manager with connect() and isConnected() is required');
   }
   if (!selfInstanceId) throw new Error('createGatewayLeader: selfInstanceId is required');
   if (!selfLockHolder) throw new Error('createGatewayLeader: selfLockHolder is required');
@@ -131,6 +133,22 @@ function createGatewayLeader({
   // doesn't break the chain — but we log on the catch so an op
   // failure isn't observable-only-via-caller (the work itself logs
   // its own failure, this is a backstop for the chain-keeping path).
+  // Best-effort lock release for pushHandoff's bail-out paths. The
+  // leader is exiting; we want to give up the lock so the next
+  // replacement task can cold-acquire immediately instead of waiting
+  // for TTL lapse. But a failure here is non-fatal — TTL absorbs it
+  // — so the caller does not propagate. Swallowing silently would
+  // hide a recurring DDB outage, so log at warn instead of `() => {}`.
+  async function releaseLockBestEffort(reason) {
+    try {
+      await lock.releaseLock();
+    } catch (err) {
+      logger.warn('gateway-leader: best-effort releaseLock failed (TTL will reap)', {
+        reason, error: err && err.message,
+      });
+    }
+  }
+
   let inFlight = Promise.resolve();
   function runSerialized(work) {
     // `.then(work, work)` — both fulfillment AND rejection handlers
@@ -421,16 +439,14 @@ function createGatewayLeader({
         logger.error('gateway-leader: listFreshPeers failed during pushHandoff', {
           error: err.message,
         });
-        // Best-effort release so the next replacement task can acquire
-        // immediately rather than wait for TTL lapse.
-        await lock.releaseLock().catch(() => {});
+        await releaseLockBestEffort('peer_lookup_failed');
         return { pushed: false, reason: 'peer_lookup_failed' };
       }
 
       const peer = peers[0]; // freshest-first per listFreshPeers contract
       if (!peer) {
         logger.warn('gateway-leader: no fresh peer for handoff — falling through to cold-fallback');
-        await lock.releaseLock().catch(() => {});
+        await releaseLockBestEffort('no_peer');
         return { pushed: false, reason: 'no_peer' };
       }
 
@@ -455,7 +471,7 @@ function createGatewayLeader({
         transferResult = await lock.transferLock(peer.instance_id, targetLockHolder);
       } catch (err) {
         logger.error('gateway-leader: transferLock threw', { error: err.message });
-        await lock.releaseLock().catch(() => {});
+        await releaseLockBestEffort('transfer_threw');
         return { pushed: false, reason: 'transfer_threw' };
       }
 

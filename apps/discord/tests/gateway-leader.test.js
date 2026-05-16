@@ -98,18 +98,18 @@ describe('createGatewayLeader — factory validation', () => {
       lock: {}, peerHeartbeat: {}, controlClient: {}, manager: {},
     })).toThrow(/manager/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
     })).toThrow(/selfInstanceId/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
       selfInstanceId: 'a',
     })).toThrow(/selfLockHolder/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
       selfInstanceId: 'a', selfLockHolder: 'h',
     })).toThrow(/shardId/);
     expect(() => createGatewayLeader({
-      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {} },
+      lock: {}, peerHeartbeat: {}, controlClient: {}, manager: { connect() {}, isConnected() {} },
       selfInstanceId: 'a', selfLockHolder: 'h', shardId: 's',
     })).toThrow(/logger/);
   });
