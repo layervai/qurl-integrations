@@ -83,6 +83,14 @@ assertNoIntent(intents, GatewayIntentBits.DirectMessages, 'DirectMessages');
 
 const client = new Client({ intents });
 
+// Bitfield form of the same `intents` array, for the Pillar 2
+// @discordjs/ws shim path (which takes a number, not an array).
+// Single source of truth: both the legacy Client construction
+// above AND the shim subscribe to identical events. Bitwise OR
+// across the intent constants is the standard discord-api-types
+// shape — see discord-api-types/v10 docs.
+const GATEWAY_INTENTS_BITFIELD = intents.reduce((acc, bit) => acc | bit, 0);
+
 // Cache for quick lookups
 let guild = null;
 let roles = {
@@ -914,6 +922,7 @@ async function shutdown() {
 
 module.exports = {
   client,
+  GATEWAY_INTENTS_BITFIELD,
   assignContributorRole,
   notifyPRMerge,
   notifyBadgeEarned,

@@ -1,7 +1,11 @@
 const config = require('./config');
 const logger = require('./logger');
-const { client, refreshCache, shutdown: discordShutdown } = require('./discord');
+const { client, GATEWAY_INTENTS_BITFIELD, refreshCache, shutdown: discordShutdown } = require('./discord');
 const { registerCommands, handleCommand } = require('./commands');
+const { createGatewayWsShim } = require('./gateway-ws-shim');
+const { createGatewaySessionStore } = require('./gateway-session-store');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { handleFlowInteraction } = require('./flow-dispatch');
 const { startServer, stopIntervals: stopServerIntervals } = require('./server');
 const { startGatewayHealthServer } = require('./gateway-health');
@@ -327,6 +331,69 @@ if (mapCommandMissing.length > 0) {
 // consumer-startup and event-listener registration sites stay in sync.
 const isWorker = isHttp && config.ENABLE_EVENT_SHIPPER;
 
+// Pillar 2 gateway-resume shim. Constructed once at module load when
+// PROCESS_ROLE=gateway AND ENABLE_GATEWAY_RESUME=true. Owns its own
+// @discordjs/ws WebSocketManager (replacing the legacy
+// `client.login()` path), persists session state to DDB, and
+// forwards every dispatch to local subscribers via shim.onDispatch.
+// Stays null in every other configuration (flag-off, http tier,
+// worker tier) so the legacy code paths run unchanged.
+//
+// Constructed at module load rather than inside start() because the
+// gracefulShutdown path needs a reference to it for the SIGTERM
+// store-flush; lazy construction would race the shutdown handler.
+//
+// The DDB session-table name is derived from `DDB_TABLE_PREFIX` (the
+// same env-specific prefix the rest of the bot uses for its DDB
+// tables) so a future env-name rename touches one var, not many.
+// Both this module and the qurl-integrations-infra qurl-bot-ddb
+// module pin the `gateway-session` suffix.
+let gatewayShim = null;
+if (isGateway && config.ENABLE_GATEWAY_RESUME) {
+  const ddbTablePrefix = (process.env.DDB_TABLE_PREFIX ?? '').trim();
+  const awsRegion = (process.env.AWS_REGION ?? '').trim();
+  if (!ddbTablePrefix || !ddbTablePrefix.endsWith('-')) {
+    logger.error(
+      'ENABLE_GATEWAY_RESUME=true requires DDB_TABLE_PREFIX (with trailing "-"). ' +
+      `Got '${ddbTablePrefix}'. The gateway-session table is at ` +
+      '`${DDB_TABLE_PREFIX}gateway-session`; without a prefix the bot cannot ' +
+      'address its DDB session row.',
+    );
+    process.exit(1);
+  }
+  if (!awsRegion) {
+    logger.error('ENABLE_GATEWAY_RESUME=true requires AWS_REGION. Set it to the env-specific region in the deployment template.');
+    process.exit(1);
+  }
+  const rawDdbClient = new DynamoDBClient({
+    region: awsRegion,
+    ...(process.env.DDB_TEST_ENDPOINT ? { endpoint: process.env.DDB_TEST_ENDPOINT } : {}),
+  });
+  const ddbClient = DynamoDBDocumentClient.from(rawDdbClient, {
+    marshallOptions: { removeUndefinedValues: true },
+  });
+  const sessionStore = createGatewaySessionStore({
+    ddbClient,
+    tableName: `${ddbTablePrefix}gateway-session`,
+    // Single-shard topology in PR 13a — matches the "0:1" convention
+    // in modules/qurl-bot-ddb's gateway-session schema comment. Reshard
+    // generalization (PR 14+) flips this to `${shardId}:${total}`
+    // computed from a SHARD_ID/SHARD_COUNT env pair.
+    shardId: '0:1',
+    logger,
+  });
+  gatewayShim = createGatewayWsShim({
+    token: config.DISCORD_TOKEN,
+    intents: GATEWAY_INTENTS_BITFIELD,
+    store: sessionStore,
+    logger,
+  });
+  logger.info('Pillar 2 gateway-resume shim constructed', {
+    tableName: `${ddbTablePrefix}gateway-session`,
+    shardId: '0:1',
+  });
+}
+
 // Log isWorker on its own so an operator triaging a no-dispatch
 // incident sees the full picture without having to mentally combine
 // the role log (line 86) with the flag. Distinct line so a grep for
@@ -403,7 +470,16 @@ if (shouldRegisterInteractionListener({
 // they never login() and so the client never fires these events —
 // but the `.on()` registrations would still leak handler references
 // and register no-op listeners, so gate them for clarity.
-if (isGateway) {
+//
+// Two disjoint subpaths inside the isGateway branch:
+//   - !ENABLE_GATEWAY_RESUME (legacy): register listeners on the
+//     discord.js Client; client.login() opens the WS in start().
+//   - ENABLE_GATEWAY_RESUME (Pillar 2): register listeners on the
+//     shim's onDispatch fan-out; shim.start() opens the WS via
+//     @discordjs/ws WebSocketManager in start(). The Client object
+//     still exists at module load (legacy modules depend on its
+//     symbol exports) but client.login() never runs.
+if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
   // Register commands when ready
   client.once('ready', async () => {
     // registerCommands accepts REST + appId + guildIds (rather than
@@ -460,6 +536,65 @@ if (isGateway) {
   client.on('error', error => {
     logger.error('Discord client error', { error: error.message });
   });
+}
+
+// Pillar 2 shim listeners. Symmetric with the legacy block above
+// but every subscription routes through gatewayShim.onDispatch (a
+// fan-out wrapping the underlying @discordjs/ws WebSocketShardEvents.
+// Dispatch event) instead of client.on('raw').
+//
+// The shim only fires for op=0 dispatches (HEARTBEAT_ACK / Hello /
+// etc. don't reach this code path; @discordjs/ws absorbs them
+// internally). Every legacy `raw` listener that used the op-filter
+// (eventPublisher.publish) still works correctly: its op check is
+// trivially satisfied, and the t-filter (INTERACTION_CREATE)
+// remains the load-bearing branch.
+//
+// registerCommands is triggered on the first READY dispatch — same
+// semantics as the legacy `client.once('ready')` listener above.
+// Discord delivers RESUMED (not READY) on a successful resume, so
+// this handler doesn't re-register commands on every reconnect.
+if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
+  gatewayShim.onDispatch(({ data }) => {
+    if (data?.t === 'READY') {
+      // Fire-and-log: registerCommands does its own try/catch on the
+      // rest.put failure path, but a thrown promise outside that
+      // (defensive: e.g. shim.getAppId() returning null past the
+      // READY guard) would bubble to unhandledRejection. Add a
+      // .catch here for completeness.
+      registerCommands({
+        rest: gatewayShim.rest,
+        appId: gatewayShim.getAppId(),
+        // Gateway tier under the shim doesn't maintain a guild
+        // cache — that's the worker tier's job. Skip the
+        // purgeStaleGuildCommands branch by passing an empty
+        // list. The dispatch-time filter in handleCommand
+        // remains the correctness guarantee; purge is UX polish
+        // that PR 13a defers. Multi-tenant deploys land on the
+        // global-commands endpoint regardless of guild count.
+        guildIds: [],
+        guildNames: {},
+      }).catch((err) => {
+        logger.error('registerCommands (shim path) failed', { error: err.message });
+      });
+    }
+  });
+
+  // Activity ticker — same observability gauge as the legacy block.
+  // The arrow wraps noteGatewayActivity to discard the dispatch
+  // payload (noteGatewayActivity's signature expects no real args).
+  gatewayShim.onDispatch(() => noteGatewayActivity());
+
+  // Publish-to-SQS hook. The shim's dispatch payload is `{data,
+  // shardId}` where `data` is the raw gateway packet (`{op, t, s,
+  // d}`) — same shape eventPublisher.publish() consumes from the
+  // legacy client.on('raw') wiring.
+  //
+  // Always armed when the shim is active because shim-on requires
+  // shipper-on at boot (unsupportedRoleResumeCombo rejects the
+  // shim-on + shipper-off combo). The conditional in the legacy
+  // block is therefore unnecessary here.
+  gatewayShim.onDispatch(({ data }) => eventPublisher.publish(data));
 }
 
 // Log and continue on unhandled rejections. The old behavior killed the
@@ -553,7 +688,22 @@ async function gracefulShutdown(code = 0) {
     // role. HTTP-only replicas never called login(), so there's no
     // WebSocket to close — discordShutdown() on an un-logged-in
     // client just releases the event emitter handles.
-    if (isGateway) {
+    //
+    // Pillar 2 shim path is structurally different: the shim owns
+    // the WebSocket (the legacy Client never logged in). stop()
+    // flushes the session store synchronously then drops manager
+    // state WITHOUT calling manager.destroy() — that's the
+    // load-bearing SIGTERM contract that keeps Discord's resume
+    // buffer alive for the next process. The TCP socket drops when
+    // process.exit() fires below, which Discord treats as a network
+    // disconnect rather than a clean close.
+    if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
+      try {
+        await gatewayShim.stop();
+      } catch (err) {
+        logger.error('gateway shim stop failed', { error: err.message });
+      }
+    } else if (isGateway) {
       await discordShutdown();
     }
     await db.close();
@@ -630,10 +780,21 @@ async function start() {
   if (isHttp) {
     httpServer = startServer();
   } else if (isGateway) {
-    // Returns 503 until client.isReady() flips true (after READY
-    // from the Discord gateway). Dockerfile --start-period=30s
-    // covers this boot window so ECS doesn't replace the task early.
-    httpServer = startGatewayHealthServer(() => client.isReady(), () => {
+    // Returns 503 until isReady() flips true (after READY from the
+    // Discord gateway). Dockerfile --start-period=30s covers this
+    // boot window so ECS doesn't replace the task early.
+    //
+    // Pillar 2 shim path: poll shim.isReady() instead of
+    // client.isReady() — the legacy Client never logs in under the
+    // shim, so client.isReady() always returns false there. The
+    // shim's flag flips to true on the first READY dispatch
+    // (cold-start path) or on the first RESUMED dispatch (cross-
+    // process resume path); both are equivalent for "health check
+    // should pass."
+    const isReadyFn = (config.ENABLE_GATEWAY_RESUME && gatewayShim)
+      ? () => gatewayShim.isReady()
+      : () => client.isReady();
+    httpServer = startGatewayHealthServer(isReadyFn, () => {
       // Null out so gracefulShutdown doesn't try to .close() a server
       // that's in an error state. Covers both the listen-window race
       // (server never finished listening — close() would log
@@ -694,14 +855,38 @@ async function start() {
     eventPublisher.start();
   }
 
-  // Login to Discord with a 30s deadline. client.login() doesn't
-  // expose a native timeout; if the Discord API is unreachable
-  // the call can hang indefinitely and block boot without any
-  // log line pointing at the cause. Gated on `isGateway` — the
-  // HTTP-only replica must NOT open a second Gateway connection
-  // on the same bot token; Discord would flap session identity
-  // between the two WebSockets every few seconds.
-  if (isGateway) {
+  // Open the Discord gateway WebSocket. Two disjoint paths:
+  //
+  //   - Pillar 2 (ENABLE_GATEWAY_RESUME=true): hydrate the persisted
+  //     session from DDB, then start the @discordjs/ws shim. On the
+  //     RESUME path the shim's `retrieveSessionInfo` returns the
+  //     hydrated row and Discord replays buffered events since the
+  //     last sequence (no IDENTIFY). On the cold-start path
+  //     (sandbox fresh boot / resume window expired) the mirror is
+  //     null and @discordjs/ws falls back to IDENTIFY.
+  //   - Legacy (flag-off): client.login() with the same 30s timeout
+  //     that the pre-Pillar-2 code carried.
+  //
+  // Both are gated on `isGateway`. HTTP-only replicas never open a
+  // second Gateway connection on the bot token (Discord would flap
+  // session identity between the two WebSockets).
+  if (isGateway && config.ENABLE_GATEWAY_RESUME && gatewayShim) {
+    const hydrated = await gatewayShim.hydrate();
+    logger.info('gateway-resume hydrate complete', {
+      // Log "resume" vs "cold start" as an SLI — operators can
+      // correlate restart frequency with successful-resume rate.
+      mode: hydrated ? 'resume' : 'cold-start',
+    });
+    await gatewayShim.start();
+    // No equivalent of startGatewayHeartbeat / startActiveGuildCount
+    // under the shim today — those probe discord.js Client's
+    // WebSocketManager shape (client.ws.shards[*].lastPingTimestamp)
+    // which doesn't exist when the shim owns the WS. Tracked as a
+    // follow-up: port the heartbeat / active-guild observability to
+    // a shim-aware snapshot. The gateway-health server's /health
+    // endpoint (isReady() probe) remains the load-bearing
+    // ECS-replacement signal in the interim.
+  } else if (isGateway) {
     await Promise.race([
       client.login(config.DISCORD_TOKEN),
       new Promise((_, reject) => {
