@@ -86,17 +86,9 @@ function createConnectionWatchdog({
   // `() => false`.
   isConnecting,
   releaseLock,
-  // Hard ceiling on the releaseLock call during exhaustion-exit. The
-  // leader's releaseLockForImmediateExit awaits through `runSerialized`,
-  // so a hung inbound-handoff (parked inside manager.connect() with
-  // `connecting=true` latched per gateway-leader.js's bounded-
-  // settlement comment, tracked in #415) would otherwise block the
-  // chain forever and exit(1) would never fire. 3 s is generous vs.
-  // the ~1 s expected DDB RTT; on miss we log and exit anyway.
-  // Injected for tests so the ceiling can be tuned tiny.
+  // Ceilings — see RELEASE_LOCK_CEILING_MS / CONNECT_CEILING_MS above
+  // for rationale. Injected for tests so they can be tuned tiny.
   releaseLockCeilingMs = RELEASE_LOCK_CEILING_MS,
-  // Hard ceiling on the inline `manager.connect()` call. See
-  // CONNECT_CEILING_MS above for rationale. Injected for tests.
   connectCeilingMs = CONNECT_CEILING_MS,
   // Optional. If provided, called best-effort on the exhaustion-exit
   // path alongside releaseLock. Symmetric to gateway-leader.js's

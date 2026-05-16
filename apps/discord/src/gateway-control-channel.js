@@ -348,12 +348,13 @@ function findInvalidHandoffField(payload) {
     return 'peer_instance_id';
   }
   // Upper bound is a sanity ceiling, not a security primitive — the
-  // HMAC has already authenticated the sender. A peer adopting
-  // Number.MAX_SAFE_INTEGER as the version cursor would burn
-  // ~2^53 CAS values before the row could ever match again; reject
-  // anything that's clearly not a real lock-version number.
-  if (typeof payload.expected_version !== 'number'
-      || !Number.isInteger(payload.expected_version)
+  // HMAC has already authenticated the sender. `Number.isInteger`
+  // accepts representable integers past MAX_SAFE_INTEGER (e.g.
+  // `2**53` returns true) where arithmetic loses precision, so the
+  // explicit `> Number.MAX_SAFE_INTEGER` check IS doing work — it's
+  // not redundant with `isInteger`. Reject values that could ever
+  // round-trip lossily via JSON or DDB number marshaling.
+  if (!Number.isInteger(payload.expected_version)
       || payload.expected_version <= 0
       || payload.expected_version > Number.MAX_SAFE_INTEGER) {
     return 'expected_version';

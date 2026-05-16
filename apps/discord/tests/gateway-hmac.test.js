@@ -306,6 +306,22 @@ describe('verify — rejection reasons', () => {
       .toEqual({ ok: false, reason: 'missing_field' });
   });
 
+  it('rejects a body where ts is Infinity (JSON.parse of `1e1000` → Infinity, typeof === number)', () => {
+    // `1e1000` is valid JSON but V8 parses it to Infinity (double-
+    // precision overflow). `Number.isFinite` rejects this; a bare
+    // `typeof === "number"` check would accept it and fall through
+    // to the stale branch — works today but the contract should be
+    // pinned at the field-shape gate, not the freshness arithmetic.
+    const now = 1_700_000_000_000;
+    const { hmac } = makeHmac({ clock: () => now });
+    const bodyBytes = Buffer.from('{"ts":1e1000,"nonce":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}', 'utf8');
+    expect(JSON.parse(bodyBytes.toString('utf8')).ts).toBe(Infinity); // sanity
+    const signature = crypto.createHmac('sha256', SECRET_CURRENT)
+      .update(bodyBytes).digest('hex');
+    expect(hmac.verify({ bodyBytes, signature }))
+      .toEqual({ ok: false, reason: 'missing_field' });
+  });
+
   it('rejects a body where nonce is empty', () => {
     const now = 1_700_000_000_000;
     const { hmac } = makeHmac({ clock: () => now });

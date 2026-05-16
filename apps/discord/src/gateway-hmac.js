@@ -227,7 +227,15 @@ function createGatewayHmac({
       return { ok: false, reason: VERIFY_REASONS.MALFORMED_BODY };
     }
 
-    if (typeof payload.ts !== 'number' || typeof payload.nonce !== 'string' || payload.nonce.length === 0) {
+    // `Number.isFinite` (not `typeof === 'number'`) because valid
+    // JSON like `1e1000` parses to `Infinity` and would slip past
+    // `typeof === 'number'`. `Math.abs(now - Infinity) > windowMs`
+    // is true today (so the body falls into the stale branch), but
+    // pinning the rejection at the field-shape gate is cleaner and
+    // doesn't depend on freshness arithmetic. Matches the
+    // `Number.isInteger` posture used elsewhere in the gateway
+    // module.
+    if (!Number.isFinite(payload.ts) || typeof payload.nonce !== 'string' || payload.nonce.length === 0) {
       return { ok: false, reason: VERIFY_REASONS.MISSING_FIELD };
     }
 
