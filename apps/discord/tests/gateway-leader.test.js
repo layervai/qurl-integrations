@@ -838,6 +838,66 @@ describe('pushHandoff — terminal contract (closed sentinel)', () => {
     expect(lock.adoptLockFromHandoff).not.toHaveBeenCalled();
   });
 
+  it('inner closed re-check: inbound-handoff queued BEFORE pushHandoff aborts when its turn comes', async () => {
+    // The race: an inbound-handoff arrives, passes the outer closed
+    // check, and is queued in runSerialized behind a tick. SIGTERM
+    // fires DURING the queue wait: pushHandoff sets closed=true and
+    // queues its own work behind the inbound. When the inbound work
+    // pops off the chain and starts running, it must observe
+    // closed=true and throw — otherwise it would adopt + connect
+    // against a soon-to-be-transferred lock.
+    //
+    // Construct: gate a tick on a slow renewLock so the chain blocks,
+    // kick inbound, kick pushHandoff, then release renewLock and
+    // verify inbound throws leader_closed and adoptLockFromHandoff
+    // never ran.
+    const mocks = makeMocks({
+      initialPeers: [{
+        instance_id: 'inst-B', ip: '10.0.0.2', port: 9876,
+        lock_holder: 'task-B/inst-B', updated_at: 100,
+      }],
+    });
+    const { leader, lock } = makeLeader({ mocks });
+    // Acquire the lock first (heldLock=true) via a tick before we
+    // install the blocking renewLock mock — otherwise the lock
+    // module would be the one stuck.
+    await leader._stepForTest();
+    expect(leader.isHoldingLock()).toBe(true);
+
+    // Now swap renewLock to block on a held promise. The next tick
+    // will queue and never settle until we release.
+    let releaseRenew;
+    mocks.lock.renewLock = jest.fn(() => new Promise((resolve) => {
+      releaseRenew = () => resolve({ renewed: true, version: 7 });
+    }));
+
+    // Kick a tick (queued #1, will block on renewLock).
+    const tickPromise = leader._stepForTest();
+    // Yield microtasks so the tick reaches the blocking renewLock.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(typeof releaseRenew).toBe('function');
+
+    // Kick the inbound (queued #2, will wait for tick to finish).
+    const inboundPromise = leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 99,
+    });
+    // SIGTERM fires (queued #3 + sets closed=true). pushHandoff's
+    // outer side-effect is `closed = true; running = false`, so by
+    // the time the inbound work pops, closed has latched.
+    const pushPromise = leader.pushHandoff();
+
+    // Let the tick complete so the chain drains.
+    releaseRenew();
+    await tickPromise;
+
+    // Inbound must reject with leader_closed and never call adopt.
+    await expect(inboundPromise).rejects.toThrow(/leader_closed/);
+    expect(lock.adoptLockFromHandoff).not.toHaveBeenCalled();
+
+    // pushHandoff still proceeds to transfer.
+    await pushPromise;
+  });
+
   it('releaseLockForImmediateExit after pushHandoff is a no-op (closed)', async () => {
     const mocks = makeMocks({
       initialPeers: [{

@@ -209,16 +209,17 @@ async function handleRequest(req, res, ctx) {
     sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST', Connection: 'close' });
     return;
   }
-  // Content-Type must be application/json (or absent, since
-  // control-client always sets it and the body is always JSON).
+  // Content-Type must be application/json (required, not optional).
   // 415 unsupported_media_type is the RFC-correct response — and
-  // helps operator triage by distinguishing "probe with wrong
-  // content type" from "real client with a bad envelope" (400).
+  // helps operator triage by distinguishing "probe with wrong /
+  // missing content type" (415) from "real client with a bad
+  // envelope" (400). Our control-client always sets it; rejecting
+  // missing CT also catches `curl` probes without `-H` upfront.
   // We accept charset parameters (`application/json; charset=utf-8`)
   // by matching the prefix, plus RFC 9110-style trailing whitespace
   // after the media type (`application/json `).
   const contentType = req.headers['content-type'];
-  if (contentType !== undefined && !/^application\/json\s*(?:;|$)/i.test(contentType)) {
+  if (contentType === undefined || !/^application\/json\s*(?:;|$)/i.test(contentType)) {
     sendJson(res, 415, { error: 'unsupported_media_type' }, { Connection: 'close' });
     return;
   }

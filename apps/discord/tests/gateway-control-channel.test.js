@@ -57,7 +57,10 @@ function makeReq({ method = 'POST', url = '/control/yours', body = Buffer.alloc(
   const req = Readable.from([body]);
   req.method = method;
   req.url = url;
-  req.headers = {};
+  // Default to a valid Content-Type so tests focused on other behaviors
+  // don't all need to set it. Tests that exercise the 415 path
+  // explicitly delete or override this header.
+  req.headers = { 'content-type': 'application/json' };
   // The handler may call req.destroy() on body-too-large; the
   // Readable.from stream implements destroy as a no-op for our needs.
   return req;
@@ -235,6 +238,20 @@ describe('handleRequest — method + path routing', () => {
     expect(ctx.onHandoff).not.toHaveBeenCalled();
   });
 
+  it('415s POST /control/yours when Content-Type header is missing', async () => {
+    // Required, not optional — catches `curl` probes without `-H` and
+    // any future caller that forgets to set the header. Triage-friendly
+    // 415 vs 400 distinguishes "wrong/missing CT" from "bad envelope".
+    const ctx = makeCtx();
+    const req = makeReq();
+    delete req.headers['content-type'];
+    const res = makeRes();
+    await _handleRequestForTest(req, res, ctx);
+    expect(res.statusCode).toBe(415);
+    expect(JSON.parse(res.body)).toEqual({ error: 'unsupported_media_type' });
+    expect(ctx.onHandoff).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['application/json'],
     ['application/json; charset=utf-8'],
@@ -356,7 +373,7 @@ describe('handleRequest — body cap', () => {
     const req = Readable.from([chunk1, chunk2]);
     req.method = 'POST';
     req.url = '/control/yours';
-    req.headers = {};
+    req.headers = { 'content-type': 'application/json' };
     const res = makeRes();
     await _handleRequestForTest(req, res, ctx);
     expect(res.statusCode).toBe(413);

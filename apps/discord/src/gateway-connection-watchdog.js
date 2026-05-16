@@ -118,6 +118,12 @@ function createConnectionWatchdog({
   // calls it from the `start()` loop. Returns once the iteration
   // (including any failure-path backoff sleep) settles.
   async function step() {
+    // Terminal-state guard. After the exhaustion-exit branch sets
+    // closed=true, the production loop stops. But _stepForTest can
+    // still be called manually post-exit; without this guard a
+    // re-entry would re-fire releaseLock + deleteOwnRow. Test-tool
+    // robustness only; production never re-enters.
+    if (closed) return;
     if (!isHoldingLock()) {
       attempts = 0;
       return;

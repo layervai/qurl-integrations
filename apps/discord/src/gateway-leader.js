@@ -333,6 +333,21 @@ function createGatewayLeader({
       throw new Error('leader_closed');
     }
     return runSerialized('inbound-handoff', async () => {
+      // Inner closed re-check: a race window exists between the
+      // outer check above and the moment this closure starts.
+      // Sequence: inbound passes outer check → queued in chain
+      // behind a tick → SIGTERM fires → pushHandoff sets
+      // closed=true AND queues its own work → tick finishes → THIS
+      // closure runs and would adopt/connect against a soon-to-be-
+      // transferred lock. The re-check makes the closed sentinel
+      // load-bearing inside the serial chain, not just at the API
+      // entry point. Throw so the server returns 500.
+      if (closed) {
+        logger.warn('gateway-leader: inbound handoff aborted mid-queue — leader closed', {
+          activeInstanceId, expectedVersion,
+        });
+        throw new Error('leader_closed');
+      }
       // Stray-handoff guard: if we already hold the lock AND the WS
       // is connected, a second inbound handoff is either a duplicate
       // from a retry-ing active or a misrouted body (the server-side
@@ -594,9 +609,16 @@ function createGatewayLeader({
     // state (it's a different DDB table), so serializing it would
     // only add latency to the SIGTERM critical path. Failure is
     // swallowed — the worst case is the row fades naturally inside
-    // the freshness window. Closes the discovery window immediately
-    // so the freshly-promoted standby's listFreshPeers stops
-    // returning this row.
+    // the freshness window.
+    //
+    // Timing note: this runs AFTER the serialized work completes,
+    // so during the window from `closed=true` (set above) through
+    // the end of the serialized chain, our heartbeat row is still
+    // visible. A concurrent inbound from another peer would see
+    // our row in their listFreshPeers head, but the inner closed
+    // re-check (in handleInboundHandoff) makes the leader reject
+    // any work that got queued post-`closed`. After this call
+    // returns, peer-side listFreshPeers stops returning our row.
     await peerHeartbeat.deleteOwnRow().catch(() => {});
 
     return result;
