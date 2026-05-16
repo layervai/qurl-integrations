@@ -136,10 +136,13 @@ describe('INSTANCE_IP derivation', () => {
     // (10.0.0.999 — non-IPv4) lands in config.INSTANCE_IP unmodified.
     // The boot-time validator must then catch it. Locks the contract
     // that override-path values still flow through the shape gate.
-    const { invalidHotStandbyValues } = require('../src/boot-requirements');
     withFreshConfig(
       { env: { INSTANCE_IP: '10.0.0.999' } },
       (config) => {
+        // Require inside isolateModules so boot-requirements sees the
+        // same module graph as config — future-proofs against a graph
+        // dependency on the `os` mock.
+        const { invalidHotStandbyValues } = require('../src/boot-requirements');
         expect(config.INSTANCE_IP).toBe('10.0.0.999');
         const problems = invalidHotStandbyValues({
           ...config,

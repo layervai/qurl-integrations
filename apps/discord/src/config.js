@@ -2,6 +2,9 @@ const path = require('path');
 const os = require('os');
 
 // Sync derivation for INSTANCE_ID / INSTANCE_IP (hot-standby identity).
+// Each helper runs once at module-load and is cached into the exported
+// config object — readers of `config.INSTANCE_ID` see a frozen value,
+// not a re-evaluation on access.
 //
 // ECS Fargate awsvpc gives each task its own hostname and ENI, but it
 // does NOT substitute `${ECS_TASK_ARN}` into task-def env-var values
@@ -12,6 +15,15 @@ const os = require('os');
 // module, which is sync, network-free, and works identically in ECS,
 // local docker, and unit tests. Per-field semantics are commented at
 // the call sites below.
+//
+// LOAD-BEARING INVARIANT for the lock primitive: two replicas in the
+// same ECS service MUST see different INSTANCE_ID values. Fargate
+// assigns a unique short alphanumeric hostname per task, which
+// satisfies this — but if a future runtime ever reused hostnames
+// across replicas in the same service, the DDB lock would short-
+// circuit and both replicas would believe they hold leadership.
+// The peer-heartbeat row collision (two writers on the same composite
+// key) would surface post-deploy as a telemetry signal.
 function deriveInstanceId() {
   return process.env.INSTANCE_ID || os.hostname();
 }
@@ -27,7 +39,7 @@ function deriveInstanceIp() {
   // returns — best-effort only; under Fargate awsvpc the eth0 path
   // above always wins, so this branch never runs in prod.
   for (const name of Object.keys(ifaces).filter(n => n !== 'eth0')) {
-    for (const addr of ifaces[name] || []) {
+    for (const addr of ifaces[name]) {
       if (addr.family === 'IPv4' && !addr.internal) return addr.address;
     }
   }
