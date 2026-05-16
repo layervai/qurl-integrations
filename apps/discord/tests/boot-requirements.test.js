@@ -18,6 +18,7 @@ const {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,
@@ -191,6 +192,60 @@ describe('unsupportedRoleShipperCombo', () => {
     ['http', false],
   ])('returns null for supported combination role=%s shipper=%s', (role, shipperEnabled) => {
     expect(unsupportedRoleShipperCombo(role, shipperEnabled)).toBeNull();
+  });
+});
+
+describe('unsupportedRoleResumeCombo', () => {
+  it('returns null when resume=false regardless of other inputs', () => {
+    // Flag-off is the legacy path — every (role, shipper) combination
+    // is supported (or rejected by unsupportedRoleShipperCombo, not
+    // this function). Pin every input as null so a future shape
+    // change to this helper can't accidentally start rejecting
+    // legacy deploys.
+    for (const role of ['combined', 'gateway', 'http']) {
+      for (const shipper of [true, false]) {
+        expect(unsupportedRoleResumeCombo(role, false, shipper)).toBeNull();
+      }
+    }
+  });
+
+  it('rejects resume=true with combined role and surfaces shim/Client conflict', () => {
+    // combined+resume is rejected ahead of the shipper check because
+    // combined mode is the higher-order failure: even with the
+    // shipper on, the legacy Client owns the WS. Pinning the
+    // message contract so a future wording drift can't strip the
+    // remediation hint operators rely on.
+    const msg = unsupportedRoleResumeCombo('combined', true, true);
+    expect(msg).not.toBeNull();
+    expect(msg).toMatch(/PROCESS_ROLE=combined/);
+    expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true/);
+    expect(msg).toMatch(/PROCESS_ROLE=gateway/);
+    expect(msg).toMatch(/PROCESS_ROLE=http/);
+    // combined+resume with shipper=false hits the same message
+    // (combined-mode check is sequenced first inside the helper).
+    expect(unsupportedRoleResumeCombo('combined', true, false)).toBe(msg);
+  });
+
+  it('rejects resume=true with shipper=false on supported roles', () => {
+    // The "resume needs shipper" rejection path. Surfaces a different
+    // remediation than the combined case — enable the shipper, not
+    // un-set combined mode.
+    for (const role of ['gateway', 'http']) {
+      const msg = unsupportedRoleResumeCombo(role, true, false);
+      expect(msg).not.toBeNull();
+      expect(msg).toMatch(/ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true/);
+      expect(msg).toMatch(/@discordjs\/ws/);
+    }
+  });
+
+  it('returns null for resume=true on supported roles with shipper=true', () => {
+    // The production-shape path: PROCESS_ROLE=gateway + both flags on
+    // is the configuration this PR is enabling. Also accepts
+    // PROCESS_ROLE=http (where resume is a no-op — http tier doesn't
+    // open a WS), so the operator can ship one task-def with uniform
+    // env across both tiers.
+    expect(unsupportedRoleResumeCombo('gateway', true, true)).toBeNull();
+    expect(unsupportedRoleResumeCombo('http', true, true)).toBeNull();
   });
 });
 

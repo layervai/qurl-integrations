@@ -15,6 +15,7 @@ const {
   missingEventShipperKeys,
   missingMapCommandKeys,
   unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
   shouldRegisterInteractionListener,
   resolveProcessRole,
 } = require('./boot-requirements');
@@ -282,6 +283,27 @@ if (eventShipperMissing.length > 0) {
 const roleShipperConflict = unsupportedRoleShipperCombo(PROCESS_ROLE, config.ENABLE_EVENT_SHIPPER);
 if (roleShipperConflict) {
   logger.error(roleShipperConflict);
+  process.exit(1);
+}
+
+// Gateway-RESUME (Pillar 2) precondition check. Rejects two shapes:
+//   1. ENABLE_GATEWAY_RESUME=true with ENABLE_EVENT_SHIPPER=false
+//      (the resume shim replaces discord.js Client and only has a
+//      forward-to-SQS path; the in-process dispatcher would be
+//      unreachable).
+//   2. ENABLE_GATEWAY_RESUME=true with PROCESS_ROLE=combined (the
+//      legacy Client owns the WS in combined mode; the shim would
+//      conflict).
+// Sequenced AFTER unsupportedRoleShipperCombo so the operator sees
+// the shipper-first remediation when both are misconfigured, rather
+// than chasing a downstream resume error.
+const roleResumeConflict = unsupportedRoleResumeCombo(
+  PROCESS_ROLE,
+  config.ENABLE_GATEWAY_RESUME,
+  config.ENABLE_EVENT_SHIPPER,
+);
+if (roleResumeConflict) {
+  logger.error(roleResumeConflict);
   process.exit(1);
 }
 

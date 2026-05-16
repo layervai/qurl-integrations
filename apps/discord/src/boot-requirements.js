@@ -122,6 +122,50 @@ function unsupportedRoleShipperCombo(role, eventShipperEnabled) {
   return null;
 }
 
+// Parallel to unsupportedRoleShipperCombo for ENABLE_GATEWAY_RESUME.
+// Two unsupported shapes:
+//
+//   1. resume=true with shipper=false — the resume shim
+//      (@discordjs/ws WebSocketManager) replaces discord.js's Client
+//      entirely, so the in-process interaction dispatcher has no
+//      `client.on('interactionCreate')` emitter to attach to. The
+//      flag-on path is only coherent when the shipper has already
+//      moved dispatch to SQS.
+//   2. resume=true with role=combined — combined mode runs both
+//      tiers in one process, which the legacy discord.js Client
+//      owns end-to-end. The resume shim would conflict with the
+//      Client's WS ownership.
+//
+// (combined + shipper=true is independently rejected by
+// unsupportedRoleShipperCombo; resume's combined-mode rejection
+// catches the remaining combined+shipper-off+resume-on case.)
+//
+// Returns the operator-facing message on rejection or null on
+// success. Same string-or-null shape as unsupportedRoleShipperCombo.
+function unsupportedRoleResumeCombo(role, resumeEnabled, eventShipperEnabled) {
+  if (!resumeEnabled) return null;
+  if (role === 'combined') {
+    return (
+      'PROCESS_ROLE=combined with ENABLE_GATEWAY_RESUME=true is not supported ' +
+      '(the resume shim owns the WebSocket and conflicts with the legacy ' +
+      'discord.js Client that combined mode runs). Run two processes: ' +
+      'PROCESS_ROLE=gateway (singleton, owns the resume shim) + ' +
+      'PROCESS_ROLE=http (consumes from SQS). For local dev / sandbox in ' +
+      'one process, leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  if (!eventShipperEnabled) {
+    return (
+      'ENABLE_GATEWAY_RESUME=true requires ENABLE_EVENT_SHIPPER=true ' +
+      '(the resume shim replaces discord.js Client with @discordjs/ws ' +
+      'WebSocketManager, which forwards every frame to SQS — the ' +
+      'in-process dispatcher path is unreachable from the shim). ' +
+      'Enable the shipper first, or leave ENABLE_GATEWAY_RESUME unset.'
+    );
+  }
+  return null;
+}
+
 // PLACEHOLDER is treated as missing because the SSM parameter
 // ships with that literal sentinel value; remediation ("seed a
 // real key") is identical to the empty-key case.
@@ -219,6 +263,7 @@ module.exports = {
   missingKekRequiredKeys,
   missingEventShipperKeys,
   unsupportedRoleShipperCombo,
+  unsupportedRoleResumeCombo,
   shouldRegisterInteractionListener,
   missingMapCommandKeys,
   GOOGLE_MAPS_API_KEY_PLACEHOLDER_SENTINEL,

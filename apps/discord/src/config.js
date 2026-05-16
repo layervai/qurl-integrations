@@ -376,6 +376,33 @@ module.exports = {
   // → "Rollback cliff: ENABLE_EVENT_SHIPPER".
   ENABLE_EVENT_SHIPPER: process.env.ENABLE_EVENT_SHIPPER === 'true',
 
+  // Gateway RESUME (zero-downtime design, Pillar 2). When true and
+  // PROCESS_ROLE=gateway, the gateway tier replaces the discord.js
+  // `Client` with `@discordjs/ws` `WebSocketManager` and persists
+  // session state (session_id / resume_url / sequence) to the
+  // `${DDB_TABLE_PREFIX}gateway-session` DDB table. On a process
+  // restart the new gateway boots, reads the persisted session, and
+  // Discord's `RESUME` (op 6) replays buffered events from the last
+  // sequence — eliminating the ~10 s IDENTIFY cold-start that the
+  // legacy single-process deploy carried on every restart.
+  //
+  // Requires `ENABLE_EVENT_SHIPPER=true` because the @discordjs/ws
+  // shim doesn't run the in-process dispatcher; it forwards every
+  // frame to SQS (same path Pillar 1 set up). `ENABLE_GATEWAY_RESUME=true`
+  // with the shipper off is rejected at boot — the shim would have
+  // nowhere to send dispatches. Combined mode is also rejected
+  // because the legacy Client owns the WS in that shape.
+  //
+  // No-op when role is http/worker (those tiers don't open a WS).
+  // Default off so a deploy without the flag set behaves identically
+  // to the pre-Pillar-2 codebase — matches the ENABLE_EVENT_SHIPPER
+  // rollout pattern.
+  //
+  // Literal-'true' string check (not truthy parsing) for the same
+  // reason as ENABLE_EVENT_SHIPPER: a typo (TRUE/1/yes) must not
+  // silently flip the gateway path.
+  ENABLE_GATEWAY_RESUME: process.env.ENABLE_GATEWAY_RESUME === 'true',
+
   // SQS Standard queue the gateway publishes to and the worker
   // consumes from (provisioned by qurl-integrations-infra PR B).
   // Required when ENABLE_EVENT_SHIPPER=true; validated at boot in
