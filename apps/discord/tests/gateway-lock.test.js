@@ -227,6 +227,13 @@ describe('renewLock', () => {
     expect(updateCall.ExpressionAttributeValues[':self']).toBe('inst-A');
     expect(updateCall.ExpressionAttributeValues[':expected']).toBe(1);
     expect(updateCall.ExpressionAttributeValues[':next']).toBe(2);
+    // renew updates version + expires_at only — lock_holder is
+    // unchanged because we already hold the lock. Including it
+    // would waste a WCU byte per renew. Pin against accidental
+    // reintroduction.
+    expect(updateCall.UpdateExpression).toBe('SET version = :next, expires_at = :exp');
+    expect(updateCall.UpdateExpression).not.toMatch(/lock_holder/);
+    expect(updateCall.ExpressionAttributeValues[':holder']).toBeUndefined();
   });
 
   it('returns renewed:false and clears version on CAS fail (lock lost)', async () => {

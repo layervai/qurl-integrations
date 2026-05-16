@@ -9,6 +9,31 @@
 // version cursor. Tests run isolated; a future multi-shard caller can
 // construct one per shard.
 //
+// ── Concurrency: single-caller only ──
+//
+// `currentVersion` is closure state mutated by acquireLock / renewLock
+// / transferLock / adoptLockFromHandoff. JS's single-threaded event
+// loop makes each read-then-write atomic at the await boundary, but
+// two concurrent renewLock invocations (e.g., a scheduled tick
+// overlapping a watchdog-triggered renew) would both read version
+// `N`, both attempt to write `N+1`, and the second's CAS fails —
+// clearing `currentVersion=null` even though the lock is still held.
+// The leader-coordinator in PR 13b.2 must serialize all mutator
+// calls (one outstanding renew at a time; transfer/release run only
+// from the SIGTERM path which has the loop stopped). The diagnostic
+// `readCurrentHolder` is the only safe overlap.
+//
+// ── Release semantics ──
+//
+// `releaseLock` is intended for the no-peer SIGTERM path (active dies
+// with no standby to hand to). Both transport errors and CAS failures
+// clear `currentVersion=null` so the caller's state doesn't outlive
+// the lock. This is correct on the SIGTERM path (process is exiting)
+// but would be over-aggressive on a voluntary-step-down path — a
+// future watchdog-driven release would need to distinguish "lock is
+// gone" from "DDB transient error, retry" rather than zero the
+// cursor on either. Today's only caller is gracefulShutdown.
+//
 // ── Load-bearing contracts ──
 //
 // 1. Conditional-write is the lock primitive, NOT DDB TTL. The TTL
@@ -160,15 +185,20 @@ function createGatewayLock({
     const now = nowSeconds();
     const nextVersion = currentVersion + 1;
     try {
+      // No `lock_holder = :holder` in SET — we already hold the
+      // lock, so lock_holder is unchanged. Including it would
+      // burn ~1 WCU byte per renew with no semantic effect.
+      // (acquireLock writes the full row; transferLock writes
+      // the new holder. Both code paths that need to set
+      // lock_holder do so explicitly.)
       await ddbClient.send(new UpdateCommand({
         TableName: tableName,
         Key: { shard_id: shardId },
-        UpdateExpression: 'SET version = :next, expires_at = :exp, lock_holder = :holder',
+        UpdateExpression: 'SET version = :next, expires_at = :exp',
         ConditionExpression: 'instance_id = :self AND version = :expected',
         ExpressionAttributeValues: {
           ':next': nextVersion,
           ':exp': now + ttlSeconds,
-          ':holder': lockHolder,
           ':self': instanceId,
           ':expected': currentVersion,
         },

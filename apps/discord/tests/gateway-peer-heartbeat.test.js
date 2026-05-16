@@ -49,7 +49,7 @@ describe('createPeerHeartbeat — factory validation', () => {
       .toThrow(/instanceId is required/);
     expect(() => createPeerHeartbeat({
       ddbClient: {}, tableName: 't', instanceId: 'i',
-    })).toThrow(/ip is required/);
+    })).toThrow(/ip \(IPv4 or IPv6 literal\) is required/);
     expect(() => createPeerHeartbeat({
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1',
     })).toThrow(/port \(integer 1-65535\) is required/);
@@ -59,6 +59,39 @@ describe('createPeerHeartbeat — factory validation', () => {
     expect(() => createPeerHeartbeat({
       ddbClient: {}, tableName: 't', instanceId: 'i', ip: '10.0.0.1', port: 9876, shardId: '0:1',
     })).toThrow(/logger is required/);
+  });
+
+  it('rejects invalid IPs (literal "undefined" from env-stringification, garbage strings, IPs masked as identifiers)', () => {
+    // The classic failure mode: a misconfigured Fargate task that
+    // env-stringifies an undefined IP-resolution result lands the
+    // literal string `"undefined"` on the row. To DDB it's a valid
+    // S value, to the active's POST it's an unreachable hostname.
+    // net.isIP() returns 0 for non-IPs, 4/6 for valid literals.
+    const base = {
+      ddbClient: {}, tableName: 't', instanceId: 'i', port: 9876,
+      shardId: '0:1', logger: {},
+    };
+    expect(() => createPeerHeartbeat({ ...base, ip: 'undefined' }))
+      .toThrow(/ip \(IPv4 or IPv6 literal\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, ip: 'not.an.ip' }))
+      .toThrow(/ip \(IPv4 or IPv6 literal\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, ip: '999.999.999.999' }))
+      .toThrow(/ip \(IPv4 or IPv6 literal\) is required/);
+    expect(() => createPeerHeartbeat({ ...base, ip: 'fe80::1::2' })) // malformed v6
+      .toThrow(/ip \(IPv4 or IPv6 literal\) is required/);
+  });
+
+  it('accepts both IPv4 and IPv6 literals', () => {
+    // Fargate tasks today get IPv4 from the awsvpc network mode,
+    // but ECS supports IPv6-only assigments and the field should
+    // accept either.
+    const base = {
+      ddbClient: {}, tableName: 't', instanceId: 'i', port: 9876,
+      shardId: '0:1', logger: {},
+    };
+    expect(() => createPeerHeartbeat({ ...base, ip: '10.0.0.1' })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, ip: 'fe80::1' })).not.toThrow();
+    expect(() => createPeerHeartbeat({ ...base, ip: '::1' })).not.toThrow();
   });
 
   it('rejects invalid ports (string, NaN, 0, negative, >65535, fractional)', () => {

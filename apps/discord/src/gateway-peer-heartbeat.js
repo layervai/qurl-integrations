@@ -42,8 +42,20 @@
 //    lag, well inside the 6 s freshness window, and ConsistentRead
 //    doubles RCU cost for no correctness benefit). If a future
 //    sharded topology pushes peer row count past ~100, revisit
-//    with a GSI on `shard_id`.
+//    with a GSI on `shard_id` AND a `LastEvaluatedKey` pagination
+//    loop (the current call assumes the entire result fits in one
+//    1 MB ScanCommand response — fine at 2 replicas, broken at
+//    ~1000+).
+//
+//    Client-side filter vs DDB FilterExpression: we apply the
+//    freshness / shard / self filters in Node, not as a
+//    FilterExpression on the Scan. FilterExpressions still consume
+//    RCU for filtered-out rows (post-Scan, pre-response — no
+//    cost-side win), and the network-byte savings are negligible
+//    at this row count. If row count ever grows past ~1000 the
+//    network bytes start to matter; revisit then.
 
+const net = require('node:net');
 const {
   PutCommand,
   ScanCommand,
@@ -68,7 +80,14 @@ function createPeerHeartbeat({
   if (!ddbClient) throw new Error('createPeerHeartbeat: ddbClient is required');
   if (!tableName) throw new Error('createPeerHeartbeat: tableName is required');
   if (!instanceId) throw new Error('createPeerHeartbeat: instanceId is required');
-  if (!ip) throw new Error('createPeerHeartbeat: ip is required');
+  // Validate as a parseable IPv4/IPv6 literal rather than just
+  // truthy. A misconfig that env-stringifies an undefined (passing
+  // the string `"undefined"`) would otherwise write a row whose
+  // `ip` field looks valid to DDB but is unreachable from the
+  // active's POST. `net.isIP` returns 0 for non-IPs, 4/6 otherwise.
+  if (!ip || net.isIP(ip) === 0) {
+    throw new Error('createPeerHeartbeat: ip (IPv4 or IPv6 literal) is required');
+  }
   // Validate port as a TCP port (positive integer, 1-65535) rather
   // than just `typeof === 'number'` — the latter accepts NaN, 0,
   // negatives, fractionals, and >65535 (all of which would produce
