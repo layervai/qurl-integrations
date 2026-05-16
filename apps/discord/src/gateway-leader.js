@@ -275,6 +275,23 @@ function createGatewayLeader({
   // path if heldLock got set before the throw.
   async function handleInboundHandoff({ activeInstanceId, expectedVersion }) {
     return runSerialized(async () => {
+      // Stray-handoff guard: if we already hold the lock AND the WS
+      // is connected, a second inbound handoff is either a duplicate
+      // from a retry-ing active or a misrouted body (the server-side
+      // peer_instance_id binding + isKnownPeer check make this
+      // low-probability but not impossible — e.g., a cold-fallback
+      // race where this replica acquired the lock just before the
+      // peer's push body arrived). Re-adopting would re-anchor
+      // currentVersion against a row that may have moved; re-
+      // calling manager.connect() would race the existing WS state
+      // (@discordjs/ws's WebSocketManager is NOT concurrent-safe).
+      // Reject cleanly — the active will exit anyway.
+      if (heldLock && manager.isConnected()) {
+        logger.warn('gateway-leader: inbound handoff rejected — already holding lock + connected', {
+          activeInstanceId, expectedVersion,
+        });
+        throw new Error('already_holding_lock_and_connected');
+      }
       // Step 1: bootstrap version cursor. THROWS if expectedVersion
       // is malformed — protects against a future control-channel-server
       // bug that lets bad payloads through. Log at error level with
@@ -329,6 +346,20 @@ function createGatewayLeader({
       // settlement, then race the timer separately. The handler
       // returns when EITHER settles, but the flag stays held until
       // the underlying connect resolves or rejects.
+      //
+      // Bounded-settlement assumption: @discordjs/ws's
+      // WebSocketManager.connect() is contracted to settle in
+      // bounded time — the shim wraps it and the underlying
+      // WebSocket has its own handshake/heartbeat timeouts. A
+      // truly-never-settling connect would pin `connecting=true`
+      // forever and the watchdog would no-op every tick, leaving
+      // a stuck standby. We trust the upstream contract here
+      // rather than racing ANOTHER timer (which would re-introduce
+      // the concurrent-connect race this guard exists to prevent).
+      // If a future @discordjs/ws version ever drops that contract,
+      // either set a hard ceiling here that accepts the concurrent
+      // risk, or wire a `manager.destroy()`-on-timeout escape in
+      // the shim layer.
       connecting = true;
       const connectPromise = manager.connect();
       connectPromise.then(

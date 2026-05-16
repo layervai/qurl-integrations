@@ -249,6 +249,49 @@ describe('handleInboundHandoff', () => {
     expect(leader.isHoldingLock()).toBe(true);
   });
 
+  it('rejects a stray inbound handoff when already holding lock + connected', async () => {
+    // Defense against a duplicate or misrouted handoff body that
+    // passed the server's HMAC + routing checks. Re-adopting would
+    // re-anchor currentVersion against a possibly-moved row;
+    // re-calling manager.connect() would race the existing WS
+    // (WebSocketManager is NOT concurrent-safe).
+    const mocks = makeMocks();
+    mocks.manager.isConnected = jest.fn(() => true);
+    const { leader } = makeLeader({ mocks });
+    await leader._stepForTest(); // heldLock=true via cold acquire
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 99,
+    })).rejects.toThrow(/already_holding_lock_and_connected/);
+
+    // Critical: must NOT have called adopt or connect on the stray.
+    expect(mocks.lock.adoptLockFromHandoff).not.toHaveBeenCalled();
+    expect(mocks.manager.connect).not.toHaveBeenCalled();
+  });
+
+  it('adopt throw — heldLock + connecting both stay false; runSerialized chain stays intact for next call', async () => {
+    // Adopt is the first step of the handoff. If it throws, NO
+    // flag mutations must happen (heldLock=false, connecting=false),
+    // and the serialization chain must still accept the next op.
+    const mocks = makeMocks();
+    mocks.lock.adoptLockFromHandoff = jest.fn(() => {
+      throw new Error('bad-version');
+    });
+    const { leader, manager } = makeLeader({ mocks });
+
+    await expect(leader.handleInboundHandoff({
+      activeInstanceId: 'inst-X', expectedVersion: 0,
+    })).rejects.toThrow(/bad-version/);
+
+    expect(leader.isHoldingLock()).toBe(false);
+    expect(leader.isConnecting()).toBe(false);
+    expect(manager.connect).not.toHaveBeenCalled();
+
+    // Chain still works: a subsequent tick must run cleanly.
+    await leader._stepForTest();
+    expect(mocks.lock.acquireLock).toHaveBeenCalledTimes(1);
+  });
+
   it('adopt throw → flag NOT set; rethrows so server returns 500', async () => {
     const mocks = makeMocks();
     mocks.lock.adoptLockFromHandoff = jest.fn(() => {

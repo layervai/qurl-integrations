@@ -167,8 +167,12 @@ function startControlChannelServer({
 async function handleRequest(req, res, ctx) {
   const path = req.url.split('?')[0];
 
+  // All short-circuit responses below set `Connection: close`. We
+  // bail without reading the request body, so any pending body
+  // bytes would otherwise confuse a keep-alive client's next
+  // request on the same socket. Same shape as the 413 path.
   if (path !== '/control/yours') {
-    sendJson(res, 404, { error: 'not_found' });
+    sendJson(res, 404, { error: 'not_found' }, { Connection: 'close' });
     return;
   }
   // Path matches but wrong method → 405 with Allow header (RFC 9110
@@ -176,7 +180,7 @@ async function handleRequest(req, res, ctx) {
   // an operator "the endpoint exists but someone is hitting it
   // with the wrong verb" (e.g., a probe misconfigured).
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST' });
+    sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: 'POST', Connection: 'close' });
     return;
   }
   // Content-Type must be application/json (or absent, since
@@ -188,7 +192,7 @@ async function handleRequest(req, res, ctx) {
   // by matching the prefix.
   const contentType = req.headers['content-type'];
   if (contentType !== undefined && !/^application\/json(\s*;|\s*$)/i.test(contentType)) {
-    sendJson(res, 415, { error: 'unsupported_media_type' });
+    sendJson(res, 415, { error: 'unsupported_media_type' }, { Connection: 'close' });
     return;
   }
 

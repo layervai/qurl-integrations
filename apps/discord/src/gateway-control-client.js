@@ -108,7 +108,7 @@ function createControlClient({
         resolve(result);
       }
 
-      // Wrap httpRequest + req.write/end in try/catch so a future
+      // Wrap httpRequest + req.end(wire) in try/catch so a future
       // Node version tightening validation on hostname/port (or
       // any other synchronous throw from the http module) doesn't
       // break the "pushHandoff never throws" contract. Inputs are
