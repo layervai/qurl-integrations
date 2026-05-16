@@ -147,20 +147,54 @@ describe('start — wiring + connect', () => {
     await expect(shim.start()).rejects.toThrow(/start\(\) after stop\(\)/);
   });
 
-  it('rejects on connect timeout', async () => {
-    const { FakeManager } = makeFakeManagerCtor();
-    // Override connect to never resolve.
-    const slowFakeManager = function (args) {
-      const inst = new (function () {})();
-      Object.assign(inst, new EventEmitter());
-      inst.connect = jest.fn(() => new Promise(() => { /* never resolves */ }));
-      inst.destroy = jest.fn().mockResolvedValue(undefined);
-      inst.on = EventEmitter.prototype.on.bind(inst);
-      inst.emit = EventEmitter.prototype.emit.bind(inst);
-      inst._constructorArgs = args;
+  // Factory for a manager whose connect() never resolves — drives
+  // the Promise.race against the deadline to fire. Constructor
+  // form (not arrow) so `new WebSocketManagerCtor(...)` works.
+  function makeSlowManagerCtor() {
+    const instances = [];
+    function SlowFakeManager(args) {
+      const inst = Object.assign(new EventEmitter(), {
+        _constructorArgs: args,
+        connect: jest.fn(() => new Promise(() => { /* never resolves */ })),
+        destroy: jest.fn().mockResolvedValue(undefined),
+      });
+      instances.push(inst);
       return inst;
-    };
-    const { shim } = makeShim({ WebSocketManagerCtor: slowFakeManager });
+    }
+    return { SlowFakeManager, instances };
+  }
+
+  it('drops late dispatches that arrive after connect timeout (start-failure teardown race)', async () => {
+    // start() attaches Dispatch/Error listeners BEFORE racing
+    // connect() against the timeout. If connect times out but the
+    // underlying WS still opens before gracefulShutdown finishes,
+    // dispatches arriving during the teardown window shouldn't
+    // fire downstream side effects (registerCommands, eventPublisher,
+    // gateway-activity ticker). start()'s catch sets stopped=true
+    // before throwing, so the in-listener guard drops the frame.
+    const { SlowFakeManager, instances: lateInstances } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
+    const handler = jest.fn();
+    shim.onDispatch(handler);
+
+    // Race the connect-timeout. start() rejects AND flips
+    // `stopped=true` in its catch before rethrowing.
+    await expect(shim.start({ timeoutMs: 10 })).rejects.toThrow(/timed out/);
+
+    // Simulate the racing WS opening mid-teardown: emit a Dispatch
+    // on the manager handle the shim attached its listener to.
+    // The handler MUST NOT fire — stopped guard drops the frame.
+    const mgr = lateInstances[0];
+    mgr.emit(WebSocketShardEvents.Dispatch, {
+      data: { t: 'INTERACTION_CREATE', d: {} },
+      shardId: 0,
+    });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects on connect timeout', async () => {
+    const { SlowFakeManager } = makeSlowManagerCtor();
+    const { shim } = makeShim({ WebSocketManagerCtor: SlowFakeManager });
 
     await expect(shim.start({ timeoutMs: 10 })).rejects.toThrow(/timed out after 10ms/);
   });

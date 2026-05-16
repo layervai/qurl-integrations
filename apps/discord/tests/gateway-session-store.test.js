@@ -116,18 +116,23 @@ describe('hydrate', () => {
     expect(store._getMirrorForTest()).toEqual(result);
   });
 
-  it('treats malformed rows as cold start (does not throw)', async () => {
+  it('treats malformed rows as cold start (does not throw or leak session credentials)', async () => {
     // Production bot MUST boot even if the DDB row is corrupted.
     // The recovery path is IDENTIFY-from-scratch, which the
     // mirror=null state surfaces to @discordjs/ws on the first
     // retrieveSessionInfo call.
+    //
+    // Security: the warn log must NOT include the actual session_id
+    // or resume_url values — those are session-bound credentials
+    // reachable from CloudWatch. Pin the type-signature-only shape.
     const { store, ddbMock, logger } = makeStore();
     ddbMock.on(GetCommand).resolves({
       Item: {
         shard_id: '0:1',
-        session_id: 'sess-xyz',
-        // resume_url missing
-        sequence: 42,
+        session_id: 'sess-leaky-secret',
+        resume_url: 'wss://r.discord/leaky-resume-url',
+        // sequence is missing/non-number to trigger the malformed branch
+        sequence: 'not-a-number',
       },
     });
 
@@ -135,10 +140,23 @@ describe('hydrate', () => {
 
     expect(result).toBeNull();
     expect(store._getMirrorForTest()).toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringMatching(/malformed/i),
-      expect.any(Object),
+    const warnCall = logger.warn.mock.calls.find(
+      (call) => /malformed/i.test(call[0]),
     );
+    expect(warnCall).toBeDefined();
+    const payload = warnCall[1];
+    // Type signature is logged...
+    expect(payload).toEqual(expect.objectContaining({
+      types: expect.objectContaining({
+        session_id: 'string',
+        resume_url: 'string',
+        sequence: 'string',
+      }),
+    }));
+    // ...but the actual credential values are NOT in the payload.
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toMatch(/sess-leaky-secret/);
+    expect(serialized).not.toMatch(/leaky-resume-url/);
   });
 
   it('treats DDB read errors as cold start (does not throw)', async () => {
@@ -324,18 +342,9 @@ describe('updateSessionInfo — throttle path', () => {
 
     // Mirror reflects the latest sequence even though DDB hasn't
     // caught up — pins the "mirror is fresh, DDB lags" contract.
+    // Deferred-flush firing is covered by the explicit-fake-timer
+    // test immediately below.
     expect(store._getMirrorForTest()).toEqual(expect.objectContaining({ sequence: 4 }));
-
-    // Fire the deferred flush by advancing the fake timers.
-    now += 1000;
-    jest.useFakeTimers();
-    // Re-create the store with fake timers active — the scheduleFlush
-    // path already armed a setTimeout above using the real timers,
-    // so this test is more naturally written with explicit fake-time
-    // up-front. Pivoting: rely on real timers + wait. The point is
-    // pinned by the previous assertions; the deferred-flush firing
-    // is covered by the explicit-fake-timer test below.
-    jest.useRealTimers();
   });
 
   it('issues exactly one deferred write after rapid updates', async () => {

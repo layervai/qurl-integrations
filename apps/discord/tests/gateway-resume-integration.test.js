@@ -37,7 +37,7 @@ function makeFakeManagerCtor() {
   const instances = [];
   function FakeManager(args) {
     const inst = new EventEmitter();
-    inst._args = args;
+    inst._constructorArgs = args;
     inst.connect = jest.fn().mockResolvedValue(undefined);
     inst.destroy = jest.fn().mockResolvedValue(undefined);
     instances.push(inst);
@@ -125,8 +125,8 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
     // 3. Fake the IDENTIFY path: @discordjs/ws calls retrieveSessionInfo,
     //    sees null, identifies, then on READY calls
     //    updateSessionInfo(shardId, sessionInfo). Simulate by directly
-    //    calling the wired callback (the manager's `_args`).
-    const { retrieveSessionInfo, updateSessionInfo } = mgr._args;
+    //    calling the wired callback (the manager's `_constructorArgs`).
+    const { retrieveSessionInfo, updateSessionInfo } = mgr._constructorArgs;
 
     expect(retrieveSessionInfo('0:1')).toBeNull();
     // IDENTIFY pending (budget=1/1 — one IDENTIFY is OK on cold start).
@@ -249,7 +249,7 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
 
     await shim.start();
     const mgr = instances[0];
-    const { retrieveSessionInfo } = mgr._args;
+    const { retrieveSessionInfo } = mgr._constructorArgs;
 
     // Critical: retrieveSessionInfo returns the persisted row.
     // @discordjs/ws sees a non-null SessionInfo and chooses RESUME.
@@ -309,7 +309,7 @@ describe('Pillar 2 integration — shim + store full lifecycle', () => {
 
     await shim.hydrate();
     await shim.start();
-    const { retrieveSessionInfo, updateSessionInfo } = instances[0]._args;
+    const { retrieveSessionInfo, updateSessionInfo } = instances[0]._constructorArgs;
 
     // 1. Mirror holds the persisted session; first retrieve returns it.
     expect(retrieveSessionInfo('0:1')).not.toBeNull();

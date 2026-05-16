@@ -235,8 +235,17 @@ function createGatewaySessionStore({
         if (typeof session_id !== 'string'
             || typeof resume_url !== 'string'
             || typeof sequence !== 'number') {
+          // Log only the type signature, not the row contents. The
+          // session_id and resume_url are session-bound credentials —
+          // a Discord-side gateway endpoint reachable by anyone holding
+          // resume_url within the ~60 s resume window. CloudWatch
+          // shouldn't carry them in plaintext from a malformed-row path.
           logger.warn('gateway-session-store: hydrate found malformed row, treating as cold start', {
-            row: result.Item,
+            types: {
+              session_id: typeof session_id,
+              resume_url: typeof resume_url,
+              sequence: typeof sequence,
+            },
           });
           return null;
         }

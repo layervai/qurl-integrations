@@ -649,7 +649,13 @@ async function gracefulShutdown(code = 0) {
       } catch (err) {
         logger.error('gateway shim stop failed', { error: err.message });
       }
-    } else if (isGateway) {
+    } else if (isGateway && !config.ENABLE_GATEWAY_RESUME) {
+      // Explicit !ENABLE_GATEWAY_RESUME (vs bare `else if (isGateway)`)
+      // so a future refactor that wraps shim construction in try/catch
+      // (leaving `gatewayShim` null when the flag is on) can't silently
+      // fall through to discordShutdown() — the legacy path would
+      // call .destroy() on an un-logged-in Client, which is harmless
+      // today but masks the underlying construction failure.
       await discordShutdown();
     }
     await db.close();

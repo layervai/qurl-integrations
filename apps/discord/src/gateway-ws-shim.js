@@ -211,6 +211,13 @@ function createGatewayWsShim({
       // user-registered handlers (the event-publisher, the
       // gateway-activity ticker).
       manager.on(WebSocketShardEvents.Dispatch, ({ data, shardId }) => {
+        // Guard against the connect-timeout-then-late-WS-open race:
+        // start() attaches listeners before Promise.race against the
+        // connect timeout. If the race rejects but manager.connect()
+        // continues opening the WS, dispatches arriving during the
+        // gracefulShutdown(1) teardown window would otherwise trigger
+        // downstream side effects (publish-to-SQS, registerCommands).
+        if (stopped) return;
         const eventType = data?.t;
         if (eventType === 'READY') {
           // application.id is the OAuth2 application snowflake —
@@ -298,9 +305,17 @@ function createGatewayWsShim({
         ]);
       } catch (err) {
         // Connect failed (timeout, identify budget exhaustion, or
-        // a Discord-side rejection). Leave the manager intact so
-        // the caller's exception handler can interrogate state if
-        // needed; stop() is the cleanup path.
+        // a Discord-side rejection). Set `stopped=true` so the
+        // Dispatch listener's guard drops any frames that arrive
+        // in the race window between this throw and the caller's
+        // gracefulShutdown → shim.stop() call (the legacy
+        // gracefulShutdown awaits db.close() etc. before reaching
+        // stop()). Without the early flip, a WS that finishes
+        // opening mid-teardown would still side-effect through
+        // registerCommands / eventPublisher / gateway-activity.
+        // Leave the manager handle intact so stop() can clean
+        // it up.
+        stopped = true;
         if (timeoutHandle) clearTimeout(timeoutHandle);
         throw err;
       }
