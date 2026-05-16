@@ -128,6 +128,15 @@ async function tryClose(name, server, logger) {
 //     server delivers in the ~ms window before process.exit fires.
 //     Calling tryClose/tryStop symmetrically would add latency to
 //     the active SIGTERM critical path with no correctness gain.
+//   * db.close() — the 12 s ceiling + process.exit() forces socket
+//     cleanup at the OS level. The active replica is not the system
+//     of record for any uncommitted DB state during the SIGTERM
+//     window: writes to qurl_bot_flow_state run on the worker tier
+//     (separate process), and the gateway's only DB interactions
+//     are lock / heartbeat reads that are idempotent and re-driven
+//     by the standby. Holding up SIGTERM for a Knex pool drain
+//     would extend the handoff critical path with no correctness
+//     gain.
 //
 // One NON-skip: `eventPublisher.stop()` runs in parallel with
 // pushHandoff. The publisher's in-flight SQS sends are the outgoing

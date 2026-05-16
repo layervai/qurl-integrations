@@ -735,9 +735,18 @@ async function gracefulShutdown(code = 0) {
     // bearing rather than incidental). Watchdog stops next so its
     // tick can't fire a manager.connect() during teardown. Leader
     // last so any in-flight tick observes running=false and exits.
-    await tryClose('control-channel server', controlChannelServer, logger);
-    await tryStop('connection-watchdog', connectionWatchdog, logger);
-    await tryStop('gateway-leader', gatewayLeader, logger);
+    //
+    // Gated on ENABLE_GATEWAY_HOT_STANDBY for symmetry with the
+    // Pillar 2 shim block below: all three handles are null when
+    // hot-standby is off, so the tryClose/tryStop calls are no-ops,
+    // but skipping the gate would still pay 3 microtask hops per
+    // teardown across every HTTP-only / combined replica that never
+    // built the hot-standby surface.
+    if (config.ENABLE_GATEWAY_HOT_STANDBY) {
+      await tryClose('control-channel server', controlChannelServer, logger);
+      await tryStop('connection-watchdog', connectionWatchdog, logger);
+      await tryStop('gateway-leader', gatewayLeader, logger);
+    }
 
     // Discord client shutdown only meaningful when we're the gateway
     // role. HTTP-only replicas never called login(), so there's no
@@ -804,14 +813,24 @@ async function pushHandoffShutdown(code = 0) {
 // uncaught reject path (e.g., adds a new await above the try)
 // would otherwise surface as an unhandledRejection on the process.
 // The explicit .catch is defense-in-depth.
-async function signalShutdown(code) {
+//
+// No `code` parameter — both call sites always pass 0 (the signal
+// itself never carries a "fault" semantic; it's ECS asking us to
+// drain). The non-zero exit codes come from `runPushHandoffShutdown`
+// (pushHandoff threw / 12 s ceiling fired) or from explicit
+// `gracefulShutdown(1)` calls on the boot-failure / onListenError
+// paths. So in production the dual-knob `code` was always 0, and
+// the third observable outcome lives in the runPushHandoffShutdown
+// unit-test surface + the existing `gracefulShutdown(1)` direct
+// callers (boot-failure path, onListenError).
+async function signalShutdown() {
   if (shouldUsePushHandoffShutdown({
     enableHotStandby: config.ENABLE_GATEWAY_HOT_STANDBY,
     gatewayLeader,
   })) {
-    await pushHandoffShutdown(code);
+    await pushHandoffShutdown(0);
   } else {
-    await gracefulShutdown(code);
+    await gracefulShutdown(0);
   }
 }
 
@@ -822,20 +841,9 @@ async function signalShutdown(code) {
 // falling through to gracefulShutdown — the contract is pinned by
 // the "returns false when leader is null" test in
 // gateway-shutdown-helpers.test.js.
-//
-// `signalShutdown(0)` always passes 0 here — the signal received is
-// "container scheduled for replacement", which is a clean transfer,
-// not a fault. The non-zero exit codes (the `forcedExitCode` knob in
-// runPushHandoffShutdown) signal in-process failures: pushHandoff
-// threw, or the 12 s ceiling fired. So in production today the
-// three-outcome contract collapses to two observable outcomes
-// (0 = clean transfer, 1 = anything else). The third knob exists
-// for the unit-test surface and for the next caller that wants to
-// distinguish "explicit fault exit" from "signal-driven exit" (e.g.
-// a future health-probe-driven self-restart path).
 process.on('SIGTERM', () => {
   logger.info('Received SIGTERM');
-  signalShutdown(0).catch(err => {
+  signalShutdown().catch(err => {
     logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
     process.exit(1);
   });
@@ -843,7 +851,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   logger.info('Received SIGINT');
-  signalShutdown(0).catch(err => {
+  signalShutdown().catch(err => {
     logger.error('signalShutdown rejected unexpectedly', { error: err.message, stack: err.stack });
     process.exit(1);
   });
@@ -935,8 +943,18 @@ async function startHotStandby() {
       // pushHandoff will succeed — we'd block the next deploy
       // indefinitely. Route through gracefulShutdown(1) to clean up
       // the leader / lock release / etc.
+      //
+      // `.catch` mirrors the SIGTERM/SIGINT handlers' defense-in-depth:
+      // gracefulShutdown handles its own errors internally, but a
+      // future refactor that introduces an uncaught reject path would
+      // otherwise surface as an unhandledRejection on the process.
       logger.error('control-channel listener fatal error; shutting down', { error: err.message });
-      gracefulShutdown(1);
+      gracefulShutdown(1).catch(shutdownErr => {
+        logger.error('gracefulShutdown rejected unexpectedly from onListenError', {
+          error: shutdownErr.message, stack: shutdownErr.stack,
+        });
+        process.exit(1);
+      });
     },
   });
   await awaitServerListening(controlChannelServer);
